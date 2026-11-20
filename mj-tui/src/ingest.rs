@@ -370,21 +370,37 @@ impl PreparedMaterializedSessionDetail {
             last_agent_message(&session.transcript, unchanged_prefix, &previous);
         let latest_agent_activity =
             latest_agent_activity(&session.transcript, unchanged_prefix, &previous);
-        let last_user_message =
-            session
-                .transcript
-                .iter()
-                .enumerate()
-                .rev()
-                .find_map(|(index, item)| {
-                    let TranscriptBody::User { content } = &item.body else {
-                        return None;
-                    };
-                    let text = materialized_content_text(content);
-                    (!text.trim().is_empty()).then(|| (index, Arc::from(text)))
-                });
+        // `/clear` starts a new conversation; the preview fields describe
+        // only that conversation, never the one before the boundary. The
+        // cutoff is by position, as in the stored summary, so an item tied
+        // with the boundary (a restored archive allows ties) is excluded by
+        // both.
+        let conversation_start = session
+            .transcript
+            .iter()
+            .rfind(|item| mj_core::archive::is_context_boundary(&item.stable_id))
+            .map(|item| item.position);
+        let in_conversation = |index: &usize| {
+            conversation_start.is_none_or(|start| session.transcript[*index].position > start)
+        };
+        let last_user_message = session
+            .transcript
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, item)| {
+                let TranscriptBody::User { content } = &item.body else {
+                    return None;
+                };
+                let text = materialized_content_text(content);
+                (!text.trim().is_empty()).then(|| (index, Arc::from(text)))
+            })
+            .filter(|(index, _)| in_conversation(index));
+        let conversation_agent_message = last_agent_message
+            .as_ref()
+            .filter(|(index, _)| in_conversation(index));
         let last_agent_message_follows_last_user =
-            last_agent_message.as_ref().is_some_and(|(agent_index, _)| {
+            conversation_agent_message.is_some_and(|(agent_index, _)| {
                 last_user_message
                     .as_ref()
                     .is_none_or(|(user_index, _)| agent_index > user_index)
@@ -392,9 +408,10 @@ impl PreparedMaterializedSessionDetail {
         let latest_agent_activity_after_last_user = latest_agent_activity
             .as_ref()
             .filter(|(activity_index, _)| {
-                last_user_message
-                    .as_ref()
-                    .is_none_or(|(user_index, _)| activity_index > user_index)
+                in_conversation(activity_index)
+                    && last_user_message
+                        .as_ref()
+                        .is_none_or(|(user_index, _)| activity_index > user_index)
             })
             .map(|(_, text)| Arc::clone(text));
         let mut cached_tool_diffstats = previous.tool_diffstats;
@@ -487,9 +504,7 @@ impl PreparedMaterializedSessionDetail {
             current_turn_started_at,
             legacy_awaiting_input,
             last_activity_at_ms,
-            last_agent_message: last_agent_message
-                .as_ref()
-                .map(|(_, text)| Arc::clone(text)),
+            last_agent_message: conversation_agent_message.map(|(_, text)| Arc::clone(text)),
             last_user_message: last_user_message.map(|(_, message)| message),
             last_agent_message_follows_last_user,
             latest_agent_activity_after_last_user,
