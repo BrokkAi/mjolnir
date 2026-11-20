@@ -15,31 +15,31 @@ import (
 // about copies, about how elements are told apart (by ==, by HashKey, or
 // by rs.Cmp), and about iteration order holds for it. Elements are passed
 // and returned by value.
-type HashSet[T comparable] struct {
+type HashSet[T any] struct {
 	base HashMap[T, struct{}]
 }
 
 // HashSetNew is HashSet::new: an empty set.
-func HashSetNew[T comparable]() HashSet[T] {
+func HashSetNew[T any]() HashSet[T] {
 	var empty HashSet[T]
 	return empty
 }
 
 // HashSetDefault is HashSet::default: an empty set.
-func HashSetDefault[T comparable]() HashSet[T] {
+func HashSetDefault[T any]() HashSet[T] {
 	var empty HashSet[T]
 	return empty
 }
 
 // HashSetWithCapacity is HashSet::with_capacity: an empty set with space for
 // at least capacity elements.
-func HashSetWithCapacity[T comparable](capacity int) HashSet[T] {
+func HashSetWithCapacity[T any](capacity int) HashSet[T] {
 	return HashSet[T]{base: HashMapWithCapacity[T, struct{}](capacity)}
 }
 
 // HashSetFrom is HashSet::from([a, b, ..]). Of several equal elements the
 // first one is kept.
-func HashSetFrom[T comparable](elements ...T) HashSet[T] {
+func HashSetFrom[T any](elements ...T) HashSet[T] {
 	set := HashSetNew[T]()
 	for _, element := range elements {
 		set.Insert(element)
@@ -49,7 +49,7 @@ func HashSetFrom[T comparable](elements ...T) HashSet[T] {
 
 // HashSetFromIter is `iter.collect::<HashSet<T>>()` (FromIterator). Of
 // several equal elements the first one is kept.
-func HashSetFromIter[T comparable](seq iter.Seq[T]) HashSet[T] {
+func HashSetFromIter[T any](seq iter.Seq[T]) HashSet[T] {
 	set := HashSetNew[T]()
 	set.Extend(seq)
 	return set
@@ -340,7 +340,7 @@ func (s HashSet[T]) Sub(rhs *HashSet[T]) HashSet[T] {
 }
 
 // hashSetCollectCloned is `iter.cloned().collect()`.
-func hashSetCollectCloned[T comparable](seq iter.Seq[T]) HashSet[T] {
+func hashSetCollectCloned[T any](seq iter.Seq[T]) HashSet[T] {
 	set := HashSetNew[T]()
 	for element := range seq {
 		set.Insert(rs.Clone(element))

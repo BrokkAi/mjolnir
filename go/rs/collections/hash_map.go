@@ -20,28 +20,35 @@ import (
 // copying it (the translation of a Rust move); `map.clone()` is rs.Clone(m),
 // which rebuilds the map through rs.ReflectMap as BTreeMap describes.
 //
-// Keys. Two keys are the same key when Rust's Eq says so, which is decided
-// in one of three ways, chosen once for the key type:
+// Keys. Any Go type can be the key type, as any Rust type with Hash and Eq
+// can. Two keys are the same key when Rust's Eq says so, which is decided in
+// one of three ways, chosen once for the key type:
 //
-//   - A key type with a method `HashKey() string` (rule 2 of the
-//     translation rules: a hand-written `impl Hash`) is keyed by that
-//     string: two keys are the same key exactly when their HashKey strings
-//     are equal.
-//   - A key type that Go's == compares as Rust's derived Eq does (strings,
-//     numbers, bools, data-free enums, and arrays and structs of those,
-//     rs.Tuple included) is the key of a Go map.
-//   - Any other key type holds a pointer or an interface, which Go's ==
-//     compares by address where Rust compares what is pointed at: an enum
-//     whose variants carry data, a Box or Arc, an rs.Option of one, or a
-//     struct holding any of them. Such keys are kept in order of rs.Cmp,
-//     and two keys are the same key when rs.Cmp finds them equal, which is
-//     the derived Eq. That costs a logarithmic search instead of a hash
-//     lookup, and needs no method on the key type, as a derived Hash needs
-//     none.
+//   - A key type with a method `HashKey() string`, on the value or on the
+//     pointer, stands for a Rust type with its own Hash and Eq (rule 2 of
+//     the translation rules; rspath.Key is one, with `Equal` beside it).
+//     The entries are held in a Go map by that string, so two keys are the
+//     same key exactly when their HashKeys are equal, which is the
+//     contract of HashKey.
+//   - A key type that Go's == compares as Rust's derived Eq does, held in a
+//     Go map by the key itself: bools, numbers, strings, data-free enums,
+//     and arrays and structs of those (rs.Tuple and rs.Option of them
+//     included), when the type has no Equal or Compare method of its own.
+//   - Any other key type, held in a B-tree in order of rs.Cmp: one that Go
+//     cannot compare at all (a slice for a Vec, as in
+//     `HashMap<Vec<u32>, u32>`, a Go map, or a struct or array holding
+//     one), and one that Go compares by address where Rust compares the
+//     value (a pointer for a Box or an Arc, an interface for an enum whose
+//     variants carry data, or a struct or array holding them), and a type
+//     with its own Equal or Compare but no HashKey. Two keys are the same
+//     key when rs.Cmp finds them equal, which for the derived Hash, Eq and
+//     Ord of such types is what rs.Eq finds. A lookup is a logarithmic
+//     search instead of a hash, and the key type needs no method, as a
+//     derived Hash needs none.
 //
-// A key type with a hand-written Eq has a hand-written Hash in valid Rust,
-// so it is keyed by its HashKey. A Rust raw pointer (`*const T`) compares by
-// address; hold it as a uintptr or an unsafe.Pointer.
+// A Rust raw pointer (`*const T`) compares by address; hold it as a uintptr
+// or an unsafe.Pointer. A key is stored as it is given, as Rust moves it into
+// the map: a slice key must not be changed afterwards.
 //
 // Pointers into the map. Get, GetMut, Entry and the iterators hand out a *V
 // that points at the value stored in the map. Each entry has its own heap
@@ -57,10 +64,11 @@ import (
 // Not covered: capacity (Rust reports hashbrown's bucket arithmetic, and a
 // Go map has none to report), the hasher parameter S and its constructors,
 // try_reserve, get_disjoint_mut, and the unstable try_insert.
-type HashMap[K comparable, V any] struct {
-	// table holds the entries by key, for a key type Go compares as Rust
-	// does.
-	table map[K]*hashMapEntry[K, V]
+type HashMap[K any, V any] struct {
+	// table holds the entries by key, for a key type Go's == compares as
+	// Rust's Eq does. The keys are held as interface values because K need
+	// not be comparable in Go; only a key type that is uses table.
+	table map[any]*hashMapEntry[K, V]
 	// keyed holds the entries by the HashKey of their key, for a key type
 	// that has that method.
 	keyed map[string]*hashMapEntry[K, V]
@@ -73,7 +81,7 @@ type HashMap[K comparable, V any] struct {
 }
 
 // hashMapEntry is the heap cell of one entry.
-type hashMapEntry[K comparable, V any] struct {
+type hashMapEntry[K any, V any] struct {
 	key   K
 	value V
 }
@@ -96,7 +104,7 @@ var (
 )
 
 // hashMapKeyingFor decides how keys of type K are told apart.
-func hashMapKeyingFor[K comparable]() hashMapKeying {
+func hashMapKeyingFor[K any]() hashMapKeying {
 	keyType := reflect.TypeFor[K]()
 	if cached, ok := hashKeyingCache.Load(keyType); ok {
 		return cached.(hashMapKeying)
@@ -115,8 +123,8 @@ func hashMapKeyingFor[K comparable]() hashMapKeying {
 }
 
 // hashKeyIsPlain reports whether Go's == on a value of the type is Rust's
-// derived Eq: no pointer or interface anywhere inside it, and no hand-written
-// Equal or Compare that rs.Eq and rs.Cmp would ask instead.
+// derived Eq: no pointer, interface, slice or map anywhere inside it, and no
+// hand-written Equal or Compare that rs.Eq and rs.Cmp would ask instead.
 func hashKeyIsPlain(keyType reflect.Type) bool {
 	if _, found := reflect.PointerTo(keyType).MethodByName("Equal"); found {
 		return false
@@ -146,7 +154,7 @@ func hashKeyIsPlain(keyType reflect.Type) bool {
 }
 
 // hashKeyOf returns the HashKey of a key of a type keyed that way.
-func hashKeyOf[K comparable](key K) string {
+func hashKeyOf[K any](key K) string {
 	if keyer, ok := any(key).(hashKeyer); ok {
 		return keyer.HashKey()
 	}
@@ -165,7 +173,7 @@ func (m *HashMap[K, V]) prepare(capacity int) {
 	}
 	switch {
 	case m.keying == hashMapKeyingNative && m.table == nil:
-		m.table = make(map[K]*hashMapEntry[K, V], capacity)
+		m.table = make(map[any]*hashMapEntry[K, V], capacity)
 	case m.keying == hashMapKeyingHashKey && m.keyed == nil:
 		m.keyed = make(map[string]*hashMapEntry[K, V], capacity)
 	}
@@ -175,7 +183,7 @@ func (m *HashMap[K, V]) prepare(capacity int) {
 func (m HashMap[K, V]) find(key K) *hashMapEntry[K, V] {
 	switch m.keying {
 	case hashMapKeyingNative:
-		return m.table[key]
+		return m.table[any(key)]
 	case hashMapKeyingHashKey:
 		return m.keyed[hashKeyOf(key)]
 	case hashMapKeyingOrdered:
@@ -194,7 +202,7 @@ func (m *HashMap[K, V]) store(entry *hashMapEntry[K, V]) {
 	m.prepare(0)
 	switch m.keying {
 	case hashMapKeyingNative:
-		m.table[entry.key] = entry
+		m.table[any(entry.key)] = entry
 	case hashMapKeyingHashKey:
 		m.keyed[hashKeyOf(entry.key)] = entry
 	default:
@@ -206,7 +214,7 @@ func (m *HashMap[K, V]) store(entry *hashMapEntry[K, V]) {
 func (m *HashMap[K, V]) erase(key K) {
 	switch m.keying {
 	case hashMapKeyingNative:
-		delete(m.table, key)
+		delete(m.table, any(key))
 	case hashMapKeyingHashKey:
 		delete(m.keyed, hashKeyOf(key))
 	case hashMapKeyingOrdered:
@@ -248,20 +256,20 @@ func (m *HashMap[K, V]) takeAll() HashMap[K, V] {
 }
 
 // HashMapNew is HashMap::new: an empty map.
-func HashMapNew[K comparable, V any]() HashMap[K, V] {
+func HashMapNew[K any, V any]() HashMap[K, V] {
 	var empty HashMap[K, V]
 	return empty
 }
 
 // HashMapDefault is HashMap::default: an empty map.
-func HashMapDefault[K comparable, V any]() HashMap[K, V] {
+func HashMapDefault[K any, V any]() HashMap[K, V] {
 	var empty HashMap[K, V]
 	return empty
 }
 
 // HashMapWithCapacity is HashMap::with_capacity: an empty map with space
 // for at least capacity entries.
-func HashMapWithCapacity[K comparable, V any](capacity int) HashMap[K, V] {
+func HashMapWithCapacity[K any, V any](capacity int) HashMap[K, V] {
 	m := HashMapNew[K, V]()
 	if capacity > 0 {
 		m.prepare(capacity)
@@ -271,7 +279,7 @@ func HashMapWithCapacity[K comparable, V any](capacity int) HashMap[K, V] {
 
 // HashMapFrom is HashMap::from([(k, v), ..]). Of several pairs with equal
 // keys, the first key is kept with the last value.
-func HashMapFrom[K comparable, V any](pairs ...rs.Tuple2[K, V]) HashMap[K, V] {
+func HashMapFrom[K any, V any](pairs ...rs.Tuple2[K, V]) HashMap[K, V] {
 	m := HashMapNew[K, V]()
 	for _, pair := range pairs {
 		m.Insert(pair.F0, pair.F1)
@@ -281,7 +289,7 @@ func HashMapFrom[K comparable, V any](pairs ...rs.Tuple2[K, V]) HashMap[K, V] {
 
 // HashMapFromIter is `iter.collect::<HashMap<K, V>>()` (FromIterator). Of
 // several pairs with equal keys, the first key is kept with the last value.
-func HashMapFromIter[K comparable, V any](seq iter.Seq2[K, V]) HashMap[K, V] {
+func HashMapFromIter[K any, V any](seq iter.Seq2[K, V]) HashMap[K, V] {
 	m := HashMapNew[K, V]()
 	m.Extend(seq)
 	return m
@@ -538,7 +546,7 @@ func (m *HashMap[K, V]) Extend(seq iter.Seq2[K, V]) {
 // single entry of a map, which is either vacant or occupied. HashMap.Entry
 // returns one. A `match` on it is a type switch over *HashMapEntry_Vacant
 // and *HashMapEntry_Occupied.
-type HashMapEntry[K comparable, V any] interface {
+type HashMapEntry[K any, V any] interface {
 	isHashMapEntry()
 
 	// OrInsert is Entry::or_insert: it makes sure the entry holds a value,
@@ -566,24 +574,24 @@ type HashMapEntry[K comparable, V any] interface {
 }
 
 // HashMapEntry_Occupied is Entry::Occupied.
-type HashMapEntry_Occupied[K comparable, V any] struct{ F0 HashMapOccupiedEntry[K, V] }
+type HashMapEntry_Occupied[K any, V any] struct{ F0 HashMapOccupiedEntry[K, V] }
 
 // HashMapEntry_Vacant is Entry::Vacant.
-type HashMapEntry_Vacant[K comparable, V any] struct{ F0 HashMapVacantEntry[K, V] }
+type HashMapEntry_Vacant[K any, V any] struct{ F0 HashMapVacantEntry[K, V] }
 
 func (*HashMapEntry_Occupied[K, V]) isHashMapEntry() {}
 func (*HashMapEntry_Vacant[K, V]) isHashMapEntry()   {}
 
 // HashMapOccupiedEntry is Rust's hash_map::OccupiedEntry: an entry that is
 // present in a map.
-type HashMapOccupiedEntry[K comparable, V any] struct {
+type HashMapOccupiedEntry[K any, V any] struct {
 	m     *HashMap[K, V]
 	entry *hashMapEntry[K, V]
 }
 
 // HashMapVacantEntry is Rust's hash_map::VacantEntry: the place in a map
 // where a key that is not present would go.
-type HashMapVacantEntry[K comparable, V any] struct {
+type HashMapVacantEntry[K any, V any] struct {
 	m   *HashMap[K, V]
 	key K
 }

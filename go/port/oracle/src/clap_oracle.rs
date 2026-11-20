@@ -82,6 +82,7 @@ fn dispatch(request: &Value) -> R<Value> {
             Ok(json!({ "results": results }))
         }
         "render" => render(build_cmd(&request["cmd"])?, request),
+        op @ ("mj_worker" | "mj_worker_runs" | "mj_worker_render") => derived::<mj_worker::Cli>(request, op),
         _ => Ok(crate::unknown(request)),
     }
 }
@@ -697,4 +698,392 @@ fn build_group(spec: &Value) -> R<ArgGroup> {
         };
     }
     Ok(group)
+}
+
+/// The command line of mj-worker, copied from mj-worker-bin/src/main.rs
+/// (the clap items, verbatim but for `Serialize` and the stand-ins for
+/// mj_core's types below).
+#[allow(dead_code)]
+mod mj_worker {
+    use std::path::PathBuf;
+
+    use clap::{Args, Parser, Subcommand};
+    use serde::Serialize;
+
+    use super::{HarnessKind, SubagentMcpRole};
+
+    #[derive(Debug, Parser, Serialize)]
+    #[command(name = "mj-worker", version, about = "Mjolnir target-side worker")]
+    pub(super) struct Cli {
+        /// Internal handoff: the parent explicitly supplied the clean login snapshot.
+        #[arg(long, hide = true, global = true)]
+        login_environment_ready: bool,
+        /// Descriptor transferred by login-environment re-exec.
+        #[arg(long, hide = true, global = true)]
+        worker_root_lock_fd: Option<i32>,
+        #[command(subcommand)]
+        command: Command,
+    }
+
+    #[derive(Debug, Subcommand, Serialize)]
+    enum Command {
+        /// Internal target-side worker commands.
+        #[command(hide = true)]
+        Worker(WorkerArgs),
+    }
+
+    #[derive(Debug, Args, Serialize)]
+    struct WorkerArgs {
+        #[command(subcommand)]
+        command: WorkerCommand,
+    }
+
+    #[derive(Debug, Subcommand, Serialize)]
+    enum WorkerCommand {
+        /// Move-only inventory and disk-backed workspace transfer utilities.
+        #[command(hide = true)]
+        MoveWorkspace,
+        /// Print `alive`, `starting` or `dead` for the worker that owns a root,
+        /// decided by the lock on its `worker.lock`.
+        #[command(hide = true)]
+        Liveness {
+            #[arg(long)]
+            root: PathBuf,
+        },
+        /// Print the pid of the worker holding a root's lock, or nothing.
+        #[command(hide = true)]
+        Holder {
+            #[arg(long)]
+            root: PathBuf,
+        },
+        /// Stop the worker that owns a root and every process it started, and
+        /// return only when its lock is free and none of them is left.
+        #[command(hide = true)]
+        Stop {
+            #[arg(long)]
+            root: PathBuf,
+            /// Kill at once instead of allowing the TERM grace.
+            #[arg(long)]
+            kill: bool,
+        },
+        /// Print this worker's compatibility identity. The controller asks an
+        /// image's worker this before linking a session to it.
+        #[command(hide = true)]
+        BuildId,
+        /// Discover profile model choices without submitting a prompt.
+        DiscoverConfig {
+            #[arg(long)]
+            spec: PathBuf,
+        },
+        /// Own an ACP bridge and durable session event log.
+        Run {
+            #[arg(long)]
+            root: PathBuf,
+            #[arg(long)]
+            config: PathBuf,
+        },
+        /// Prepare an exact managed harness without starting a session worker.
+        PrepareHarness {
+            #[arg(long)]
+            config: PathBuf,
+        },
+        /// Proxy JSON-lines between stdio and a detached worker.
+        Proxy {
+            #[arg(long)]
+            root: PathBuf,
+        },
+        /// Supervise the ACP bridge process tree for a worker daemon.
+        AcpSupervisor {
+            #[arg(long)]
+            spec: PathBuf,
+        },
+        /// Build a target-side archive for verified controller transfer.
+        ExportCheckpoint {
+            /// Export specification path, or `-` to read it from standard input.
+            #[arg(long)]
+            spec: PathBuf,
+        },
+        /// Seal target-owned checkpoint inputs while ACP dispatch is frozen.
+        #[command(hide = true)]
+        CaptureCheckpoint,
+        /// Package a sealed checkpoint after ACP dispatch has resumed.
+        #[command(hide = true)]
+        PackCheckpoint,
+        /// Restore a verified archive into a freshly cloned target.
+        RestoreCheckpoint {
+            #[arg(long)]
+            spec: PathBuf,
+            /// Restore only missing parent state; never modify checkout or child reports.
+            #[arg(long, conflicts_with = "missing_checkout")]
+            missing_parent: bool,
+            #[arg(long)]
+            missing_checkout: bool,
+            /// Current controller-owned queue/frontier, for partial parent recovery.
+            #[arg(long, requires = "missing_parent")]
+            relay_seed: Option<PathBuf>,
+        },
+        /// Journal queue discard while the worker is stopped, before any dispatch.
+        #[command(hide = true)]
+        DiscardQueuedPrompts {
+            #[arg(long)]
+            root: PathBuf,
+            #[arg(long)]
+            session_id: String,
+            #[arg(long)]
+            command_id: String,
+        },
+        /// Install one streamed resource directory on a remote target.
+        InstallResource {
+            #[arg(long)]
+            destination: PathBuf,
+        },
+        /// Serve project history tools over MCP stdio.
+        MemoryMcp {
+            /// Accepted for staged Kimi profiles created by older controllers.
+            #[arg(long, hide = true)]
+            _root: Option<PathBuf>,
+            #[arg(long)]
+            history_socket: Option<PathBuf>,
+        },
+        /// Drain mailbox events for one harness tool hook.
+        MailboxHook {
+            #[arg(long)]
+            socket: PathBuf,
+            #[arg(long, value_parser = ["PostToolUse", "PostToolBatch"])]
+            event: String,
+        },
+        /// Exchange one mailbox lease request for a durable harness inbox.
+        MailboxRequest {
+            #[arg(long)]
+            socket: PathBuf,
+        },
+        /// Serve Mjolnir-owned delegation tools over MCP stdio.
+        SubagentMcp {
+            #[arg(long)]
+            socket: PathBuf,
+            /// Harness used to choose the MCP server instructions.
+            #[arg(long)]
+            harness: Option<HarnessKind>,
+            /// `parent` serves the delegation tools; `child` serves only
+            /// `handback`, a child's report to the session that started it.
+            #[arg(long, default_value_t = SubagentMcpRole::Parent)]
+            role: SubagentMcpRole,
+            /// Accepted for older launch arguments; tool availability is unchanged.
+            #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+            agent_mailboxes_enabled: bool,
+            /// False when only the straightforward task type is configured: the
+            /// spawn tool then offers no task type.
+            #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+            subtle_subagents: bool,
+            /// Accepted for configurations written by older workers; the review
+            /// tools now belong to the `--review-server` server.
+            #[arg(long, hide = true)]
+            review_gate: bool,
+            /// Serve the before-push review tools as `mj-review` instead of the
+            /// delegation tools.
+            #[arg(long)]
+            review_server: bool,
+        },
+        /// Print a unified diff of the session's work in one repository.
+        Diff {
+            #[arg(long)]
+            repository: PathBuf,
+            /// The commit the session started from, when the controller recorded one.
+            #[arg(long)]
+            base: Option<String>,
+            /// The session branch, whose reflog names the commit it was created at.
+            #[arg(long)]
+            branch: Option<String>,
+            /// Include the resolved base and HEAD commit in JSON output.
+            #[arg(long)]
+            json: bool,
+        },
+        /// Write one file from the session workspace to standard output.
+        ReadFile {
+            #[arg(long)]
+            root: PathBuf,
+            /// Path relative to the workspace root.
+            #[arg(long)]
+            path: PathBuf,
+        },
+        /// Write a file, a zip archive of a directory, or a JSON listing of either
+        /// to standard output, after one JSON line naming which it is and where
+        /// it resolved.
+        Fetch {
+            /// The file or directory to fetch.
+            #[arg(long)]
+            path: PathBuf,
+            /// A directory the path may resolve inside; repeatable.
+            #[arg(long = "root")]
+            roots: Vec<PathBuf>,
+            /// Also allow this machine's temporary directory.
+            #[arg(long)]
+            temp: bool,
+            /// List the path instead of reading it.
+            #[arg(long)]
+            list: bool,
+        },
+        /// Save fetched bytes in this target's temporary directory.
+        StoreFetch {
+            #[arg(long)]
+            session: String,
+            #[arg(long)]
+            source: String,
+            #[arg(long)]
+            directory: bool,
+            #[arg(long)]
+            length: usize,
+        },
+        /// Atomically publish stdin as a file in the session workspace.
+        WriteFile {
+            #[arg(long)]
+            root: PathBuf,
+            #[arg(long)]
+            path: PathBuf,
+            #[arg(long)]
+            overwrite: bool,
+            /// Expected input length; premature EOF must not publish a partial file.
+            #[arg(long)]
+            length: usize,
+        },
+        /// Push the repository's current HEAD to a branch on its push remote.
+        PushBranch {
+            /// Worker root containing the session's existing Git authentication.
+            #[arg(long)]
+            root: PathBuf,
+            #[arg(long)]
+            repository: PathBuf,
+            #[arg(long)]
+            branch: String,
+        },
+    }
+}
+
+/// mj_core::config::HarnessKind as clap sees it: its FromStr and its ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HarnessKind {
+    Codex,
+    Claude,
+    Kimi,
+    Grok,
+    Muse,
+    OpenCode,
+    Dsh,
+    Antigravity,
+}
+
+impl HarnessKind {
+    const ALL: [Self; 8] = [
+        Self::Codex,
+        Self::Claude,
+        Self::Kimi,
+        Self::Grok,
+        Self::Muse,
+        Self::OpenCode,
+        Self::Dsh,
+        Self::Antigravity,
+    ];
+
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Kimi => "kimi",
+            Self::Grok => "grok",
+            Self::Muse => "muse",
+            Self::OpenCode => "opencode",
+            Self::Dsh => "dsh",
+            Self::Antigravity => "antigravity",
+        }
+    }
+}
+
+impl std::str::FromStr for HarnessKind {
+    type Err = String;
+
+    /// The real error is `anyhow!("unknown harness kind {value:?}")`, whose
+    /// Display is this text.
+    fn from_str(value: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.id() == value)
+            .ok_or_else(|| format!("unknown harness kind {value:?}"))
+    }
+}
+
+impl serde::Serialize for HarnessKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.id())
+    }
+}
+
+/// mj_core::subagent::SubagentMcpRole as clap sees it: its FromStr and its
+/// Display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubagentMcpRole {
+    Parent,
+    MessageOnly,
+    FetchOnly,
+    Child,
+}
+
+impl SubagentMcpRole {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Parent => "parent",
+            Self::MessageOnly => "message_only",
+            Self::FetchOnly => "fetch_only",
+            Self::Child => "child",
+        }
+    }
+}
+
+impl std::fmt::Display for SubagentMcpRole {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.id())
+    }
+}
+
+impl std::str::FromStr for SubagentMcpRole {
+    type Err = String;
+
+    /// The real error is `anyhow::bail!("unknown sub-agent MCP role
+    /// {other:?}")`, whose Display is this text.
+    fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "parent" => Ok(Self::Parent),
+            "fixed_parent" => Ok(Self::Parent),
+            "message_only" => Ok(Self::MessageOnly),
+            "fetch_only" => Ok(Self::FetchOnly),
+            "child" => Ok(Self::Child),
+            other => Err(format!("unknown sub-agent MCP role {other:?}")),
+        }
+    }
+}
+
+impl serde::Serialize for SubagentMcpRole {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+/// The derive-based ops: parse with `P`, or render its Command.
+fn derived<P: clap::Parser + serde::Serialize>(request: &Value, op: &str) -> R<Value> {
+    let parse = |argv: &[String]| match P::try_parse_from(argv) {
+        Ok(parsed) => serde_json::to_value(&parsed)
+            .map(|value| json!({ "ok": value }))
+            .map_err(|error| error.to_string()),
+        Err(error) => Ok(json!({ "err": dump_error(&error) })),
+    };
+    if op.ends_with("_render") {
+        return render(P::command(), request);
+    }
+    if op.ends_with("_runs") {
+        let mut results = Vec::new();
+        for argv in argvs(request)? {
+            results.push(parse(&argv)?);
+        }
+        return Ok(json!({ "results": results }));
+    }
+    parse(&strings(request.get("argv"))?)
 }

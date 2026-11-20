@@ -64,8 +64,8 @@
 // byte) order exactly as in Rust. Paths are the exception to watch: Rust
 // orders and compares a PathBuf by its components ("a/b" before "a-b", and
 // "a//b" equal to "a/b"), and a path held as a Go string orders by bytes. A
-// collection keyed by paths needs a key type whose Compare and HashKey call
-// rspath.Cmp and rspath.HashKey. Iteration is a Go range-over-func
+// collection keyed by paths takes rspath.Key, whose Compare, Equal and
+// HashKey follow the components. Iteration is a Go range-over-func
 // sequence, in key order: `for k, v := range m.Iter()` yields each key and a
 // pointer to its value. HashMap and HashSet iterate in Go's map order, which
 // changes from one loop to the next as Rust's does from one run to the next;
@@ -79,18 +79,36 @@
 //
 // # Hash keys
 //
-// HashMap and HashSet take a comparable key type and decide once per key
-// type how keys are told apart, so that two keys are one key exactly when
-// Rust's Eq says so: by HashKey for a type with a hand-written Hash (a
-// `HashKey() string` method, translation rule 2); by Go's == for strings,
-// numbers, bools, data-free enums and arrays and structs of those; and by
-// rs.Cmp for everything else that holds a pointer or an interface (an enum
-// whose variants carry data, a Box or Arc, an Option of one, or a struct
-// holding them), which Go's == would compare by address. Such keys need no
-// method, as a derived Hash needs none, and cost a logarithmic search
-// instead of a hash lookup. A key type that Go cannot compare at all, a
-// slice for Rust's Vec, cannot be a key: Mjolnir has one such map,
-// `HashMap<Vec<u32>, u32>` in mj-transcript/src/github_history.rs.
+// HashMap and HashSet take any key type, as Rust takes any type with Hash
+// and Eq, and decide once per key type how to store the keys so that two
+// keys are one key exactly when Rust's Eq says so:
+//
+//   - A key type with a method `HashKey() string`, on the value or the
+//     pointer, is a Rust type with its own Hash and Eq (translation rule 2),
+//     such as rspath.Key, which has `Equal` beside it and gives equal
+//     HashKeys exactly to equal paths. Its entries are held in a Go map by
+//     the HashKey, so keys with equal HashKeys are one key; the key kept is
+//     the first one inserted, which iteration and the lookups return.
+//   - A key type that Go's == compares as Rust's derived Eq does, and that
+//     has no Equal or Compare method of its own: bools, numbers, strings,
+//     data-free enums, and arrays and structs of those (rs.Tuple and
+//     rs.Option of them included). Its entries are held in a Go map by the
+//     key.
+//   - Every other key type: one that Go cannot compare at all (a slice for
+//     a Vec, as in `HashMap<Vec<u32>, u32>` in
+//     mj-transcript/src/github_history.rs, a Go map, or a struct or array
+//     holding one); one that Go would compare by address where Rust
+//     compares the value (a pointer for a Box or Arc, an interface for an
+//     enum whose variants carry data, such as SessionRequestStream, or a
+//     struct or array holding them); and a type with its own Equal or
+//     Compare but no HashKey. Its entries are held in a B-tree ordered by
+//     rs.Cmp, and keys that rs.Cmp finds equal are one key, which for the
+//     derived Hash, Eq and Ord of these types is what rs.Eq finds. A lookup
+//     costs a logarithmic search instead of a hash, and the key type needs
+//     no method, as a derived Hash needs none.
+//
+// A key is stored as it is given, as Rust moves it into the map, so a slice
+// key must not be changed afterwards.
 //
 // HashMapDefaultHasher is SipHash 1-3 with zero keys, the DefaultHasher that
 // Mjolnir uses to derive stable hashes (mj-daemon's mbx_service.rs and
