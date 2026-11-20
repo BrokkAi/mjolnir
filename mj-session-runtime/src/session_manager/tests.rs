@@ -564,6 +564,7 @@ async fn missing_workspace_actor_parks_until_its_target_changes() {
 /// and restarts nothing until a later measurement finds room.
 // Hard-won: 540c9202: Full-disk recovery must not upload another worker onto the same full filesystem.
 // Hard-won: e579584b9: a harness that failed to open on a full disk went to Error once space returned.
+// Hard-won: #1620: a room-for-the-worker-root sample restarted a worker whose workspace mount was still full.
 #[tokio::test]
 #[cfg_attr(
     windows,
@@ -584,7 +585,9 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     let plan = WorkerRecoveryPlan {
         source_target: mj_core::state::TargetLocator::SshBare {
             host: host.into(),
-            workspace: "/work".into(),
+            // The workspace is on a mount of its own, apart from the worker
+            // root, and the exit record does not say which one was full.
+            workspace: "/home/jonathan/Projects/app".into(),
             worker_id: None,
         },
         target: None,
@@ -635,6 +638,23 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
         recover_worker(plan.clone(), false).await.unwrap(),
         WorkerRecoveryOutcome::StorageFull { .. }
     ));
+    assert!(!restarted.exists());
+
+    // The worker root has room, but the workspace's mount is still full: a
+    // restart would fail the same way.
+    crate::target_storage::record_samples(
+        &[crate::target_storage::test_storage_sample(
+            host,
+            40 << 30,
+            0,
+        )],
+        now,
+    );
+    let outcome = recover_worker(plan.clone(), false).await.unwrap();
+    let WorkerRecoveryOutcome::StorageFull { problem, .. } = &outcome else {
+        panic!("expected a wait on the workspace's mount, got {outcome:?}");
+    };
+    assert!(problem.contains("/home/jonathan/Projects"), "{problem}");
     assert!(!restarted.exists());
 
     // Space was freed. The old exit record predates this measurement, so it
