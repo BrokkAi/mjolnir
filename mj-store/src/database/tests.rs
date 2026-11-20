@@ -8840,7 +8840,7 @@ fn projection_repair_yields_to_a_concurrent_committed_frontier() {
     save_session_to(&database, &session("session-1", "project-1")).unwrap();
     let observed = materialized_session("session-1");
     save_materialized_session_to(&database, &observed).unwrap();
-    let replacement = MaterializedSession::empty("session-1");
+    let replacement = observed.clone();
     // Both repairs observed the same broken cursor. The first repairs and
     // catches up before the second reaches the serialized replacement write.
     assert!(
@@ -8883,4 +8883,43 @@ fn projection_repair_yields_to_a_concurrent_committed_frontier() {
         )
         .unwrap()
     );
+}
+
+// Hard-won: c1da39f: a pending ACK could prune the good prefix after repair rewound its durable projection.
+#[test]
+fn projection_repair_never_rewinds_a_frontier_an_attachment_can_acknowledge() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let durable = materialized_session("session-1");
+    assert!(durable.applied_event_ordinal > 0);
+    save_materialized_session_to(&database, &durable).unwrap();
+    // Both a genesis probe and a checkpoint probe may succeed on their first
+    // replay page while the later journal tail is corrupt. Neither permits
+    // deleting a prefix another connection has committed and can now ACK.
+    for ordinal in [0, durable.applied_event_ordinal - 1] {
+        let mut candidate = MaterializedSession::empty("session-1");
+        candidate.applied_event_ordinal = ordinal;
+        if ordinal > 0 {
+            candidate.applied_event_digest = event_digest(ordinal);
+        }
+        let error = materialized::repair_materialized_session_if_current_to(
+            &database,
+            &candidate,
+            durable.applied_event_ordinal,
+            &durable.applied_event_digest,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains(&format!(
+            "durable frontier {}:",
+            durable.applied_event_ordinal
+        )));
+        let saved = load_materialized_session_from(&database, "session-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(saved).unwrap(),
+            serde_json::to_value(&durable).unwrap()
+        );
+    }
 }

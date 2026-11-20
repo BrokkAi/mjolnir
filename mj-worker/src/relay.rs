@@ -585,6 +585,7 @@ impl DurableRelay {
                 })
             })
             .collect();
+        let live_questions = self.operator_away.live_questions();
         Ok(LiveSessionBaseline {
             delivered_initial_prompts,
             state,
@@ -592,15 +593,18 @@ impl DurableRelay {
             questions: self
                 .snapshot
                 .pending_elicitations
-                .values()
-                .flatten()
-                .cloned()
+                .iter()
+                .filter_map(|(id, body)| {
+                    body.as_ref()
+                        .filter(|question| live_questions.get(id) == Some(*question))
+                        .cloned()
+                })
                 .collect(),
             unavailable_questions: self
                 .snapshot
                 .pending_elicitations
-                .values()
-                .filter(|body| body.is_none())
+                .iter()
+                .filter(|(id, body)| live_questions.contains_key(*id) && body.is_none())
                 .count(),
             native_agent_replay: self
                 .snapshot

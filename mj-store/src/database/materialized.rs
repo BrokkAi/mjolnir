@@ -1885,6 +1885,17 @@ pub(super) fn repair_materialized_session_if_current_to(
     if current.0 != expected_ordinal || current.1 != expected_digest {
         return Ok(false);
     }
+    // A connection may already owe an ACK for this durable frontier. That ACK
+    // needs no database write, so even a successful CAS cannot authorize rewind.
+    if materialized.applied_event_ordinal < current.0 {
+        bail!(
+            "refusing projection repair from durable frontier {}:{} to older frontier {}:{}; the durable projection is unchanged",
+            current.0,
+            current.1,
+            materialized.applied_event_ordinal,
+            materialized.applied_event_digest,
+        );
+    }
     if !session_exists(&tx, &materialized.session_id)? {
         bail!("unknown session {}", materialized.session_id);
     }

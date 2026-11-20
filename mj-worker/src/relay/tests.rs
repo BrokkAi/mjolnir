@@ -10086,14 +10086,19 @@ fn forms_opened_during_bridge_startup_survive_session_open_and_ack_pruning() {
         }
         assert_eq!(projection.pending_elicitations, vec![live.clone()]);
         assert_eq!(
-            relay.live_session_baseline().unwrap().questions,
-            vec![live.clone()]
+            relay.snapshot.pending_elicitations.get(&live.id),
+            Some(&Some(live.clone()))
         );
         let frontier = relay.latest_ordinal();
         acknowledge_relay(&mut relay, "collect-startup", frontier);
         drop(relay);
         let mut relay = DurableRelay::open(temp.path(), SESSION, "reopened").unwrap();
-        assert_eq!(relay.live_session_baseline().unwrap().questions, vec![live]);
+        assert_eq!(
+            relay.snapshot.pending_elicitations.get(&live.id),
+            Some(&Some(live))
+        );
+        // Reopening does not resurrect the old bridge's responder.
+        assert!(relay.live_session_baseline().unwrap().questions.is_empty());
         relay
             .record_observation(RelayObservation::SessionRestarted)
             .unwrap();

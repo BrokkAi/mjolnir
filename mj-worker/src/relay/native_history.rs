@@ -333,7 +333,7 @@ mod tests {
                 Some(&None)
             );
             let baseline = relay.live_session_baseline().unwrap();
-            assert_eq!(baseline.unavailable_questions, 1);
+            assert_eq!(baseline.unavailable_questions, 0);
             assert!(baseline.questions.is_empty());
         }
         let mut relay = DurableRelay::open(temp.path(), SESSION, "upgraded").unwrap();

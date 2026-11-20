@@ -81,6 +81,19 @@ pub(super) enum AwayRequest {
 }
 
 impl OperatorAway {
+    pub(crate) fn live_questions(&self) -> BTreeMap<String, ElicitationRequest> {
+        // Recovery calls this with the relay held: Relay -> OperatorAway is
+        // the lock order. This owner never takes the relay lock while held;
+        // answering only wakes a responder, whose FIFO work runs afterwards.
+        let state = self.0.lock().expect("operator-away state lock poisoned");
+        state
+            .pending
+            .iter()
+            .filter(|entry| state.bridges.contains(&entry.bridge) && !entry.answer.is_closed())
+            .map(|entry| (entry.question.id.clone(), entry.question.clone()))
+            .collect()
+    }
+
     // Only the Unix worker runtime receives SetOperatorAway. Other targets
     // carry the default state so ACP request handling has one type.
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -151,7 +164,21 @@ impl Drop for PendingBridge {
     }
 }
 
+/// The connection, rather than its cloned responder tasks, owns bridge life.
+/// Dropping a cancelled driver retires responders before terminal teardown.
+pub(super) struct PendingBridgeLifetime(PendingElicitations);
+
+impl Drop for PendingBridgeLifetime {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 impl PendingElicitations {
+    pub(super) fn bridge_lifetime(&self) -> PendingBridgeLifetime {
+        PendingBridgeLifetime(self.clone())
+    }
+
     /// Both immediate and later AFK decisions reach the same responder task.
     /// It publishes Requested before receiving this answer, so AFK cannot
     /// resolve a form before the relay has observed the question.
@@ -451,6 +478,109 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{TcpListener, TcpStream};
+
+    // Hard-won: c1da39f: the last terminal closed before a dead bridge's form-resolution event.
+    #[cfg(unix)]
+    #[test]
+    fn recovery_cut_asks_responder_owner_before_terminal_close_releases_it() {
+        use mj_core::relay::{ActiveAgentTerminal, RelayObservation};
+        let root = tempfile::tempdir().unwrap();
+        let relay = Arc::new(crate::relay::RelayCell::new(
+            crate::relay::DurableRelay::open(root.path(), "question-cut", "test").unwrap(),
+        ));
+        let owner = relay.lock().unwrap().operator_away.clone();
+        let old = owner.pending_for_bridge();
+        let old_lifetime = old.bridge_lifetime();
+        let replacement = owner.pending_for_bridge();
+        let _replacement_lifetime = replacement.bridge_lifetime();
+        let old_question = question("old", "Old bridge question");
+        let live_question = question("live", "Replacement bridge question");
+        let abandoned = question("abandoned", "Responder disappeared");
+        let old_reused_question = question("reused", "Previous bridge's form");
+        let current_reused_question = question("reused", "Replacement bridge's different form");
+        let _reused_answer = replacement.register(
+            current_reused_question.clone(),
+            String::new(),
+            AwayRequest::Question,
+        );
+
+        let _old_answer = old.register(old_question.clone(), String::new(), AwayRequest::Question);
+        let _live_answer =
+            replacement.register(live_question.clone(), String::new(), AwayRequest::Question);
+        drop(replacement.register(abandoned.clone(), String::new(), AwayRequest::Question));
+        {
+            let mut state = relay.lock().unwrap();
+            for request in [
+                old_question.clone(),
+                live_question.clone(),
+                abandoned,
+                old_reused_question,
+            ] {
+                state
+                    .record_observation(RelayObservation::ElicitationRequested { request })
+                    .unwrap();
+            }
+            assert_eq!(
+                state.live_session_baseline().unwrap().questions,
+                vec![live_question.clone(), old_question]
+            );
+            state
+                .agent_terminal_started(ActiveAgentTerminal {
+                    terminal_id: "old-terminal".into(),
+                    command: "sleep 30".into(),
+                    started_at_ms: 1,
+                })
+                .unwrap();
+        }
+        let mut cut = relay.lock().unwrap().reserve_live_baseline();
+        assert!(cut.try_recv().is_err());
+        // Responder clones and their resolution tasks still exist. The actual
+        // bridge lifetime owner is decisive even without HarnessRestarting.
+        drop(old_lifetime);
+        crate::worker_runtime::record_runtime_event(
+            &relay,
+            &mut BTreeMap::new(),
+            RuntimeEvent::TerminalClosed {
+                terminal_id: "old-terminal".into(),
+                output: String::new(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            cut.try_recv().unwrap().unwrap().questions,
+            vec![live_question.clone()]
+        );
+        // A restarted bridge can reuse IDs. Its live responder cannot bless
+        // the old body before the new Requested event reaches the frontier.
+        relay
+            .lock()
+            .unwrap()
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: current_reused_question.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            relay
+                .lock()
+                .unwrap()
+                .live_session_baseline()
+                .unwrap()
+                .questions,
+            vec![live_question, current_reused_question]
+        );
+        let history = relay
+            .lock()
+            .unwrap()
+            .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap();
+        assert!(!history.iter().any(|event| matches!(
+            event.observation,
+            RelayObservation::ElicitationResolved { .. }
+        )));
+    }
 
     struct Classifier {
         listener: TcpListener,
