@@ -373,6 +373,10 @@ Functions.
 
 - An `async fn` takes `ctx context.Context` as its first parameter and returns
   its result directly. `.await` on a call is the call with `ctx` passed.
+- A synchronous function that Rust lets reach the runtime through its
+  thread-local (`Handle::current()`, `tokio::spawn` from a non-async function,
+  a `Drop` that spawns) uses `tokio.RuntimeHandleCurrent()`; it does not grow a
+  `ctx` parameter. The model is in `.agents/docs/go-port/tokio-contract.md`.
 - `ctx` is the identity of the running task, not a deadline to check. Never
   test `ctx.Err()`, never select on `ctx.Done()`, and never wrap it with
   `context.WithTimeout` or `WithCancel`. Use `tokio.TimeTimeout`,
@@ -413,9 +417,9 @@ a `switch` on the index holds the arm bodies, so `break`, `continue` and
     var msg rs.Option[Message]
     var joined tokio.TaskJoinResult[rs.Unit]
     switch tokio.Select(ctx, tokio.SelectBiased,
-        tokio.ArmIf(!tasks.IsEmpty(), tasks.JoinNext(), &joined),
-        tokio.Arm(rx.Recv(), &msg),
-        tokio.Arm(cancel.Cancelled(), nil),
+        tokio.ArmIf(!tasks.IsEmpty(), tasks.JoinNextFuture(), &joined),
+        tokio.Arm(rx.RecvFuture(), &msg),
+        tokio.Arm(cancel.CancelledFuture(), nil),
     ) {
     case 0:
         ...
@@ -426,7 +430,9 @@ a `switch` on the index holds the arm bodies, so `break`, `continue` and
     }
 
 - Keep the arms in the Rust order. Pass `tokio.SelectBiased` exactly when the
-  Rust macro says `biased;`.
+  Rust macro says `biased;`, and `tokio.SelectUnbiased` otherwise.
+- Every awaitable runtime operation has two forms: `rx.Recv(ctx)` waits (it is
+  `rx.recv().await`), and `rx.RecvFuture()` is the future itself, for an arm.
 - `, if cond` is `tokio.ArmIf(cond, ..)`. A refutable pattern
   (`Some(x) = rx.recv() =>`) is `tokio.ArmMatch`, and `else =>` is
   `tokio.ArmElse()`.
@@ -437,7 +443,7 @@ a `switch` on the index holds the arm bodies, so `break`, `continue` and
 - A future pinned outside a loop and polled by reference
   (`tokio::pin!(fut); loop { select! { r = &mut fut => .. } }`) is
   `fut := tokio.Start(ctx, fn)` before the loop, `defer fut.Drop()`, and
-  `tokio.Arm(fut, &r)` in the select.
+  `tokio.Arm[T](fut, &r)` in the select.
 - `tokio::join!`, `try_join!`, `futures::future::join_all` are `tokio.Join2`,
   `tokio.TryJoin2`, `futures.FutureJoinAll`. They run their futures on the same
   task, as Rust does.
