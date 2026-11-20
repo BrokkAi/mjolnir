@@ -14,7 +14,7 @@ use crate::test_support::*;
 use crate::render::render;
 
 #[test]
-fn retained_subagents_do_not_count_as_working_after_profile_move() {
+fn retained_subagents_remain_browsable_after_profile_move() {
     use mj_core::native_agent::*;
     let mut parent = running_session();
     let mut dashboard = dashboard_with_session(parent.clone());
@@ -65,13 +65,12 @@ fn retained_subagents_do_not_count_as_working_after_profile_move() {
             mj_core::attention::SessionAttention::Unreachable,
         );
     }
-    dashboard.set_native_agents(agents.clone());
+    dashboard.set_native_agents(agents);
     parent.last_profile = "destination-profile".into();
     let mut state = State::default();
     state.sessions.insert(parent.id.clone(), parent.clone());
     dashboard.set_state(state);
     assert_eq!(dashboard.subagent_count_for(&parent.id), 23);
-    assert_eq!(dashboard.working_subagent_count_for(&parent.id), 0);
     dashboard.open_subagent_workspace(parent.id.clone());
     assert_eq!(
         dashboard.ordered_sessions().len(),
@@ -81,14 +80,6 @@ fn retained_subagents_do_not_count_as_working_after_profile_move() {
     dashboard.focus_sessions();
     dashboard.handle_key(key(KeyCode::Char('a')));
     assert_eq!(dashboard.ordered_sessions().len(), 23);
-    let mut resumed = agents;
-    resumed[0].agent.state = NativeAgentState::Running;
-    resumed[0].agent.availability = NativeAgentAvailability::Available;
-    dashboard.set_native_agents(resumed);
-    let mut verdict = dashboard.verdict(&parent.id);
-    verdict.working_children = 1;
-    dashboard.set_session_verdict(&parent.id, verdict);
-    assert_eq!(dashboard.working_subagent_count_for(&parent.id), 1);
 }
 
 #[test]

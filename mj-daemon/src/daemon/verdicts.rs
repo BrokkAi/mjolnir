@@ -604,6 +604,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn retained_native_children_only_count_as_working_when_running() {
+        let mut capture = RuntimeProjection::default();
+        insert_running_session(&mut capture, "parent");
+        for (id, state) in [
+            ("active", NativeAgentState::Running),
+            ("finished", NativeAgentState::Completed),
+            ("failed", NativeAgentState::Failed),
+        ] {
+            let child = native(id, true, state);
+            capture.native_agents.insert(child.agent.view_id(), child);
+        }
+        project(&mut capture, &Default::default());
+        assert_eq!(capture.verdicts["parent"].working_children, 1);
+
+        let before = capture.clone();
+        capture.records.get_mut("parent").unwrap().last_profile = "destination-profile".into();
+        let retained = native("active", true, NativeAgentState::Disconnected);
+        let id = retained.agent.view_id();
+        capture.native_agents.insert(id.clone(), retained);
+        project(&mut capture, &before);
+        assert_eq!(capture.verdicts["parent"].working_children, 0);
+
+        let before = capture.clone();
+        let active = capture.native_agents.get_mut(&id).unwrap();
+        active.agent.state = NativeAgentState::Running;
+        active.agent.availability = mj_core::native_agent::NativeAgentAvailability::Available;
+        project(&mut capture, &before);
+        assert_eq!(capture.verdicts["parent"].working_children, 1);
+    }
+
     #[tokio::test]
     async fn interrupt_all_offer_and_execution_cover_the_only_cancellable_native_child() {
         let mut manager = super::super::tests::TestRemoteManager::for_session("parent").await;
