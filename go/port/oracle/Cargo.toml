@@ -77,6 +77,66 @@ tree-sitter-bash = { version = "=0.25.1", optional = true }
 sysinfo = { version = "=0.32.1", default-features = false, features = ["system"], optional = true }
 agent-client-protocol = { version = "=5.0.0", features = ["unstable_session_fork", "unstable_session_system_prompt", "unstable_end_turn_token_usage"], optional = true }
 
+# cargo-machete (the product's "Unused dependencies" check) scans every
+# Cargo.toml in the repository and cannot see that each dependency here is
+# used by the one module its feature enables. Every dependency a module may
+# use is listed; add a new one here when you add it above.
+[package.metadata.cargo-machete]
+ignored = [
+    "serde",
+    "serde_ignored",
+    "toml",
+    "toml_edit",
+    "yaml-rust2",
+    "jsonc-parser",
+    "anyhow",
+    "tracing",
+    "tracing-subscriber",
+    "clap",
+    "similar",
+    "chrono",
+    "chrono-tz",
+    "url",
+    "semver",
+    "bytesize",
+    "base64",
+    "indexmap",
+    "imbl",
+    "tar",
+    "flate2",
+    "zip",
+    "zstd",
+    "ruzstd",
+    "sha2",
+    "hmac",
+    "blake3",
+    "tempfile",
+    "dirs",
+    "regex",
+    "aho-corasick",
+    "unicode-width",
+    "unicode-segmentation",
+    "pulldown-cmark",
+    "linkify",
+    "qrcode",
+    "vt100",
+    "vte",
+    "ratatui",
+    "tui-term",
+    "rat-focus",
+    "crossterm",
+    "tokio",
+    "tokio-util",
+    "tokio-stream",
+    "futures",
+    "rusqlite",
+    "tokenizers",
+    "tree-sitter",
+    "tree-sitter-bash",
+    "sysinfo",
+    "agent-client-protocol",
+]
+
 [features]
 # One feature for each module; a module is built on its own.
 std_fmt = []

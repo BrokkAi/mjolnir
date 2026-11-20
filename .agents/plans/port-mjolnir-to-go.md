@@ -14,11 +14,14 @@ Until then, `python3 go/port/status.py` always says exactly how far the port is.
 
 ## Progress
 
-- [x] (2026-11-20 09:30Z) Surveyed the workspace: 29 crates, 1,004 Rust files, 459,085 production lines, 385,557 test lines, 6,144 tests, 88 direct third-party crates.
-- [x] (2026-11-20 09:40Z) Built `go/port/rsindex` (parses every Rust file) and `go/port/portmap.py` (module graph, schedule, Rust-to-Go names, test names).
-- [x] (2026-11-20 10:30Z) Wrote the translation rules (`.agents/docs/go-port/translation-rules.md`) and the runtime package catalogue (`.agents/docs/go-port/runtime-packages.md`).
-- [ ] Milestone 0: module skeleton, oracle, status tool, CI lane (in progress).
-- [ ] Milestone 1: runtime packages (standard library, tokio, serde and the other crates).
+- [x] (2026-11-20 09:45Z) Surveyed the workspace: 29 crates, 1,004 Rust files, 459,085 production lines, 385,557 test lines, 6,144 tests, 88 direct third-party crates.
+- [x] (2026-11-20 09:55Z) Built `go/port/rsindex` (parses every Rust file) and `go/port/portmap.py` (module graph, schedule, Rust-to-Go names, test names).
+- [x] (2026-11-20 10:05Z) Wrote the translation rules (`.agents/docs/go-port/translation-rules.md`) and the runtime package catalogue (`.agents/docs/go-port/runtime-packages.md`).
+- [x] (2026-11-20 10:05Z) Milestone 0, skeleton: root `go.mod`, `assets.go` embedding the 98 files the Rust code includes, `go/assets`, `go/rs` core (Option, Result, tuples, panics, type registry, formatter and container interfaces).
+- [x] (2026-11-20 10:38Z) Milestone 0, instruments: `go/port/oracle` with every planned module registered, the Go oracle helper, `go/port/status.py`, `go/port/gotest.sh`, `scripts/go/build.sh`, `.github/workflows/go.yml`.
+- [x] (2026-11-20 10:37Z) Milestone 0, declarations generator: `portmap.py declarations` writes a Go skeleton for all 849 production files (974 Go files, about 181,000 lines) with no syntax errors; about 1,200 places are marked `PORT:` for a person to settle, of which about 400 are ACP types awaiting `acp-mapping.md`.
+- [ ] Milestone 0, remaining: a check that every `rs.Format` string parses and its arguments match (the `rsfmt` vet), the `exhaustruct` and `go-check-sumtype` checks in the Go lane.
+- [ ] Milestone 1: runtime packages. Started 2026-11-20 10:10Z with twenty parallel units (the harness runs at most twenty at once; eight more assignments wait in `.agents/docs/go-port/briefs/`): the formatter; clone, equality, ordering and counted references; numbers, sorting and slices; `strs`; `collections`; `rspath` and `rsenv`; `rsio` and `rsfs`; `rssync`, `rsthread` and `rstime`; `serde` and `serdejson`; `toml` and `tomledit`; `anyhow`, `tracing`; the `tokio` core; `clap`; `chrono`; `similar`, `linkify`, `semver`, `bytesize`, `base64`; `unicodewidth`, `unicodesegmentation`; `vt100`, `vte`; `pulldowncmark`; `url`, `qrcode`, `regex`; and four analysis documents (`acp-mapping.md`, `counted-arcs.md`, `compressed-bytes.md`, `library-usage.md`). None is merged yet.
 - [ ] Milestone 2: foundation crates (`mj-core`, `mj-review`, `mj-transcript`, `mj-checkpoint`, `mj-build-id`).
 - [ ] Milestone 3: the Go worker (`mj-worker`, `mj-worker-bin`), driven by the Rust daemon.
 - [ ] Milestone 4: client, targets, store and the session crates.
@@ -37,6 +40,12 @@ Until then, `python3 go/port/status.py` always says exactly how far the port is.
   Evidence: `mj-session-runtime/src/worker_client/credential_sync.rs:461` keeps a profile only while `Arc::strong_count(profile) > 1`; `mj-controller/src/controller/worktree.rs:732` keeps a map of `Weak<Mutex<()>>` locks.
 - Observation: `serde_json` is built with `preserve_order`, so a JSON object keeps insertion order, and the map type is `BTreeMap` almost everywhere else (2,406 uses against 156 of `HashMap`). Ordering is part of the output throughout.
   Evidence: `cargo tree -p brokk-mjolnir -e features` lists `serde_json ... preserve_order`.
+- Observation: Go names made by joining PascalCase parts collide where Rust keeps items apart by namespace and case.
+  Evidence: type-checking the generated declarations of `mj-core` reported 78 "is not a type" and 120 redeclaration errors: the method `RelayCommand::kind` and the type `RelayCommandKind` both became `RelaySnapshotRelayCommandKind`. With `<ModulePrefix>_<rust name>` the same check reports none.
+- Observation: `cargo machete`, the product's "Unused dependencies" job, scans every `Cargo.toml` in the repository, not only workspace members.
+  Evidence: the job failed from commit `1c3f41552` (the first push of `go/port/oracle`) until `63fe420b3` listed the oracle's dependencies under `package.metadata.cargo-machete`. Reproduced and verified with cargo-machete 0.9.2 on an export of the commit.
+- Observation: The "Tests (worker-cli)" job on `master` was already failing before the port's first commit, so a red CI run on a port commit needs its failing jobs compared with the run before it.
+  Evidence: runs for `63c80bc5a` and `bedb7fcae` fail only in that job.
 - Observation: The owner's `github.com/BrokkAi/acp-go` (v0.14.0, Apache-2.0, no dependencies) already reproduces the Rust ACP crate's JSON exactly and exposes `jsonvalue`, an exact `serde_json::Value`.
   Evidence: its README: "Over 14,000 decode and encode cases, captured from the Rust schema crate itself".
 
@@ -65,6 +74,15 @@ Until then, `python3 go/port/status.py` always says exactly how far the port is.
   Date/Author: 2026-11-20, owner; recorded by Claude.
 - Decision: No C in the Go build (`CGO_ENABLED=0`). SQLite through `modernc.org/sqlite`; tree-sitter's C sources compiled to WebAssembly and run by a pure-Go runtime; ONNX Runtime loaded at run time.
   Rationale: The Rust build already avoids a C toolchain where it can (see the comments in `Cargo.toml`), and pure Go cross-compiles every platform from one Linux machine, which also lets CI check macOS and Windows builds without macOS runners.
+  Date/Author: 2026-11-20, Claude.
+- Decision: A product item is named `<ModulePrefix>_<rust name as written>` (`Runtime_block_on`, `Runtime_ShutdownState_new`, `RelayProtocol_RelayRequest_Hello`); methods and fields stay PascalCase or camelCase. Runtime packages keep ordinary PascalCase names.
+  Rationale: Joined names collide (see Surprises). Keeping the Rust name verbatim after a separator makes collisions impossible, needs no case conversion, and lets a Go name be read back to its Rust path. Runtime packages are a small vocabulary that is looked up in the package, so they can read like ordinary Go.
+  Date/Author: 2026-11-20, Claude.
+- Decision: A Go function takes `ctx` if and only if the Rust function is `async`. Functions that are synchronous in Rust but need the runtime (`tokio::spawn`, `Handle::current`) find it through a table of the runtime's goroutines.
+  Rationale: Rust reaches the runtime through a thread-local from synchronous code, including from `Drop`. Threading `ctx` into those functions would change signatures the translation cannot derive locally. The rule as stated is checkable from the Rust signature alone.
+  Date/Author: 2026-11-20, Claude.
+- Decision: Declarations (types, tags, registrations, signatures) are generated from the parsed Rust source; bodies and tests are translated by hand.
+  Rationale: About 1,000 serialized types carry 2,100 serde attributes. A retyped attribute or a missing variant compiles and only shows up as a wire incompatibility. The generator also makes every signature of a crate exist before any body is written, which is what lets files inside a module cycle be ported in parallel.
   Date/Author: 2026-11-20, Claude.
 - Decision: The Go programs build into `target/go/<profile>/`, and a Go build run from there refuses to own the default instance, as a Rust build run from a Cargo target directory does.
   Rationale: AGENTS.md forbids pointing a test build at the default instance. `target*/` is already ignored by Git.
@@ -255,3 +273,5 @@ Go modules the port depends on, all pure Go: `github.com/BrokkAi/acp-go` (Agent 
 The interfaces every product package relies on are fixed by the rulebook and must exist at the end of Milestone 1: `rs.Option[T]`, `rs.Format`, `rs.Clone`, `rs.Eq`, `rs.Cmp`, `rs.Todo`, `rs.RegisterStruct` and `rs.RegisterEnum` in `go/rs`; `collections.BTreeMap[K, V]` and its siblings; `rspath`, `rsfs`, `rsio`, `rssync`, `rstime`, `rsthread`, `rsprocess`; `rstest.AssertEq` and the oracle helper; `serde` and `serdejson`; `anyhow`; `tracing`; and in `go/crates/tokio`: `tokio.Fn[T]`, `tokio.Spawn`, `tokio.Select` with `Arm`, `ArmIf`, `ArmMatch`, `ArmFn`, `ArmElse`, `tokio.Start`, `tokio.Test`, the `Sync*` channel types and the `Time*` functions.
 
 Change note (2026-11-20): initial version, written after the survey and the first two port tools.
+
+Change note (2026-11-20, later): Progress records Milestone 0 and the start of Milestone 1. The naming rule changed from joined PascalCase to `<ModulePrefix>_<rust name>` after generated declarations were type-checked; the Decision Log and Surprises say why. The rule for which functions take `ctx` and the decision to generate declarations were added.

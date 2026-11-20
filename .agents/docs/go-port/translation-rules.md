@@ -77,58 +77,71 @@ A test file ported from the same Rust file carries the same two lines.
 ## 2. Names
 
 Names are derived mechanically so that two people porting different files
-arrive at the same identifier without talking to each other.
+arrive at the same identifier without talking to each other, and so that no
+two Rust items can ever map to one Go name.
 
-Module prefix. An item defined in module `a::b_c` gets the prefix `ABC` (each
-path segment in PascalCase, joined). Items in the crate root have no prefix.
-An inline `mod tests` adds nothing.
+**An item of a product crate is named: module prefix, underscore, then the
+Rust name exactly as written.**
 
-- `mj_core::runtime::ShutdownReport` is `mjcore.RuntimeShutdownReport`.
-- `mj_core::relay::protocol::RelayRequest` is `mjcore.RelayProtocolRelayRequest`.
-- `mj_core::relay::MAX_FRAME_BYTES` is `mjcore.RelayMaxFrameBytes`.
-- `mj_core::runtime::block_on` is `mjcore.RuntimeBlockOn`.
-
+The module prefix is the item's module path with each segment in PascalCase
+and joined: `runtime` is `Runtime`, `relay::protocol` is `RelayProtocol`,
+`config::dsh_credentials` is `ConfigDshCredentials`. The crate root (`lib.rs`,
+`main.rs`) has the prefix `Lib` or `Main`. An inline `mod tests` adds nothing.
 The prefix comes from the module that defines the item, never from a
 re-export: `pub use config::Config` in `lib.rs` does not create a second name.
 
-Case. PascalCase and camelCase are mechanical: split on `_`, capitalise each
-part, lower-case the rest of an all-capitals part. `session_id` is `sessionId`
-or `SessionId`, `HTTP_PORT` is `HttpPort`. Do not apply Go's initialism style
-(`ID`, `URL`).
+| Rust | Go |
+| --- | --- |
+| `mj_core::runtime::ShutdownReport` (a type) | `mjcore.Runtime_ShutdownReport` |
+| `mj_core::runtime::block_on` (a function) | `mjcore.Runtime_block_on` |
+| `mj_core::relay::MAX_FRAME_BYTES` (a constant or static) | `mjcore.Relay_MAX_FRAME_BYTES` |
+| `ShutdownState::new` (an associated function) | `mjcore.Runtime_ShutdownState_new` |
+| `RelayVersionRange::CURRENT` (an associated constant) | `mjcore.RelayProtocol_RelayVersionRange_CURRENT` |
+| `RelayRequest::Hello` (an enum variant) | `mjcore.RelayProtocol_RelayRequest_Hello` |
+| a constant `REPORTED` declared inside the body of `fn report` in `config` | `config_report_REPORTED` |
+| `mj_session_types::RecoveryPlan` (crate root) | `mjsessiontypes.Lib_RecoveryPlan` |
 
-Visibility. `pub` becomes an exported (capitalised) name. Everything else
-(`pub(crate)`, `pub(super)`, private) becomes an unexported name with a
-lower-case first letter: private `runtime::InFlightGuard` is
-`runtimeInFlightGuard`. This applies to types, functions, constants, statics,
-struct fields and methods alike.
+Visibility is the case of the first letter, and nothing else changes: `pub`
+is exported (`Runtime_block_on`), anything else (`pub(crate)`, `pub(super)`,
+private) starts in lower case (`runtime_block_on`, `runtime_InFlightGuard`,
+`runtime_InFlightGuard_register`). A private associated function of a public
+type is lower case too.
 
-Methods and associated items.
+Methods and fields are the exception, because Go writes them after a dot:
 
-- A method with a `self` receiver keeps its own name with no prefix:
-  `fn negotiate(self, ..)` is `Negotiate`, private `fn drain(&mut self)` is
-  `drain`.
-- An associated function without `self`, and an associated constant, is a
-  package-level name: the type's Go name followed by the item's name.
-  `ShutdownState::new()` is `RuntimeShutdownStateNew()`,
-  `RelayVersionRange::CURRENT` is `RelayProtocolRelayVersionRangeCurrent`.
-  The item's own visibility decides the case of the first letter.
+- A method with a `self` receiver is the Rust name in PascalCase when `pub`
+  and camelCase otherwise: `fn negotiate(self, ..)` is `Negotiate`, private
+  `fn drain_all(&mut self)` is `drainAll`. PascalCase is mechanical: split on
+  `_`, capitalise each part, lower-case the rest of an all-capitals part
+  (`session_id` is `SessionId`, never `SessionID`).
+- A struct field follows the same rule: `pub awaits_left` is `AwaitsLeft`,
+  private `in_flight` is `inFlight`. Fields of an enum variant are always
+  exported, and tuple fields are `F0`, `F1`, ...
 - When a type has a field and a method whose Go names would be equal, the
-  method gets the suffix `Method`. `portmap.py file` shows this.
+  method gets the suffix `Method`. A method or field whose name is a Go
+  keyword gets a trailing underscore (`select_`, `type_`).
+- Go cannot put a method on an interface, which is what a data-carrying enum
+  is, nor give a method type parameters. The body of such a method is the
+  function `<Type>_<method>` taking the receiver first
+  (`RelaySnapshot_RelayCommand_kind(self_)`), and for an enum each variant has
+  a one-line method forwarding to it, so callers still write `command.Kind()`.
 
-Enum variants are `Enum_Variant`, with the underscore:
-`RelayRequest::Hello` is `RelayProtocolRelayRequest_Hello`. The underscore keeps
-a variant apart from a separate type that happens to be named `EnumVariant`.
+A trait is an interface under the same naming, with PascalCase methods. The
+default body of a trait method is the function `<Trait>_default_<method>`.
 
-Trait implementations use fixed names:
+`python3 go/port/portmap.py file <path.rs>` prints every name, and
+`portmap.py declarations <path.rs>` writes the declarations with them.
+
+Trait implementations use fixed names. `T` is the type's Go name:
 
 | Rust | Go |
 | --- | --- |
-| `impl Display for T` | `func (t *T) FmtDisplay(f *rs.Formatter) error` |
+| `impl Display for T` | `func (t *T) FmtDisplay(f *rs.Formatter) error`, plus `String() string` |
 | `impl Debug for T` (hand-written) | `func (t *T) FmtDebug(f *rs.Formatter) error` |
-| `impl Default for T` | `func TDefault() T` |
-| `impl From<A> for T` | `func TFromA(a A) T`, with `A` the Go name of the source type without its package |
-| `impl TryFrom<A> for T` | `func TTryFromA(a A) (T, error)` |
-| `impl FromStr for T` | `func TFromStr(s string) (T, error)` |
+| `impl Default for T` | `func T_default() T` |
+| `impl From<A> for T` | `func T_from_A(a A) T`, with `A` the source type's Go name without its package |
+| `impl TryFrom<A> for T` | `func T_try_from_A(a A) (T, error)` |
+| `impl FromStr for T` | `func T_from_str(s string) (T, error)` |
 | `impl Drop for T` | `func (t *T) Drop()` |
 | `impl Clone for T` (hand-written) | `func (t *T) Clone() T` |
 | `impl PartialEq for T` (hand-written) | `func (t *T) Equal(other *T) bool` |
@@ -137,7 +150,9 @@ Trait implementations use fixed names:
 | `impl Iterator for T` | `func (t *T) Next() rs.Option[Item]` |
 | `impl Serialize` / `Deserialize` (hand-written) | `SerializeSerde` / `DeserializeSerde`, see rule 9 |
 | `impl Deref<Target = U> for T` | `func (t *T) Deref() *U`, and callers write the call out |
-| operator traits (`Add`, `Sub`, `Index`, ...) | a method of the trait's method name: `Add`, `Sub`, `Index` |
+| `impl std::error::Error for T` | `func (t *T) Error() string` (the `Display` text), and `Unwrap() error` for `source` |
+| any other trait method with `self` | the method name in PascalCase |
+| any other trait function without `self` | `func T_<function>(..)` |
 
 A derived `Debug`, `Clone`, `PartialEq`, `Eq`, `Ord`, `Hash` or `Default` needs
 no method: the runtime does it by reflection (rule 4).
@@ -154,11 +169,14 @@ the module prefix, an underscore, then the Rust name unchanged. An integration
 test in `tests/acp.rs` is `TestItAcp_<name>`. The names are checked against the
 Rust sources, so a renamed or missing test is reported.
 
-Third-party and standard-library names follow the same prefix rule over the
-path people write in Rust: `tokio::sync::mpsc::channel` is
-`tokio.SyncMpscChannel`, `std::fs::read_to_string` is `rsfs.ReadToString`,
-`serde_json::to_string` is `serdejson.ToString`. The catalogue lists the
-packages.
+The runtime packages (the standard library and third-party crates) are a
+fixed vocabulary and read like ordinary Go: every name is PascalCase, joined
+without underscores, over the path people write in Rust.
+`tokio::sync::mpsc::channel` is `tokio.SyncMpscChannel`,
+`std::fs::read_to_string` is `rsfs.ReadToString`, `serde_json::to_string` is
+`serdejson.ToString`, `Mutex::new` is `rssync.MutexNew`. Look a name up in the
+package (its `doc.go` lists what it covers) instead of deriving it. The
+catalogue lists the packages.
 
 ## 3. Types
 
@@ -229,7 +247,8 @@ Enums.
   once with `rs.RegisterEnum`.
 - Any other enum is a sealed interface `E` with an unexported method `isE()`,
   and one struct for each variant, `E_Variant`. A value is always a pointer to
-  the variant struct: `&RelayEvent_Started{Id: id}`, `&RelayEvent_Idle{}`.
+  the variant struct: `&RelaySnapshot_RelayEvent_Started{Id: id}`,
+  `&RelaySnapshot_RelayEvent_Idle{}`.
   Named fields keep their names in PascalCase; tuple fields are `F0`, `F1`, ...
 - `match` is a type switch (or a `switch` on the constant). Every match the
   Rust compiler checked as exhaustive ends in
@@ -246,11 +265,12 @@ Enums.
 
 Traits are Go interfaces with the same method names. Every trait method is in
 the interface. An implementation that relies on a default method adds a
-one-line method calling `<Trait>Default<Method>(self, ..)`, the package-level
+one-line method calling `<Trait>_default_<method>(self, ..)`, the package-level
 function that holds the default body. Go methods cannot have type parameters,
 so a generic method becomes a package-level generic function named
-`<Type><Method>`. An extension trait (a trait implemented for a type the crate
-does not own) becomes package-level functions named `<Trait><Method>`.
+`<Type>_<method>`. An extension trait (a trait implemented for a type the crate
+does not own) becomes package-level functions named
+`<module prefix>_<Trait>_<method>`.
 
 Generics become Go generics with the bound as the constraint. Where Go cannot
 express the bound, take the interface or a function argument, and say so in a
@@ -323,7 +343,7 @@ type as a question: where does this value die?
 ## 5. Errors and panics
 
 - `?` is `if err != nil { return zero, err }`. Where `?` converts the error
-  through a `From` impl, call the conversion: `return zero, FooErrorFromIo(err)`.
+  through a `From` impl, call the conversion: `return zero, Foo_Error_from_Error(err)`.
 - `anyhow` is `go/crates/anyhow`. `bail!("..")` is
   `return zero, anyhow.Errorf("..", args...)`; `anyhow!("..")` is
   `anyhow.Errorf`; `ensure!(c, "..")` is `if !c { return .. }`;
@@ -371,8 +391,13 @@ translate what the task does.
 
 Functions.
 
-- An `async fn` takes `ctx context.Context` as its first parameter and returns
-  its result directly. `.await` on a call is the call with `ctx` passed.
+- A function takes `ctx context.Context` as its first parameter if and only if
+  it is `async` in Rust, and returns its result directly. `.await` on a call
+  is the call with `ctx` passed. Functions that are synchronous in Rust never
+  take `ctx`, including the ones that reach the runtime through its
+  thread-local (`tokio::spawn`, `spawn_blocking`, `Handle::current()`,
+  `Instant::now()`); the Go runtime finds the calling goroutine's runtime the
+  same way. The model is in `.agents/docs/go-port/tokio-contract.md`.
 - `ctx` is the identity of the running task, not a deadline to check. Never
   test `ctx.Err()`, never select on `ctx.Done()`, and never wrap it with
   `context.WithTimeout` or `WithCancel`. Use `tokio.TimeTimeout`,
@@ -397,10 +422,10 @@ Tasks.
 
 | Rust | Go |
 | --- | --- |
-| `mj_core::runtime::spawn(fut)`, `tokio::spawn(fut)` | `mjcore.RuntimeSpawn(ctx, fn)`, `tokio.Spawn(ctx, fn)` returning `*tokio.TaskJoinHandle[T]` |
+| `mj_core::runtime::spawn(fut)`, `tokio::spawn(fut)` | `mjcore.Runtime_spawn(fn)`, `tokio.Spawn(fn)` returning `*tokio.TaskJoinHandle[T]` |
 | `handle.await` | `handle.Await(ctx)` returning `(T, *tokio.TaskJoinError)` |
 | `handle.abort()` | `handle.Abort()` |
-| `tokio::task::spawn_blocking(f)` | `tokio.TaskSpawnBlocking(ctx, f)` |
+| `tokio::task::spawn_blocking(f)` | `tokio.TaskSpawnBlocking(f)` |
 | `tokio::task::yield_now().await` | `tokio.TaskYieldNow(ctx)` |
 | `JoinSet`, `AbortHandle` | `tokio.TaskJoinSet[T]`, `tokio.TaskAbortHandle` |
 | `std::thread::spawn(f)` | `rsthread.Spawn(f)` |
@@ -413,9 +438,9 @@ a `switch` on the index holds the arm bodies, so `break`, `continue` and
     var msg rs.Option[Message]
     var joined tokio.TaskJoinResult[rs.Unit]
     switch tokio.Select(ctx, tokio.SelectBiased,
-        tokio.ArmIf(!tasks.IsEmpty(), tasks.JoinNext(), &joined),
-        tokio.Arm(rx.Recv(), &msg),
-        tokio.Arm(cancel.Cancelled(), nil),
+        tokio.ArmIf(!tasks.IsEmpty(), tasks.JoinNextFuture(), &joined),
+        tokio.Arm(rx.RecvFuture(), &msg),
+        tokio.Arm(cancel.CancelledFuture(), nil),
     ) {
     case 0:
         ...
@@ -426,7 +451,9 @@ a `switch` on the index holds the arm bodies, so `break`, `continue` and
     }
 
 - Keep the arms in the Rust order. Pass `tokio.SelectBiased` exactly when the
-  Rust macro says `biased;`.
+  Rust macro says `biased;`, and `tokio.SelectUnbiased` otherwise.
+- Every awaitable runtime operation has two forms: `rx.Recv(ctx)` waits (it is
+  `rx.recv().await`), and `rx.RecvFuture()` is the future itself, for an arm.
 - `, if cond` is `tokio.ArmIf(cond, ..)`. A refutable pattern
   (`Some(x) = rx.recv() =>`) is `tokio.ArmMatch`, and `else =>` is
   `tokio.ArmElse()`.
@@ -436,8 +463,8 @@ a `switch` on the index holds the arm bodies, so `break`, `continue` and
   another arm wins.
 - A future pinned outside a loop and polled by reference
   (`tokio::pin!(fut); loop { select! { r = &mut fut => .. } }`) is
-  `fut := tokio.Start(ctx, fn)` before the loop, `defer fut.Drop()`, and
-  `tokio.Arm(fut, &r)` in the select.
+  `fut := tokio.Start(fn)` before the loop, `defer fut.Drop()`, and
+  `tokio.Arm[T](fut, &r)` in the select.
 - `tokio::join!`, `try_join!`, `futures::future::join_all` are `tokio.Join2`,
   `tokio.TryJoin2`, `futures.FutureJoinAll`. They run their futures on the same
   task, as Rust does.
@@ -517,10 +544,10 @@ syntax at run time, so the string stays exactly as it is in the Rust source:
 Logging is `go/crates/tracing`. The target of an event is the Rust module
 path, which filters and log lines show, so each ported file declares it once:
 
-    const runtimeTarget = "mj_core::runtime"
+    const runtime_TARGET = "mj_core::runtime"
 
     tracing::warn!(session_id = %id, error = ?err, in_flight, "shutting down {}", name);
-    tracing.Warn(runtimeTarget, "shutting down {}",
+    tracing.Warn(runtime_TARGET, "shutting down {}",
         tracing.Display("session_id", id), tracing.Debug("error", err),
         tracing.Field("in_flight", inFlight), name)
 
@@ -534,9 +561,11 @@ length, so the encoding must match byte for byte. `go/crates/serde` implements
 serde's data model and derive behaviour; `serdejson`, `toml` and the other
 format packages produce what the Rust crates produce, including error text.
 
-Type declarations for serialized types are generated from the Rust source by
-`go/port/portmap.py declarations <file.rs>`; start from its output instead of
-typing them. It writes:
+Declarations are generated from the Rust source by
+`python3 go/port/portmap.py declarations <file.rs>`: every type, constant and
+function signature of the file, with bodies that panic with `rs.Todo`. Start
+from its output instead of typing declarations, and resolve the places it
+marks `PORT:`. For serialized types it writes:
 
 - the `rs:"rust_name"` tag on every field, and a `serde:".."` tag carrying the
   field's serde attributes in serde's own spelling (`default`,
@@ -559,7 +588,7 @@ and map keys differently, and reports different errors.
 
 | Rust | Go |
 | --- | --- |
-| `#[cfg(unix)]`, `#[cfg(windows)]`, `#[cfg(target_os = "macos")]` on an item | the item moves to `<file>_cfg_unix.go`, `<file>_cfg_windows.go`, `<file>_cfg_darwin.go`, each with the matching `//go:build` line |
+| `#[cfg(unix)]`, `#[cfg(windows)]`, `#[cfg(target_os = "macos")]` on an item | the item moves to `<file>_cfg_unix.go`, `<file>_cfg_windows.go`, `<file>_cfg_darwin.go`, each with the matching `//go:build` line; `#[cfg(not(unix))]` is `<file>_cfg_nonunix.go` with `//go:build !unix`. The declarations generator does this split |
 | a `cfg` on a whole module | the whole Go file carries the `//go:build` line |
 | `cfg!(windows)` in an expression | `rs.CfgWindows`, a constant |
 | `#[cfg(test)]` | a `_test.go` file |
@@ -588,7 +617,7 @@ pass is a defect in the port, not in the test.
 - `#[should_panic(expected = "..")]` is `rstest.ShouldPanic(t, "..", func() {..})`.
 - `#[ignore]` is `rstest.Ignored(t, "<the Rust reason>")` as the first line,
   which skips unless `MJ_RUN_IGNORED=1`.
-- Golden files stay where they are. `mjcore.GoldenAssertGolden(t, "mj-core",
+- Golden files stay where they are. `mjcore.Golden_assert_golden(t, "mj-core",
   name, actual)` reads `mj-core/tests/golden/<name>.txt`. The Go tests never
   rewrite a golden: the Rust tests own them, and a difference is a port bug.
 - Fixtures are read from their Rust locations through the repository root
