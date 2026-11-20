@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Oracle module `serde_derive`: serde 1.0.229's derive behaviour, its data
 //! model and serde_ignored 0.1.14, as go/crates/serde reproduces them.
 //!

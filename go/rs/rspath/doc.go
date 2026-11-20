@@ -45,6 +45,15 @@
 // compares paths), HashKey (a map key equal exactly when Eq is), IsSeparator,
 // MainSeparator, Separators, and std::path::absolute (Absolute, host only).
 //
+// Comparing paths: Rust compares, orders and hashes a Path by its
+// components, so `a/b`, `a//b`, `a/./b` and `a/b/` are equal and `a/b`
+// sorts before `a-b`; Go's == and < on the strings say otherwise. Eq and Cmp
+// answer as Rust does. Key is the type of a PathBuf that is a map or set key
+// or a field of a type deriving PartialEq, Ord or Hash: its Equal and
+// Compare are Eq and Cmp (so rs.Eq, rs.Cmp and the B-tree collections order
+// it as Rust does) and its HashKey is equal for two keys exactly when they
+// are Equal (so the hash collections hold the entries Rust's hold).
+//
 // std::ffi: OsStr::to_str, to_string_lossy, display, len, is_empty,
 // is_ascii, eq_ignore_ascii_case, to_ascii_lowercase and uppercase,
 // make_ascii_lowercase and uppercase, as_encoded_bytes,

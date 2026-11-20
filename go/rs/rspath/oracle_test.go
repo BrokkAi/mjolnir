@@ -156,6 +156,15 @@ func agree(texts ...string) string {
 	return texts[0]
 }
 
+// pathDebug is `format!("{:?}", path)`, which DebugString, the formatter on
+// Debug and, under the host's flavour, the formatter on a Key must all give.
+func pathDebug(f Flavor, path string) string {
+	if f.resolve() == Host {
+		return agree(f.DebugString(path), rs.DebugString(f.Debug(path)), rs.DebugString(Key(path)))
+	}
+	return agree(f.DebugString(path), rs.DebugString(f.Debug(path)))
+}
+
 // componentsListPretty is `format!("{:#?}", components.collect::<Vec<_>>())`.
 // Under the host's flavour the components print themselves (their FmtDebug
 // methods and registrations); under any flavour componentDebug prints them.
@@ -221,7 +230,7 @@ func inspectReply(f Flavor, path string, pretty bool) any {
 		"to_str":           optionalText(f.ToStr(path)),
 		"lossy":            f.ToStringLossy(path),
 		"display":          f.Display(path),
-		"debug":            agree(f.DebugString(path), rs.DebugString(f.Debug(path))),
+		"debug":            pathDebug(f, path),
 		"into_string":      intoString,
 		"components_debug": agree(f.Components(path).DebugString(), rs.DebugString(f.Components(path))),
 		"iter_debug":       agree(f.Iter(path).DebugString(), rs.DebugString(f.Iter(path))),
@@ -236,6 +245,57 @@ func inspectReply(f Flavor, path string, pretty bool) any {
 		reply["iter_pretty"] = rs.Format("{:#?}", f.Iter(path))
 	}
 	return reply
+}
+
+// keyed is a type that derives PartialEq and Ord with a PathBuf field: rs.Eq
+// and rs.Cmp reach the field's Equal and Compare.
+type keyed struct {
+	Name  string `rs:"name"`
+	Path  Key    `rs:"path"`
+	Order int    `rs:"order"`
+}
+
+// pairEq is `path == other`, which every way the Go code has of asking must
+// answer alike: Eq, HashKey equality and, under the host's flavour, Key
+// directly, through rs.Eq and as a field of a struct.
+func pairEq(f Flavor, path, other string) any {
+	eq := f.Eq(path, other)
+	answers := map[string]bool{"HashKey": f.HashKey(path) == f.HashKey(other)}
+	if f.resolve() == Host {
+		answers["Key.Equal"] = Key(path).Equal(Key(other))
+		answers["rs.Eq(Key)"] = rs.Eq(Key(path), Key(other))
+		answers["Key.HashKey"] = Key(path).HashKey() == Key(other).HashKey()
+		answers["rs.Eq(struct)"] = rs.Eq(keyed{Name: "x", Path: Key(path)}, keyed{Name: "x", Path: Key(other)})
+	}
+	for way, answer := range answers {
+		if answer != eq {
+			return "Eq says " + strconv.FormatBool(eq) + " and " + way + " says " + strconv.FormatBool(answer)
+		}
+	}
+	return eq
+}
+
+// pairCmp is `path.cmp(&other)`, asked as pairEq asks equality.
+func pairCmp(f Flavor, path, other string) any {
+	order := f.Cmp(path, other)
+	answers := map[string]int{}
+	if f.resolve() == Host {
+		answers["Key.Compare"] = Key(path).Compare(Key(other))
+		answers["rs.Cmp(Key)"] = rs.Cmp(Key(path), Key(other))
+		// Equal paths leave the order to the next field, which is greater
+		// on the left.
+		structOrder := rs.Cmp(keyed{Name: "x", Path: Key(path), Order: 2}, keyed{Name: "x", Path: Key(other), Order: 1})
+		if order == 0 {
+			structOrder--
+		}
+		answers["rs.Cmp(struct)"] = structOrder
+	}
+	for way, answer := range answers {
+		if answer != order {
+			return "Cmp says " + strconv.Itoa(order) + " and " + way + " says " + strconv.Itoa(answer)
+		}
+	}
+	return order
 }
 
 func pairReply(f Flavor, path, other string) any {
@@ -256,8 +316,8 @@ func pairReply(f Flavor, path, other string) any {
 		"ends_with":        f.EndsWith(path, other),
 		"strip_prefix":     stripOk,
 		"strip_prefix_err": stripErr,
-		"eq":               f.Eq(path, other),
-		"cmp":              f.Cmp(path, other),
+		"eq":               pairEq(f, path, other),
+		"cmp":              pairCmp(f, path, other),
 		// HashKey is the same exactly when the paths are equal, so Rust's
 		// "equal paths hash alike" holds for it by the comparison of "eq".
 		"eq_implies_hash_eq": !f.Eq(path, other) || f.HashKey(path) == f.HashKey(other),
@@ -601,6 +661,25 @@ func (g *pathGenerator) requests(yield func(any)) {
 		send(oracleRequest{Op: "walk", P: path, Steps: "PDFPBPFPBPDFB"})
 		send(oracleRequest{Op: "walk", P: path, Steps: "BPBPBPFPFPF"})
 	}
+	// Pairs that byte order and component order put the other way round,
+	// and spellings of one path.
+	ordering := [][2]string{
+		{"a/b", "a-b"}, {"a/b", "a.b"}, {"a/b", "a b"}, {"a/b", "a!b"}, {"a/b/c", "a/bc"}, {"a/b", "a/b/c"},
+		{"a//b", "a/b"}, {"a/./b", "a/b"}, {"a/b/", "a/b"}, {"a/b/.", "a/b"}, {"./a", "a"}, {"/a", "a"},
+		{"/a/b", "/a-b"}, {"a/..", "a"}, {"../a", "a"}, {"", "."}, {"", "/"}, {"a\\b", "a/b"},
+	}
+	if g.flavor == Windows {
+		ordering = append(ordering, [][2]string{
+			{`a\b`, "a-b"}, {`a\\b`, `a/b`}, {`a\.\b`, "a/b"}, {`C:\a`, `c:/a`}, {`C:\a`, `C:a`}, {`\\?\C:\a`, `C:\a`},
+			{`\\server\share\a`, `//server/share/a`}, {`\\server\share`, `\\server\share\`}, {`C:`, `D:`},
+			{`\\?\UNC\s\t`, `\\s\t`}, {`\\.\COM1`, `\\?\COM1`}, {`\a`, `C:\a`},
+		}...)
+	}
+	for _, pair := range ordering {
+		send(oracleRequest{Op: "pair", P: pair[0], Q: pair[1]})
+		send(oracleRequest{Op: "pair", P: pair[1], Q: pair[0]})
+	}
+
 	if g.flavor == Windows {
 		// OsString::push joins a lead and a trail surrogate.
 		for _, pair := range [][2]string{
