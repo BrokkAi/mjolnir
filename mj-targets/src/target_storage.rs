@@ -419,6 +419,7 @@ pub fn test_storage_sample(host: &str, root_free: u64, projects_free: u64) -> Ho
                     "/home/jonathan/.cache/mjolnir".into(),
                     "/tmp".into(),
                 ],
+                quota_limited: false,
             },
             FilesystemSpace {
                 mount: "/home/jonathan/Projects".into(),
@@ -426,6 +427,7 @@ pub fn test_storage_sample(host: &str, root_free: u64, projects_free: u64) -> Ho
                 total_bytes: 1000 << 30,
                 reserved_bytes: 0,
                 paths: vec!["/home/jonathan/Projects".into()],
+                quota_limited: false,
             },
         ],
     }
