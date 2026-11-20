@@ -20,7 +20,61 @@ const CACHE_MAX_KIB: u64 = 20 * 1024 * 1024;
 
 // A successful redirection creates the lock file exclusively. Some mkdir
 // implementations report success after the mkdir syscall loses to a peer.
-const CACHE_LOCK_FUNCTION: &str = r#"try_cache_lock() (set -C; : > "$1") 2>/dev/null"#;
+const CACHE_LOCK_FUNCTIONS: &str = r#"
+cache_lock_signal() {
+    if [ "$changing_cache_lock" = 0 ]; then
+        exit "$1"
+    fi
+    pending_cache_lock_signal=$1
+}
+track_cache_locks() {
+    held_cache_lock=
+    gc_lock=
+    changing_cache_lock=0
+    pending_cache_lock_signal=
+    trap 'cache_lock_signal 129' HUP
+    trap 'cache_lock_signal 130' INT
+    trap 'cache_lock_signal 143' TERM
+}
+finish_cache_lock_change() {
+    changing_cache_lock=0
+    [ -z "$pending_cache_lock_signal" ] || exit "$pending_cache_lock_signal"
+}
+try_cache_lock() {
+    # Defer exit until the recorded owner agrees with the filesystem.
+    changing_cache_lock=1
+    lock_status=1
+    set -C
+    if command : 2>/dev/null > "$1"; then
+        if [ "${2:-}" = gc ]; then
+            gc_lock=$1
+        else
+            held_cache_lock=$1
+        fi
+        lock_status=0
+    fi
+    set +C
+    finish_cache_lock_change
+    return "$lock_status"
+}
+release_cache_lock() {
+    changing_cache_lock=1
+    # The child must finish unlinking and reporting success even when the
+    # same signal hits both the shell and its children.
+    (trap '' HUP INT TERM; exec rm -- "$held_cache_lock")
+    held_cache_lock=
+    finish_cache_lock_change
+}
+cleanup_cache_locks() {
+    trap '' HUP INT TERM
+    set --
+    [ -z "$held_cache_lock" ] || set -- "$held_cache_lock"
+    [ -z "$gc_lock" ] || set -- "$@" "$gc_lock"
+    if [ "$#" -gt 0 ]; then
+        rm -f -- "$@"
+    fi
+}
+"#;
 
 use super::cache_host::CacheHost;
 
@@ -34,7 +88,7 @@ impl CacheHost {
         purpose: impl Into<String>,
     ) -> CommandSpec {
         self.shell_command(
-            &format!("{CACHE_LOCK_FUNCTION}\n{script}"),
+            &format!("{CACHE_LOCK_FUNCTIONS}\n{script}"),
             "hel-git-cache",
             arguments,
             purpose,
@@ -359,17 +413,12 @@ snapshot_partial="$snapshot.partial-$$"
 # Full history must never enter a session's mounted subtree, even temporarily.
 pinned="$preparation/pinned.git"
 cutoff_repository="$snapshot.cutoff-$$"
-locked=0
 cleanup() {
-    if [ "$locked" -eq 1 ]; then
-        rm -- "$lock"
-    fi
+    cleanup_cache_locks
     rm -rf -- "$preparation" "$snapshot_partial" "$cutoff_repository"
 }
+track_cache_locks
 trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 attempt=0
 while ! try_cache_lock "$lock"; do
     attempt=$((attempt + 1))
@@ -379,7 +428,6 @@ while ! try_cache_lock "$lock"; do
     fi
     sleep 0.2
 done
-locked=1
 if [ "$has_token" = 1 ]; then
     IFS= read -r GH_TOKEN || exit 1
     export GH_TOKEN
@@ -428,8 +476,7 @@ fi
 # Git hardlinks immutable objects; this private repository needs no shared lock
 # while packing a cutoff bundle or making the mounted snapshot readable.
 git clone --mirror --local -- "$mirror" "$pinned"
-locked=0
-rm -- "$lock"
+release_cache_lock
 rm -rf -- "$snapshot" "$snapshot_partial"
 if [ "$#" -eq 0 ]; then
     if [ -n "$exact_ref" ]; then
@@ -550,13 +597,10 @@ if [ -f "$marker" ] && find "$marker" -mmin -1440 -print | grep -q .; then
 fi
 # Reap old lock files and stale lock directories from earlier builds.
 find "$root/locks" -mindepth 1 -maxdepth 1 \( -type f -o -type d \) -mmin +1440 -exec rm -rf {} \;
-gc_lock="$root/locks/gc"
-try_cache_lock "$gc_lock" || exit 0
 candidates="$root/gc-candidates-$$"
-trap 'rm -f -- "$candidates" "$gc_lock"' EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+track_cache_locks
+trap 'cleanup_cache_locks; rm -f -- "$candidates"' EXIT
+try_cache_lock "$root/locks/gc" gc || exit 0
 for snapshot in "$root"/sessions/*; do
     [ -d "$snapshot" ] || continue
     session=${snapshot##*/}
@@ -579,7 +623,8 @@ for entry in "$root"/mirrors/*; do
     key=${entry##*/}
     [ -f "$entry/last-used" ] || continue
     if find "$entry/last-used" -mmin +43200 -print | grep -q . && try_cache_lock "$root/locks/$key"; then
-        rm -rf -- "$entry" "$root/locks/$key"
+        rm -rf -- "$entry"
+        release_cache_lock
     fi
 done
 size=$(du -sk "$root/mirrors" | awk '{print $1}')
@@ -590,7 +635,8 @@ if [ "$size" -gt "$limit_kib" ]; then
         entry=${used%/last-used}
         key=${entry##*/}
         if try_cache_lock "$root/locks/$key"; then
-            rm -rf -- "$entry" "$root/locks/$key"
+            rm -rf -- "$entry"
+            release_cache_lock
             size=$(du -sk "$root/mirrors" | awk '{print $1}')
             [ "$size" -le "$limit_kib" ] && break
         fi
@@ -1604,6 +1650,7 @@ exec "$CACHE_TEST_SLEEP" "$@"
         );
     }
 
+    // Hard-won: 932a8969f: interrupted GC left its eviction lock.
     #[test]
     #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
     fn cache_gc_evicts_the_oldest_mirror_to_meet_its_soft_cap() {
@@ -1634,6 +1681,79 @@ exec "$CACHE_TEST_SLEEP" "$@"
 
         assert!(!old.exists());
         assert!(recent.exists());
+
+        #[cfg(unix)]
+        {
+            // Run the size-based eviction again with a TERM arriving after
+            // GC owns the recent mirror's lock and before removal finishes.
+            std::fs::remove_file(cache_root.join("last-gc")).unwrap();
+            let wrappers = temporary.path().join("bin");
+            std::fs::create_dir(&wrappers).unwrap();
+            let eviction_lock = cache_root.join("locks/recent");
+            mj_core::test_hooks::install_fake_command(
+                &wrappers,
+                "rm",
+                r#"#!/bin/sh
+set -eu
+if [ "$#" -ge 3 ] && [ "$3" = "${CACHE_TEST_EVICTION:-}" ]; then
+    test -f "$CACHE_TEST_EVICTION_LOCK"
+    kill -TERM "$PPID"
+    exit 0
+fi
+exec /bin/rm "$@"
+"#,
+            );
+            let mut executor = GitExecutor(BTreeMap::from([
+                (
+                    "PATH".into(),
+                    format!("{}:{}", wrappers.display(), std::env::var("PATH").unwrap()),
+                ),
+                ("CACHE_TEST_EVICTION".into(), recent.display().to_string()),
+                (
+                    "CACHE_TEST_EVICTION_LOCK".into(),
+                    eviction_lock.display().to_string(),
+                ),
+            ]));
+            let error =
+                collect_garbage_with_limit(&CacheHost::Local, &cache_root, &[], 0, &executor)
+                    .unwrap_err();
+            assert!(error.to_string().contains("status 143"), "{error:#}");
+            assert!(recent.exists());
+            assert!(!eviction_lock.exists());
+            assert!(!cache_root.join("locks/gc").exists());
+            assert!(std::fs::read_dir(&cache_root).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("gc-candidates-")
+            }));
+
+            executor.0.remove("CACHE_TEST_EVICTION");
+            let source = temporary.path().join("source");
+            let git = CommandSpec::new("git", ["init", "--bare", source.to_str().unwrap()]);
+            checked(ProcessExecutor.execute(&git).unwrap(), &git).unwrap();
+            mj_core::test_hooks::install_fake_command(
+                &wrappers,
+                "sleep",
+                "#!/bin/sh\necho 'preparation unexpectedly waited for the eviction lock' >&2\nexit 99\n",
+            );
+            let snapshot = cache_root.join("sessions/new/recent.git");
+            prepare_repository(
+                &CacheHost::Local,
+                &cache_root,
+                "recent",
+                source.to_str().unwrap(),
+                &snapshot,
+                None,
+                None,
+                None,
+                &executor,
+            )
+            .unwrap();
+            assert!(snapshot.join("HEAD").exists());
+            assert!(!eviction_lock.exists());
+        }
     }
 
     #[test]
