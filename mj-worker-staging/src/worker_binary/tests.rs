@@ -4062,12 +4062,37 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
     .unwrap()
     .0;
     let mut on = launch.clone();
-    apply_jev_switch(&mut on, true);
+    apply_jev_settings(&mut on, &Default::default());
     assert_eq!(on.target_environment, launch.target_environment);
     assert_eq!(on.environment, launch.environment);
 
-    apply_jev_switch(&mut launch, false);
+    use mj_core::config::{EnvironmentValue, JevConfig, SecretResolver, with_secret_resolver};
+    let resolver = SecretResolver::fixed(
+        Default::default(),
+        [("FASTINO".into(), "personal-key".into())].into(),
+    );
+    let mut config = JevConfig {
+        enabled: true,
+        fastino_key: Some(EnvironmentValue::FromSecret("FASTINO".into())),
+    };
+    with_secret_resolver(resolver, || apply_jev_settings(&mut launch, &config));
+    assert_eq!(
+        launch
+            .target_environment
+            .get(mj_core::jev::FASTINO_KEY_ENVIRONMENT)
+            .map(String::as_str),
+        Some("personal-key")
+    );
+    assert!(
+        !launch
+            .environment
+            .contains_key(mj_core::jev::FASTINO_KEY_ENVIRONMENT)
+    );
+
+    config.enabled = false;
+    apply_jev_settings(&mut launch, &config);
     for environment in [&launch.target_environment, &launch.environment] {
+        assert!(!environment.contains_key(mj_core::jev::FASTINO_KEY_ENVIRONMENT));
         assert_eq!(
             environment.get(mj_core::jev::DISABLED_ENVIRONMENT),
             Some(&"1".to_owned())

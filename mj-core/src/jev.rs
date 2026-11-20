@@ -29,6 +29,17 @@ pub fn request_body(evidence: &impl Serialize, direct_questions: Option<Value>) 
 /// Workers re-exec with a cleared environment and may run on another
 /// machine, so the switch travels in the launch configuration.
 pub const DISABLED_ENVIRONMENT: &str = "MJ_JEV_DISABLED";
+pub const FASTINO_KEY_ENVIRONMENT: &str = "MJ_JEV_FASTINO_KEY";
+
+/// Add a key only to hosted Jev requests. Mark the header sensitive for diagnostics.
+pub fn fastino_header(key: &str) -> Result<reqwest::header::HeaderValue> {
+    let mut header =
+        reqwest::header::HeaderValue::from_str(key).context("invalid Fastino key header")?;
+    header.set_sensitive(true);
+    Ok(header)
+}
+
+pub const FASTINO_KEY_HEADER: &str = "x-fastino-key";
 
 /// Whether this process was launched with Jev turned off.
 pub fn disabled_by_environment() -> bool {

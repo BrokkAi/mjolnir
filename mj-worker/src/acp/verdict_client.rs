@@ -5,6 +5,7 @@ use mj_core::activity::verdict::TurnEvidence;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+pub(crate) static FASTINO_KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn is_glide_size_refusal(status: reqwest::StatusCode, body: &[u8]) -> bool {
     let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
@@ -160,8 +161,7 @@ impl Drop for VerdictAttempt {
 
 #[cfg_attr(not(unix), allow(dead_code))]
 impl VerdictClient {
-    /// The proxy URL for a GLiDE route. GLiDE is always hosted: the Fastino key
-    /// exists only as the proxy's secret.
+    /// The proxy URL for a GLiDE route.
     fn hosted_glide_url(&self, route: &str) -> Result<reqwest::Url> {
         Ok(reqwest::Url::parse(&self.endpoint)?.join(route)?)
     }
@@ -445,6 +445,11 @@ impl VerdictClient {
             tracing::info!(target: "mj_jev", outcome = "disabled", reason = "jev_switch_off", "Jev classifier disabled");
             return None;
         }
+        let fastino_key = if source.is_none() {
+            FASTINO_KEY.get().map(String::as_str)
+        } else {
+            None
+        };
         let source = source.unwrap_or_else(|| VerdictSource::Hosted {
             endpoint: HOSTED_PROXY.into(),
         });
@@ -452,7 +457,7 @@ impl VerdictClient {
             tracing::info!(target: "mj_jev", outcome = "disabled", reason = "explicit_disabled_source", "Jev classifier disabled");
             return None;
         }
-        match Self::new(source) {
+        match Self::new_with_key(source, fastino_key) {
             Ok(client) => Some(client),
             Err(error) => {
                 tracing::warn!(target: "mj_jev", %error, "turn classifier unavailable");
@@ -461,13 +466,26 @@ impl VerdictClient {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new(source: VerdictSource) -> Result<Self> {
+        Self::new_with_key(source, None)
+    }
+
+    fn new_with_key(source: VerdictSource, fastino_key: Option<&str>) -> Result<Self> {
         let VerdictSource::Hosted { endpoint } = source else {
             anyhow::bail!("classification is disabled for this source");
         };
         // Library callers may not pass through the standalone worker entry point.
         let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(key) = fastino_key {
+            headers.insert(
+                mj_core::jev::FASTINO_KEY_HEADER,
+                mj_core::jev::fastino_header(key)?,
+            );
+        }
         let client = reqwest::Client::builder()
+            .default_headers(headers)
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()

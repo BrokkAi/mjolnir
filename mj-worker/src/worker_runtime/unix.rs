@@ -925,9 +925,18 @@ pub async fn run_daemon_owned(
         .target_environment
         .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
         .map(PathBuf::from);
+    if let Some(key) = config
+        .target_environment
+        .remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT)
+    {
+        anyhow::ensure!(
+            crate::acp::verdict_client::FASTINO_KEY.set(key).is_ok(),
+            "the worker's Fastino key was already initialized"
+        );
+    }
     let mut target_environment = config.target_environment.clone();
-    target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     target_environment.extend(config.environment);
+    target_environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
     target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     config.environment = target_environment;
     let startup_directory = std::env::current_dir()?;

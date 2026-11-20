@@ -123,15 +123,27 @@ impl Notices {
 pub struct Classifier {
     student: Option<Arc<dyn StudentOwner>>,
     notices: Arc<Notices>,
+    fastino_key: Option<Arc<str>>,
 }
 impl Classifier {
-    pub fn new(student: Option<Arc<dyn StudentOwner>>, notices: Arc<Notices>) -> Self {
-        Self { student, notices }
+    pub fn new(
+        student: Option<Arc<dyn StudentOwner>>,
+        notices: Arc<Notices>,
+        fastino_key: Option<String>,
+    ) -> Self {
+        Self {
+            student,
+            notices,
+            fastino_key: fastino_key.map(Arc::from),
+        }
     }
 
     pub async fn classify(&self, evidence: &GithubItemEvidence) -> Result<GithubItemVerdict> {
-        self.classify_with(evidence, |e| {
-            Box::pin(crate::github_item_verdict::classify_probability(e))
+        let key = self.fastino_key.clone();
+        self.classify_with(evidence, move |e| {
+            Box::pin(async move {
+                crate::github_item_verdict::classify_probability(e, key.as_deref()).await
+            })
         })
         .await
     }
@@ -317,6 +329,7 @@ mod tests {
             Arc::new(Notices::new(|notice| {
                 panic!("proxy-only scoring must not announce local model failure: {notice}")
             })),
+            None,
         );
         for (probability, interested) in [(0.1123, true), (0.1123 - f64::EPSILON, false)] {
             let calls = std::sync::atomic::AtomicUsize::new(0);
@@ -351,7 +364,7 @@ mod tests {
                 score,
                 calls: Default::default(),
             });
-            let classifier = Classifier::new(Some(student), Arc::new(Notices::new(|_| {})));
+            let classifier = Classifier::new(Some(student), Arc::new(Notices::new(|_| {})), None);
             let used = std::sync::atomic::AtomicUsize::new(0);
             let result = classifier
                 .classify_with(&evidence, |_| {
@@ -373,6 +386,7 @@ mod tests {
         let classifier = Classifier::new(
             Some(student.clone()),
             Arc::new(Notices::new(move |s| captured.lock().unwrap().push(s))),
+            None,
         );
         for _ in 0..2 {
             assert!(

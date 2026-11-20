@@ -130,6 +130,24 @@ impl<'de> Deserialize<'de> for EnvironmentValue {
 }
 
 impl EnvironmentValue {
+    /// Interpret a TOML inline table or the JSON form Settings displays.
+    /// Anything else is a literal, which the caller validates in context.
+    pub fn typed_reference(text: &str) -> Option<Result<Self, String>> {
+        let text = text.trim();
+        if !text.starts_with('{') {
+            return None;
+        }
+        let parsed = serde_json::from_str::<Self>(text).ok().or_else(|| {
+            toml::from_str::<BTreeMap<String, Self>>(&format!("value = {text}"))
+                .ok()
+                .and_then(|mut table| table.remove("value"))
+        });
+        Some(parsed.filter(Self::is_reference).ok_or_else(|| {
+            "Enter a reference like { from_secret = \"NAME\" } or { from_env = \"NAME\" }."
+                .to_owned()
+        }))
+    }
+
     fn name(&self) -> &str {
         match self {
             Self::Literal(value) | Self::FromEnv(value) | Self::FromSecret(value) => value,
@@ -465,7 +483,7 @@ pub fn with_secret_resolver<T>(resolver: SecretResolver, read: impl FnOnce() -> 
     value
 }
 
-fn resolve_active(key: &str, value: &EnvironmentValue) -> Result<String> {
+pub(super) fn resolve_active(key: &str, value: &EnvironmentValue) -> Result<String> {
     ACTIVE.with(|active| match active.borrow().as_ref() {
         Some(resolver) => resolver.resolve(key, value),
         None => SecretResolver::for_instance().resolve(key, value),
@@ -476,9 +494,13 @@ fn resolve_active(key: &str, value: &EnvironmentValue) -> Result<String> {
 pub fn load_secrets(path: &Path) -> Result<BTreeMap<String, String>> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("read secrets file {}", path.display()))?;
-    let table: toml::Table = contents
-        .parse()
-        .with_context(|| format!("parse secrets file {}", path.display()))?;
+    let table: toml::Table = contents.parse().map_err(|error: toml::de::Error| {
+        // The parser displays the source line, which can contain a secret.
+        let location = error
+            .span()
+            .map_or_else(String::new, |span| format!(" at byte {}", span.start));
+        anyhow::anyhow!("invalid TOML in secrets file {}{location}", path.display())
+    })?;
     table
         .into_iter()
         .map(|(name, value)| match value {
