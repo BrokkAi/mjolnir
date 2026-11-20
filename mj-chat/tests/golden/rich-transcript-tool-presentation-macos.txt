@@ -3,7 +3,7 @@
 │ ✓ Tool · done                                                               ▐│
 │ │ completed command                                                         ▐│
 │                                                                             ▐│
-│ • Tool · waiting                                                            ▐│
+│ ● Tool · running                                                            ▐│
 │ │ pending command                                                           ▐│
 │                                                                             ▐│
 │ ● Tool · running                                                            ▐│
@@ -12,8 +12,8 @@
 │ × Tool · failed                                                             ▐│
 │ │ failed command                                                            ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
+│ ? Tool · waiting for approval                                               ▐│
+│ │ approval command                                                          ▐│
 │                                                                             ▐│
 │                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -24,9 +24,10 @@
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 completed command style: header=Some(Rgb(151, 163, 163)), body=Some(Rgb(151, 163, 163))
-pending command style: header=Some(Rgb(151, 163, 163)), body=Some(Rgb(151, 163, 163))
+pending command style: header=Some(Rgb(232, 189, 123)), body=None
 running command style: header=Some(Rgb(232, 189, 123)), body=None
 failed command style: header=Some(Rgb(244, 154, 165)), body=None
+approval command style: header=Some(Rgb(240, 205, 145)), body=None
 
 === every tool has a click target (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -138,7 +139,7 @@ expanded tools: {}
 
 === execute pending (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
-│ • Tool · waiting                                                                                ▐│
+│ ● Tool · running                                                                                ▐│
 │ │ git add && cargo test | cat                                                                   ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
@@ -482,7 +483,7 @@ Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === raw-output failure pending expanded (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
-│ • Tool · waiting · 15:00                                                    ▐│
+│ ● Tool · running · 15:00                                                    ▐│
 │ │ contact_peer                                                              ▐│
 │ │ Input arguments                                                           ▐│
 │ │ peer:                                                                     ▐│
@@ -1074,8 +1075,7 @@ q detach · : / ? palette
 
 === inline tool calls (80x36) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
-│ ○ Thinking                                                                  ▐│
-│ │ first thought                                                             ▐│
+│ │ first thought                                                             ││
 │                                                                             ▐│
 │ ✓ Ran cargo test -p brokk-mj-chat --lib                                     ▐│
 │   └ running 12 tests                                                        ▐│
@@ -1099,8 +1099,9 @@ q detach · : / ? palette
 │ ● Running sleep 30 && echo done                                             ▐│
 │   └ waiting                                                                 ▐│
 │                                                                             ▐│
+│ ? waiting for approval: cargo fmt                                           ▐│
 │                                                                             ▐│
-│                                                                             ▐│
+│ ? waiting for approval: Read private.txt                                    ▐│
 │                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
@@ -1112,18 +1113,14 @@ Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 
 === inline call expanded (80x36) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
-│ │ test case_1 ... ok                                                        ││
-│ │ test case_2 ... ok                                                        ││
-│ │ test case_3 ... ok                                                        ││
-│ │ test case_4 ... ok                                                        ││
 │ │ test case_5 ... ok                                                        ││
-│ │ test case_6 ... ok                                                        ▐│
-│ │ test case_7 ... ok                                                        ▐│
-│ │ test case_8 ... ok                                                        ▐│
-│ │ test case_9 ... ok                                                        ▐│
-│ │ test case_10 ... ok                                                       ▐│
-│ │ test result: ok. 12 passed                                                ▐│
-│ │ exited 0                                                                  ▐│
+│ │ test case_6 ... ok                                                        ││
+│ │ test case_7 ... ok                                                        ││
+│ │ test case_8 ... ok                                                        ││
+│ │ test case_9 ... ok                                                        ││
+│ │ test case_10 ... ok                                                       ││
+│ │ test result: ok. 12 passed                                                ││
+│ │ exited 0                                                                  ││
 │                                                                             ▐│
 │ ○ Thinking                                                                  ▐│
 │ │ second thought                                                            ▐│
@@ -1139,6 +1136,10 @@ Tab pane · Cmd-V paste · Enter send │ ctrl+b then q detach · : / ? palette
 │                                                                             ▐│
 │ ● Running sleep 30 && echo done                                             ▐│
 │   └ waiting                                                                 ▐│
+│                                                                             ▐│
+│ ? waiting for approval: cargo fmt                                           ▐│
+│                                                                             ▐│
+│ ? waiting for approval: Read private.txt                                    ▐│
 │                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮
@@ -1171,9 +1172,9 @@ expanded tools: {2}
 | * Running sleep 30 && echo done                                             #|
 |   `- waiting                                                                #|
 |                                                                             #|
+| ? waiting for approval: cargo fmt                                           #|
 |                                                                             #|
-|                                                                             #|
-|                                                                             #|
+| ? waiting for approval: Read private.txt                                    #|
 |                                                                             #|
 |                                                                             #|
 |                                                                             #|

@@ -1045,6 +1045,26 @@ async fn event_stream_replays_then_follows_live_events_with_version_and_ids() {
     let text = next_event_frame(&mut body).await;
     assert!(text.contains("\"last_activity_at_ms\":124"), "{text}");
     assert!(text.contains("\"seq\":3"), "{text}");
+    // Hard-won: 4b10e3633: old v1 stream clients reject a permission's call ID.
+    backend
+        .events
+        .lock()
+        .unwrap()
+        .push(mj_controller::database::ApiEvent {
+            seq: 4,
+            session_id: "session-1".into(),
+            recorded_at_ms: 10,
+            event: mj_controller::database::ApiEventData::InputRequired {
+                request: Some(permission_request()),
+                turn_id: None,
+            },
+        });
+    let text = next_event_frame(&mut body).await;
+    assert!(text.contains("event: input_required"), "{text}");
+    assert!(
+        text.contains("\"tool_permission\":{\"skip\":true}"),
+        "{text}"
+    );
     let queries = backend.event_queries.lock().unwrap();
     assert_eq!(queries[0].0.workspace_id.as_deref(), Some("default"));
     assert_eq!(queries[0].1, Some(1));
@@ -5582,6 +5602,16 @@ async fn an_empty_bundle_is_refused_rather_than_served_as_an_empty_file() {
         "checkpoint storage failed"
     );
 }
+
+fn permission_request() -> mj_core::elicitation::ElicitationRequest {
+    let mut request = input_request();
+    request.tool_permission = Some(mj_core::elicitation::ToolPermissionForm {
+        skip: true,
+        tool_call_id: Some("call-1".into()),
+    });
+    request
+}
+
 fn input_request() -> mj_core::elicitation::ElicitationRequest {
     mj_core::elicitation::ElicitationRequest::from_acp_params("question-1", serde_json::json!({
         "sessionId": "session-1", "mode": "form", "message": "Choose a name", "requestedSchema": {
@@ -5753,8 +5783,26 @@ fn input_aware_wait_is_opt_in_and_respects_completed_turns_and_stopping() {
 #[tokio::test]
 async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
     let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |s| {
-        s.sessions[0].pending_elicitations = vec![input_request()]
+        s.sessions[0].pending_elicitations = vec![permission_request()]
     });
+    // Hard-won: 45ec5bc42: old v1 clients reject a permission's call ID.
+    for (path, field) in [
+        ("/api/v1/sessions/session-1", Some("pending_elicitations")),
+        ("/api/v1/sessions/session-1/elicitations", None),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let requests = field.map_or(&body, |field| &body[field]);
+        assert_eq!(
+            requests[0]["tool_permission"],
+            serde_json::json!({"skip": true})
+        );
+    }
     let response = app
         .oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/wait"))
@@ -5768,6 +5816,10 @@ async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
     let body = json_body(response).await;
     assert_eq!(body["outcome"], "input_required");
     assert_eq!(body["pending_elicitations"][0]["id"], "question-1");
+    assert_eq!(
+        body["pending_elicitations"][0]["tool_permission"],
+        serde_json::json!({"skip": true})
+    );
 }
 
 /// A backend whose store holds the fixture session's workspace, which is

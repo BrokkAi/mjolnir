@@ -1,5 +1,27 @@
 use super::*;
 
+/// HTTP API v1 clients reject the call ID in a permission form.
+pub(super) fn to_v1_elicitation(request: &mut mj_core::elicitation::ElicitationRequest) {
+    if let Some(form) = request.tool_permission.as_mut() {
+        form.tool_call_id = None;
+    }
+}
+
+pub(super) fn v1_elicitations(
+    requests: &[mj_core::elicitation::ElicitationRequest],
+) -> Vec<mj_core::elicitation::ElicitationRequest> {
+    let mut requests = requests.to_vec();
+    requests.iter_mut().for_each(to_v1_elicitation);
+    requests
+}
+
+fn serialize_v1_elicitations<S: serde::Serializer>(
+    requests: &[mj_core::elicitation::ElicitationRequest],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(&v1_elicitations(requests), serializer)
+}
+
 /// An externally produced item waiting in a session's durable mailbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,7 +179,11 @@ pub struct ApiSession {
     pub config_options: Vec<crate::server::ViewerConfigOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_controls: Option<mj_core::relay::TurnControls>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_v1_elicitations"
+    )]
     pub pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
 }
 
@@ -520,7 +546,11 @@ pub struct WaitResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<mj_core::diagnostic::TurnDiagnostic>,
 
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_v1_elicitations"
+    )]
     pub pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<mj_core::usage::TokenUsage>,

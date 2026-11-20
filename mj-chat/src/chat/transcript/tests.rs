@@ -585,7 +585,7 @@ fn fixture_tool_item(position: u64) -> Arc<TranscriptItem> {
         format!("tool:{position}"),
         TranscriptBody::Tool {
             call: (serde_json::json!({
-                "toolCallId": format!("call-{position}"),
+                "toolCallId": position.to_string(),
                 "title": format!("read file-{position}"),
                 "status": "completed",
                 "content": [{
@@ -683,6 +683,70 @@ fn opening_a_long_session_converts_only_the_tail() {
         materialized_chat_entries(&short_session),
         "the threshold keeps shorter conversations fully available"
     );
+}
+
+// Hard-won: 509af374e: grouped completed tools hid open permission requests.
+#[test]
+fn permission_marks_follow_open_requests_across_prefix_splice_and_render_cache() {
+    let mut session = long_materialized_session(TAIL_SEED_ITEMS as u64 + 300);
+    let mut chat = ChatState::from_materialized_tail(&session, &[], &[]);
+    let tail = ((session.transcript.len() as u64 / 6) * 6).to_string();
+    let permission = |id: &str| {
+        let mut request = mj_core::elicitation::ElicitationRequest::from_acp_params(
+            format!("permission-{id}"),
+            serde_json::json!({
+                "mode": "form", "sessionId": "session-long", "message": "Run it?",
+                "requestedSchema": {"type":"object", "required":["choice"],"properties":{
+                    "choice":{"type":"string", "oneOf":[{"const":"approved", "title":"Yes"}]}}}
+            }),
+        )
+        .unwrap();
+        request.tool_permission = Some(mj_core::elicitation::ToolPermissionForm {
+            skip: true,
+            tool_call_id: Some(id.into()),
+        });
+        request
+    };
+    let marks = |chat: &ChatState| {
+        chat.entries
+            .iter()
+            .filter(|entry| entry.awaiting_approval)
+            .filter_map(|entry| entry.tool_call_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let prefix = converted_prefix(&session, &chat);
+    session.pending_elicitations = vec![permission(&tail), permission("6")];
+    chat.apply_materialized(&session, &[], &[]);
+    assert_eq!(marks(&chat), [mj_transcript::tool_item_id(&tail)]);
+    assert!(chat.splice_transcript_prefix(prefix));
+    assert_eq!(
+        marks(&chat),
+        ["tool:6".into(), mj_transcript::tool_item_id(&tail)]
+    );
+    session.pending_elicitations.clear();
+    chat.apply_materialized(&session, &[], &[]);
+    assert!(marks(&chat).is_empty());
+
+    // Exercise the warmed row cache without apply_materialized's invalidation.
+    for calls in [
+        vec![fixture_tool_item(6)],
+        vec![fixture_tool_item(6), fixture_tool_item(12)],
+    ] {
+        let mut session = MaterializedSession::empty("session-long");
+        session.transcript = calls;
+        session.applied_event_ordinal = 13;
+        let mut chat = ChatState::from_materialized(&session, &[], &[]);
+        chat.tool_display.layout = mj_core::config::ToolOutput::Grouped;
+        let closed = drawn_transcript(&mut chat, 100, 24);
+        assert!(!shows(&closed, TOOL_AWAITING_APPROVAL));
+        assert!(chat.render_cache.entries.iter().any(Option::is_some));
+        apply_entry_list_rules(&mut chat.entries, &[permission("6")]);
+        let opened = drawn_transcript(&mut chat, 100, 24);
+        assert!(shows(&opened, TOOL_AWAITING_APPROVAL), "{opened:#?}");
+        assert_eq!(chat.render_cache.collapse[0], EntryCollapse::None);
+        apply_entry_list_rules(&mut chat.entries, &[]);
+        assert_eq!(drawn_transcript(&mut chat, 100, 24), closed);
+    }
 }
 
 #[test]
@@ -4238,14 +4302,18 @@ fn golden_rich_transcript_tool_presentation() {
     running.tool_content = vec!["running detail".into()];
     let mut failed = ChatEntry::tool(4, "failed command", None, ToolStatus::Failed);
     failed.tool_content = vec!["failed detail".into()];
+    let mut approval = ChatEntry::tool(5, "approval command", None, ToolStatus::Pending);
+    approval.tool_content = vec!["approval detail".into()];
+    approval.awaiting_approval = true;
     chat.entries.extend([
         completed.clone(),
         pending.clone(),
         running.clone(),
         failed.clone(),
+        approval.clone(),
     ]);
     let buffer = golden_chat_buffer(&mut chat, 80, 24);
-    let style_details = [&completed, &pending, &running, &failed]
+    let style_details = [&completed, &pending, &running, &failed, &approval]
         .into_iter()
         .map(|entry| {
             let visual = entry_visual(entry);
@@ -4968,6 +5036,14 @@ fn golden_rich_transcript_tool_presentation() {
         failed,
         running,
     ]);
+    for (id, title, kind) in [
+        (8, "cargo fmt", ToolKind::Execute),
+        (9, "Read private.txt", ToolKind::Read),
+    ] {
+        let mut entry = kind_tool(id, title, kind, ToolStatus::Pending);
+        entry.awaiting_approval = true;
+        chat.entries.push(entry);
+    }
     let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 36));
     append_transcript_golden_state(&mut output, "inline tool calls", 80, 36, &rows, &[]);
     click_rendered_text(&mut chat, &rows, "cargo test -p brokk-mj-chat");

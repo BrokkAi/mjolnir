@@ -183,7 +183,8 @@ pub const RELAY_RESTART_RECOVERY_PROTOCOL: u32 = 72;
 pub const RELAY_COMMAND_RETENTION_PROTOCOL: u32 = 73;
 /// 74 reserves the next quiescent boundary for cancellable adoption cuts.
 pub const RELAY_LIVE_BASELINE_PROTOCOL: u32 = 74;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_LIVE_BASELINE_PROTOCOL;
+/// 75 names the tool call in permission forms, which older readers reject.
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_LIVE_BASELINE_PROTOCOL + 1;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

@@ -1008,7 +1008,10 @@ mod tests {
              DROP TABLE push_entry_cutover;
              DROP TABLE alert_events;
              DELETE FROM schema_migrations WHERE version>=138;
+             UPDATE schema_compatibility SET minimum_compatible_version=137 WHERE singleton=1;
              PRAGMA user_version=137;
+             CREATE TRIGGER stop_before_alert_ledger BEFORE INSERT ON schema_migrations
+                 WHEN NEW.version=139 BEGIN SELECT RAISE(ABORT,'fixture boundary after push ledger'); END;
              INSERT INTO push_episodes VALUES('s','legacy','{}','[]',1);",
         )
         .unwrap();
@@ -1016,10 +1019,19 @@ mod tests {
             "INSERT INTO push_deliveries(endpoint,episode,payload,accepted) VALUES(?1,'legacy','{}',0)",
             [&subscription.endpoint],
         ).unwrap();
+        let error = schema::migrate_schema(&db).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("fixture boundary after push ledger"),
+            "{error:#}"
+        );
+        db.execute_batch("ROLLBACK; DROP TRIGGER stop_before_alert_ledger;")
+            .unwrap();
+        let pushed = schema::read_schema_state(&db).unwrap();
+        assert_eq!(pushed.revision, 138);
+        pushed.ensure_supported_by(137).unwrap();
         schema::migrate_schema(&db).unwrap();
-        let schema = schema::read_schema_state(&db).unwrap();
-        assert_eq!(schema.revision, super::super::SCHEMA_VERSION);
-        schema.ensure_supported_by(137).unwrap();
 
         let mut runtime = runtime(true);
         runtime.metadata.notification_cards = None;

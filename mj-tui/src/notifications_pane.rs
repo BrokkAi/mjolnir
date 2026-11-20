@@ -4260,7 +4260,10 @@ pub(crate) mod tests {
         assert!(lines.iter().any(|line| line.contains("age unknown")));
 
         let mut approval = question("child-session");
-        approval.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+        approval.tool_permission = Some(mj_core::elicitation::ToolPermissionForm {
+            skip: true,
+            tool_call_id: None,
+        });
         family
             .session_details
             .get_mut("child-session")

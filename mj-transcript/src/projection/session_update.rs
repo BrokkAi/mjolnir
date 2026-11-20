@@ -27,7 +27,7 @@ pub(super) fn project_session_update(
             if fallback_terminal_already_claimed(index, call)? {
                 return Ok(());
             }
-            let stable_id = format!("tool:{}", call.tool_call_id);
+            let stable_id = crate::tool_item_id(&call.tool_call_id);
             // Agents re-send a whole `tool_call` for an id they already
             // reported, both when they revise a call and when a resumed
             // session replays its history. Merge into the existing item so the
@@ -77,7 +77,7 @@ pub(super) fn project_session_update(
             }
         }
         SessionUpdate::ToolCallUpdate(update) => {
-            let stable_id = format!("tool:{}", update.tool_call_id);
+            let stable_id = crate::tool_item_id(&update.tool_call_id);
             let item = index
                 .get(&stable_id)
                 .map(|item| TranscriptItem::clone(item));

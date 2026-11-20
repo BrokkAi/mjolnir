@@ -379,7 +379,7 @@ fn inline_tool_rows(
     output_lines: usize,
     copies: Option<&mut Vec<RowCopy>>,
 ) -> Vec<Line<'static>> {
-    let (glyph, _, status_style) = tool_row_presentation(entry);
+    let (glyph, label, status_style) = tool_row_presentation(entry);
     let presentation = entry.tool_presentation.as_ref();
     let source = presentation.map_or(
         std::borrow::Cow::Borrowed(entry.text.as_str()),
@@ -396,7 +396,9 @@ fn inline_tool_rows(
         format!("{glyph} "),
         status_style.add_modifier(Modifier::BOLD),
     )];
-    if presentation.is_some_and(|presentation| presentation.tool_kind == ToolKind::Execute) {
+    if label == TOOL_AWAITING_APPROVAL {
+        header.push(Span::styled(format!("{label}: "), status_style));
+    } else if presentation.is_some_and(|presentation| presentation.tool_kind == ToolKind::Execute) {
         let verb = match entry.tool_status.unwrap_or(ToolStatus::Pending) {
             ToolStatus::Pending | ToolStatus::Running => "Running ",
             ToolStatus::Completed | ToolStatus::Failed => "Ran ",
@@ -1010,6 +1012,15 @@ fn tool_row_presentation(entry: &ChatEntry) -> (&'static str, &'static str, Styl
             Style::default().fg(theme::palette().muted),
         );
     }
+    if entry.awaiting_approval {
+        return (
+            theme::glyphs().waiting,
+            TOOL_AWAITING_APPROVAL,
+            Style::default()
+                .fg(theme::palette().session_attention)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
     tool_presentation(entry.tool_status.unwrap_or(ToolStatus::Pending))
 }
 
@@ -1065,10 +1076,8 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
             let status = entry.tool_status.unwrap_or(ToolStatus::Pending);
             let (_glyph, label, style) = tool_row_presentation(entry);
             let body_style = match status {
-                ToolStatus::Pending | ToolStatus::Completed => {
-                    Style::default().fg(theme::palette().muted)
-                }
-                ToolStatus::Running | ToolStatus::Failed => Style::default(),
+                ToolStatus::Completed => Style::default().fg(theme::palette().muted),
+                ToolStatus::Pending | ToolStatus::Running | ToolStatus::Failed => Style::default(),
             };
             EntryVisual {
                 glyph: role_glyph(entry),
@@ -1113,12 +1122,7 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
 
 pub(crate) fn tool_presentation(status: ToolStatus) -> (&'static str, &'static str, Style) {
     match status {
-        ToolStatus::Pending => (
-            theme::glyphs().bullet,
-            "waiting",
-            Style::default().fg(theme::palette().muted),
-        ),
-        ToolStatus::Running => (
+        ToolStatus::Pending | ToolStatus::Running => (
             theme::glyphs().running,
             "running",
             Style::default().fg(theme::palette().warning),

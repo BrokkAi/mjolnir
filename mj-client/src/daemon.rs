@@ -3860,7 +3860,8 @@ pub const ALERT_EVENTS_PROTOCOL: u32 = 109;
 pub const SUSPEND_ONLY_CHECKPOINT_PROTOCOL: u32 = 110;
 /// Adoption streams cancellable quiescence waits before its atomic install.
 pub const QUIESCENT_ADOPTION_PROTOCOL: u32 = SUSPEND_ONLY_CHECKPOINT_PROTOCOL + 1;
-pub const PROTOCOL_VERSION: u32 = QUIESCENT_ADOPTION_PROTOCOL;
+/// Tool permission forms name their transcript call, which older clients reject.
+pub const PROTOCOL_VERSION: u32 = QUIESCENT_ADOPTION_PROTOCOL + 1;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";
