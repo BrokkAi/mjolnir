@@ -44,6 +44,11 @@ that is the same for every package.
 
 - Follow the Rust source. When you are unsure what Rust does, read the source
   or ask the oracle; do not rely on memory or on documentation prose.
+- Keep your work in the repository's working tree. Files that exist only in
+  `/tmp` are lost on reboot and nobody else can find them. If you develop
+  outside the package so as not to break the build for others (a copy used
+  through the go tool's `-overlay`, say), install into the package at least
+  every hour.
 - Keep the package compiling at every step; never leave a file half-written
   between tool calls. Build and test only your package:
   `go build ./go/crates/<name>/ && go vet ./go/crates/<name>/` and
@@ -63,6 +68,18 @@ that is the same for every package.
 - Anything you cannot finish is `panic(rs.Todo("<rust path>: <reason>"))`, never
   a plausible-looking stub.
 - Do not commit.
+
+## Picking up an assignment someone else started
+
+Assignments are sometimes stopped part way (an account limit, a closed
+session) and continued by someone else. If yours was, the message that sent
+you here says so and where the earlier work is. Read what exists first: the
+package's `doc.go`, its files and tests, and any scratch directory named. Build
+it and run its tests. Then continue from there. Do not start over, and do not
+rewrite working code for style: finish what is missing, fix what is broken,
+complete the tests and oracle comparisons, and report on the whole package as
+it stands when you finish. The working tree is the current state; parts of it
+may be newer than the last commit.
 
 ## The oracle
 
