@@ -884,40 +884,27 @@ def fetch_output(sid, path):
     raise RuntimeError(problem)
 
 
-def suspend_session(sid, report=lambda **fields: None):
-    retry_delay, attempt = 1, 0
-    while True:
-        attempt += 1
+def suspend_session(sid):
+    """Ask mj to suspend the session and wait for it to confirm. Returns None once it is
+    suspended, or what went wrong. There is no retry: mj gives the same "retry suspension"
+    guidance for transient and persistent causes, so run_batch leaves a failed suspension for the
+    operator and the run goes on, rather than blocking later batches on it."""
+    try:
         driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
-        # Keep the old confirmation window for each accepted suspension.
         deadline, delay = time.monotonic() + 900, 1
         while True:
             session = driver.session(sid)
-            error = session.get("error")
-            if error is not None:
-                if not (error.startswith("the suspension did not finish:") and ". Retry suspension" in error):
-                    raise RuntimeError(error)
-                # Retry only when mj itself tells us to retry suspension. Its public message is
-                # the same for transient and persistent causes (the cause is in the daemon log
-                # under the attempt's reference), so the runner can't tell them apart: it keeps
-                # retrying, reports every attempt with its error in the run log and on stderr,
-                # and backs off to 10 minutes, so a persistent cause is visible to the operator,
-                # who can stop the run. A suspend sent while the earlier operation still owns the
-                # session just joins it, which is harmless.
-                print(f"suspension of {sid} failed (attempt {attempt}): {error}", file=sys.stderr, flush=True)
-                report(session=sid, attempt=attempt, error=error)
-                time.sleep(retry_delay)
-                retry_delay = min(2 * retry_delay, 600)
-                break
             if session["lifecycle"] == "suspended":
-                return
-            # An accepted retry clears the old error before cleanup finishes.
-            # Its lifecycle can still read failed during that interval.
+                return None
+            if session.get("error") is not None:
+                return session["error"]
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RuntimeError(f"suspension did not complete: lifecycle is {session['lifecycle']}")
+                return f"suspension did not complete in 15 minutes: lifecycle is {session['lifecycle']}"
             time.sleep(min(delay, remaining))
             delay = min(2 * delay, 30)
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+        return str(error)
 
 
 def run_batch(args, split, role, repo, batch, revision, allowed, documents):
@@ -977,6 +964,7 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         raise
     # A session with inaccessible output stays available for manual fetch.
     recover_output = False
+    unsuspended = None
     try:
         log(args.labels_dir, "launched", title=title, session=sid)
         driver.wait_idle(sid)
@@ -1046,16 +1034,23 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
     finally:
         if not recover_output:
             # The host unit retains the input and output evidence after suspension.
-            try:
-                suspend_session(sid, report=lambda **fields: log(args.labels_dir, "suspend-retry", title=title, **fields))
-            except Exception as error:
-                log(args.labels_dir, "suspend-failed", title=title, session=sid, error=str(error))
-                raise
-            # Suspension is confirmed, whether the batch succeeded or failed, so no worker can
-            # still need the checkout. Keep the evidence beside it and release the full clone.
-            # A session left for fetch recovery keeps its checkout.
-            shutil.rmtree(unit / "repo")
+            problem = suspend_session(sid)
+            if problem is None:
+                # Suspension is confirmed, whether the batch succeeded or failed, so no worker can
+                # still need the checkout. Keep the evidence beside it and release the full clone.
+                # A session left for fetch recovery keeps its checkout.
+                shutil.rmtree(unit / "repo")
+            else:
+                # The batch's labels are already saved. Leave the session and its checkout for the
+                # operator to suspend, and let later batches run.
+                unsuspended = {"session": sid, "title": title, "unit": str(unit), "error": problem}
+                append(args.labels_dir / "unsuspended.jsonl",
+                       {"time": datetime.now(timezone.utc).isoformat(), **unsuspended})
+                log(args.labels_dir, "suspend-failed", **unsuspended)
+                print(f"suspension of {sid} ({title}) did not finish; suspend it by hand: {problem}",
+                      file=sys.stderr, flush=True)
     log(args.labels_dir, "batch-complete", title=title, invalid=list(errors))
+    return unsuspended
 
 
 def main():
@@ -1138,7 +1133,7 @@ def main():
         expected_hashes = {(item["repo"], item["id"]): inputs_sha(item, documents, args.labeller, heads[item["repo"]])
                            for item in selected}
         done, _ = read_current_labels(destination, expected_hashes)
-        by_repo = defaultdict(list)
+        by_repo, unsuspended = defaultdict(list), []
         for item in selected:
             if (item["repo"], item["id"]) not in done:
                 by_repo[item["repo"]].append(item)
@@ -1146,7 +1141,9 @@ def main():
             indexed(subset, f"{args.split}/{repo}")
             for batch in batches(subset, args.batch_size):
                 try:
-                    run_batch(args, args.split, args.labeller, repo, batch, heads[repo], allowed, documents)
+                    if left := run_batch(args, args.split, args.labeller, repo, batch, heads[repo],
+                                         allowed, documents):
+                        unsuspended.append(left)
                 except Exception as error:
                     log(args.labels_dir, "batch-failed", split=args.split, role=args.labeller,
                         repo=repo, ids=[item["id"] for item in batch], error=str(error))
@@ -1158,8 +1155,12 @@ def main():
         if unresolved:
             print(f"{len(unresolved)} selected items have no valid label: {', '.join(unresolved[:20])}",
                   file=sys.stderr)
-            return 1
-        return 0
+        # Sessions whose suspension failed are listed in unsuspended.jsonl; the run isn't clean
+        # until the operator suspends them.
+        if unsuspended:
+            print(f"{len(unsuspended)} sessions still need suspending: "
+                  f"{', '.join(entry['session'] for entry in unsuspended)}", file=sys.stderr)
+        return 1 if unresolved or unsuspended else 0
 
 
 if __name__ == "__main__":
