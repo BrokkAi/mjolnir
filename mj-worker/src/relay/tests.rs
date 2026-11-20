@@ -11015,3 +11015,59 @@ fn native_goal_reply_spans_acp_completion_and_reopen() {
     let relay = DurableRelay::open(temp.path(), SESSION, "native-acp-completion-reopen").unwrap();
     check(&relay);
 }
+
+// Hard-won: ddbed432e: an unlabelled response appended to the elicitation's answered question.
+#[test]
+fn answered_elicitation_starts_a_new_auxiliary_reply_before_unlabelled_chunks() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "elicitation-answer").unwrap();
+    submit_relay(
+        &mut relay,
+        "elicitation-prompt",
+        prompt("continue the task"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"question-message",
+                "content":{"type":"text","text":"Which option?"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let question = mj_core::elicitation::ElicitationRequest::from_acp_params("option-question", serde_json::json!({
+        "mode":"form", "sessionId":SESSION, "message":"Which option?", "requestedSchema":{"type":"object","properties":{}}
+    })).unwrap();
+    relay
+        .record_observation(RelayObservation::ElicitationRequested { request: question })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::ElicitationResolved {
+            elicitation_id: "option-question".into(),
+            action: "accept".into(),
+            reply: Some("implement".into()),
+        })
+        .unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"Implementing the selected option."}
+    })).unwrap()).unwrap();
+    let check = |relay: &DurableRelay| {
+        assert_eq!(
+            relay
+                .turn_context()
+                .evidence(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::activity::verdict::TurnPhase::Running,
+                    &Default::default(),
+                    0,
+                )
+                .assistant_text_tail,
+            "Implementing the selected option."
+        )
+    };
+    check(&relay);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "elicitation-answer-reopen").unwrap();
+    check(&relay);
+}

@@ -192,6 +192,13 @@ impl TurnContext {
             } => {
                 complete_message(&mut self.0.lock().expect("turn context lock poisoned"));
             }
+            RelayObservation::ElicitationResolved {
+                reply: Some(_),
+                action,
+                ..
+            } if action != mj_core::elicitation::OPERATOR_AWAY_ACTION => {
+                complete_message(&mut self.0.lock().expect("turn context lock poisoned"));
+            }
             RelayObservation::SessionUpdate { update } => self.observe(update),
             RelayObservation::TerminalOutput {
                 terminal_id,
