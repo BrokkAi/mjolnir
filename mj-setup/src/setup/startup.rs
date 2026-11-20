@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::{
-    DiscoveredHome, build_config, discover_profiles, reference_secret_api_keys,
-};
+use super::{DiscoveredHome, build_config, discover_profiles, reference_secret_api_keys};
 use crate::doctor::{CheckStatus, DoctorCheck};
 use crate::targets::CommandExecutor;
 use mj_client::daemon::FirstRunSetupReport;
@@ -25,27 +23,21 @@ pub fn run_setup(
     cancelled: &dyn Fn() -> bool,
     accepted: impl FnOnce(),
 ) -> Result<Option<FirstRunSetupReport>> {
-    run_setup_with_discovery(
-        config_path,
-        instance_data,
-        cancelled,
-        accepted,
-        || {
-            let homes = discover_profiles(executor);
-            let cwd = project_directory
-                .map(Path::to_path_buf)
-                .or_else(|| std::env::current_dir().ok());
-            let repository = cwd.and_then(|cwd| {
-                let (source, stripped) =
-                    mj_core::local_git::discover_project_source(&cwd, executor).ok()?;
-                if stripped {
-                    tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
-                }
-                Some(source)
-            });
-            Ok((homes, repository))
-        },
-    )
+    run_setup_with_discovery(config_path, instance_data, cancelled, accepted, || {
+        let homes = discover_profiles(executor);
+        let cwd = project_directory
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok());
+        let repository = cwd.and_then(|cwd| {
+            let (source, stripped) =
+                mj_core::local_git::discover_project_source(&cwd, executor).ok()?;
+            if stripped {
+                tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
+            }
+            Some(source)
+        });
+        Ok((homes, repository))
+    })
 }
 
 /// Whether automatic setup has work to do: a new installation, or one whose
