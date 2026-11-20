@@ -94,6 +94,8 @@ STD_PACKAGES = {
 
 IMPORTS = {
     "rs": "github.com/BrokkAi/mjolnir/go/rs",
+    "assets": "github.com/BrokkAi/mjolnir/go/assets",
+    "math": "math",
     "strs": "github.com/BrokkAi/mjolnir/go/rs/strs",
     "collections": "github.com/BrokkAi/mjolnir/go/rs/collections",
     "context": "context", "time": "time",
@@ -280,6 +282,7 @@ class Generator:
         self.used = set()
         self.notes = 0
         self.generic_scope = [set()]
+        self.constable_memo = {}
         self.substitution_scope = []
         self.self_type = None
         self.aliases = {}
@@ -1283,6 +1286,359 @@ class Generator:
         self.generic_scope.pop()
         return out
 
+    INT_LIMITS = {
+        "u8::MAX": "math.MaxUint8", "u16::MAX": "math.MaxUint16", "u32::MAX": "math.MaxUint32",
+        "u64::MAX": "math.MaxUint64", "i8::MAX": "math.MaxInt8", "i16::MAX": "math.MaxInt16",
+        "i32::MAX": "math.MaxInt32", "i64::MAX": "math.MaxInt64", "i8::MIN": "math.MinInt8",
+        "i16::MIN": "math.MinInt16", "i32::MIN": "math.MinInt32", "i64::MIN": "math.MinInt64",
+        "u8::MIN": "0", "u16::MIN": "0", "u32::MIN": "0", "u64::MIN": "0", "usize::MIN": "0",
+        "usize::MAX": "rs.UsizeMax", "isize::MAX": "rs.UsizeMax", "f64::MAX": "math.MaxFloat64",
+        "f32::MAX": "math.MaxFloat32", "f64::INFINITY": "math.Inf(1)", "f64::NEG_INFINITY": "math.Inf(-1)",
+        "f64::EPSILON": "0x1p-52", "Duration::ZERO": "time.Duration(0)", "Duration::MAX": "time.Duration(math.MaxInt64)",
+    }
+    DURATION_UNITS = {
+        "from_secs": "time.Second", "from_millis": "time.Millisecond", "from_micros": "time.Microsecond",
+        "from_nanos": "time.Nanosecond",
+    }
+    BASIC_GO_TYPES = {
+        "string", "bool", "int", "uint8", "uint16", "uint32", "uint64", "int8", "int16", "int32", "int64",
+        "float32", "float64", "time.Duration", "rune", "byte", "uint",
+    }
+
+    def find_value_item(self, path: str):
+        """The const or static a path names: (crate, file, item) or None."""
+        segments = [s for s in path.split("::") if s]
+        name = segments[-1]
+        if len(segments) == 1:
+            for item in self.file["items"]:
+                if item["kind"] in ("const", "static") and item["name"] == name and not item["test_only"]:
+                    return self.crate, self.file, item
+        candidates = []
+        for use in self.file["uses"]:
+            parts = use["path"].split("::")
+            exported = use["alias"] or parts[-1]
+            if not use["glob"] and exported == segments[0]:
+                candidates.append(parts + segments[1:])
+            elif use["glob"]:
+                candidates.append(parts + segments)
+        candidates.append(segments)
+        for candidate in candidates:
+            target = self.ws._absolute(self.crate, self.file, candidate)
+            if target is None and len(candidate) > 1:
+                base = [p for p in self.file["module"].split("::") if p]
+                target = ("crate", self.crate, base + candidate)
+            if not target or target[0] != "crate":
+                continue
+            owner, rest = target[1], target[2]
+            file, left = self._module_file(owner, rest)
+            if file is None or not left:
+                continue
+            if len(left) == 1:
+                for item in file["items"]:
+                    if item["kind"] in ("const", "static") and item["name"] == left[0] and not item["test_only"]:
+                        return owner, file, item
+            if len(left) == 2:
+                # `Type::CONSTANT`
+                for item in file["items"]:
+                    if item["kind"] == "assoc_const" and item["name"] == left[1] and (item.get("owner") or "").split("::")[-1] == left[0]:
+                        return owner, file, item
+        return None
+
+    def find_callable(self, path: str):
+        """The Go name of the workspace function a path calls, or None."""
+        segments = [s for s in path.split("::") if s]
+        candidates = [segments]
+        for use in self.file["uses"]:
+            parts = use["path"].split("::")
+            exported = use["alias"] or parts[-1]
+            if not use["glob"] and exported == segments[0]:
+                candidates.insert(0, parts + segments[1:])
+            elif use["glob"]:
+                candidates.append(parts + segments)
+        if len(segments) == 1:
+            for item in self.file["items"]:
+                if item["kind"] == "fn" and item["name"] == segments[0] and not item["test_only"] and not item.get("fn_scope"):
+                    return self.ws.go_name(self.crate, self.file, item)
+        for candidate in candidates:
+            target = self.ws._absolute(self.crate, self.file, candidate)
+            if target is None and len(candidate) > 1:
+                base = [p for p in self.file["module"].split("::") if p]
+                target = ("crate", self.crate, base + candidate)
+            if not target or target[0] != "crate":
+                continue
+            owner, rest = target[1], target[2]
+            file, left = self._module_file(owner, rest)
+            if file is None or not left or len(left) > 2:
+                continue
+            for item in file["items"]:
+                if item["test_only"]:
+                    continue
+                free = len(left) == 1 and item["kind"] == "fn" and item["name"] == left[0] and not item.get("fn_scope")
+                assoc = (
+                    len(left) == 2 and item["kind"] == "method" and not item["has_self"]
+                    and item["name"] == left[1] and (item.get("owner") or "").split("::")[-1] == left[0]
+                )
+                if not (free or assoc):
+                    continue
+                if assoc:
+                    hit = self.resolve(item["owner"], file, owner)
+                    if not hit or hit[0] != "item":
+                        continue
+                    name = self.ws.go_name(hit[1], hit[2], hit[3]) + "_" + item["name"]
+                    if item["vis"] != "pub" or not name[:1].isupper():
+                        name = lower_first(name)
+                else:
+                    name = self.ws.go_name(owner, file, item)
+                if owner is not self.crate:
+                    self.used.add(owner.go_package)
+                    return f"{owner.go_package}.{name}"
+                return name
+        return None
+
+    def value_go_name(self, crate, file, item) -> str:
+        if item["kind"] == "assoc_const":
+            hit = self.resolve(item["owner"], file, crate)
+            base = self.ws.go_name(hit[1], hit[2], hit[3]) if hit and hit[0] == "item" else item["owner"].split("::")[-1]
+            name = base + "_" + item["name"]
+            if item["vis"] != "pub" or not name[:1].isupper():
+                name = lower_first(name)
+        else:
+            name = self.ws.go_name(crate, file, item)
+        if crate is not self.crate:
+            self.used.add(crate.go_package)
+            return f"{crate.go_package}.{name}"
+        return name
+
+    def go_expr(self, node, want: str | None = None, depth: int = 0):
+        """(Go text, is a Go constant expression) for an initializer, or None
+        when it needs a person."""
+        if node is None or depth > 40:
+            return None
+        kind = node.get("k")
+        if kind == "lit":
+            lit = node["kind"]
+            if lit == "str":
+                return go_string(node["value"]), True
+            if lit in ("int", "float", "bool"):
+                return node["value"], True
+            if lit == "char":
+                return node["value"], True
+            if lit == "bytes":
+                return "[]byte{" + ", ".join(str(b) for b in node["value"]) + "}", False
+            return None
+        if kind == "paren":
+            inner = self.go_expr(node["e"], want, depth + 1)
+            return (f"({inner[0]})", inner[1]) if inner else None
+        if kind == "un":
+            inner = self.go_expr(node["e"], want, depth + 1)
+            if not inner or node["op"] not in ("-", "!"):
+                return None
+            return f"{node['op']}{inner[0]}", inner[1]
+        if kind == "bin":
+            op = node["op"]
+            if op not in ("+", "-", "*", "/", "%", "<<", ">>", "&", "|", "^", "==", "!=", "<", ">", "<=", ">=", "&&", "||"):
+                return None
+            left = self.go_expr(node["l"], want, depth + 1)
+            right = self.go_expr(node["r"], want, depth + 1)
+            if not left or not right:
+                return None
+            return f"{left[0]} {op} {right[0]}", left[1] and right[1]
+        if kind == "path":
+            path = node["path"]
+            if path in ("true", "false"):
+                return path, True
+            if path in self.INT_LIMITS:
+                text = self.INT_LIMITS[path]
+                self.mark(text)
+                return text, "(" not in text
+            if path == "None" and want and want.startswith("rs.Option["):
+                self.used.add("rs")
+                return f"rs.None[{want[len('rs.Option['):-1]}]()", False
+            hit = self.find_value_item(path)
+            if hit:
+                return self.value_go_name(*hit), self.constable(*hit, depth + 1)
+            # `Enum::Variant` of a data-free enum is a constant.
+            segments = path.split("::")
+            if len(segments) >= 2:
+                owner = self.resolve("::".join(segments[:-1]))
+                if owner and owner[0] == "item" and owner[3]["kind"] == "enum":
+                    name = self.go_item_name(owner[1], owner[2], owner[3]) + "_" + segments[-1]
+                    variant = next((v for v in owner[3]["decl"]["variants"] if v["name"] == segments[-1]), None)
+                    if variant is None:
+                        return None
+                    if self.item_shape(owner[3]) == "cenum":
+                        return name, True
+                    if variant["kind"] == "unit":
+                        return f"&{name}{{}}", False
+            return None
+        if kind == "cast":
+            inner = self.go_expr(node["e"], None, depth + 1)
+            if not inner:
+                return None
+            target = self.go_type(node["ty"], "generic")
+            if target not in self.BASIC_GO_TYPES:
+                return None
+            return f"{target}({inner[0]})", inner[1]
+        if kind == "call":
+            function = node["f"]
+            if function.get("k") != "path":
+                return None
+            path = function["path"]
+            last = path.split("::")[-1]
+            args = node["args"]
+            if path.split("::")[0] in ("Duration", "std") and last in self.DURATION_UNITS and len(args) == 1:
+                inner = self.go_expr(args[0], None, depth + 1)
+                if not inner:
+                    return None
+                self.used.add("time")
+                value = inner[0] if re.fullmatch(r"[0-9]+", inner[0]) else f"time.Duration({inner[0]})"
+                return f"{value} * {self.DURATION_UNITS[last]}", inner[1]
+            if path == "Some" and len(args) == 1:
+                inner_want = want[len("rs.Option["):-1] if want and want.startswith("rs.Option[") else None
+                inner = self.go_expr(args[0], inner_want, depth + 1)
+                if not inner:
+                    return None
+                self.used.add("rs")
+                return (f"rs.Some[{inner_want}]({inner[0]})" if inner_want else f"rs.Some({inner[0]})"), False
+            if path in ("String::new", "PathBuf::new") and not args:
+                return '""', True
+            if path in ("String::from", "PathBuf::from", "Path::new", "OsString::from", "OsStr::new") and len(args) == 1:
+                return self.go_expr(args[0], want, depth + 1)
+            if path in ("Vec::new", "Vec::with_capacity"):
+                return "nil", False
+            # Constructors of the standard library's synchronisation types.
+            head = path.replace("std::sync::atomic::", "").replace("std::sync::", "")
+            if head.endswith("::new") and want:
+                owner = head[: -len("::new")]
+                if owner in ("OnceLock", "Mutex", "RwLock", "LazyLock", "Condvar", "Once") or owner.startswith("Atomic"):
+                    translated = []
+                    inner_want = want[want.index("[") + 1 : -1] if "[" in want and want.endswith("]") else None
+                    for arg in args:
+                        part = self.go_expr(arg, inner_want, depth + 1)
+                        if not part:
+                            return None
+                        translated.append(part[0])
+                    self.used.add("rssync")
+                    base, _, type_args = want.partition("[")
+                    type_args = "[" + type_args if type_args else ""
+                    return f"{base.lstrip('*')}New{type_args}({', '.join(translated)})", False
+            # A function or associated function of this workspace.
+            callable_ = self.find_callable(path)
+            if callable_:
+                translated = []
+                for arg in args:
+                    part = self.go_expr(arg, None, depth + 1)
+                    if not part:
+                        return None
+                    translated.append(part[0])
+                return f"{callable_}({', '.join(translated)})", False
+            return None
+        if kind == "method":
+            if node["name"] in ("to_string", "to_owned", "into", "as_str", "to_path_buf", "as_ref", "clone") and not node["args"]:
+                return self.go_expr(node["recv"], want, depth + 1)
+            if node["name"] == "as_bytes" and not node["args"]:
+                inner = self.go_expr(node["recv"], None, depth + 1)
+                return (f"[]byte({inner[0]})", False) if inner else None
+            return None
+        if kind == "ref":
+            return self.go_expr(node["e"], want, depth + 1)
+        if kind in ("array", "tuple"):
+            elems = node["elems"]
+            if kind == "tuple":
+                if not want or not want.startswith("rs.Tuple") or len(elems) > 5:
+                    return None
+                # The tuple's element types come from the declared type, so
+                # an untyped constant gets the width Rust gave it.
+                element_types = split_attrs(want[want.index("[") + 1 : -1])
+                if len(element_types) != len(elems):
+                    return None
+                parts = [self.go_expr(e, t, depth + 1) for e, t in zip(elems, element_types)]
+                if not all(parts):
+                    return None
+                self.used.add("rs")
+                fields = ", ".join(f"F{i}: {p[0]}" for i, p in enumerate(parts))
+                return f"{want}{{{fields}}}", False
+            if not want:
+                return None
+            element = None
+            if want.startswith("[]"):
+                element = want[2:]
+            else:
+                match = re.match(r"\[[^\]]*\](.*)", want)
+                element = match.group(1) if match else None
+            if element is None:
+                return None
+            parts = [self.go_expr(e, element, depth + 1) for e in elems]
+            if not all(parts):
+                return None
+            if len(parts) > 4:
+                body = "\n" + "".join(f"\t{p[0]},\n" for p in parts)
+            else:
+                body = ", ".join(p[0] for p in parts)
+            return f"{want}{{{body}}}", False
+        if kind == "struct":
+            hit = self.resolve(node["path"])
+            if not hit or hit[0] != "item" or hit[3]["kind"] != "struct" or node.get("rest"):
+                return None
+            _, crate, file, item = hit
+            fields = {f["name"]: (index, f) for index, f in enumerate(item["decl"]["fields"])}
+            other = self if file is self.file else Generator(self.ws, file["path"])
+            parts = []
+            for name, value in node["fields"]:
+                if name not in fields:
+                    return None
+                index, field = fields[name]
+                field_type = other.go_type(field["ty"])
+                self.used |= other.used
+                part = self.go_expr(value, field_type, depth + 1)
+                if not part:
+                    return None
+                parts.append(f"{self.field_name(field, index)}: {part[0]}")
+            if len(parts) != len(fields):
+                return None
+            name = self.go_item_name(crate, file, item)
+            body = "\n" + "".join(f"\t{p},\n" for p in parts) if len(parts) > 3 else ", ".join(parts)
+            return f"{name}{{{body}}}", False
+        if kind == "macro":
+            name = node["name"]
+            args = node.get("args")
+            if name == "concat" and args is not None:
+                parts = [self.go_expr(a, "string", depth + 1) for a in args]
+                if not all(parts):
+                    return None
+                return " + ".join(p[0] for p in parts) or '""', all(p[1] for p in parts)
+            if name in ("include_str", "include_bytes") and args and args[0].get("k") == "lit":
+                import os
+                target = os.path.normpath(os.path.join(os.path.dirname(self.path), args[0]["value"]))
+                self.used.add("assets")
+                call = "MustString" if name == "include_str" else "MustBytes"
+                return f'assets.{call}("{target}")', False
+            if name == "vec" and args is not None and want and want.startswith("[]"):
+                parts = [self.go_expr(a, want[2:], depth + 1) for a in args]
+                if not all(parts):
+                    return None
+                return f"{want}{{" + ", ".join(p[0] for p in parts) + "}", False
+            return None
+        return None
+
+    def constable(self, crate, file, item, depth: int = 0) -> bool:
+        """Whether a Rust const becomes a Go `const` (a basic type with a
+        constant expression) rather than a `var`."""
+        key = (file["path"], item["start"], item["name"])
+        if key in self.constable_memo:
+            return self.constable_memo[key]
+        self.constable_memo[key] = False
+        if item["kind"] == "static" or depth > 40:
+            return False
+        other = self if file is self.file else Generator(self.ws, file["path"])
+        go_type = other.go_type(item["decl"]["ty"])
+        result = False
+        if go_type in self.BASIC_GO_TYPES:
+            value = other.go_expr(item["decl"].get("tree"), go_type, depth + 1)
+            result = bool(value and value[1])
+        self.constable_memo[key] = result
+        return result
+
     def emit_const(self, item) -> list[str]:
         decl = item["decl"]
         name = self.ws.go_name(self.crate, self.file, item)
@@ -1296,24 +1652,21 @@ class Generator:
         out = self.docs(item["docs"])
         go_type = self.go_type(decl["ty"])
         expr = decl["expr"]
-        literal = None
-        value = decl.get("literal")
-        if value:
-            if value["kind"] == "str":
-                literal = go_string(value["value"])
-            elif value["kind"] in ("int", "float", "bool"):
-                literal = value["value"]
-            elif value["kind"] == "char":
-                literal = value["value"]
-        keyword = "const" if literal is not None and go_type in (
-            "string", "bool", "int", "uint8", "uint16", "uint32", "uint64", "int8", "int16", "int32",
-            "int64", "float32", "float64") else "var"
-        if literal is not None:
-            out.append(f"{keyword} {name} {go_type} = {literal}")
-        else:
-            out.append(f"// rust: {expr[:400]}")
-            out.append(f"var {name} {go_type} // PORT: value")
+        value = self.go_expr(decl.get("tree"), go_type)
+        if item.get("fn_scope"):
+            out.append(f"// Declared inside `{item['fn_scope']}`.")
+        if value is None:
+            # No Go value could be derived. The name on the right does not
+            # exist, so the file does not compile until a person writes it.
             self.notes += 1
+            out.append(f"// rust: {expr[:600]}")
+            out.append(f"var {name} {go_type} = PORT_VALUE")
+            return out + [""]
+        text, constant = value
+        if constant and go_type in self.BASIC_GO_TYPES and item["kind"] != "static":
+            out.append(f"const {name} {go_type} = {text}")
+        else:
+            out.append(f"var {name} {go_type} = {text}")
         return out + [""]
 
     def emit_alias(self, item) -> list[str]:
