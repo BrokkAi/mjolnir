@@ -83,7 +83,7 @@ impl HostState {
             .iter()
             .filter(|(key, _)| key.session_id == session_id)
         {
-            let mut view = slot.view(session_id);
+            let mut view = slot.view(session_id, &key.review_id);
             if let Some(group) = &slot.open.active_group {
                 for registration in &group.registrations {
                     if let Some(child) = &registration.child_session_id

@@ -18,7 +18,7 @@ impl ReviewSlot {
         }
     }
 
-    pub fn view(&self, session_id: &str) -> RuntimeReviewView {
+    pub fn view(&self, session_id: &str, review_id: &str) -> RuntimeReviewView {
         let verdict = self.driver.last_verdict().map(|v| VerdictView {
             kind: match v {
                 ReviewVerdict::Clean => VerdictKind::Clean,
@@ -44,7 +44,7 @@ impl ReviewSlot {
         }
         RuntimeReviewView {
             session_id: session_id.to_owned(),
-            review_id: self.driver.snapshot().review_id,
+            review_id: review_id.to_owned(),
             roots: self
                 .roots()
                 .iter()

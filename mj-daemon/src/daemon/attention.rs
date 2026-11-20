@@ -483,7 +483,9 @@ fn project_states(
                     .any(|request| !request.goes_to_parent()),
             )
         })
-        .chain(reviews.values().flat_map(|review| {
+        // Every review's questions count, whichever review stands for the
+        // session in its status.
+        .chain(runtime.metadata.reviews.iter().flat_map(|review| {
             review
                 .questions
                 .iter()
@@ -575,7 +577,13 @@ fn project_states(
                 })
             {
                 Unreachable
-            } else if failed_review(review) {
+            } else if failed_review(
+                runtime
+                    .metadata
+                    .reviews
+                    .iter()
+                    .filter(|review| review.session_id == id.as_str()),
+            ) {
                 Failed
             } else if questions.contains(id) {
                 NeedsInput

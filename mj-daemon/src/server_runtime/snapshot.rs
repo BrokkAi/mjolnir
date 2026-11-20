@@ -18,33 +18,25 @@ pub(super) struct PhoneSessionViews<'a> {
     /// The most recent capacity reading per probe target.
     pub(super) capacity: &'a [crate::server::ViewerTargetCapacity],
     pub(super) launch_failures: &'a [crate::server::ViewerLaunchFailure],
-    /// Reviews the daemon is running, keyed by session. The phone renders the
-    /// same review the terminal does, from the same host.
+    /// Reviews the daemon is running, by session. The phone shows the most
+    /// notable review of a session and every review's questions.
     pub(super) reviews:
-        &'a std::collections::BTreeMap<String, crate::review_host::RuntimeReviewView>,
+        &'a std::collections::BTreeMap<String, Vec<crate::review_host::RuntimeReviewView>>,
 }
 
-/// The review the phone shows for each session that has any: the most
-/// notable of its open reviews, since the phone shows one per session.
+/// The open reviews of each session that has any.
 pub(super) fn viewer_reviews(
     reviews: &[crate::review_host::RuntimeReviewView],
-) -> std::collections::BTreeMap<String, crate::review_host::RuntimeReviewView> {
-    let mut by_session: std::collections::BTreeMap<&str, Vec<_>> =
+) -> std::collections::BTreeMap<String, Vec<crate::review_host::RuntimeReviewView>> {
+    let mut by_session: std::collections::BTreeMap<String, Vec<_>> =
         std::collections::BTreeMap::new();
     for review in reviews {
         by_session
-            .entry(&review.session_id)
+            .entry(review.session_id.clone())
             .or_default()
-            .push(review);
+            .push(review.clone());
     }
     by_session
-        .into_iter()
-        .filter_map(|(session, reviews)| {
-            mj_client::review::most_notable(reviews.iter().copied())
-                .or_else(|| reviews.first().copied())
-                .map(|review| (session.to_owned(), review.clone()))
-        })
-        .collect()
 }
 
 /// Project the capacity service's readings and refresh status for the phone.
@@ -681,7 +673,7 @@ pub(super) fn viewer_snapshot_selected(
             .unwrap_or_default();
         // A reviewing harness's form is this session's question too: the
         // person answers it here, and its id routes the answer to that role.
-        if let Some(review) = reviews.get(&session.id) {
+        for review in reviews.get(&session.id).into_iter().flatten() {
             session.pending_elicitations.extend(
                 review
                     .questions
@@ -860,8 +852,12 @@ pub(super) fn viewer_snapshot_selected(
             .as_ref()
             .filter(|facts| facts.supports_plan_mode())
             .map(mj_core::acp::AcpSessionFacts::plan_mode_active);
+        // The phone has one review slot per session: the most notable review.
         session.turn_review = reviews
             .get(&session.id)
+            .and_then(|reviews| {
+                mj_client::review::most_notable(reviews).or_else(|| reviews.first())
+            })
             .map(crate::server::ViewerTurnReview::from_runtime)
             .map(Box::new);
         session.capabilities =

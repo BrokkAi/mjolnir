@@ -5,7 +5,7 @@ use mj_core::review::driver::TurnReviewPhase;
 #[derive(Debug)]
 pub(super) struct TurnReview {
     pub(super) view: RuntimeReviewView,
-    failure: Option<String>,
+    pub(super) failure: Option<String>,
 }
 
 impl TurnReview {
@@ -80,15 +80,22 @@ impl super::ChatState {
         match self.turn_reviews.as_slice() {
             [] => None,
             [only] => Some(only.status()),
+            // One row has room for each review's repository and state, not for
+            // each review's full status.
             several => Some(
                 several
                     .iter()
                     .map(|review| {
+                        let state = review
+                            .failure
+                            .clone()
+                            .or_else(|| review.view.activity_label().map(str::to_owned))
+                            .unwrap_or_else(|| "Reviewing".to_owned());
                         let roots = review.view.roots_label();
                         if roots.is_empty() {
-                            review.status()
+                            state
                         } else {
-                            format!("{roots}: {}", review.status())
+                            format!("{roots}: {state}")
                         }
                     })
                     .collect::<Vec<_>>()
@@ -97,14 +104,15 @@ impl super::ChatState {
         }
     }
 
-    /// Reports a refusal on the first review that has none to show, or as a
-    /// notice when no review is open.
+    /// Reports a refusal on the review it is about when exactly one is open;
+    /// with several, a refusal cannot be tied to one of them, so it is a
+    /// notice.
     pub(super) fn report_turn_review_failure(&mut self, message: String) {
-        match self.turn_reviews.first_mut() {
-            Some(review) => {
-                review.report_failure(message);
+        match self.turn_reviews.as_mut_slice() {
+            [only] => {
+                only.report_failure(message);
             }
-            None => self.set_notice(message),
+            _ => self.set_notice(message),
         }
     }
 

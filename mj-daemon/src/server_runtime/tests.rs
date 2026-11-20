@@ -2845,7 +2845,7 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
     };
     let reviews = BTreeMap::from([(
         "parent".to_owned(),
-        RuntimeReviewView {
+        vec![RuntimeReviewView {
             review_id: String::new(),
             roots: Vec::new(),
             child_session_id: None,
@@ -2858,7 +2858,7 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
             roles: Vec::new(),
             status: "the reviewer is reading the change…".into(),
             verdict: None,
-        },
+        }],
     )]);
     let sources = PhoneProjectSources::default();
     let snapshot = viewer_snapshot(

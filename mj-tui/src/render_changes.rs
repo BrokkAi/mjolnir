@@ -8,7 +8,6 @@
 
 pub(crate) use mj_core::clock::epoch_seconds;
 
-
 use crate::render::{checkpoint_age, refresh_age, reset_duration, session_display_clock};
 use crate::{DashboardState, Mode, SupportPane};
 
