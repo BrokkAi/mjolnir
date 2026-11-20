@@ -295,10 +295,10 @@ pub(crate) async fn run_server(
         // The transcript tails the browser's conversations are projected
         // from: the same daemon-owned tails the terminal feed serves, so one
         // owner decides what changed in every client's transcript.
-        let mut cache_transcripts = mj_core::snapshot_map::SnapshotMap::<
+        let mut cache_transcripts: Option<mj_core::snapshot_map::SnapshotMap<
             String,
             mj_client::runtime_feed::SessionTail,
-        >::new();
+        >> = None;
         macro_rules! publish_snapshot {
             ($control:lifetime, $revision:expr) => {
                 let runtime = match daemon_runtime.runtime_publication() {
@@ -313,14 +313,18 @@ pub(crate) async fn run_server(
                     }
                 }
                 cache_records = runtime.records.clone();
-                for (id, tail) in cache_transcripts.changes(&runtime.transcripts) {
+                let transcript_changes = cache_transcripts
+                    .as_ref()
+                    .map(|previous| previous.changes(&runtime.transcripts).collect::<Vec<_>>())
+                    .unwrap_or_else(|| runtime.transcripts.iter().map(|(id, tail)| (id, Some(tail))).collect());
+                for (id, tail) in transcript_changes {
                     if let Some(tail) = tail
                         && runtime.records.get(id).is_some_and(|record| record.state.is_active())
                     {
                         conversation_projections.enqueue(tail.materialized());
                     }
                 }
-                cache_transcripts = runtime.transcripts.clone();
+                cache_transcripts = Some(runtime.transcripts.clone());
                 if conversations_changed { conversation_tx.send_replace(conversations.clone()); }
                 publication.observe_runtime(&runtime, &mut native_agents, &mut move_recoveries);
                 install_captured_records(&mut controller, &runtime);

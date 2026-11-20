@@ -2567,6 +2567,31 @@ fn materialized_at(ordinal: u64) -> MaterializedSession {
     materialized
 }
 
+// Hard-won: 44ee87bd8: the first browser capture never projected tails already present.
+#[tokio::test]
+async fn first_browser_capture_projects_existing_transcript_tails() {
+    let previous = mj_core::snapshot_map::SnapshotMap::<String, MaterializedSession>::new();
+    let mut capture = mj_core::snapshot_map::SnapshotMap::new();
+    capture.insert("session-1".into(), materialized_at(1));
+    let first_capture_changes = previous
+        .changes(&capture)
+        .filter_map(|(id, tail)| tail.map(|tail| (id.clone(), tail.clone())))
+        .collect::<Vec<_>>();
+    assert_eq!(first_capture_changes.len(), 1);
+
+    let (results, mut completed) = tokio::sync::mpsc::channel(1);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut dispatcher = ConversationProjectionDispatcher::new(results, shutdown);
+    for (_, tail) in first_capture_changes {
+        dispatcher.enqueue(tail);
+    }
+    let projected = tokio::time::timeout(Duration::from_secs(1), completed.recv())
+        .await
+        .expect("initial tail was not projected without a later capture")
+        .expect("projection result channel closed");
+    assert_eq!(projected.key.ordinal, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn browser_projection_enqueue_does_not_wait_for_a_blocking_permit() {
     let (results, mut completed) = tokio::sync::mpsc::channel(1);
