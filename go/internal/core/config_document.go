@@ -398,7 +398,7 @@ func (k tomlEditKey) display() string {
 	if k.name != "" && strings.IndexFunc(k.name, func(r rune) bool { return !isBareKeyRune(r) }) < 0 {
 		return k.name
 	}
-	return tomlBasicString(k.name)
+	return tomlBasicString(k.name, false)
 }
 
 type tomlEditValueKind int
@@ -815,39 +815,6 @@ func (d *tomlEditDocument) String() string {
 		}
 	}
 	text.WriteString(d.trailing)
-	return text.String()
-}
-
-// tomlBasicString is a basic string as toml_edit spells a key or string by
-// default.
-func tomlBasicString(value string) string {
-	var text strings.Builder
-	text.WriteByte('"')
-	for _, r := range value {
-		switch r {
-		case '\b':
-			text.WriteString(`\b`)
-		case '\t':
-			text.WriteString(`\t`)
-		case '\n':
-			text.WriteString(`\n`)
-		case '\f':
-			text.WriteString(`\f`)
-		case '\r':
-			text.WriteString(`\r`)
-		case '"':
-			text.WriteString(`\"`)
-		case '\\':
-			text.WriteString(`\\`)
-		default:
-			if r <= 0x1f || r == 0x7f {
-				fmt.Fprintf(&text, `\u%04X`, r)
-			} else {
-				text.WriteRune(r)
-			}
-		}
-	}
-	text.WriteByte('"')
 	return text.String()
 }
 

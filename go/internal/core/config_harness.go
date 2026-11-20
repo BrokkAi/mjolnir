@@ -691,7 +691,9 @@ func (k HarnessKind) ConfigureHomeEnvironment(home string, environment map[strin
 	configRoot := home
 	if k.NestedHome() {
 		environment["XDG_DATA_HOME"] = Text(Join(home, ".data"))
-		configRoot = pathParent(home)
+		if parent, ok := pathParent(home); ok {
+			configRoot = parent
+		}
 	}
 	environment[k.HomeEnv()] = Text(configRoot)
 	if k == HarnessKindAntigravity {
@@ -707,25 +709,6 @@ func (k HarnessKind) ConfigureHomeEnvironment(home string, environment map[strin
 		// second writer to guard against.
 		environment["KIMI_CODE_SESSION_LOCK"] = "0"
 	}
-}
-
-// pathParent is Rust's `path.parent().unwrap_or(path)`: the path without its
-// last component, the path itself for a root, and empty for a single
-// relative component.
-func pathParent(path string) string {
-	trimmed := strings.TrimRight(path, "/"+string(filepath.Separator))
-	if trimmed == "" {
-		return path
-	}
-	index := strings.LastIndexAny(trimmed, "/"+string(filepath.Separator))
-	if index < 0 {
-		return ""
-	}
-	parent := strings.TrimRight(trimmed[:index], "/"+string(filepath.Separator))
-	if parent == "" {
-		return trimmed[:1]
-	}
-	return parent
 }
 
 // ConfigureStagedHomeEnvironment pins global instructions to a session-owned
@@ -2213,7 +2196,7 @@ func (h HarnessProfile) validate(id string) error {
 	if h.Kind.NestedHome() {
 		leaf := h.Kind.ID()
 		name := h.Kind.DisplayName()
-		if pathFileName(h.Home) != leaf {
+		if name, _ := pathFileName(h.Home); name != leaf {
 			return fmt.Errorf("%s profile %s home must end in /%s (its XDG configuration directory)", name, debugString(id), leaf)
 		}
 		if h.Environment.ContainsKey("XDG_DATA_HOME") {
@@ -2274,20 +2257,6 @@ func (h HarnessProfile) validate(id string) error {
 		}
 	}
 	return nil
-}
-
-// pathFileName is Rust's Path::file_name: the last component, or empty for a
-// path that ends in `..` or is a root.
-func pathFileName(path string) string {
-	trimmed := strings.TrimRight(path, "/"+string(filepath.Separator))
-	if trimmed == "" {
-		return ""
-	}
-	name := trimmed[strings.LastIndexAny(trimmed, "/"+string(filepath.Separator))+1:]
-	if name == ".." {
-		return ""
-	}
-	return name
 }
 
 // AntigravityPools is the Antigravity quota pools this profile uses; empty

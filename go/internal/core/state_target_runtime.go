@@ -279,7 +279,7 @@ func (s *TargetRuntimeSettings) WithCurrentSSHOptions(current *TargetRuntimeSett
 		return nil
 	}
 	recorded, now := recordedConnection.SSH, nowConnection.SSH
-	if s.Kind != current.Kind || sshConnectionEqual(&recorded, &now) {
+	if s.Kind != current.Kind || sshConnectionEqual(recorded, now) {
 		return nil
 	}
 	location := func(ssh *SshConnection) ManagedWorktreeTargetSsh {
@@ -299,15 +299,6 @@ func (s *TargetRuntimeSettings) WithCurrentSSHOptions(current *TargetRuntimeSett
 	connection.ExtraArgs = slices.Clone(now.ExtraArgs)
 	refreshed.Connection = TargetConnectionSsh{SSH: connection}
 	return &refreshed
-}
-
-// sshConnectionEqual is SshConnection's derived equality.
-func sshConnectionEqual(a, b *SshConnection) bool {
-	optionEqual := func(x, y *string) bool {
-		return (x == nil) == (y == nil) && (x == nil || *x == *y)
-	}
-	return a.Host == b.Host && optionEqual(a.User, b.User) &&
-		optionEqual(a.IdentityFile, b.IdentityFile) && slices.Equal(a.ExtraArgs, b.ExtraArgs)
 }
 
 // TargetRuntimeSettingsFromTemplate is From<&TargetTemplate> for

@@ -140,13 +140,3 @@ func FindAntigravityProgram(ctx context.Context, environment map[string]string) 
 	}
 	return result.path, result.ok, result.err
 }
-
-// canonicalizePath resolves path to an absolute path with every symbolic
-// link resolved, as std::fs::canonicalize does.
-func canonicalizePath(path string) (string, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	return filepath.EvalSymlinks(absolute)
-}

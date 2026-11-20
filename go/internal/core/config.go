@@ -2769,8 +2769,8 @@ func (l *ConfigLock) Close() error {
 }
 
 func configLockPath(path string) string {
-	name := pathFileName(path)
-	if name == "" {
+	name, ok := pathFileName(path)
+	if !ok {
 		return path + ".lock"
 	}
 	return filepath.Join(filepath.Dir(path), name+".lock")

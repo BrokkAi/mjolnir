@@ -9,12 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 )
 
 type ProjectRepository struct {
@@ -113,41 +111,6 @@ func (p ProjectBundle) validate(bundleID string) error {
 		return fmt.Errorf("bundle %s primary repository %s does not exist", debugString(bundleID), debugString(p.PrimaryRepo))
 	}
 	return nil
-}
-
-// pathComponents is a path's components as Rust's Path::components yields
-// them: separators collapse, and a `.` counts only at the start.
-func pathComponents(path string) []string {
-	var components []string
-	if volume := filepath.VolumeName(path); volume != "" {
-		components = append(components, volume)
-		path = path[len(volume):]
-	}
-	if path != "" && os.IsPathSeparator(path[0]) {
-		components = append(components, string(filepath.Separator))
-	}
-	for index, part := range strings.FieldsFunc(path, func(r rune) bool { return r < utf8.RuneSelf && os.IsPathSeparator(uint8(r)) }) {
-		if part == "." && (index > 0 || len(components) > 0) {
-			continue
-		}
-		components = append(components, part)
-	}
-	return components
-}
-
-// pathStartsWith is Rust's Path::starts_with: base is a whole-component
-// prefix of path.
-func pathStartsWith(path, base string) bool {
-	pathParts, baseParts := pathComponents(path), pathComponents(base)
-	if len(baseParts) > len(pathParts) {
-		return false
-	}
-	for i, part := range baseParts {
-		if pathParts[i] != part {
-			return false
-		}
-	}
-	return true
 }
 
 func (p ProjectBundle) Primary() *ProjectRepository {
@@ -700,7 +663,7 @@ func defaultNamedMachinePrefix() string { return LegacyWorkspacePrefix }
 func validateWorkspacePrefix(id, workspacePrefix string) error {
 	unsafe := workspacePrefix == ""
 	for _, component := range pathComponents(workspacePrefix) {
-		if component == ".." {
+		if component.kind == pathComponentParentDir {
 			unsafe = true
 		}
 	}

@@ -31,13 +31,6 @@ func lockMasterOpening(socket string) (*FileLock, error) {
 	return lockMasterOpeningUnless(socket, nil)
 }
 
-func skipUnlessUnix(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix only")
-	}
-}
-
 // sshExecuteOnly is a test executor whose every run goes to execute.
 type sshExecuteOnly struct {
 	CommandExecutorDefaults
