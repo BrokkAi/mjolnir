@@ -287,6 +287,12 @@ pub(super) fn project(
     let mut unreachable = BTreeMap::<String, (Vec<&str>, String, String, bool)>::new();
     let path = std::env::var_os("PATH");
     for (id, target) in &config.targets {
+        let engine = match target {
+            TargetTemplate::LocalDocker { .. } => Some("Docker"),
+            TargetTemplate::LocalPodman { .. } => Some("Podman"),
+            TargetTemplate::AppleContainer { .. } => Some("Apple container"),
+            _ => None,
+        };
         let installed_missing = engines.runtime_missing(target, path.as_deref());
         if installed_missing {
             projection.uninstalled_engines.insert(id.clone());
@@ -298,13 +304,8 @@ pub(super) fn project(
                 "runtime {id:?} is turned off; turn it on in Settings › Runtimes or choose another"
             ))
         } else if installed_missing {
-            let label = match target {
-                TargetTemplate::LocalDocker { .. } => "Docker",
-                TargetTemplate::LocalPodman { .. } => "Podman",
-                TargetTemplate::AppleContainer { .. } => "Apple container",
-                _ => unreachable!("only local engine commands are checked"),
-            };
-            TargetFinding::reason(mj_controller::targets::engine_not_installed(label))
+            let engine = engine.expect("only local engine commands are checked");
+            TargetFinding::reason(mj_controller::targets::engine_not_installed(engine))
         } else {
             target_finding(config, id, target, report, &machines)
         };
@@ -325,10 +326,12 @@ pub(super) fn project(
             {
                 reason.to_owned()
             }
-            TargetFinding::Verdict(_) => {
-                "This runtime failed its availability check. Verify it in Settings › Runtimes."
-                    .to_owned()
-            }
+            TargetFinding::Verdict(_) => engine.map_or_else(
+                || "This runtime failed its availability check. Verify it in Settings › Runtimes.".to_owned(),
+                |engine| format!(
+                    "{engine} failed its availability check. Make sure {engine} is running and the daemon can reach it."
+                ),
+            ),
         });
         if let Some(reason) = &browser_reason {
             projection

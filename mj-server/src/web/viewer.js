@@ -5624,6 +5624,17 @@ function renderMoveFiles(draft) {
   moveBackButton.disabled = draft.preparing || draft.committing;
 }
 
+function moveAvailabilityError(draft) {
+  if (draft.queueLocked) return '';
+  if (availabilityMissing(snapshot.profiles.find(profile => profile.id === draft.profileId))) {
+    return 'Choose an available profile before moving.';
+  }
+  if (!targetLaunchable(draft.targetId)) {
+    return 'Choose an available target before moving.';
+  }
+  return '';
+}
+
 function renderMoveForm() {
   if (!moveStep || route.name !== 'move') return;
   const session = sessionById(route.sessionId);
@@ -5642,6 +5653,7 @@ function renderMoveForm() {
   if (!moveDraft || moveDraft.sessionId !== session.id) moveDraft = freshMoveDraft(session);
   const draft = moveDraft;
   const preparation = draft.preparation;
+  const availabilityError = moveAvailabilityError(draft);
   moveProgress.textContent = preparation ? 'Review the destination and confirm the interruption.' : 'Choose a compatible destination. The source is not changed during preparation.';
   moveStep.replaceChildren();
   if (preparation?.workspace && draft.filePage) { renderMoveFiles(draft); return; }
@@ -5649,14 +5661,15 @@ function renderMoveForm() {
   if (!preparation) {
     moveStep.append(el('p', '', `Move “${session.title || session.id}” while keeping its session identity, transcript, and recoverable workspace state.`));
     // A sole profile has nothing to choose; the terminal's Move skips it too.
-    const soleProfile = !draft.queueLocked && soleProfileId();
-    if (soleProfile) draft.profileId = soleProfile;
-    const profilePicker = pickerField('Profile', `move-profile-${session.id}`, snapshot.profiles, draft.profileId, value => {
+    const soleProfile = !draft.queueLocked && draft.profileId && soleProfileId() === draft.profileId;
+    const profiles = draft.queueLocked ? snapshot.profiles : offeredProfiles();
+    const profilePicker = pickerField('Profile', `move-profile-${session.id}`, profiles, draft.profileId, value => {
       if (draft.queueLocked) return;
       draft.profileId = value;
       draft.filesReviewed = false;
       draft.workspaceSelection.acknowledge_large_transfer = false;
       draft.preparation = null;
+      if (availabilityError) renderMoveForm();
     });
     if (!soleProfile) moveStep.append(profilePicker);
     const targetIds = [...new Set([
@@ -5670,6 +5683,7 @@ function renderMoveForm() {
       draft.filesReviewed = false;
       draft.workspaceSelection.acknowledge_large_transfer = false;
       draft.preparation = null;
+      if (availabilityError) renderMoveForm();
     });
     if (draft.queueLocked) {
       for (const input of [...profilePicker.querySelectorAll('input'), ...targetPicker.querySelectorAll('input')]) {
@@ -5784,8 +5798,9 @@ function renderMoveForm() {
     }
     moveNextButton.textContent = 'Confirm move';
   }
+  if (availabilityError) moveStep.append(el('p', 'move-warning', availabilityError));
   const busy = draft.preparing || draft.committing;
-  moveNextButton.disabled = busy || (!preparation && !!subagentSelectionError(draft))
+  moveNextButton.disabled = busy || Boolean(availabilityError) || (!preparation && !!subagentSelectionError(draft))
     || (preparation?.active === true && !draft.acknowledge)
     || (preparation?.workspace?.blockers || []).length > 0 || moveStorageProblems(draft).length > 0;
   moveBackButton.disabled = busy;
@@ -5795,9 +5810,9 @@ function renderMoveForm() {
 async function prepareMove() {
   const draft = moveDraft;
   if (!draft || draft.preparing) return;
-  const subagentError = subagentSelectionError(draft);
-  if (subagentError) {
-    moveError.textContent = subagentError;
+  const error = moveAvailabilityError(draft) || subagentSelectionError(draft);
+  if (error) {
+    moveError.textContent = error;
     return;
   }
   if (!draft.profileId && !draft.targetId) {
@@ -5851,6 +5866,11 @@ async function prepareMove() {
 async function commitMove() {
   const draft = moveDraft;
   if (!draft || !draft.preparation || draft.committing) return;
+  const availabilityError = moveAvailabilityError(draft);
+  if (availabilityError) {
+    moveError.textContent = availabilityError;
+    return;
+  }
   draft.committing = true;
   moveError.textContent = '';
   renderMoveForm();
