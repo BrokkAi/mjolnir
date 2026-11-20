@@ -6,11 +6,15 @@ package core
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 // PackageVersion is the workspace package version (Rust's
@@ -86,8 +90,22 @@ func Install(identity BuildIdentity) {
 // point, so it gets the test identity's stamp by calling this. The stamp must
 // not be anywhere else (#1603).
 func TestWorkerExecutable() string {
-	panic("unported: mj-core/src/worker_build.rs test_worker_executable")
+	if !strings.Contains(testWorkerBuildStamp, testRevision) {
+		panic("the test worker stamp names the test revision")
+	}
+	// Keep the stamp's bytes in the executable: only a test that calls this
+	// links it.
+	testWorkerStampSink = testWorkerBuildStamp
+	path, err := os.Executable()
+	if err != nil {
+		panic(fmt.Sprintf("locate the running test executable: %v", err))
+	}
+	return path
 }
+
+// testWorkerStampSink holds the test stamp so the linker keeps it, as Rust's
+// black_box does.
+var testWorkerStampSink string
 
 func installed() BuildIdentity {
 	installedIdentity.mu.Lock()
@@ -173,7 +191,24 @@ func IsWorkerBuild(build string) bool {
 }
 
 func workerBuildStamps(data []byte) []string {
-	panic("unported: mj-core/src/worker_build.rs worker_build_stamps")
+	builds := []string{}
+	for offset := 0; ; {
+		index := bytes.Index(data[offset:], prefix)
+		if index < 0 {
+			return builds
+		}
+		start := offset + index + len(prefix)
+		offset = start
+		tail := data[start:]
+		window := tail[:min(stampBytes, len(tail))]
+		end := bytes.IndexByte(window, 0)
+		if end < 0 {
+			continue
+		}
+		if build := tail[:end]; utf8.Valid(build) && IsWorkerBuild(string(build)) {
+			builds = append(builds, string(build))
+		}
+	}
 }
 
 func WorkerBuildFromBytes(data []byte) (string, error) {
@@ -199,10 +234,6 @@ type ExecutableIdentity struct {
 	changed  [2]int64
 }
 
-func executableIdentityFromMetadata(info os.FileInfo) ExecutableIdentity {
-	panic("unported: mj-core/src/worker_build.rs ExecutableIdentity::from_metadata")
-}
-
 type ExecutableContents struct {
 	// digest is nil only for a stamp-only read of an unpublished file.
 	digest *string
@@ -212,7 +243,48 @@ type ExecutableContents struct {
 }
 
 func executableContentsRead(input *os.File, hash bool) (*ExecutableContents, error) {
-	panic("unported: mj-core/src/worker_build.rs ExecutableContents::read")
+	// Read each byte once for both the digest and build stamp. Only the
+	// stamp parser needs to see bytes from the previous chunk again.
+	overlap := len(prefix) + stampBytes
+	window := make([]byte, 0, readBytes+overlap)
+	chunk := make([]byte, readBytes)
+	digest := sha256.New()
+	found := ""
+	var stampErr error
+	for {
+		n, err := io.ReadFull(input, chunk)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return nil, err
+		}
+		if n == 0 {
+			break
+		}
+		window = append(window, chunk[:n]...)
+		if hash {
+			digest.Write(chunk[:n])
+		}
+		if stampErr == nil {
+			for _, build := range workerBuildStamps(window) {
+				if found == "" {
+					found = build
+				} else if found != build {
+					stampErr = errors.New("conflicting worker build stamps")
+					break
+				}
+			}
+		}
+		keepFrom := max(0, len(window)-overlap)
+		window = window[:copy(window, window[keepFrom:])]
+	}
+	contents := &ExecutableContents{stamp: found, stampErr: stampErr}
+	if stampErr == nil && found == "" {
+		contents.stampErr = errors.New("missing worker build stamp (legacy or invalid worker)")
+	}
+	if hash {
+		sum := LowerHex(digest.Sum(nil))
+		contents.digest = &sum
+	}
+	return contents, nil
 }
 
 // ExecutableRead is Rust's `Arc<Mutex<Option<Arc<ExecutableContents>>>>`:
@@ -233,11 +305,51 @@ type ExecutableMemo struct {
 }
 
 func (m *ExecutableMemo) lookup(path string, identity ExecutableIdentity) *ExecutableRead {
-	panic("unported: mj-core/src/worker_build.rs ExecutableMemo::lookup")
+	if m.byPath == nil {
+		m.byPath = map[string]ExecutableIdentity{}
+		m.byIdentity = map[ExecutableIdentity]*MemoizedExecutable{}
+	}
+	if previous, ok := m.byPath[path]; !ok || previous != identity {
+		m.byPath[path] = identity
+		if ok {
+			entry, indexed := m.byIdentity[previous]
+			if !indexed {
+				panic("indexed executable")
+			}
+			entry.paths--
+			if entry.paths == 0 {
+				delete(m.byIdentity, previous)
+			}
+		}
+		entry, present := m.byIdentity[identity]
+		if !present {
+			entry = &MemoizedExecutable{read: &ExecutableRead{}}
+			m.byIdentity[identity] = entry
+		}
+		entry.paths++
+	}
+	return m.byIdentity[identity].read
 }
 
 func executableContents(path string) (*ExecutableContents, error) {
-	panic("unported: mj-core/src/worker_build.rs executable_contents")
+	input, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open worker executable %s: %w", path, err)
+	}
+	defer input.Close()
+	var contents *ExecutableContents
+	if executableMemoSupported {
+		contents, err = memoizedExecutableContents(path, input)
+	} else {
+		// Path, size and mtime cannot distinguish same-size replacements
+		// with preserved timestamps on Windows. Read the file each time
+		// there.
+		contents, err = executableContentsRead(input, true)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read worker executable %s: %w", path, err)
+	}
+	return contents, nil
 }
 
 // executableMemo is the static `MEMO` inside Rust's
@@ -248,7 +360,37 @@ var executableMemo struct {
 }
 
 func memoizedExecutableContents(path string, input *os.File) (*ExecutableContents, error) {
-	panic("unported: mj-core/src/worker_build.rs memoized_executable_contents")
+	// Stat the open file we will read. Publication by rename supplies a new
+	// inode. An in-place write updates ctime even if the writer restores
+	// mtime. Keep both timestamps at their full nanosecond resolution.
+	info, err := input.Stat()
+	if err != nil {
+		return nil, err
+	}
+	identity := executableIdentityFromMetadata(info)
+	executableMemo.mu.Lock()
+	read := executableMemo.memo.lookup(path, identity)
+	executableMemo.mu.Unlock()
+	// Concurrent launches of this file share the read. Other binaries can be
+	// opened and read independently.
+	read.mu.Lock()
+	defer read.mu.Unlock()
+	if read.contents != nil {
+		return read.contents, nil
+	}
+	scanned, err := executableContentsRead(input, true)
+	if err != nil {
+		return nil, err
+	}
+	after, err := input.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if identity != executableIdentityFromMetadata(after) {
+		return nil, errors.New("worker executable changed while being read")
+	}
+	read.contents = scanned
+	return scanned, nil
 }
 
 func executableDigest(path string) (string, error) {

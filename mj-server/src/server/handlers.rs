@@ -397,7 +397,7 @@ pub(super) async fn upload_attachment(
 pub(super) async fn action(
     State(state): State<ServerState>,
     Json(body): Json<serde_json::Value>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     if body.get("action").and_then(serde_json::Value::as_str) == Some("set-container-settings")
         && (body.get("cpus").is_some() || body.get("memory").is_some())
     {
@@ -415,6 +415,34 @@ pub(super) async fn action(
         *remember_launch_choices = true;
     }
     validate_action_live(&state, &action).await?;
+    if let ControllerAction::SetContainerSettings {
+        session_id,
+        resource_allocation,
+        mounts,
+    } = action
+    {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state
+            .client_state_tx
+            .send(ClientStateRequest::ContainerSettings {
+                session_id,
+                resource_allocation,
+                mounts,
+                reply,
+            })
+            .await
+            .map_err(|_| ApiError::controller_unavailable())?;
+        return match answer
+            .await
+            .map_err(|_| ApiError::controller_unavailable())?
+        {
+            Ok(Some(preview)) => Ok(Json(preview).into_response()),
+            Ok(None) => Ok(StatusCode::ACCEPTED.into_response()),
+            Err(outcome) => Err(outcome
+                .rejection()
+                .unwrap_or_else(ApiError::controller_unavailable)),
+        };
+    }
     identify_raw_project(&mut action);
     let action = decode_prompt_images_off_task(action).await?;
     let (reply, outcome) = tokio::sync::oneshot::channel();
@@ -428,7 +456,7 @@ pub(super) async fn action(
         .map_err(|_| ApiError::controller_unavailable())?;
     match outcome.rejection() {
         Some(rejection) => Err(rejection),
-        None => Ok(StatusCode::ACCEPTED),
+        None => Ok(StatusCode::ACCEPTED.into_response()),
     }
 }
 
@@ -908,12 +936,13 @@ pub(super) async fn prepare_move(
     let preparation = result
         .await
         .map_err(|_| ApiError::controller_unavailable())?
-        .map_err(|error| {
-            tracing::debug!(error = %error, "move preparation was rejected");
-            ApiError::new(
+        .map_err(|refusal| match refusal {
+            Some(refusal) => ApiError::new(StatusCode::CONFLICT, refusal.message().to_owned())
+                .with_code(refusal.code()),
+            None => ApiError::new(
                 StatusCode::CONFLICT,
                 "move preparation was rejected; refresh and try again",
-            )
+            ),
         })?;
     Ok(Json(preparation))
 }

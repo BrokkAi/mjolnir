@@ -20,6 +20,13 @@
 package core
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -43,7 +50,45 @@ func (c *CodexCatalog) Slugs() []string {
 
 // ToJSON serializes back to the `{"models": [...]}` document Codex reads.
 func (c *CodexCatalog) ToJSON() string {
-	panic("unported: mj-core/src/codex_catalog.rs CodexCatalog::to_json")
+	models := make([]any, len(c.Models))
+	for i, model := range c.Models {
+		models[i] = model
+	}
+	// serde_json's to_string_pretty: two-space indent, sorted object keys,
+	// no HTML escapes, no trailing newline.
+	var body bytes.Buffer
+	encoder := json.NewEncoder(&body)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(map[string]any{"models": models}); err != nil {
+		panic(fmt.Sprintf("catalog objects are serializable: %v", err))
+	}
+	return strings.TrimSuffix(body.String(), "\n")
+}
+
+// codexCatalogDecode parses one JSON document, keeping numbers as their
+// text and refusing trailing data as serde_json does.
+func codexCatalogDecode(data []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("parse model catalog as JSON: %w", err)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, errors.New("parse model catalog as JSON: trailing characters")
+	}
+	return value, nil
+}
+
+// codexCatalogArray is `value.get(key).and_then(Value::as_array)`.
+func codexCatalogArray(value any, key string) ([]any, bool) {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	array, ok := object[key].([]any)
+	return array, ok
 }
 
 // CodexCatalogParse is Rust's `codex_catalog::parse` (prefixed: the name is
@@ -58,7 +103,47 @@ func (c *CodexCatalog) ToJSON() string {
 // entryFromOpenAIModel. A body with neither array is an error naming both
 // shapes.
 func CodexCatalogParse(data []byte) (CodexCatalog, error) {
-	panic("unported: mj-core/src/codex_catalog.rs parse")
+	value, err := codexCatalogDecode(data)
+	if err != nil {
+		return CodexCatalog{}, err
+	}
+	var entries []map[string]any
+	if models, ok := codexCatalogArray(value, "models"); ok {
+		entries = make([]map[string]any, 0, len(models))
+		for _, model := range models {
+			object, ok := model.(map[string]any)
+			if !ok {
+				return CodexCatalog{}, errors.New("model catalog entry is not a JSON object")
+			}
+			entries = append(entries, object)
+		}
+	} else if list, ok := codexCatalogArray(value, "data"); ok {
+		entries = make([]map[string]any, 0, len(list))
+		for position, model := range list {
+			object, ok := model.(map[string]any)
+			if !ok {
+				return CodexCatalog{}, errors.New("model list entry is not a JSON object")
+			}
+			id, ok := object["id"].(string)
+			if !ok {
+				return CodexCatalog{}, errors.New("model list entry has no `id`")
+			}
+			var ownedBy *string
+			if owner, ok := object["owned_by"].(string); ok {
+				ownedBy = &owner
+			}
+			entries = append(entries, entryFromOpenAIModel(id, ownedBy, position))
+		}
+	} else {
+		return CodexCatalog{}, errors.New("model catalog has neither a `models` array (Codex catalog format) nor a `data` array (OpenAI model list format)")
+	}
+	if len(entries) == 0 {
+		return CodexCatalog{}, errors.New("model catalog lists no models")
+	}
+	for _, entry := range entries {
+		backfillReasoningLevels(entry)
+	}
+	return CodexCatalog{Models: entries}, nil
 }
 
 // backfillReasoningLevels fills in reasoning-effort levels for a known model
@@ -75,7 +160,27 @@ func CodexCatalogParse(data []byte) (CodexCatalog, error) {
 // keeps them, and a profile's own `models.json` override still wins because
 // MergeOverrides runs later.
 func backfillReasoningLevels(entry map[string]any) {
-	panic("unported: mj-core/src/codex_catalog.rs backfill_reasoning_levels")
+	slug, ok := entry["slug"].(string)
+	if !ok {
+		return
+	}
+	if listed, ok := entry["supported_reasoning_levels"].([]any); ok && len(listed) > 0 {
+		return
+	}
+	levels, defaultLevel, ok := knownReasoningLevels(slug)
+	if !ok {
+		return
+	}
+	values := make([]any, 0, len(levels))
+	for _, level := range levels {
+		values = append(values, map[string]any{"effort": level[0], "description": level[1]})
+	}
+	entry["supported_reasoning_levels"] = values
+	// Keep a default the provider already stated (Z.ai's `glm-5-turbo` says
+	// `max` even while listing no levels); only supply one when it is missing.
+	if _, present := entry["default_reasoning_level"]; !present {
+		entry["default_reasoning_level"] = defaultLevel
+	}
 }
 
 // knownReasoningLevels is reasoning-effort levels (effort, description) and
@@ -129,7 +234,26 @@ func knownContextLimits(slug string) (window uint64, compactAt uint64, ok bool) 
 // `models.json` override file. The override file refines fetched entries, so
 // it must speak the same language as the catalog it refines.
 func ParseCodexShape(data []byte) (CodexCatalog, error) {
-	panic("unported: mj-core/src/codex_catalog.rs parse_codex_shape")
+	value, err := codexCatalogDecode(data)
+	if err != nil {
+		return CodexCatalog{}, err
+	}
+	models, ok := codexCatalogArray(value, "models")
+	if !ok {
+		return CodexCatalog{}, errors.New("model catalog has no `models` array")
+	}
+	entries := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		object, ok := model.(map[string]any)
+		if !ok {
+			return CodexCatalog{}, errors.New("model catalog entry is not a JSON object")
+		}
+		entries = append(entries, object)
+	}
+	if len(entries) == 0 {
+		return CodexCatalog{}, errors.New("model catalog lists no models")
+	}
+	return CodexCatalog{Models: entries}, nil
 }
 
 // entryFromOpenAIModel builds a Codex catalog entry from one id in an
@@ -144,7 +268,39 @@ func ParseCodexShape(data []byte) (CodexCatalog, error) {
 // user refines any entry with a `models.json` override file in the profile
 // home.
 func entryFromOpenAIModel(id string, ownedBy *string, position int) map[string]any {
-	panic("unported: mj-core/src/codex_catalog.rs entry_from_openai_model")
+	description := id
+	if ownedBy != nil && *ownedBy != "" {
+		description = fmt.Sprintf("%s (%s)", id, *ownedBy)
+	}
+	number := func(value uint64) json.Number { return json.Number(strconv.FormatUint(value, 10)) }
+	entry := map[string]any{
+		"slug":                         id,
+		"display_name":                 id,
+		"description":                  description,
+		"supported_reasoning_levels":   []any{},
+		"shell_type":                   "shell_command",
+		"visibility":                   "list",
+		"supported_in_api":             true,
+		"priority":                     number(uint64(position)),
+		"base_instructions":            "",
+		"supports_reasoning_summaries": false,
+		"default_reasoning_summary":    "none",
+		"support_verbosity":            false,
+		"apply_patch_tool_type":        "freeform",
+		"truncation_policy":            map[string]any{"mode": "bytes", "limit": number(10000)},
+	}
+	contextWindow := uint64(128000)
+	if window, limit, ok := knownContextLimits(id); ok {
+		contextWindow = window
+		entry["auto_compact_token_limit"] = number(limit)
+	}
+	entry["context_window"] = number(contextWindow)
+	entry["max_context_window"] = number(contextWindow)
+	entry["effective_context_window_percent"] = number(95)
+	entry["supports_parallel_tool_calls"] = true
+	entry["experimental_supported_tools"] = []any{}
+	entry["input_modalities"] = []any{"text"}
+	return entry
 }
 
 // MergeOverrides copies the user's override entries over the fetched
@@ -156,7 +312,36 @@ func entryFromOpenAIModel(id string, ownedBy *string, position int) map[string]a
 // is how a user adds reasoning levels or a larger context window to a
 // provider whose model list carries only ids.
 func MergeOverrides(catalog *CodexCatalog, overrides *CodexCatalog) {
-	panic("unported: mj-core/src/codex_catalog.rs merge_overrides")
+	for _, entry := range overrides.Models {
+		slug, ok := entry["slug"].(string)
+		if !ok {
+			continue
+		}
+		var existing map[string]any
+		for _, model := range catalog.Models {
+			if found, ok := model["slug"].(string); ok && found == slug {
+				existing = model
+				break
+			}
+		}
+		if existing != nil {
+			for field, value := range entry {
+				existing[field] = value
+			}
+			continue
+		}
+		// A slug the provider did not list becomes a complete entry:
+		// start from the same conservative defaults a translated entry
+		// gets, then overlay the user's fields. Pushing the override
+		// verbatim would leave a partial entry that Codex rejects,
+		// failing the launch, even though the docs promise a few fields
+		// are enough to add a model.
+		complete := entryFromOpenAIModel(slug, nil, len(catalog.Models))
+		for field, value := range entry {
+			complete[field] = value
+		}
+		catalog.Models = append(catalog.Models, complete)
+	}
 }
 
 // GuardianReviewModel is the newest flash model among slugs, which Mjolnir
@@ -169,14 +354,37 @@ func MergeOverrides(catalog *CodexCatalog, overrides *CodexCatalog) {
 // marker are ignored, and ok false means the catalog has no flash model and
 // Codex should keep its own fallback of reviewing with the session model.
 func GuardianReviewModel(slugs []string) (string, bool) {
-	panic("unported: mj-core/src/codex_catalog.rs guardian_review_model")
+	best, found := "", false
+	for _, slug := range slugs {
+		if !strings.Contains(modelCatalogASCIILower(slug), "flash") {
+			continue
+		}
+		// Rust's max_by keeps the last of equal maxima.
+		if !found || slices.Compare(versionOf(slug), versionOf(best)) >= 0 {
+			best, found = slug, true
+		}
+	}
+	return best, found
 }
 
 // versionOf is the dotted number sequence in a slug, as numbers.
 // `glm-5.3-flash` is `[5, 3]`; a slug with no numbers is an empty vector,
 // which sorts first.
 func versionOf(slug string) []uint64 {
-	panic("unported: mj-core/src/codex_catalog.rs version_of")
+	parts := strings.FieldsFunc(slug, func(r rune) bool { return !(r >= '0' && r <= '9') && r != '.' })
+	for _, part := range parts {
+		if part[0] < '0' || part[0] > '9' {
+			continue
+		}
+		version := []uint64{}
+		for _, segment := range strings.Split(part, ".") {
+			if value, err := strconv.ParseUint(segment, 10, 64); err == nil {
+				version = append(version, value)
+			}
+		}
+		return version
+	}
+	return []uint64{}
 }
 
 // StampReviewer sets `auto_review_model_override` on every catalog entry, so

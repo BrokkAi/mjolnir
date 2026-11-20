@@ -4,6 +4,8 @@
 Build mj with --features test-hooks and provide its matching portable worker.
 The old mj must be the official 2.51.0 release, with its bundled worker beside it.
 Every invocation uses the named instance and this driver's private directories.
+Pass --settings-only for the size and mounts case on the current build. The
+Podman host must delegate CPU and memory controllers for that case.
 """
 
 import argparse
@@ -168,13 +170,17 @@ with socket.socket(socket.AF_UNIX) as connection:
             target, = database.execute("SELECT resource_id FROM session_targets WHERE session_id=?", (session,)).fetchone()
             return target
 
-    def create_session(self, workspace, mounts, title):
-        status, response = self.request("POST", "/api/actions", {"action": "new", "workspace_id": workspace,
-            "profile_id": "fake", "bundle_id": "fixture", "target_id": "podman", "title": title,
-            "additional_mounts": mounts})
+    def create_session(self, workspace, mounts, title, allocation=None):
+        body = {"action": "new", "workspace_id": workspace, "profile_id": "fake", "bundle_id": "fixture",
+                "target_id": "podman", "title": title, "additional_mounts": mounts}
+        if allocation is not None:
+            body["resource_allocation"] = allocation
+        status, response = self.request("POST", "/api/actions", body)
         assert status == 202, response
-        snapshot = self.wait_snapshot(lambda value: any(row.get("title") == title and row.get("state") == "running" for row in value.get("sessions", [])), title + " ready")
-        session = next(row["id"] for row in snapshot["sessions"] if row.get("title") == title and row["state"] == "running")
+        def ready():
+            return next((row["id"] for row in self.snapshot()["sessions"]
+                         if row.get("title") == title and row.get("state") == "running"), None)
+        session = self.wait(ready, title + " ready")
         self.sessions.append(session)
         return session
 
@@ -203,7 +209,7 @@ with socket.socket(socket.AF_UNIX) as connection:
         self.podman("exec", self.container(session), "sh", "-c", script, "mj-regression", workspace)
         return current
 
-    def prepare_container_fixture(self):
+    def prepare_container_fixture(self, image=OLD_IMAGE):
         self.prepare(fake_acp_prompt_delay_ms=0)
         (self.runtime_root / "empty-gh").mkdir()
         (self.runtime_root / "releases").mkdir()
@@ -242,10 +248,87 @@ def unused_timer_wait():
         self.git_output(["remote", "add", "origin", origin], self.project)
         config = self.config / "config.toml"
         body = config.read_text()
-        body = body.replace(f'image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"', f'image = "{OLD_IMAGE}"', 1)
+        body = body.replace(f'image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"', f'image = "{image}"', 1)
         body = body.replace('[targets.podman]\nkind = "podman"', '[targets.podman]\nkind = "podman"\nworkspace_storage = { kind = "podman-volume" }')
         body = body.replace('environment = { MJ_FAKE_ACP_LOG', f'environment = {{ MJ_FAKE_ACP_RELEASE_ROOT = {json.dumps(str(self.runtime_root / "releases"))}, MJ_FAKE_ACP_LOG')
         config.write_text(body + '\n[github.watch]\nenabled = false\n[machines.local]\nkind = "local"\nbuild_cache = { enabled = false }\n')
+
+    def run_settings_replacement(self):
+        self.prepare_container_fixture("ghcr.io/brokkai/mjolnir/agent-dev:latest")
+        config = self.config / "config.toml"
+        config.write_text(config.read_text().replace("[targets.podman]\n", '[targets.podman]\ncpus = "2.5"\nmemory = "5g"\n'))
+        self.cli("workspaces", "create", "Container settings replacement")
+        self.authenticate()
+        workspace = self.snapshot()["workspaces"][0]["id"]
+        fixture = {"source": str(self.runtime_root), "destination": str(self.runtime_root), "access": "rw"}
+        initial = {"kind": "container", "cpus": 2, "memory_bytes": 4 << 30}
+        session = self.create_session(workspace, [fixture], "settings-preservation", initial)
+        record = self.record(session)
+        original = self.inspect(session)
+        path = record["container_workspace"]
+        argv = ["sh", "-c", 'set -eu; checkout=$(find "$1" -maxdepth 3 -name .git -print -quit); cd "${checkout%/.git}"; shift; exec sh -ec "$1"',
+                "mj-regression", path]
+        self.podman("exec", self.container(session), *argv,
+                    'printf "\nignored-build\n" >>.gitignore; mkdir ignored-build; printf preserved >ignored-build/output; git check-ignore ignored-build/output')
+        mount_source = self.runtime_root / "extra"
+        mount_source.mkdir()
+        (mount_source / "marker").write_text("mounted")
+        mount = {"source": str(mount_source), "destination": "/mnt/extra", "access": "ro"}
+        size = {"kind": "container", "cpus": 3, "memory_bytes": 8 << 30}
+        move = json.loads(self.cli("move", "--session", session, "--cpus", "3", "--memory-gib", "8", "--prepare").stdout)
+        assert move["container_upgrade"]["settings"]["resource_allocation"] == size and "workspace" not in move, move
+        status, preview = self.request("POST", "/api/actions", {
+            "action": "set-container-settings", "session_id": session,
+            "resource_allocation": size, "mounts": [fixture, mount]}, timeout=WAIT)
+        assert status == 200 and preview["available"], (status, preview)
+        assert preview["settings"]["resource_allocation"] == size, preview
+        assert "writable layer" in preview["warning"], preview
+        assert self.inspect(session)["Id"] == original["Id"]
+        upgrade_path = f"/api/v1/sessions/{session}/container-upgrade"
+        def confirm(selection):
+            status, body = self.request("POST", upgrade_path, {
+                "selection": selection, "acknowledge_writable_layer_loss": True}, timeout=WAIT)
+            assert status == 202, body
+        self.prompt(session, "hold during settings preview retry")
+        confirm(preview)
+        status, retained = self.request("GET", upgrade_path)
+        assert status == 200 and retained == preview, retained
+        confirm(retained)
+        self.release(session, "hold during settings preview retry")
+        self.wait(lambda: not self.pending(session) and self.inspect(session)["Id"] != original["Id"],
+                  "settings replacement finished")
+        replacement = self.inspect(session)
+        assert replacement["Id"] != original["Id"]
+        assert replacement["Image"] == original["Image"]
+        key = lambda mount: (mount["Destination"], mount.get("Name"), mount["Source"], mount["RW"])
+        assert set(map(key, original["Mounts"])) < set(map(key, replacement["Mounts"]))
+        assert self.record(session)["target_runtime"]["container_settings"]["resource_allocation"] == size
+        self.podman("exec", self.container(session), *argv,
+                    'git check-ignore ignored-build/output; test "$(cat ignored-build/output)" = preserved')
+        limits = self.podman("exec", self.container(session), "sh", "-ec",
+                             'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/cpu.max; cat /mnt/extra/marker')
+        memory, cpu, marker = limits.splitlines()
+        quota, period = map(int, cpu.split())
+        assert (int(memory), quota, marker) == (8 << 30, 3 * period, "mounted"), limits
+        status, clear = self.request("POST", "/api/actions", {
+            "action": "set-container-settings", "session_id": session,
+            "resource_allocation": None, "mounts": [fixture, mount]}, timeout=WAIT)
+        assert status == 200 and clear["available"], (status, clear)
+        confirm(clear)
+        self.wait(lambda: not self.pending(session) and self.inspect(session)["Id"] != replacement["Id"],
+                  "template limits restored")
+        limits = self.podman("exec", self.container(session), "cat",
+                             "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/cpu.max")
+        memory, cpu = limits.splitlines()
+        quota, period = map(int, cpu.split())
+        assert int(memory) == 5 << 30 and quota * 2 == 5 * period, limits
+        with sqlite3.connect(f"file:{self.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+            assert not database.execute("SELECT 1 FROM session_moves WHERE session_id=?", (session,)).fetchone()
+        self.record_action("container-settings-replacement-preserved-storage", session=session)
+        self.trace["outcome"] = "passed"
+        self.trace["finished_at"] = self.timestamp()
+        self.write_trace()
+        print(json.dumps({"instance": self.instance, "result": "passed", "artifacts": str(self.root)}), flush=True)
 
     def run_regression(self):
         self.prepare_container_fixture()
@@ -363,15 +446,21 @@ def unused_timer_wait():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mj", type=Path, required=True)
-    parser.add_argument("--old-mj", type=Path, required=True)
+    parser.add_argument("--old-mj", type=Path)
+    parser.add_argument("--settings-only", action="store_true", help="run the settings replacement case on the current build")
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--instance", required=True)
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named test instance")
+    if not args.settings_only and args.old_mj is None:
+        parser.error("--old-mj is required for the old-to-new regression")
     regression = Regression(args)
     try:
-        regression.run_regression()
+        if args.settings_only:
+            regression.run_settings_replacement()
+        else:
+            regression.run_regression()
     finally:
         regression.cleanup()
 

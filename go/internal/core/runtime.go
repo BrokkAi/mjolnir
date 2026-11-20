@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -92,13 +93,99 @@ var errRuntimeShuttingDown = errors.New("runtime is shutting down")
 // signalled, and the call then fails with "runtime is shutting down".
 // (Rust's ShutdownState::block_on_with; Go methods cannot be generic.)
 func BlockOnWith[T any](s *ShutdownState, future func(ctx context.Context) T) (T, error) {
-	panic("unported: mj-core/src/runtime.rs ShutdownState::block_on_with")
+	var zero T
+	if s.signalled.Load() {
+		return zero, errRuntimeShuttingDown
+	}
+	guard := registerInFlight(s)
+	defer guard.release()
+	// Re-check after registering: a shutdown that started in between has
+	// already passed the drain wait, so it must not be given work to wait
+	// for.
+	if s.signalled.Load() {
+		return zero, errRuntimeShuttingDown
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type outcome struct {
+		value     T
+		recovered any
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		var result outcome
+		defer func() {
+			result.recovered = recover()
+			done <- result
+		}()
+		result.value = future(ctx)
+	}()
+	// Shutdown wins a tie, as Rust's biased select does.
+	select {
+	case <-s.signalledChan():
+		return zero, errRuntimeShuttingDown
+	default:
+	}
+	select {
+	case <-s.signalledChan():
+		return zero, errRuntimeShuttingDown
+	case result := <-done:
+		if result.recovered != nil {
+			panic(result.recovered)
+		}
+		return result.value, nil
+	}
 }
 
 // ShutdownWith signals shutdown, waits up to grace for guarded BlockOn calls
 // to return, then shuts runtime down as work says.
 func (s *ShutdownState) ShutdownWith(runtime *Runtime, work BlockingWork, grace time.Duration) ShutdownReport {
-	panic("unported: mj-core/src/runtime.rs ShutdownState::shutdown_with")
+	var report ShutdownReport
+	s.signalled.Store(true)
+	s.notifyOnce.Do(func() { close(s.notify) })
+	deadline := time.Now().Add(grace)
+	for {
+		s.mu.Lock()
+		inFlight, drained := s.inFlight, s.drained
+		s.mu.Unlock()
+		if inFlight == 0 {
+			break
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			slog.Warn("shutting the runtime down with blocking awaits still running", "in_flight", inFlight)
+			break
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-drained:
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+	s.mu.Lock()
+	report.AwaitsLeft = s.inFlight
+	s.mu.Unlock()
+	switch work := work.(type) {
+	case BlockingWorkAwait:
+		runtime.blocking.Wait()
+	case BlockingWorkAbandon:
+	case BlockingWorkAwaitFor:
+		finished := make(chan struct{})
+		go func() {
+			runtime.blocking.Wait()
+			close(finished)
+		}()
+		timer := time.NewTimer(work.Limit)
+		select {
+		case <-finished:
+			timer.Stop()
+		case <-timer.C:
+			// A wait that used the whole limit left work running.
+			report.BlockingLeft = true
+		}
+	}
+	return report
 }
 
 // inFlightGuard holds one registration of a guarded BlockOn call.
@@ -313,7 +400,30 @@ func (u *Unbounded[T]) Send(value T) error {
 // Recv waits for the next value; false when the channel is closed and empty,
 // or ctx ended.
 func (u *Unbounded[T]) Recv(ctx context.Context) (T, bool) {
-	panic("unported: mj-core/src/runtime.rs tokio::sync::mpsc::UnboundedReceiver::recv")
+	for {
+		u.mu.Lock()
+		if len(u.queue) > 0 {
+			value := u.queue[0]
+			var zero T
+			u.queue[0] = zero
+			u.queue = u.queue[1:]
+			u.mu.Unlock()
+			return value, true
+		}
+		if u.closed {
+			u.mu.Unlock()
+			var zero T
+			return zero, false
+		}
+		ready := u.ready
+		u.mu.Unlock()
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			var zero T
+			return zero, false
+		}
+	}
 }
 
 // Close stops further sends, as dropping the receiver does.

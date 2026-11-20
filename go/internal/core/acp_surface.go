@@ -64,7 +64,25 @@ type AcpSessionSurface struct {
 // AcpSessionSurfaceFromConfiguration builds a surface from projected
 // configuration values (decoded JSON values).
 func AcpSessionSurfaceFromConfiguration(configuration map[string]any) AcpSessionSurface {
-	panic("unported: mj-core/src/acp/surface.rs AcpSessionSurface::from_configuration")
+	text := func(key string) *string {
+		if value, ok := configuration[key].(string); ok {
+			return &value
+		}
+		return nil
+	}
+	// Rust: `.get("collaboration_mode").or_else(|| .get("mode")).and_then(as_str)`:
+	// a present non-string collaboration_mode hides mode.
+	var currentMode *string
+	if _, ok := configuration["collaboration_mode"]; ok {
+		currentMode = text("collaboration_mode")
+	} else {
+		currentMode = text("mode")
+	}
+	return AcpSessionSurface{
+		currentMode:   currentMode,
+		currentModel:  text("model"),
+		currentEffort: text("effort"),
+	}
 }
 
 func (s *AcpSessionSurface) HarnessKind() *HarnessKind {
@@ -88,16 +106,49 @@ func (s *AcpSessionSurface) ConfigOptions() []schema.SessionConfigOption {
 }
 
 func (s *AcpSessionSurface) SetSessionModes(modes *schema.SessionModeState) {
+	// The surface owns its copy, as Rust's by-value Option does:
+	// ApplyCurrentModeUpdate writes into it.
+	if modes != nil {
+		copied := *modes
+		modes = &copied
+	}
 	s.sessionModes = modes
 	s.syncPlanMode()
 }
 
 func (s *AcpSessionSurface) ApplyCurrentModeUpdate(mode string) {
-	panic("unported: mj-core/src/acp/surface.rs AcpSessionSurface::apply_current_mode_update")
+	if s.modeConfigKey() == "collaboration_mode" {
+		return
+	}
+	if s.sessionModes != nil {
+		s.sessionModes.CurrentModeID = schema.SessionModeId(mode)
+	}
+	if s.planModeChangePending {
+		return
+	}
+	if ConfigCurrentValue(s.configOptions, s.modeConfigKey()) != nil {
+		// Claude can publish a mode change before its matching config-option
+		// update. Keep the selector authoritative when it exists.
+		s.syncPlanMode()
+	} else {
+		s.currentMode = &mode
+	}
 }
 
 func (s *AcpSessionSurface) ApplyProjectedConfiguration(configuration map[string]any) {
-	panic("unported: mj-core/src/acp/surface.rs AcpSessionSurface::apply_projected_configuration")
+	if mode, ok := configuration[s.modeConfigKey()].(string); ok {
+		s.currentMode = &mode
+	}
+	if model, ok := configuration["model"].(string); ok {
+		s.currentModel = &model
+	} else {
+		s.currentModel = ConfigCurrentValue(s.configOptions, "model")
+	}
+	if effort, ok := configuration["effort"].(string); ok {
+		s.currentEffort = &effort
+	} else {
+		s.currentEffort = ConfigCurrentValue(s.configOptions, "effort")
+	}
 }
 
 func (s *AcpSessionSurface) SetAgentCommands(commands []schema.AvailableCommand) {
@@ -172,7 +223,19 @@ func (s *AcpSessionSurface) BeginPlanModeChange(active bool) {
 }
 
 func (s *AcpSessionSurface) FinishPlanModeChange(active bool) {
-	panic("unported: mj-core/src/acp/surface.rs AcpSessionSurface::finish_plan_mode_change")
+	s.planModeChangePending = false
+	mode := s.executionModeID()
+	if active {
+		mode = "plan"
+	}
+	s.currentMode = &mode
+	// Claude and Kimi carry their execution mode on the same selector as
+	// Plan, so leaving Plan is the worker's to decide: it restores the
+	// target policy's mode (or the harness default when the policy sets
+	// none) rather than a mode named here.
+	if s.carriesExecutionModeOnPlanSelector() && !active {
+		s.syncPlanMode()
+	}
 }
 
 // executionModeID is the mode a harness returns to when Plan mode ends.
@@ -203,11 +266,100 @@ func (s *AcpSessionSurface) PlanModeActive() bool {
 // PlanControl returns the call that turns plan mode on or off, or a non-nil
 // error kind saying why this harness cannot.
 func (s *AcpSessionSurface) PlanControl(active bool) (PlanControl, *PlanControlError) {
-	panic("unported: mj-core/src/acp/surface.rs AcpSessionSurface::plan_control")
+	failure := func(kind PlanControlError) (PlanControl, *PlanControlError) {
+		return nil, &kind
+	}
+	// Claude and Kimi carry their execution mode on the same selector as
+	// Plan, so leaving Plan is the worker's to decide: it restores the
+	// target policy's mode (or the harness default when the policy sets
+	// none) rather than a mode named here.
+	if s.carriesExecutionModeOnPlanSelector() && !active {
+		if s.SupportsPlanMode() {
+			return PlanControlRestoreExecutionMode{}, nil
+		}
+		return failure(PlanControlErrorIncompatible)
+	}
+	value := "default"
+	if active {
+		value = "plan"
+	}
+	if s.harnessKind == nil {
+		if s.configHasPlanPair("mode") {
+			return PlanControlSetConfig{Key: "mode", Value: value}, nil
+		}
+		if s.advertisedPlanModes() {
+			return PlanControlSetSessionMode{ModeID: value}, nil
+		}
+		return failure(PlanControlErrorIncompatible)
+	}
+	switch harness := *s.harnessKind; harness {
+	case HarnessKindMuse:
+		// muse-acp 0.10 runs Plan read-only, and leaving it keeps the
+		// separate `approval_mode`; see ForwardsPlanCommand.
+		if s.exactConfigHasPlanPair("mode") {
+			return PlanControlSetConfig{Key: "mode", Value: value}, nil
+		}
+		return failure(PlanControlErrorIncompatible)
+	case HarnessKindOpenCode, HarnessKindDsh:
+		// OpenCode and dsh-acp advertise their modes as a `mode` select
+		// whose normal value is not `default`, so Hel's plan toggle maps
+		// onto that value instead.
+		execution := s.executionModeID()
+		if s.exactConfigHasPair("mode", execution) {
+			if active {
+				return PlanControlSetConfig{Key: "mode", Value: "plan"}, nil
+			}
+			return PlanControlSetConfig{Key: "mode", Value: execution}, nil
+		}
+		return failure(PlanControlErrorIncompatible)
+	case HarnessKindCodex:
+		if s.exactConfigHasPlanPair("collaboration_mode") {
+			return PlanControlSetConfig{Key: "collaboration_mode", Value: value}, nil
+		}
+		return failure(PlanControlErrorCodexIncompatible)
+	case HarnessKindClaude, HarnessKindKimi, HarnessKindAntigravity:
+		if s.exactConfigHasPlanPair("mode") {
+			return PlanControlSetConfig{Key: "mode", Value: value}, nil
+		}
+		if s.advertisedPlanModes() {
+			return PlanControlSetSessionMode{ModeID: value}, nil
+		}
+		return failure(PlanControlErrorIncompatible)
+	case HarnessKindGrok:
+		if GrokPermitsUnadvertisedPlanMode(harness, value) {
+			return PlanControlSetSessionMode{ModeID: value}, nil
+		}
+		return failure(PlanControlErrorGrokIncompatible)
+	}
+	return failure(PlanControlErrorIncompatible)
 }
 
 func (s *AcpSessionSurface) syncPlanMode() {
-	panic("unported: mj-core/src/acp/surface.rs AcpSessionSurface::sync_plan_mode")
+	if s.planModeChangePending {
+		return
+	}
+	if value := ConfigCurrentValue(s.configOptions, s.modeConfigKey()); value != nil {
+		s.currentMode = value
+	} else if s.harnessKind == nil || *s.harnessKind != HarnessKindCodex {
+		s.currentMode = nil
+		if s.sessionModes != nil {
+			mode := string(s.sessionModes.CurrentModeID)
+			s.currentMode = &mode
+		}
+	}
+}
+
+// carriesExecutionModeOnPlanSelector reports Claude, Kimi and Antigravity,
+// whose execution mode lives on the same selector as Plan.
+func (s *AcpSessionSurface) carriesExecutionModeOnPlanSelector() bool {
+	if s.harnessKind == nil {
+		return false
+	}
+	switch *s.harnessKind {
+	case HarnessKindClaude, HarnessKindKimi, HarnessKindAntigravity:
+		return true
+	}
+	return false
 }
 
 func (s *AcpSessionSurface) modeConfigKey() string {

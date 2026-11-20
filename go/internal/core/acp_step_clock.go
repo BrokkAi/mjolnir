@@ -144,5 +144,38 @@ func (c *StepClock) observeAt(update *schema.SessionUpdate, nowMs int64) {
 // sends `usage_update` between two updates of the same running tool call —
 // so treating them as steps would restart the clock at random.
 func signatureOf(update *schema.SessionUpdate, toolStatuses map[string]schema.ToolCallStatus) (stepSignature, bool) {
-	panic("unported: mj-core/src/acp/step_clock.rs signature_of")
+	switch {
+	case update.AgentMessageChunk != nil:
+		return stepSignature{kind: stepSignatureMessage}, true
+	case update.AgentThoughtChunk != nil:
+		return stepSignature{kind: stepSignatureThought}, true
+	case update.Plan != nil:
+		return stepSignature{kind: stepSignaturePlan}, true
+	case update.ToolCall != nil:
+		id := string(update.ToolCall.ToolCallID)
+		// An absent status is `pending`, ACP's default.
+		status := schema.ToolCallStatusPending
+		if update.ToolCall.Status != nil {
+			status = *update.ToolCall.Status
+		}
+		toolStatuses[id] = status
+		return stepSignature{kind: stepSignatureTool, id: id, status: status}, true
+	case update.ToolCallUpdate != nil:
+		id := string(update.ToolCallUpdate.ToolCallID)
+		var status schema.ToolCallStatus
+		if update.ToolCallUpdate.Status != nil {
+			status = *update.ToolCallUpdate.Status
+			toolStatuses[id] = status
+		} else if known, ok := toolStatuses[id]; ok {
+			// No status of its own: the call is still doing what it was.
+			status = known
+		} else {
+			// A call whose creation this connection never saw defaults to
+			// `pending`, which is what ACP says an unstated status means.
+			status = schema.ToolCallStatusPending
+		}
+		return stepSignature{kind: stepSignatureTool, id: id, status: status}, true
+	}
+	// The user's own message is not the agent working.
+	return stepSignature{}, false
 }

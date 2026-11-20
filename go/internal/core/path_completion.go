@@ -12,7 +12,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // MaxCandidates is the most candidates any completion returns. A longer list
@@ -133,7 +137,17 @@ type PathCompletion struct {
 	Truncated bool `json:"truncated"`
 }
 
+// MarshalJSON writes no candidates as `[]`, as serde writes an empty Vec.
+func (c PathCompletion) MarshalJSON() ([]byte, error) {
+	type wire PathCompletion
+	c.Candidates = nonNilStrings(c.Candidates)
+	return marshalSerdeJSON(wire(c))
+}
+
 func (c *PathCompletion) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "candidates", "truncated"); err != nil {
+		return err
+	}
 	type wire PathCompletion
 	return unmarshalDenyUnknown(data, (*wire)(c))
 }
@@ -150,7 +164,45 @@ func LooksLikePath(text string) bool {
 
 // LocalCompletions completes an on-disk path without spawning a shell.
 func LocalCompletions(prefix string, kind CompletionKind) []string {
-	panic("unported: mj-core/src/path_completion.rs local_completions")
+	// This host's separators: `/`, and also `\` on Windows, where a typed
+	// `C:\Users\me\pr` or a verbatim `\\?\C:\...` path has no `/` to split
+	// on. The directory keeps the separator as typed.
+	directory, fragment := "", prefix
+	if end := strings.LastIndexFunc(prefix, func(c rune) bool { return c < utf8.RuneSelf && isPathSeparator(byte(c)) }); end >= 0 {
+		// Every separator is one ASCII byte.
+		directory, fragment = prefix[:end+1], prefix[end+1:]
+	}
+	lookup := directory
+	if lookup == "" {
+		lookup = "."
+	}
+	entries, err := os.ReadDir(lookup)
+	if err != nil {
+		slog.Debug("path completion directory could not be read", "path", lookup, "error", err)
+		return []string{}
+	}
+	matches := []string{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !utf8.ValidString(name) {
+			slog.Debug("path completion skipped a non-UTF-8 directory entry", "path", rustPathPush(lookup, name))
+			continue
+		}
+		if !strings.HasPrefix(name, fragment) {
+			continue
+		}
+		// Rust's `Path::is_dir` follows a link to what it names.
+		info, err := os.Stat(rustPathPush(lookup, name))
+		isDirectory := err == nil && info.IsDir()
+		switch {
+		case isDirectory:
+			matches = append(matches, directory+name+"/")
+		case kind == CompletionKindAny:
+			matches = append(matches, directory+name)
+		}
+	}
+	slices.Sort(matches)
+	return slices.Compact(matches)
 }
 
 // SSHCompletions completes a path through the configured SSH target.
@@ -160,7 +212,42 @@ func LocalCompletions(prefix string, kind CompletionKind) []string {
 // prefix remains literal while the trailing glob is expanded only by the
 // remote shell.
 func SSHCompletions(ssh *SshTarget, prefix string, kind CompletionKind, executor CommandExecutor) ([]string, error) {
-	panic("unported: mj-core/src/path_completion.rs ssh_completions")
+	if prefix == "" {
+		return []string{}, nil
+	}
+	// `-p` marks directories with a trailing separator, which is how a
+	// candidate says it has children.
+	remoteCommand := fmt.Sprintf("ls -dp -- %s* 2>/dev/null", PosixQuote(prefix))
+	if kind == CompletionKindDirectories {
+		remoteCommand = fmt.Sprintf("ls -d -- %s*/ 2>/dev/null", PosixQuote(prefix))
+	}
+	args := slices.Clone(ssh.SSHArgs)
+	args = append(args,
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=3",
+		"-o", "ServerAliveInterval=2",
+		"-o", "ServerAliveCountMax=1",
+	)
+	PushConnectionReuseArgs(&args, ssh)
+	args = append(args, ssh.Destination, remoteCommand)
+	command := NewCommandSpec("ssh", args).
+		WithSSHDestination(ssh.Destination).
+		WithPurpose("complete remote mount directory")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return nil, err
+	}
+	if output.Status != 0 {
+		return []string{}, nil
+	}
+	matches := []string{}
+	for _, path := range rustLines(fromUTF8Lossy(output.Stdout)) {
+		if extendsPrefixByOneComponent(path, prefix, kind) {
+			matches = append(matches, path)
+		}
+	}
+	slices.Sort(matches)
+	return slices.Compact(matches), nil
 }
 
 // extendsPrefixByOneComponent is whether a remote line is a candidate: it

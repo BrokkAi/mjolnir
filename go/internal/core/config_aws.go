@@ -5,7 +5,13 @@
 
 package core
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"slices"
+	"strings"
+	"unicode"
+)
 
 // DefaultBedrockSessionPolicy grants the permissions to invoke and look up
 // Bedrock models, used as the session policy when a profile names a role and
@@ -63,13 +69,35 @@ func (a *AwsRoleConfig) UnmarshalJSON(data []byte) error {
 // whether the role exists are limits AWS owns and reports when it refuses a
 // request.
 func (a AwsRoleConfig) Validate(id string) error {
-	panic("unported: mj-core/src/config/aws.rs AwsRoleConfig::validate")
+	if !validRoleARN(a.RoleARN) {
+		return fmt.Errorf("profile %s: [profiles.%s.aws] role_arn %s is not a role ARN such as arn:aws:iam::123456789012:role/name",
+			debugString(id), id, debugString(a.RoleARN))
+	}
+	if a.SessionPolicy != nil {
+		var document any
+		if err := json.Unmarshal([]byte(*a.SessionPolicy), &document); err != nil {
+			return fmt.Errorf("profile %s: [profiles.%s.aws] session_policy is not a JSON policy document", debugString(id), id)
+		}
+		if _, ok := document.(map[string]any); !ok {
+			return fmt.Errorf("profile %s: [profiles.%s.aws] session_policy is not a JSON policy document", debugString(id), id)
+		}
+	}
+	for _, arn := range a.SessionPolicyARNs {
+		if !strings.HasPrefix(arn, "arn:") {
+			return fmt.Errorf("profile %s: [profiles.%s.aws] session_policy_arns entry %s is not an ARN",
+				debugString(id), id, debugString(arn))
+		}
+	}
+	return nil
 }
 
 // SessionPolicyFingerprint is a fingerprint of what narrows the role: the
 // effective inline policy and the managed policy ARNs, in a fixed order.
 func (a AwsRoleConfig) SessionPolicyFingerprint() string {
-	panic("unported: mj-core/src/config/aws.rs AwsRoleConfig::session_policy_fingerprint")
+	arns := slices.Clone(a.SessionPolicyARNs)
+	slices.Sort(arns)
+	policy, _ := a.EffectiveSessionPolicy()
+	return CredentialFingerprint([]byte(policy + "\n" + strings.Join(arns, "\n")))
 }
 
 // EffectiveSessionPolicy is the inline session policy to send, or false when
@@ -86,5 +114,19 @@ func (a AwsRoleConfig) EffectiveSessionPolicy() (string, bool) {
 
 // validRoleARN accepts arn:<partition>:iam::<12 digits>:role/<path and name>.
 func validRoleARN(arn string) bool {
-	panic("unported: mj-core/src/config/aws.rs valid_role_arn")
+	parts := strings.SplitN(arn, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "iam" || parts[3] != "" {
+		return false
+	}
+	partition, account, resource := parts[1], parts[4], parts[5]
+	if partition == "" || len(account) != 12 {
+		return false
+	}
+	for i := 0; i < len(account); i++ {
+		if account[i] < '0' || account[i] > '9' {
+			return false
+		}
+	}
+	name, ok := strings.CutPrefix(resource, "role/")
+	return ok && name != "" && !strings.ContainsFunc(name, unicode.IsSpace)
 }

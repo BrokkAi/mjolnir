@@ -5,6 +5,8 @@
 
 package core
 
+import "fmt"
+
 // OutcomeReason is why a turn or command ended as it did. The Rust default
 // is LegacyUnclassified.
 type OutcomeReason string
@@ -114,7 +116,14 @@ func turnOutcomeKindResult(kind TurnOutcomeKind) TurnResult {
 // of that turn. Harness questions remain authoritative when no usable
 // assessment exists.
 func (o *MaterializedTurnOutcome) RequiresInput(assessment *TurnAssessment) bool {
-	panic("unported: mj-core/src/event_outcome.rs MaterializedTurnOutcome::requires_input")
+	if assessment != nil && assessment.MatchesCompletion(o) && assessment.QuestionDismissed() {
+		return false
+	}
+	// A failed or interrupted turn can also need a person's intervention.
+	if assessment != nil && assessment.AppliesTo(o) && assessment.Action != nil && *assessment.Action == AssessmentActionAwaitInput {
+		return true
+	}
+	return o.Result().Kind == TurnResultKindInputRequired
 }
 
 func (o *MaterializedTurnOutcome) Result() TurnResult {
@@ -170,7 +179,75 @@ func CommandResultWorker(commandID string, command RelayCommandKind, outcome Com
 
 // CommandResultCompleted is CommandResult::completed.
 func CommandResultCompleted(commandID string, command RelayCommandKind, outcome RelayCommandOutcome) CommandResult {
-	panic("unported: mj-core/src/event_outcome.rs CommandResult::completed")
+	result := CommandResultWorker(commandID, command, CommandResultKindSucceeded, nil, nil)
+	var shell *UserShellResult
+	switch v := outcome.(type) {
+	case RelayCommandOutcomeUserShell:
+		shell = &v.Result
+	case *RelayCommandOutcomeUserShell:
+		shell = &v.Result
+	}
+	if shell == nil {
+		return result
+	}
+	var reason OutcomeReason
+	switch shell.Status {
+	case UserShellStatusExited:
+		if shell.ExitCode != nil && *shell.ExitCode == 0 {
+			return result
+		}
+		reason = OutcomeReasonNonzeroExit
+	case UserShellStatusSignaled:
+		reason = OutcomeReasonSignaled
+	case UserShellStatusTimedOut:
+		reason = OutcomeReasonTimedOut
+	case UserShellStatusCancelled:
+		reason = OutcomeReasonRequestedCancellation
+	case UserShellStatusInterrupted:
+		reason = OutcomeReasonWorkerRestarted
+	default:
+		reason = OutcomeReasonCommandFailed
+	}
+	if reason.ExpectedCancellation() {
+		result.Outcome = CommandResultKindCancelled
+	} else {
+		result.Outcome = CommandResultKindFailed
+	}
+	result.Reason = &reason
+	var message string
+	if shell.Error != nil {
+		message = *shell.Error
+	} else {
+		exitCode := "None"
+		if shell.ExitCode != nil {
+			exitCode = fmt.Sprintf("Some(%d)", *shell.ExitCode)
+		}
+		signal := "None"
+		if shell.Signal != nil {
+			signal = "Some(" + debugString(*shell.Signal) + ")"
+		}
+		message = fmt.Sprintf("Shell ended with status %s, exit code %s, signal %s",
+			userShellStatusDebug(shell.Status), exitCode, signal)
+	}
+	result.Message = &message
+	return result
+}
+
+// userShellStatusDebug is UserShellStatus's Rust Debug name.
+func userShellStatusDebug(status UserShellStatus) string {
+	switch status {
+	case UserShellStatusExited:
+		return "Exited"
+	case UserShellStatusSignaled:
+		return "Signaled"
+	case UserShellStatusTimedOut:
+		return "TimedOut"
+	case UserShellStatusCancelled:
+		return "Cancelled"
+	case UserShellStatusInterrupted:
+		return "Interrupted"
+	}
+	return "Failed"
 }
 
 // ApiTurnOutcome: the public turn result keeps raw provider evidence but

@@ -5,11 +5,17 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"unicode/utf8"
+
+	acp "github.com/BrokkAi/acp-go/schema/unstable"
 )
 
 // ArchiveSchemaVersion is the baseline schema. Every payload occupies
@@ -267,7 +273,26 @@ func (m *LinkedWorktreeMetadata) UnmarshalJSON(data []byte) error {
 
 // slashPathSerialize writes a plain relative path as /-separated text.
 func slashPathSerialize(path string) (string, error) {
-	panic("unported: mj-core/src/archive.rs slash_path::serialize")
+	if filepath.IsAbs(path) || filepath.VolumeName(path) != "" ||
+		(path != "" && os.IsPathSeparator(path[0])) {
+		return "", errors.New("worktree path is not a plain relative path")
+	}
+	var parts []string
+	for i, part := range strings.FieldsFunc(path, func(r rune) bool { return r < utf8.RuneSelf && os.IsPathSeparator(uint8(r)) }) {
+		// Rust's Path::components drops "." after the first component; a
+		// leading "." is CurDir and ".." is ParentDir, neither plain.
+		if part == "." && i > 0 {
+			continue
+		}
+		if part == "." || part == ".." {
+			return "", errors.New("worktree path is not a plain relative path")
+		}
+		if !utf8.ValidString(part) {
+			return "", errors.New("worktree path is not UTF-8")
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "/"), nil
 }
 
 // slashPathDeserialize reads /-separated text as a native relative path.
@@ -275,7 +300,22 @@ func slashPathDeserialize(text string) (string, error) {
 	if text == "" {
 		return "", errors.New("worktree path is empty")
 	}
-	panic("unported: mj-core/src/archive.rs slash_path::deserialize")
+	// Rust collects the parts into a PathBuf, pushing each in turn without
+	// normalizing: an empty part adds nothing, and an absolute part (a
+	// Windows drive path) replaces what came before.
+	path := ""
+	for _, part := range strings.Split(text, "/") {
+		switch {
+		case part == "":
+		case filepath.IsAbs(part) || path == "":
+			path = part
+		case os.IsPathSeparator(path[len(path)-1]):
+			path += part
+		default:
+			path += string(filepath.Separator) + part
+		}
+	}
+	return path, nil
 }
 
 // LinkedWorktreeManifest is a linked worktree's manifest entry: its record
@@ -454,7 +494,25 @@ func (s *CanonicalSessionSnapshot) Validate() error {
 // bookkeeping advances them without changing what the session contains.
 // LastActivityAtMs is a watermark of the same kind.
 func (s *CanonicalSessionSnapshot) ContentMatches(other *CanonicalSessionSnapshot) bool {
-	panic("unported: mj-core/src/archive.rs CanonicalSessionSnapshot::content_matches")
+	return transcriptValuesEqual(s.CommandLedger, other.CommandLedger) &&
+		transcriptValuesEqual(s.AssessmentState, other.AssessmentState) &&
+		transcriptValuesEqual(s.NotificationStack, other.NotificationStack) &&
+		transcriptValuesEqual(s.Transcript, other.Transcript) &&
+		transcriptValuesEqual(s.QueuedPrompts, other.QueuedPrompts) &&
+		transcriptValuesEqual(s.Session.withoutActivityWatermark(), other.Session.withoutActivityWatermark())
+}
+
+// MarshalJSON writes an empty transcript or queue as [], as serde does.
+func (s CanonicalSessionSnapshot) MarshalJSON() ([]byte, error) {
+	type plain CanonicalSessionSnapshot
+	v := plain(s)
+	if v.Transcript == nil {
+		v.Transcript = []CanonicalTranscriptItem{}
+	}
+	if v.QueuedPrompts == nil {
+		v.QueuedPrompts = []CanonicalQueuedPrompt{}
+	}
+	return transcriptMarshal(v)
 }
 
 type CanonicalSessionState struct {
@@ -843,7 +901,7 @@ func (p CanonicalQueuedPrompt) MarshalJSON() ([]byte, error) {
 		members = append(members, transcriptMember{"kind", p.Kind})
 	}
 	members = append(members,
-		transcriptMember{"content", p.Content},
+		transcriptMember{"content", transcriptNonNilValues(p.Content)},
 		transcriptMember{"queued_at_ms", p.QueuedAtMs})
 	return transcriptMarshalMembers(members)
 }
@@ -1038,7 +1096,20 @@ func (NativeArtifactDataFile) isNativeArtifactData()  {}
 // NativeArtifactDataOpenFile opens path for reading without following a
 // final symlink, and refuses anything but a regular file.
 func NativeArtifactDataOpenFile(path string) (*os.File, error) {
-	panic("unported: mj-core/src/archive.rs NativeArtifactData::open_file")
+	file, err := os.OpenFile(path, os.O_RDONLY|archiveNoFollow, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		file.Close()
+		return nil, errors.New("native artifact is not a regular file")
+	}
+	return file, nil
 }
 
 // NativeArtifactDataBytesOf materializes a small provider record when its
@@ -1055,15 +1126,198 @@ func NativeArtifactDataBytesOf(data NativeArtifactData) ([]byte, error) {
 }
 
 func (a *NativeArtifact) Size() (uint64, error) {
-	panic("unported: mj-core/src/archive.rs NativeArtifact::size")
+	switch data := a.Data.(type) {
+	case NativeArtifactDataFile:
+		file, err := NativeArtifactDataOpenFile(string(data))
+		if err != nil {
+			return 0, err
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			return 0, err
+		}
+		return uint64(info.Size()), nil
+	case NativeArtifactDataBytes:
+		return uint64(len(data)), nil
+	}
+	return 0, errors.New("native artifact has no data")
 }
 
 func (a *NativeArtifact) Reader() (io.ReadCloser, error) {
-	panic("unported: mj-core/src/archive.rs NativeArtifact::reader")
+	switch data := a.Data.(type) {
+	case NativeArtifactDataFile:
+		return NativeArtifactDataOpenFile(string(data))
+	case NativeArtifactDataBytes:
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+	return nil, errors.New("native artifact has no data")
 }
 
 func validateCanonicalSession(snapshot *CanonicalSessionSnapshot) error {
-	panic("unported: mj-core/src/archive.rs validate_canonical_session")
+	if snapshot.NotificationStack != nil {
+		if err := snapshot.NotificationStack.validateAt(snapshot.EventFrontier); err != nil {
+			return err
+		}
+	}
+	if snapshot.AssessmentState != nil {
+		if _, err := CheckpointDecode(transcriptParse(snapshot.AssessmentState)); err != nil {
+			return err
+		}
+	}
+	if !IsLowerHexSha256(snapshot.EventFrontierDigest) {
+		return errors.New("canonical event frontier digest must be 64 lowercase hexadecimal characters")
+	}
+	if (snapshot.EventFrontier == 0) != (snapshot.EventFrontierDigest == EventFrontierGenesisDigest) {
+		return errors.New("canonical event frontier and digest are inconsistent")
+	}
+	if (snapshot.EventFrontier == 0) != (snapshot.Session.LastActivityAtMs == nil) {
+		return errors.New("canonical event frontier and activity watermark are inconsistent")
+	}
+	if snapshot.Session.Execution != (CanonicalExecutionState{State: CanonicalExecutionStateIdle}) {
+		return errors.New("canonical session is not idle at the checkpoint barrier")
+	}
+	if title := snapshot.Session.SessionTitle; title != nil && strings.TrimSpace(*title) == "" {
+		return errors.New("canonical session title is empty")
+	}
+	itemIDs := map[string]struct{}{}
+	var previousPosition uint64
+	outputs := TerminalOutputsOfCanonical(snapshot.Transcript)
+	for i := range snapshot.Transcript {
+		item := &snapshot.Transcript[i]
+		if strings.TrimSpace(item.StableID) == "" {
+			return errors.New("canonical transcript item id is empty")
+		}
+		if _, duplicate := itemIDs[item.StableID]; duplicate {
+			return fmt.Errorf("duplicate canonical transcript item id '%s'", item.StableID)
+		}
+		itemIDs[item.StableID] = struct{}{}
+		if item.Position == 0 {
+			return fmt.Errorf("canonical transcript item '%s' has zero position", item.StableID)
+		}
+		if item.Position < previousPosition {
+			return errors.New("canonical transcript items are out of position order")
+		}
+		if item.Position > snapshot.EventFrontier {
+			return fmt.Errorf("canonical transcript item '%s' is beyond event frontier %d", item.StableID, snapshot.EventFrontier)
+		}
+		_, agent := item.Body.(CanonicalTranscriptBodyAgent)
+		switch ordinal := item.LatestContentEventOrdinal; {
+		case agent && ordinal != nil:
+			if !(*ordinal >= item.Position && *ordinal <= snapshot.EventFrontier) {
+				return fmt.Errorf("canonical agent message '%s' has invalid latest content ordinal %d", item.StableID, *ordinal)
+			}
+		case agent:
+			return fmt.Errorf("canonical agent message '%s' has no latest content ordinal", item.StableID)
+		case ordinal != nil:
+			return fmt.Errorf("canonical non-agent transcript item '%s' has latest content ordinal %d", item.StableID, *ordinal)
+		}
+		if item.LastChangedAtMs < item.CreatedAtMs {
+			return fmt.Errorf("canonical transcript item '%s' changed before it was created", item.StableID)
+		}
+		streaming := false
+		switch body := item.Body.(type) {
+		case CanonicalTranscriptBodyAgent:
+			streaming = body.Streaming
+		case CanonicalTranscriptBodyThought:
+			streaming = body.Streaming
+		}
+		if streaming {
+			return fmt.Errorf("canonical transcript item '%s' is still streaming at the checkpoint barrier", item.StableID)
+		}
+		switch body := item.Body.(type) {
+		case CanonicalTranscriptBodyMessage:
+			valid := body.Event != nil && strings.TrimSpace(body.Event.Key) != ""
+			if valid {
+				_, hasText := body.Event.MessageText()
+				valid = hasText && item.StableID == MessageItemID(body.Event.Key)
+			}
+			if !valid {
+				return fmt.Errorf("canonical message '%s' has invalid message data", item.StableID)
+			}
+		case CanonicalTranscriptBodyUser:
+			for index, block := range body.Content {
+				var decoded acp.ContentBlock
+				if err := json.Unmarshal(block, &decoded); err != nil {
+					return fmt.Errorf("canonical transcript item '%s' has invalid ACP content block %d: %w", item.StableID, index, err)
+				}
+			}
+		case CanonicalTranscriptBodyAgent:
+			if err := archiveValidateChunks(item.StableID, body.Chunks); err != nil {
+				return err
+			}
+		case CanonicalTranscriptBodyThought:
+			if err := archiveValidateChunks(item.StableID, body.Chunks); err != nil {
+				return err
+			}
+		case CanonicalTranscriptBodyTool:
+			var call acp.ToolCall
+			if err := json.Unmarshal(body.Call, &call); err != nil {
+				return fmt.Errorf("canonical transcript item '%s' has invalid ACP tool call: %w", item.StableID, err)
+			}
+			embedded := outputs.EmbeddedForTool(item.StableID)
+			for j := range embedded {
+				if err := validateCanonicalTerminalOutput(&embedded[j], item.StableID); err != nil {
+					return err
+				}
+			}
+			for _, terminalID := range body.TerminalRefs {
+				if strings.TrimSpace(terminalID) == "" {
+					return fmt.Errorf("canonical transcript item '%s' refers to a terminal with an empty id", item.StableID)
+				}
+			}
+		case CanonicalTranscriptBodyTerminalOutput:
+			if err := validateCanonicalTerminalOutput(&body.Record, item.StableID); err != nil {
+				return err
+			}
+		case CanonicalTranscriptBodyPlan:
+			var plan acp.Plan
+			if err := json.Unmarshal(body.Plan, &plan); err != nil {
+				return fmt.Errorf("canonical transcript item '%s' has invalid ACP plan: %w", item.StableID, err)
+			}
+		case CanonicalTranscriptBodyPlanProposal:
+			if strings.TrimSpace(body.ProposalID) == "" {
+				return fmt.Errorf("canonical transcript item '%s' has an empty plan proposal id", item.StableID)
+			}
+		}
+		previousPosition = item.Position
+	}
+
+	queueIDs := map[string]struct{}{}
+	for i := range snapshot.QueuedPrompts {
+		prompt := &snapshot.QueuedPrompts[i]
+		if strings.TrimSpace(prompt.CommandID) == "" {
+			return errors.New("canonical queued prompt id is empty")
+		}
+		if _, duplicate := queueIDs[prompt.CommandID]; duplicate {
+			return fmt.Errorf("duplicate canonical queued prompt id '%s'", prompt.CommandID)
+		}
+		queueIDs[prompt.CommandID] = struct{}{}
+		if len(prompt.Content) == 0 {
+			return fmt.Errorf("canonical queued prompt '%s' has no content", prompt.CommandID)
+		}
+		if prompt.Kind.Kind == CanonicalQueuedCommandKindSetConfig &&
+			(strings.TrimSpace(prompt.Kind.Key) == "" || strings.TrimSpace(prompt.Kind.Value) == "") {
+			return fmt.Errorf("canonical queued configuration change '%s' is incomplete", prompt.CommandID)
+		}
+		for index, content := range prompt.Content {
+			var decoded acp.ContentBlock
+			if err := json.Unmarshal(content, &decoded); err != nil {
+				return fmt.Errorf("canonical queued prompt '%s' has invalid ACP content block %d: %w", prompt.CommandID, index, err)
+			}
+		}
+	}
+	return nil
+}
+
+func archiveValidateChunks(stableID string, chunks []json.RawMessage) error {
+	for index, chunk := range chunks {
+		var decoded acp.ContentChunk
+		if err := json.Unmarshal(chunk, &decoded); err != nil {
+			return fmt.Errorf("canonical transcript item '%s' has invalid ACP content chunk %d: %w", stableID, index, err)
+		}
+	}
+	return nil
 }
 
 func validateCanonicalTerminalOutput(output *CanonicalTerminalOutput, stableID string) error {

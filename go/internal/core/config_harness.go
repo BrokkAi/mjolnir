@@ -5,14 +5,21 @@
 package core
 
 import (
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	acpschema "github.com/BrokkAi/acp-go/schema"
+	"github.com/tailscale/hujson"
 )
 
 // HarnessKind is a harness Mjolnir runs (serde kebab-case; note OpenCode is
@@ -147,7 +154,23 @@ func AntigravityQuotaPoolOfScope(scope string) (AntigravityQuotaPool, bool) {
 // ModelMatchesScope is true when model contains one of the comma-separated
 // scope fragments and none of the fragments written with a leading `!`.
 func ModelMatchesScope(model, scope string) bool {
-	panic("unported: mj-core/src/config/harness.rs model_matches_scope")
+	model = strings.ToLower(model)
+	contains := func(fragment string) bool { return strings.Contains(model, strings.ToLower(fragment)) }
+	included := false
+	for _, fragment := range strings.Split(scope, ",") {
+		fragment = strings.TrimSpace(fragment)
+		if fragment == "" {
+			continue
+		}
+		if excluded, ok := strings.CutPrefix(fragment, "!"); ok {
+			if excluded != "" && contains(excluded) {
+				return false
+			}
+			continue
+		}
+		included = included || contains(fragment)
+	}
+	return included
 }
 
 // ModelOffer is the models Mjolnir offers from a profile: its `models`
@@ -209,7 +232,10 @@ const (
 
 // HarnessHostCurrent is the machine this process runs on.
 func HarnessHostCurrent() HarnessHost {
-	panic("unported: mj-core/src/config/harness.rs HarnessHost::current")
+	if runtime.GOOS == "darwin" {
+		return HarnessHostMacOs
+	}
+	return HarnessHostOther
 }
 
 // HarnessLoginStore is where a profile's login lives on the machine that runs
@@ -243,7 +269,11 @@ func (HarnessLoginStoreMacKeychain) isHarnessLoginStore() {}
 func (s HarnessLoginStoreFile) LockMarker() (string, error) { return s.Marker, nil }
 
 func (HarnessLoginStoreMacKeychain) LockMarker() (string, error) {
-	panic("unported: mj-core/src/config/harness.rs HarnessLoginStore::lock_marker")
+	home, ok := UserHome()
+	if !ok {
+		return "", errors.New("the user's home directory is unknown")
+	}
+	return HarnessAuthenticationMarker(HarnessKindClaude, filepath.Join(home, HarnessKindClaude.DefaultHomeLeaf())), nil
 }
 
 // ClaudeKeychainService is the Keychain item Claude Code stores its login in
@@ -499,7 +529,27 @@ type StagedObjectVersion struct {
 // Apply writes this setting into a staged document's root object, creating
 // the objects along Path and stamping ObjectVersion where it is missing.
 func (s StagedSetting) Apply(root map[string]any) error {
-	panic("unported: mj-core/src/config/harness.rs StagedSetting::apply")
+	if len(s.Path) == 0 {
+		return errors.New("staged setting path must name a key")
+	}
+	key, parents := s.Path[len(s.Path)-1], s.Path[:len(s.Path)-1]
+	object := root
+	for _, parent := range parents {
+		s.stampVersion(object)
+		child, ok := object[parent]
+		if !ok {
+			child = map[string]any{}
+			object[parent] = child
+		}
+		next, ok := child.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s must be a JSON object", parent)
+		}
+		object = next
+	}
+	s.stampVersion(object)
+	object[key] = s.Value
+	return nil
 }
 
 func (s StagedSetting) stampVersion(object map[string]any) {
@@ -518,7 +568,30 @@ func (s StagedSetting) stampVersion(object map[string]any) {
 // It stays owned when the bridge does not offer the policy's mode right now,
 // such as Auto on a model without it, so no other mode can be chosen then.
 func (e ExecutionEnforcement) OwnedConfigKeys(options []acpschema.SessionConfigOption) []string {
-	panic("unported: mj-core/src/config/harness.rs ExecutionEnforcement::owned_config_keys")
+	// `mode` resolves the way a SetConfig for it does: the option with that
+	// id, else the Mode-category one.
+	keys := []string{}
+	if e.acpMode != nil {
+		var mode *acpschema.SessionConfigOption
+		if e.acpModeSelector != nil {
+			for i := range options {
+				if string(options[i].ID) == *e.acpModeSelector {
+					mode = &options[i]
+					break
+				}
+			}
+		}
+		if mode == nil {
+			mode = FindSessionConfigOption(options, "mode")
+		}
+		if mode != nil {
+			keys = append(keys, string(mode.ID))
+		}
+	}
+	if e.acpSetting != nil {
+		keys = append(keys, e.acpSetting[0])
+	}
+	return keys
 }
 
 // Label is the name reported to the UI for the mode this session runs in.
@@ -589,7 +662,11 @@ func derefString(value *string) (string, bool) {
 // absoluteEnvironmentPath is an XDG base directory variable's value, when it
 // names an absolute path. XDG requires a relative value to be ignored.
 func absoluteEnvironmentPath(name string) (string, bool) {
-	panic("unported: mj-core/src/config/harness.rs absolute_environment_path")
+	value, ok := os.LookupEnv(name)
+	if !ok || !filepath.IsAbs(value) {
+		return "", false
+	}
+	return value, true
 }
 
 // HarnessAuthenticationMarker is the file inside a harness home that proves
@@ -611,13 +688,38 @@ func HarnessAuthenticationMarker(kind HarnessKind, home string) string {
 // for it, on every target and every operating system, so this always sets the
 // variable.
 func (k HarnessKind) ConfigureHomeEnvironment(home string, environment map[string]string) {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::configure_home_environment")
+	configRoot := home
+	if k.NestedHome() {
+		environment["XDG_DATA_HOME"] = Text(Join(home, ".data"))
+		if parent, ok := pathParent(home); ok {
+			configRoot = parent
+		}
+	}
+	environment[k.HomeEnv()] = Text(configRoot)
+	if k == HarnessKindAntigravity {
+		// The managed pin owns updates, including during login/discovery.
+		environment["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
+	}
+	if k == HarnessKindKimi {
+		// Kimi treats a session lock recorded under another hostname, or
+		// under a live process with the recorded PID, as held forever. A home
+		// survives container replacement (a new hostname) and a killed turn
+		// leaves its lock behind, so the lock would refuse every later
+		// prompt. One harness owns each staged home, so the lock has no
+		// second writer to guard against.
+		environment["KIMI_CODE_SESSION_LOCK"] = "0"
+	}
 }
 
 // ConfigureStagedHomeEnvironment pins global instructions to a session-owned
 // staged copy.
 func (k HarnessKind) ConfigureStagedHomeEnvironment(home string, environment map[string]string) {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::configure_staged_home_environment")
+	k.ConfigureHomeEnvironment(home, environment)
+	if k == HarnessKindOpenCode {
+		// OpenCode replaces its XDG global config root with this override.
+		// Both variables must name the session-owned staged profile.
+		environment["OPENCODE_CONFIG_DIR"] = Text(home)
+	}
 }
 
 // ConfigureProfileHomeEnvironment points this harness's own CLI at a
@@ -641,7 +743,8 @@ func (k HarnessKind) ConfigureProfileHomeEnvironment(home string, host HarnessHo
 // IsDefaultHome reports whether home is the conventional home
 // HarnessKind.DefaultHomeLeaf names beneath the user's home.
 func (k HarnessKind) IsDefaultHome(home string) bool {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::is_default_home")
+	user, ok := UserHome()
+	return ok && samePath(home, filepath.Join(user, k.DefaultHomeLeaf()))
 }
 
 // ManagedProfileHome is the profile home Mjolnir creates during managed
@@ -662,7 +765,14 @@ func (k HarnessKind) ManagedProfileHomeIn(configRoot, profileID string) string {
 // with an XDG home (HarnessKind.NestedHome): $XDG_CONFIG_HOME/<id>, or
 // ~/.config/<id> when that variable is unset or relative, as XDG requires.
 func (k HarnessKind) IsOwnNestedHome(home string) bool {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::is_own_nested_home")
+	if !k.NestedHome() {
+		return false
+	}
+	if config, ok := absoluteEnvironmentPath("XDG_CONFIG_HOME"); ok {
+		return samePath(k.HomeFromEnvironment(config), home)
+	}
+	user, ok := UserHome()
+	return ok && samePath(filepath.Join(user, k.DefaultHomeLeaf()), home)
 }
 
 // NestedDataDir is where a harness with an XDG home (HarnessKind.NestedHome)
@@ -672,7 +782,20 @@ func (k HarnessKind) IsOwnNestedHome(home string) bool {
 // under <home>/.data/<id> (HarnessKind.ConfigureHomeEnvironment). False for
 // a harness whose data lives in its home.
 func (k HarnessKind) NestedDataDir(home string) (string, bool) {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::nested_data_dir")
+	if !k.NestedHome() {
+		return "", false
+	}
+	staged := filepath.Join(home, ".data", k.ID())
+	if !k.IsOwnNestedHome(home) {
+		return staged, true
+	}
+	if data, ok := absoluteEnvironmentPath("XDG_DATA_HOME"); ok {
+		return filepath.Join(data, k.ID()), true
+	}
+	if user, ok := UserHome(); ok {
+		return filepath.Join(user, ".local/share", k.ID()), true
+	}
+	return staged, true
 }
 
 // KeepsLoginInHome reports whether this harness keeps its login inside its
@@ -720,14 +843,24 @@ func (k HarnessKind) HomeFromEnvironment(value string) string {
 // HomeCLIArgs is the extra CLI arguments required to point this harness's ACP
 // or login command at home, in addition to ConfigureHomeEnvironment.
 func (k HarnessKind) HomeCLIArgs(home string) []string {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::home_cli_args")
+	if k == HarnessKindAntigravity {
+		return []string{"--gemini-dir", Text(home)}
+	}
+	return []string{}
 }
 
 // HomeCLIArgsFromEnvironment is the extra CLI arguments for k derived from
 // environment, failing if a harness that requires a CLI home argument is
 // missing its home variable.
 func (k HarnessKind) HomeCLIArgsFromEnvironment(environment map[string]string) ([]string, error) {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::home_cli_args_from_environment")
+	args := []string{}
+	if value, ok := environment[k.HomeEnv()]; ok {
+		args = k.HomeCLIArgs(k.HomeFromEnvironment(value))
+	}
+	if k == HarnessKindAntigravity && len(args) == 0 {
+		return nil, errors.New("Antigravity staged home is missing")
+	}
+	return args, nil
 }
 
 // HomeEnv is the environment variable used to isolate this harness's
@@ -759,7 +892,28 @@ func (k HarnessKind) HomeEnv() string {
 // when HomeEnv is unset. The single source for both setup discovery and
 // import.
 func (k HarnessKind) DefaultHomeLeaf() string {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::default_home_leaf")
+	switch k {
+	case HarnessKindCodex:
+		return ".codex"
+	case HarnessKindClaude:
+		return ".claude"
+	case HarnessKindKimi:
+		return ".kimi-code"
+	case HarnessKindGrok:
+		return ".grok"
+	case HarnessKindMuse:
+		return ".config/muse"
+	case HarnessKindOpenCode:
+		return ".config/opencode"
+	case HarnessKindDsh:
+		// DeepSeek's own CLI, `dsh`, keeps its home here. Detection keys off
+		// the user's DeepSeek installation; the dsh-acp bridge that serves a
+		// session is installed on demand and proves nothing about one.
+		return ".dsh"
+	case HarnessKindAntigravity:
+		return ".gemini"
+	}
+	panic(fmt.Sprintf("unknown harness kind %q", string(k)))
 }
 
 // CredentialFileName is the harness-home-relative file that proves the
@@ -771,7 +925,25 @@ func (k HarnessKind) DefaultHomeLeaf() string {
 // them in, the JSON array `opencode auth export` prints, which every launch
 // imports (OpencodeACPScript).
 func (k HarnessKind) CredentialFileName() string {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::credential_file_name")
+	switch k {
+	case HarnessKindCodex, HarnessKindGrok, HarnessKindMuse:
+		return "auth.json"
+	case HarnessKindClaude:
+		return ".credentials.json"
+	case HarnessKindKimi:
+		return "credentials/kimi-code.json"
+	case HarnessKindOpenCode:
+		return ".data/opencode/mjolnir-credentials.json"
+	case HarnessKindDsh:
+		// dsh-acp keeps no login: it reads its key from its environment
+		// (HarnessKind.APIKeyVariable), so every DSH profile authenticates
+		// with an API key and nothing that decides a login reads this. No
+		// dsh-acp release writes the file.
+		return "auth.json"
+	case HarnessKindAntigravity:
+		return "antigravity-cli/antigravity-oauth-token"
+	}
+	panic(fmt.Sprintf("unknown harness kind %q", string(k)))
 }
 
 // HarnessKindClaudeGhRule is the Claude Code allow rule for the GitHub CLI
@@ -781,7 +953,32 @@ const HarnessKindClaudeGhRule = "Bash(gh:*)"
 // GhApproval is where this harness accepts Mjolnir's `gh` approval. See
 // GhApproval for how each destination is delivered to a session.
 func (k HarnessKind) GhApproval() GhApproval {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::gh_approval")
+	switch k {
+	case HarnessKindCodex:
+		// Codex loads every `rules/*.rules` file from its home.
+		return GhApprovalStagedFile{Value: "rules/mj-gh.rules"}
+	case HarnessKindClaude:
+		return GhApprovalSessionOptions{}
+	case HarnessKindKimi, HarnessKindGrok:
+		return GhApprovalStagedFile{Value: "config.toml"}
+	case HarnessKindOpenCode:
+		// OpenCode merges its configuration documents and takes the last
+		// matching permission rule, so the rule is asserted in the document
+		// Mjolnir supplies last.
+		return GhApprovalSessionConfigDocument{Value: "OPENCODE_CONFIG_CONTENT"}
+	case HarnessKindMuse:
+		// Muse keeps command prefixes in its adapter, not its settings.
+		return GhApprovalAdapterEnvironment{Value: "MUSE_ACP_ALLOW_COMMAND_PREFIXES"}
+	case HarnessKindAntigravity:
+		// agy's Auto mode answers commands from its project's grant file,
+		// which the launch stages for the servers it registers.
+		return GhApprovalLaunchFile{Value: "config/projects/default-cli-project.json"}
+	case HarnessKindDsh:
+		// dsh-acp has no configuration of its own; its permission mode is
+		// all-or-nothing, so the worker answers its `gh` requests.
+		return GhApprovalAcpRequest{}
+	}
+	panic(fmt.Sprintf("unknown harness kind %q", string(k)))
 }
 
 // KeepsLoginsInDatabase reports whether this harness keeps its logins in its
@@ -827,7 +1024,18 @@ func (k HarnessKind) SharesLocalLogin() bool { return k == HarnessKindCodex }
 
 // CLIBinaryName is the harness's own command-line program, as found on PATH.
 func (k HarnessKind) CLIBinaryName() string {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::cli_binary_name")
+	switch k {
+	case HarnessKindOpenCode:
+		return "opencode"
+	case HarnessKindDsh:
+		// DeepSeek's `dsh`, not the dsh-acp bridge Mjolnir installs to serve
+		// sessions: a machine carrying the bridge but no DeepSeek
+		// installation has nothing to detect.
+		return "dsh"
+	case HarnessKindAntigravity:
+		return "agy"
+	}
+	return string(k)
 }
 
 // AgentInstructionsFile is the project instruction file this harness reads.
@@ -884,14 +1092,40 @@ func (k HarnessKind) ID() string {
 
 // DisplayName is the product name shown to people.
 func (k HarnessKind) DisplayName() string {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::display_name")
+	switch k {
+	case HarnessKindCodex:
+		return "Codex"
+	case HarnessKindClaude:
+		return "Claude Code"
+	case HarnessKindKimi:
+		return "Kimi Code"
+	case HarnessKindGrok:
+		return "Grok Build"
+	case HarnessKindMuse:
+		return "Muse Code"
+	case HarnessKindOpenCode:
+		return "OpenCode"
+	case HarnessKindDsh:
+		return "DSH"
+	case HarnessKindAntigravity:
+		return "Antigravity"
+	}
+	panic(fmt.Sprintf("unknown harness kind %q", string(k)))
 }
 
 // InstallAdvice is how to install this harness's own CLI, as the start of a
 // sentence: "Install it with `npm install -g @openai/codex` (Node.js 22 or
 // newer)". `mj login` and launch preflight say it when the CLI is missing.
 func (k HarnessKind) InstallAdvice() string {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::install_advice")
+	switch k {
+	case HarnessKindCodex:
+		return "Install it with `npm install -g @openai/codex` (Node.js 22 or newer)"
+	case HarnessKindClaude:
+		return "Install it with `npm install -g @anthropic-ai/claude-code`"
+	case HarnessKindDsh:
+		return "Install it with `npm install -g @brokkai/dsh-acp` (Node.js 22 or newer), or from a release archive at https://github.com/BrokkAi/dsh-acp/releases"
+	}
+	return fmt.Sprintf("Install the %s CLI", k.DisplayName())
 }
 
 // HarnessKindEveryDisplayNameOr is every harness by product name, in
@@ -912,13 +1146,134 @@ func HarnessKindEveryDisplayNameOr() string {
 // Unconstrained targets run every harness without approval checks; only the
 // sandbox is disabled for Muse, whose profile may opt back into auto-review.
 func (k HarnessKind) ExecutionEnforcement(policy ExecutionPolicy) (ExecutionEnforcement, bool) {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::execution_enforcement")
+	unconstrained := policy.IsUnconstrained()
+	switch {
+	// Antigravity's guardian is its Auto mode: agy approves workspace edits,
+	// runs commands in its terminal sandbox, and has a separate reviewer
+	// agent clear or ask about commands that would leave it. Unconstrained
+	// targets use Default mode, which has no reviewer, and the flag that
+	// approves every request except agy's own system command denylist.
+	case k == HarnessKindAntigravity:
+		enforcement := ExecutionEnforcement{label: "auto / guardian", acpMode: staticString("auto")}
+		if unconstrained {
+			enforcement.label = "default / skip-permissions"
+			enforcement.acpMode = staticString("default")
+			enforcement.launchFlag = staticString("--dangerously-skip-permissions")
+		}
+		return enforcement, true
+	case k == HarnessKindMuse && unconstrained:
+		// Isolated targets run Muse without permission checks, like
+		// OpenCode's `permission = "allow"`: `allowAll` emits no permission
+		// requests, so the adapter's client-side auto-review would have
+		// nothing to decide, and it stays off. The container remains the
+		// isolation boundary, so only the sandbox is off.
+		//
+		// muse-acp 0.10 puts Default, Read-only, and Plan on `mode` and the
+		// approval policy on `approval_mode`. Container images built before
+		// it keep the approval policy on `mode`.
+		return ExecutionEnforcement{
+			label:             "allowAll / no-review / sandbox-off / :ask-me",
+			acpMode:           staticString("allowAll"),
+			acpModeSelector:   staticString("approval_mode"),
+			acpSetting:        &[2]string{"auto_review", "off"},
+			launchEnvironment: &[2]string{"MUSE_APPROVAL_MODE", "allowAll"},
+			launchArgument:    &LaunchArgument{Variable: "MUSE_SERVE_ARGS", Word: "--disable-sandbox", Present: true},
+			stagedSetting:     museStagedSetting(),
+		}, true
+	// Muse's guardian is muse-acp's auto-review: a read-only Muse reviewer
+	// answers each approval, and a failed review denies. `muse serve`
+	// refuses Muse's own `:auto-review` profile, so the staged profile asks
+	// and the adapter's reviewer answers. The sandbox stays on even when a
+	// profile's MUSE_SERVE_ARGS disables it.
+	case k == HarnessKindMuse:
+		return ExecutionEnforcement{
+			label:             "promptUnmatched / auto-review / :ask-me",
+			acpMode:           staticString("promptUnmatched"),
+			acpModeSelector:   staticString("approval_mode"),
+			acpSetting:        &[2]string{"auto_review", "on"},
+			launchEnvironment: &[2]string{"MUSE_APPROVAL_MODE", "promptUnmatched"},
+			launchArgument:    &LaunchArgument{Variable: "MUSE_SERVE_ARGS", Word: "--disable-sandbox", Present: false},
+			stagedSetting:     museStagedSetting(),
+		}, true
+	case k == HarnessKindCodex && !unconstrained:
+		return ExecutionEnforcement{
+			label:             "agent / guardian",
+			acpMode:           staticString("agent"),
+			launchEnvironment: &[2]string{"INITIAL_AGENT_MODE", "agent"},
+		}, true
+	case k == HarnessKindCodex:
+		return ExecutionEnforcement{
+			label:             "agent-full-access",
+			acpMode:           staticString("agent-full-access"),
+			launchEnvironment: &[2]string{"INITIAL_AGENT_MODE", "agent-full-access"},
+		}, true
+	// Claude's guardian defaults to its Auto mode; a profile's
+	// `claude_permission_mode` picks another.
+	case k == HarnessKindClaude && !unconstrained:
+		return HarnessKindClaudeGuardianEnforcement(ClaudePermissionModeAuto), true
+	// dsh-acp records each session's permission policy and keeps it across
+	// `session/load`, so the policy is selected on every open: a resumed
+	// session, or one moved from a container to a raw target, must not keep
+	// an earlier one. `ask` sends every write, command and MCP call to Hel as
+	// a permission request.
+	case k == HarnessKindDsh && !unconstrained:
+		return ExecutionEnforcement{label: "permission-ask", acpSetting: &[2]string{"permission_mode", "ask"}}, true
+	// Every remaining harness keeps the configuration its user wrote.
+	case !unconstrained:
+		return ExecutionEnforcement{}, false
+	case k == HarnessKindClaude:
+		return ExecutionEnforcement{
+			label:          "bypassPermissions / sandbox-off",
+			acpMode:        staticString("bypassPermissions"),
+			sessionSandbox: new(bool),
+		}, true
+	case k == HarnessKindKimi:
+		return ExecutionEnforcement{label: "auto", acpMode: staticString("auto")}, true
+	case k == HarnessKindGrok:
+		return ExecutionEnforcement{
+			label:             "always-approve / sandbox-off",
+			launchFlag:        staticString("--always-approve"),
+			launchEnvironment: &[2]string{"GROK_SANDBOX", "off"},
+		}, true
+	// OpenCode reads permission rules from its config file; `allow` is its
+	// shorthand for allowing every tool without a prompt.
+	case k == HarnessKindOpenCode:
+		return ExecutionEnforcement{
+			label:         "permission-allow",
+			stagedSetting: &StagedSetting{File: "opencode.json", Path: []string{"permission"}, Value: "allow"},
+		}, true
+	// dsh-acp has no sandbox to disable; `allow` stops it asking.
+	case k == HarnessKindDsh:
+		return ExecutionEnforcement{label: "permission-allow", acpSetting: &[2]string{"permission_mode", "allow"}}, true
+	}
+	panic(fmt.Sprintf("unknown harness kind %q", string(k)))
+}
+
+// staticString is a pointer to a copy of value, for the optional fields of
+// ExecutionEnforcement.
+func staticString(value string) *string { return &value }
+
+// museStagedSetting is the profile both Muse policies stage.
+func museStagedSetting() *StagedSetting {
+	return &StagedSetting{
+		File:          "settings.json",
+		Path:          []string{"permissions", "default_profile"},
+		Value:         ":ask-me",
+		ObjectVersion: &StagedObjectVersion{Key: "schema_version", Version: 1},
+	}
 }
 
 // HarnessKindClaudeGuardianEnforcement is Claude under configured approvals,
 // in the profile's chosen mode.
 func HarnessKindClaudeGuardianEnforcement(mode ClaudePermissionMode) ExecutionEnforcement {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::claude_guardian_enforcement")
+	label := "auto / guardian"
+	switch mode {
+	case ClaudePermissionModeAcceptEdits:
+		label = "acceptEdits / guardian"
+	case ClaudePermissionModeManual:
+		label = "default / guardian"
+	}
+	return ExecutionEnforcement{label: label, acpMode: staticString(mode.ACPMode())}
 }
 
 // ResolveExecutionEnforcement is execution enforcement for policy, honoring
@@ -948,7 +1303,40 @@ func (k HarnessKind) ConfigureExecutionEnvironment(policy ExecutionPolicy, envir
 // HarnessProfile.ConfigureExecutionEnvironment: the launch argument, then the
 // launch environment.
 func applyExecutionEnforcementEnvironment(enforcement ExecutionEnforcement, environment map[string]string) {
-	panic("unported: mj-core/src/config/harness.rs configure_execution_environment")
+	if argument, ok := enforcement.LaunchArgument(); ok {
+		args := environment[argument.Variable]
+		words := strings.Fields(args)
+		hasWord := false
+		for _, word := range words {
+			if word == argument.Word {
+				hasWord = true
+				break
+			}
+		}
+		if argument.Present && !hasWord {
+			if args != "" {
+				args += " "
+			}
+			environment[argument.Variable] = args + argument.Word
+		} else if !argument.Present && hasWord {
+			// The harness splits this variable on whitespace without quoting,
+			// so rejoining the other words keeps their meaning.
+			rest := make([]string, 0, len(words))
+			for _, word := range words {
+				if word != argument.Word {
+					rest = append(rest, word)
+				}
+			}
+			if len(rest) == 0 {
+				delete(environment, argument.Variable)
+			} else {
+				environment[argument.Variable] = strings.Join(rest, " ")
+			}
+		}
+	}
+	if key, value, ok := enforcement.LaunchEnvironment(); ok {
+		environment[key] = value
+	}
 }
 
 // Guardian is who reviews this harness's tool approvals under configured
@@ -1026,7 +1414,23 @@ func (k HarnessKind) HasNativeSubagents() bool {
 // native session files, scanned when a checkpoint captures or restores native
 // state.
 func (k HarnessKind) NativeSessionDirs() []string {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::native_session_dirs")
+	switch k {
+	case HarnessKindCodex:
+		return []string{"sessions", "archived_sessions"}
+	case HarnessKindClaude:
+		return []string{"projects", "session-env", "file-history"}
+	case HarnessKindKimi, HarnessKindGrok, HarnessKindDsh:
+		return []string{"sessions"}
+	case HarnessKindMuse:
+		return []string{".data/muse/sessions"}
+	case HarnessKindOpenCode:
+		return []string{".data/opencode"}
+	case HarnessKindAntigravity:
+		// agy's conversation database and, beside it, the files each
+		// conversation owns, such as the full output of a long command.
+		return []string{"antigravity-cli/conversations", "antigravity-cli/brain"}
+	}
+	panic(fmt.Sprintf("unknown harness kind %q", string(k)))
 }
 
 // MCPServersNeedAdvertisedHTTP reports whether this harness's adapter passes
@@ -1051,7 +1455,25 @@ func (k HarnessKind) ExtraManagedEntrypoint() (string, bool) {
 // BridgeArgs is the harness-specific arguments that start its ACP stdio
 // server.
 func (k HarnessKind) BridgeArgs(policy ExecutionPolicy) []string {
-	panic("unported: mj-core/src/config/harness.rs HarnessKind::bridge_args")
+	flag, hasFlag := k.LaunchFlagFor(policy)
+	switch k {
+	case HarnessKindKimi, HarnessKindOpenCode:
+		return []string{"acp"}
+	case HarnessKindGrok:
+		args := []string{"agent"}
+		if hasFlag {
+			args = append(args, flag)
+		}
+		return append(args, "stdio")
+	case HarnessKindAntigravity:
+		args := []string{"acp", "--disable-telemetry"}
+		if hasFlag {
+			args = append(args, flag)
+		}
+		return args
+	}
+	// dsh-acp is an ACP server and nothing else.
+	return []string{}
 }
 
 // ParseHarnessKind is FromStr for HarnessKind: it reads an ID.
@@ -1126,11 +1548,59 @@ func QuotaProviderOrdinal(p QuotaProvider) int {
 }
 
 func quotaProviderFromEndpoint(id string, endpoint *string) QuotaProvider {
-	panic("unported: mj-core/src/config/harness.rs QuotaProvider::from_endpoint")
+	// The endpoint decides when there is one: an unrecognised host (a proxy,
+	// OpenRouter, a local server) is its own provider, never the table id's
+	// default vendor. Without an endpoint the provider id decides.
+	if endpoint != nil {
+		if host, ok := urlHost(*endpoint); ok {
+			if provider, ok := quotaProviderRecognise(host); ok {
+				return provider
+			}
+			return QuotaProviderOther{Value: host}
+		}
+	}
+	if provider, ok := quotaProviderRecognise(id); ok {
+		return provider
+	}
+	return QuotaProviderOther{Value: id}
+}
+
+// urlHost is the host of an absolute URL, as Rust's url crate writes it:
+// lowercase, without a port.
+func urlHost(text string) (string, bool) {
+	parsed, err := url.Parse(text)
+	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" {
+		return "", false
+	}
+	return strings.ToLower(parsed.Hostname()), true
 }
 
 func quotaProviderRecognise(value string) (QuotaProvider, bool) {
-	panic("unported: mj-core/src/config/harness.rs QuotaProvider::recognise")
+	switch CodexProviderKindFromHost(value) {
+	case CodexProviderKindZai:
+		return QuotaProviderZai{}, true
+	case CodexProviderKindDeepSeek:
+		return QuotaProviderDeepSeek{}, true
+	}
+	value = strings.ToLower(value)
+	domain := func(suffix string) bool { return value == suffix || strings.HasSuffix(value, "."+suffix) }
+	switch {
+	case value == "deepseek":
+		return QuotaProviderDeepSeek{}, true
+	case domain("anthropic.com") || value == "anthropic":
+		return QuotaProviderAnthropic{}, true
+	case domain("openai.com") || value == "openai":
+		return QuotaProviderOpenAI{}, true
+	case domain("googleapis.com") || value == "google" || value == "gemini" || value == "google-vertex":
+		return QuotaProviderGoogle{}, true
+	case domain("meta.ai") || domain("meta.com") || value == "meta":
+		return QuotaProviderMeta{}, true
+	case domain("x.ai") || value == "xai" || value == "grok":
+		return QuotaProviderXAI{}, true
+	case domain("moonshot.ai") || domain("moonshot.cn") || value == "moonshot" || value == "kimi" || value == "kimi-for-coding":
+		return QuotaProviderMoonshot{}, true
+	}
+	return nil, false
 }
 
 // CodexQuotaSource is where a Codex profile's quota comes from, decided once
@@ -1175,7 +1645,32 @@ func CodexQuotaSourceOfProfile(profile HarnessProfile) CodexQuotaSource {
 // codexQuotaSourceResolve decides collection and attribution together from
 // the same configuration.
 func codexQuotaSourceResolve(profile HarnessProfile) (CodexQuotaSource, QuotaProvider) {
-	panic("unported: mj-core/src/config/harness.rs CodexQuotaSource::resolve")
+	provider, err := profile.CodexProvider()
+	if err != nil {
+		slog.Warn("read quota provider", "home", profile.Home, "error", err.Error())
+		return CodexQuotaSourceUnreadable{Value: err.Error()}, QuotaProviderOther{Value: "Codex (provider unavailable)"}
+	}
+	if provider == nil {
+		return CodexQuotaSourceChatGptLogin{}, QuotaProviderOpenAI{}
+	}
+	if provider.UsesCodexLogin() {
+		// The quota collector reads ChatGPT's allowance, even for an API-key
+		// login whose launch environment redirects model requests elsewhere.
+		return CodexQuotaSourceChatGptLogin{}, QuotaProviderOpenAI{}
+	}
+	var endpoint *string
+	if custom := provider.Custom(); custom != nil {
+		endpoint = &custom.BaseURL
+	}
+	attribution := quotaProviderFromEndpoint(provider.ID(), endpoint)
+	if provider.Custom() != nil {
+		apiKey, hasKey := profile.codexProviderAPIKeyFrom(*provider)
+		host, hasHost := provider.Host()
+		if hasKey && hasHost {
+			return CodexQuotaSourceProvider{Value: ProviderCredential{ID: provider.ID(), Host: host, APIKey: apiKey}}, attribution
+		}
+	}
+	return CodexQuotaSourceUsagePriced{Provider: provider.ID()}, attribution
 }
 
 // ProviderCredential is where a profile's quota lives when the profile
@@ -1200,7 +1695,19 @@ type MuseQuotaEndpoints struct {
 // MuseQuotaEndpointsOf: Muse's own TBH overrides take the profile environment
 // first, then the daemon environment, exactly as the quota adapter does.
 func MuseQuotaEndpointsOf(environment map[string]string) MuseQuotaEndpoints {
-	panic("unported: mj-core/src/config/harness.rs MuseQuotaEndpoints::of")
+	configured := func(name, fallback string) string {
+		if value, ok := environment[name]; ok {
+			return value
+		}
+		if value, ok := os.LookupEnv(name); ok {
+			return value
+		}
+		return fallback
+	}
+	return MuseQuotaEndpoints{
+		Mint: configured("TBH_MINT_BASE_URL", "https://api.meta.ai"),
+		Auth: configured("TBH_AUTH_BASE_URL", "https://auth.meta.com"),
+	}
 }
 
 type HarnessProfile struct {
@@ -1325,7 +1832,12 @@ type ProfileDiscoveryInputs struct {
 // CapabilitiesKey keys one configured profile's entry in every capability
 // cache.
 func (p ProfileDiscoveryInputs) CapabilitiesKey(id string, enabled bool) string {
-	panic("unported: mj-core/src/config/harness.rs ProfileDiscoveryInputs::capabilities_key")
+	inputs, err := serdeJSON([]any{"profile-capabilities-v2", id, enabled, p})
+	if err != nil {
+		panic(fmt.Sprintf("profile capability inputs serialize: %v", err))
+	}
+	digest := sha256.Sum256(inputs)
+	return LowerHex(digest[:])
 }
 
 // DefaultContextBytes is the transcript budget a profile without an explicit
@@ -1344,13 +1856,99 @@ const GuardianReviewSession = "session"
 // installationHome compares discovery identities without rewriting the
 // user's configured path.
 func installationHome(path string) string {
-	panic("unported: mj-core/src/config/harness.rs installation_home")
+	expanded, err := ExpandLocal(path)
+	if err != nil {
+		expanded = path
+	}
+	if canonical, err := filepath.EvalSymlinks(expanded); err == nil {
+		if absolute, err := filepath.Abs(canonical); err == nil {
+			return absolute
+		}
+	}
+	// Homes that are not present yet still have a stable lexical identity.
+	separator := string(filepath.Separator)
+	rooted := filepath.IsAbs(expanded) || strings.HasPrefix(expanded, separator)
+	volume := filepath.VolumeName(expanded)
+	var components []string
+	for _, component := range strings.FieldsFunc(expanded[len(volume):], func(r rune) bool {
+		return r == '/' || os.IsPathSeparator(uint8(r)) && r < 0x80
+	}) {
+		switch component {
+		case ".":
+		case "..":
+			if len(components) > 0 && components[len(components)-1] != ".." {
+				components = components[:len(components)-1]
+			} else if !rooted {
+				components = append(components, component)
+			}
+		default:
+			components = append(components, component)
+		}
+	}
+	normalized := strings.Join(components, separator)
+	if rooted {
+		return volume + separator + normalized
+	}
+	return volume + normalized
 }
 
 // QuotaProvider reads the harness's own provider configuration. Call on a
 // background goroutine, never from a UI event or render loop.
 func (h HarnessProfile) QuotaProvider() QuotaProvider {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::quota_provider")
+	switch h.Kind {
+	// Claude's collector reads Anthropic's fixed OAuth usage endpoint,
+	// regardless of the model-request base URL. Bedrock is usage priced and
+	// has no subscription allowance to attribute elsewhere.
+	case HarnessKindClaude:
+		return QuotaProviderAnthropic{}
+	case HarnessKindAntigravity:
+		return QuotaProviderGoogle{}
+	case HarnessKindGrok:
+		return QuotaProviderXAI{}
+	case HarnessKindKimi:
+		return QuotaProviderMoonshot{}
+	case HarnessKindDsh:
+		return QuotaProviderDeepSeek{}
+	case HarnessKindMuse:
+		endpoints := MuseQuotaEndpointsOf(h.Environment.Resolved())
+		return quotaProviderFromEndpoint("meta", &endpoints.Mint)
+	case HarnessKindCodex:
+		_, provider := codexQuotaSourceResolve(h)
+		return provider
+	}
+	// OpenCode.
+	configuration := map[string]any{}
+	for _, name := range []string{"opencode.json", "opencode.jsonc"} {
+		text, err := os.ReadFile(filepath.Join(h.Home, name))
+		if err != nil {
+			continue
+		}
+		value, ok := opencodeConfiguration(string(text))
+		if !ok {
+			continue
+		}
+		if object, ok := value.(map[string]any); ok {
+			for key, member := range object {
+				configuration[key] = member
+			}
+		}
+	}
+	model, _ := configuration["model"].(string)
+	id, _, found := strings.Cut(model, "/")
+	if !found {
+		return QuotaProviderOther{Value: "OpenCode"}
+	}
+	var endpoint *string
+	if providers, ok := configuration["provider"].(map[string]any); ok {
+		if provider, ok := providers[id].(map[string]any); ok {
+			if options, ok := provider["options"].(map[string]any); ok {
+				if baseURL, ok := options["baseURL"].(string); ok {
+					endpoint = &baseURL
+				}
+			}
+		}
+	}
+	return quotaProviderFromEndpoint(id, endpoint)
 }
 
 // NewHarnessProfile creates an enabled profile with all optional settings
@@ -1360,7 +1958,22 @@ func NewHarnessProfile(kind HarnessKind, home string) HarnessProfile {
 }
 
 func (h HarnessProfile) DiscoveryInputs() ProfileDiscoveryInputs {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::discovery_inputs")
+	environment := make(map[string]EnvironmentValue, len(h.Environment.Sources()))
+	for key, value := range h.Environment.Sources() {
+		environment[key] = value
+	}
+	var inherited []string
+	for name := range h.Environment.InheritedNames() {
+		inherited = append(inherited, name)
+	}
+	return ProfileDiscoveryInputs{
+		Kind:                 h.Kind,
+		Home:                 h.Home,
+		Environment:          environment,
+		CodexProfile:         cloneStringPointer(h.CodexProfile),
+		ManagedInstall:       Pin(h.Kind).InstallID,
+		InheritedEnvironment: inherited,
+	}
 }
 
 // CapabilitiesKey is the stable identity of configured capabilities,
@@ -1415,25 +2028,47 @@ func (h HarnessProfile) ConfigureExecutionEnvironment(policy ExecutionPolicy, en
 // CodexProvider is the provider named in this profile's Codex configuration,
 // if any. Always nil for another harness, or when Codex uses its default.
 func (h HarnessProfile) CodexProvider() (*CodexProvider, error) {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::codex_provider")
+	if h.Kind != HarnessKindCodex {
+		return nil, nil
+	}
+	return ReadCodexProvider(h.Home, h.CodexProfile)
 }
 
 // ModelService is the service this profile's harness sends model requests
 // to.
 func (h HarnessProfile) ModelService() (ModelService, error) {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::model_service")
+	if service, ok := ModelServiceOfHarness(h.Kind); ok {
+		return service, nil
+	}
+	provider, err := h.CodexProvider()
+	if err != nil {
+		return nil, err
+	}
+	if provider == nil {
+		return ModelServiceCodexBuiltIn{Value: BuiltInCodexProviderOpenAi}, nil
+	}
+	switch definition := provider.Definition.(type) {
+	case CodexProviderDefinitionBuiltIn:
+		return ModelServiceCodexBuiltIn{Value: definition.Provider}, nil
+	case CodexProviderDefinitionCustom:
+		return ModelServiceCodexCustom{Value: normalizedBaseURL(definition.Provider.BaseURL)}, nil
+	}
+	panic("codex provider without a definition")
 }
 
 // CodexConfig is the Codex configuration this profile runs with, as staged
 // into every session home. Nil for another harness, or when there is none.
 func (h HarnessProfile) CodexConfig() (*string, error) {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::codex_config")
+	if h.Kind != HarnessKindCodex {
+		return nil, nil
+	}
+	return EffectiveConfig(h.Home, h.CodexProfile)
 }
 
 // DescribeCodexConfig is how this profile's Codex configuration is named in
 // messages.
 func (h HarnessProfile) DescribeCodexConfig() string {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::describe_codex_config")
+	return DescribeConfig(h.Home, h.CodexProfile)
 }
 
 // AuthScheme is how this profile proves it may talk to its service.
@@ -1446,7 +2081,45 @@ func (h HarnessProfile) DescribeCodexConfig() string {
 // copied into the staged home, so the profile is just as set up as an
 // `env_key` one and needs no interactive login.
 func (h HarnessProfile) AuthScheme() AuthScheme {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::auth_scheme")
+	if h.Kind.KeepsLoginsInDatabase() {
+		return AuthSchemeNativeLoginStore{}
+	}
+	if envKey, ok := h.Kind.APIKeyVariable(); ok {
+		return AuthSchemeApiKey{EnvKey: envKey}
+	}
+	if h.Kind == HarnessKindClaude {
+		if value, ok := h.Environment.Get("CLAUDE_CODE_USE_BEDROCK"); ok && (value == "1" || value == "true" || value == "TRUE") {
+			return AuthSchemeAwsCredentialChain{}
+		}
+	}
+	provider, err := h.CodexProvider()
+	// An unreadable or malformed home is reported where it is read
+	// (EnsureReady, staging, doctor), not silently here.
+	if err != nil || provider == nil {
+		return AuthSchemeNativeLogin{}
+	}
+	switch {
+	case provider.UsesAWSCredentials():
+		return AuthSchemeAwsCredentialChain{}
+	case provider.NeedsNoAuthentication():
+		return AuthSchemeNoAuthentication{}
+	}
+	custom := provider.Custom()
+	if custom == nil {
+		// The built-in OpenAI provider uses Codex's own login.
+		return AuthSchemeNativeLogin{}
+	}
+	// A custom provider names its key either in an environment variable
+	// (`env_key`) or inline in its own `config.toml`
+	// (`experimental_bearer_token`); either way there is no interactive login
+	// and no credential file to sync or expire.
+	switch key := custom.Key().(type) {
+	case CodexProviderKeyEnvKey:
+		return AuthSchemeApiKey{EnvKey: string(key)}
+	case CodexProviderKeyInline:
+		return AuthSchemeInlineApiKey{}
+	}
+	return AuthSchemeNativeLogin{}
 }
 
 // CodexProviderAPIKey is the API key this Codex profile's custom provider
@@ -1466,7 +2139,17 @@ func (h HarnessProfile) CodexProviderAPIKey() (string, bool) {
 }
 
 func (h HarnessProfile) codexProviderAPIKeyFrom(provider CodexProvider) (string, bool) {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::codex_provider_api_key_from")
+	custom := provider.Custom()
+	if custom == nil {
+		return "", false
+	}
+	switch key := custom.Key().(type) {
+	case CodexProviderKeyEnvKey:
+		return h.Environment.Get(string(key))
+	case CodexProviderKeyInline:
+		return string(key), true
+	}
+	return "", false
 }
 
 // AuthenticationMarker is the file inside this profile's home that proves it
@@ -1475,22 +2158,105 @@ func (h HarnessProfile) codexProviderAPIKeyFrom(provider CodexProvider) (string,
 // login kept in the harness's database (AuthSchemeNativeLoginStore) has no
 // such file in the profile home; this names where a staged home carries it.
 func (h HarnessProfile) AuthenticationMarker() string {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::authentication_marker")
+	switch h.AuthScheme().(type) {
+	case AuthSchemeApiKey:
+		// A harness that reads its key from its environment keeps no file
+		// that proves it; its kind's marker names where one would be.
+		if _, ok := h.Kind.APIKeyVariable(); ok {
+			return HarnessAuthenticationMarker(h.Kind, h.Home)
+		}
+		return filepath.Join(h.Home, "config.toml")
+	case AuthSchemeInlineApiKey, AuthSchemeAwsCredentialChain, AuthSchemeNoAuthentication:
+		return filepath.Join(h.Home, "config.toml")
+	}
+	return HarnessAuthenticationMarker(h.Kind, h.Home)
 }
 
 // CredentialFreshness: see CredentialFreshness. An API key does not expire or
 // refresh, so it orders no copies.
 func (h HarnessProfile) CredentialFreshness(bytes []byte) (int64, bool) {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::credential_freshness")
+	if _, ok := h.AuthScheme().(AuthSchemeNativeLogin); !ok {
+		return 0, false
+	}
+	return CredentialFreshness(h.Kind, bytes)
 }
 
 // CredentialExpiry: see CredentialExpiry. An API key has no expiry.
 func (h HarnessProfile) CredentialExpiry(bytes []byte) (int64, bool) {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::credential_expiry")
+	if _, ok := h.AuthScheme().(AuthSchemeNativeLogin); !ok {
+		return 0, false
+	}
+	return CredentialExpiry(h.Kind, bytes)
 }
 
 func (h HarnessProfile) validate(id string) error {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::validate")
+	if err := ValidateID("profile", id); err != nil {
+		return err
+	}
+	if h.Kind.NestedHome() {
+		leaf := h.Kind.ID()
+		name := h.Kind.DisplayName()
+		if name, _ := pathFileName(h.Home); name != leaf {
+			return fmt.Errorf("%s profile %s home must end in /%s (its XDG configuration directory)", name, debugString(id), leaf)
+		}
+		if h.Environment.ContainsKey("XDG_DATA_HOME") {
+			return fmt.Errorf("%s profile %s must not override its managed XDG_DATA_HOME", name, debugString(id))
+		}
+	}
+	if h.Home == "" {
+		return fmt.Errorf("profile %s has an empty home path", debugString(id))
+	}
+	// The entries as written, so one whose reference did not resolve is
+	// checked too.
+	environment := h.Environment.Sources()
+	for key := range environment {
+		if strings.TrimSpace(key) == "" || strings.Contains(key, "=") {
+			return fmt.Errorf("profile %s contains an invalid environment variable name", debugString(id))
+		}
+	}
+	if _, ok := environment[h.Kind.HomeEnv()]; ok {
+		return fmt.Errorf("profile %s must use `home`, not override %s in `environment`", debugString(id), h.Kind.HomeEnv())
+	}
+	for _, owned := range h.Kind.LaunchOwnedEnvironment() {
+		if _, ok := environment[owned[0]]; ok {
+			return fmt.Errorf("profile %s must not set %s in `environment`; %s", debugString(id), owned[0], owned[1])
+		}
+	}
+	if h.ContextWindowBytes != nil && *h.ContextWindowBytes < 32*1024 {
+		return fmt.Errorf("profile %s: `context_window_bytes` must be at least 32768", debugString(id))
+	}
+	if name := h.CodexProfile; name != nil {
+		if h.Kind != HarnessKindCodex {
+			return fmt.Errorf("profile %s: `codex_profile` applies only to a Codex profile", debugString(id))
+		}
+		if !IsOverlayName(*name) {
+			return fmt.Errorf("profile %s: `codex_profile` %s must be a plain name of ASCII letters, digits, '-' or '_', naming <home>/<name>%s",
+				debugString(id), debugString(*name), OverlaySuffix)
+		}
+	}
+	if reviewer := h.GuardianReviewModel; reviewer != nil {
+		if strings.TrimSpace(*reviewer) == "" {
+			return fmt.Errorf("profile %s: `guardian_review_model` must be %s, %s, or a model slug from the provider's catalog",
+				debugString(id), debugString(GuardianReviewNewestFlash), debugString(GuardianReviewSession))
+		}
+		// Whether a Codex profile names a custom provider is up to its home,
+		// which EnsureReady reads; another harness never does.
+		if h.Kind != HarnessKindCodex {
+			return fmt.Errorf("profile %s: `guardian_review_model` applies only to a Codex profile whose config.toml names a custom model provider, because Mjolnir generates the model catalog only for those", debugString(id))
+		}
+	}
+	if h.ClaudePermissionMode != nil && h.Kind != HarnessKindClaude {
+		return fmt.Errorf("profile %s: `claude_permission_mode` applies only to a Claude profile", debugString(id))
+	}
+	if !h.ThirdPartyModels && h.Kind != HarnessKindAntigravity {
+		return fmt.Errorf("profile %s: `third_party_models` applies only to an Antigravity profile", debugString(id))
+	}
+	if h.AWS != nil {
+		if err := h.AWS.Validate(id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AntigravityPools is the Antigravity quota pools this profile uses; empty
@@ -1531,7 +2297,38 @@ func (h HarnessProfile) ModelOffer() ModelOffer {
 // supplies it. For OpenCode it is every provider key variable OpenCode reads
 // and every variable its configuration substitutes as `{env:NAME}`.
 func (h *HarnessProfile) InheritProviderKey() {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::inherit_provider_key")
+	// A projection reads no files, and a malformed home is reported by
+	// EnsureReady.
+	if !resolvesValues() {
+		return
+	}
+	if h.Kind == HarnessKindDsh {
+		h.resolveDshKey()
+		return
+	}
+	if envKey, ok := h.Kind.APIKeyVariable(); ok {
+		h.Environment.inherit(envKey)
+		return
+	}
+	if h.Kind == HarnessKindOpenCode {
+		environment := openCodeEnvironmentRead(h.Home)
+		names := make(map[string]struct{}, len(environment.keys)+len(environment.references))
+		for name := range environment.keys {
+			names[name] = struct{}{}
+		}
+		for name := range environment.references {
+			names[name] = struct{}{}
+		}
+		for _, name := range sortedKeys(names) {
+			h.Environment.inherit(name)
+		}
+		return
+	}
+	if provider, err := h.CodexProvider(); err == nil && provider != nil {
+		if custom := provider.Custom(); custom != nil && custom.EnvKey != nil {
+			h.Environment.inherit(*custom.EnvKey)
+		}
+	}
 }
 
 // resolveDshKey decides the key a DSH profile authenticates with, first
@@ -1541,7 +2338,54 @@ func (h *HarnessProfile) InheritProviderKey() {
 // from `secrets.toml`. The first three are DSH's own order, so a session uses
 // the key the person's `dsh` uses.
 func (h *HarnessProfile) resolveDshKey() {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::resolve_dsh_key")
+	envKey, ok := h.Kind.APIKeyVariable()
+	if !ok {
+		return
+	}
+	home := h.Home
+	// A DSH file Mjolnir cannot use keeps a lower source usable: the session
+	// sends only the key, so DSH's own refusal of the file does not stop it.
+	// It is the reason when no source has a key.
+	var problems []string
+	usable := func(key *string, err error) *string {
+		if err != nil {
+			problems = append(problems, err.Error())
+			return nil
+		}
+		if key == nil || strings.TrimSpace(*key) == "" {
+			return nil
+		}
+		return key
+	}
+	stored, storedErr := dshStored(home, envKey)
+	accountSignedIn := storedErr == nil && stored.AccountSignedIn
+	key := usable(stored.APIKey, storedErr)
+	if key == nil {
+		if value, found := environmentFromProcess(envKey); found {
+			key = usable(&value, nil)
+		}
+	}
+	if key == nil {
+		key = usable(dshDotenv(home, envKey))
+	}
+	if len(problems) > 0 {
+		slog.Warn("DSH credentials: "+strings.Join(problems, "; "), "home", home)
+	}
+	if key != nil {
+		h.Environment.supply(envKey, *key)
+		return
+	}
+	if h.SuppliesAPIKey(envKey) {
+		return
+	}
+	if accountSignedIn {
+		problems = append(problems, fmt.Sprintf(
+			"DSH in %s is signed in to a DeepSeek account but holds no API key; dsh-acp authenticates only with an API key, so save one in DSH's Models settings, or export %s and run `mj daemon restart`",
+			home, envKey))
+	}
+	if len(problems) > 0 {
+		h.Environment.refuse(envKey, strings.Join(problems, "; "))
+	}
 }
 
 // OpencodeEnvironmentLogins is the provider keys this OpenCode profile's
@@ -1549,7 +2393,17 @@ func (h *HarnessProfile) resolveDshKey() {
 // with any of them without a stored login, and prefers a stored login when
 // it has both. Empty for another harness.
 func (h HarnessProfile) OpencodeEnvironmentLogins() []string {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::opencode_environment_logins")
+	logins := []string{}
+	if h.Kind != HarnessKindOpenCode {
+		return logins
+	}
+	// OpenCode tests each variable for truth, so an empty one is unset.
+	for _, name := range sortedKeys(openCodeEnvironmentRead(h.Home).keys) {
+		if value, ok := h.Environment.Get(name); ok && value != "" {
+			logins = append(logins, name)
+		}
+	}
+	return logins
 }
 
 // SuppliesAPIKey reports whether this profile's environment gives the API key
@@ -1573,7 +2427,45 @@ func (h HarnessProfile) SuppliesAPIKey(envKey string) bool {
 // The failure is a precondition refusal: the person fixes it, so it travels
 // to the client as the reason rather than as an internal error.
 func (h HarnessProfile) EnsureReady(id string) error {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::ensure_ready")
+	if err := h.ready(id); err != nil {
+		return profileRefusal(id, err)
+	}
+	return nil
+}
+
+func (h HarnessProfile) ready(id string) error {
+	if err := h.Environment.EnsureResolved(); err != nil {
+		return err
+	}
+	provider, err := h.CodexProvider()
+	if err != nil {
+		return err
+	}
+	var source, envKey string
+	needsKey := false
+	if key, ok := h.Kind.APIKeyVariable(); ok {
+		source, envKey, needsKey = h.Kind.DisplayName(), key, true
+	} else if provider != nil {
+		if custom := provider.Custom(); custom != nil && custom.EnvKey != nil {
+			source, envKey, needsKey = h.DescribeCodexConfig(), *custom.EnvKey, true
+		}
+	}
+	if needsKey && !h.SuppliesAPIKey(envKey) {
+		if h.Kind == HarnessKindDsh {
+			return fmt.Errorf(
+				"DSH authenticates with %[1]s, which is found neither in DSH's own credentials (%[2]s), the environment Mjolnir started with, %[3]s, nor under [profiles.%[4]s.environment]; save a key in DSH, export %[1]s and run `mj daemon restart`, or put it in secrets.toml and add `%[1]s = { from_secret = \"%[1]s\" }` under [profiles.%[4]s.environment]",
+				envKey, filepath.Join(h.Home, dshCredentialsFile), filepath.Join(h.Home, dshDotenvFile), id)
+		}
+		return fmt.Errorf(
+			"%[1]s authenticates with %[2]s, which is set neither in the environment Mjolnir started with nor under [profiles.%[3]s.environment]; export %[2]s and run `mj daemon restart`, or put it in secrets.toml and add `%[2]s = { from_secret = \"%[2]s\" }` under [profiles.%[3]s.environment]",
+			source, envKey, id)
+	}
+	if h.GuardianReviewModel != nil && (provider == nil || provider.Custom() == nil) {
+		return fmt.Errorf(
+			"`guardian_review_model` applies only to a Codex profile whose %s names a custom model provider, because Mjolnir generates the model catalog only for those",
+			h.DescribeCodexConfig())
+	}
+	return h.ensureInstructionsDeliverable(nil)
 }
 
 // EnsureStagedInstructionsDeliverable refuses a session whose harness cannot
@@ -1594,13 +2486,50 @@ func (h HarnessProfile) EnsureStagedInstructionsDeliverable(id, staged string) e
 // (UndeliverableDshInstructions); every other harness owns its
 // instruction-file validation.
 func (h HarnessProfile) ensureInstructionsDeliverable(staged *string) error {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::ensure_instructions_deliverable")
+	if h.Kind != HarnessKindDsh {
+		return nil
+	}
+	name := h.Kind.AgentInstructionsFile()
+	own := filepath.Join(h.Home, name)
+	checked := own
+	if staged != nil {
+		checked = filepath.Join(*staged, name)
+	}
+	problem, err := FindUndeliverableDshInstructions(checked)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", checked, err)
+	}
+	switch problem := problem.(type) {
+	case nil:
+		return nil
+	case UndeliverableDshInstructionsNotRegularFile:
+		return fmt.Errorf("%s is not a regular file, but dsh-acp accepts instructions only from a regular AGENTS.md. Replace it with a regular file.", own)
+	case UndeliverableDshInstructionsNotUtf8:
+		return fmt.Errorf("%s is not UTF-8 text (line %d has the first byte that is not), but dsh-acp accepts only UTF-8 instructions. Save the file as UTF-8.", own, problem.Line)
+	case UndeliverableDshInstructionsTooLong:
+		limit := uint64(DshACPInstructionsLimit)
+		var ownBytes uint64
+		if info, err := os.Stat(own); err == nil {
+			ownBytes = uint64(info.Size())
+		}
+		size := fmt.Sprintf("%s is %d bytes", own, problem.Bytes)
+		if problem.Bytes > ownBytes {
+			size = fmt.Sprintf("%s is %d bytes, and with the %d bytes Mjolnir adds to describe this session's environment, DSH's instructions would be %d bytes",
+				own, ownBytes, problem.Bytes-ownBytes, problem.Bytes)
+		}
+		excess := "1 byte"
+		if problem.Bytes-limit != 1 {
+			excess = fmt.Sprintf("%d bytes", problem.Bytes-limit)
+		}
+		return fmt.Errorf("%s, but dsh-acp loads at most %d bytes from each instruction file. Shorten the file by at least %s.", size, limit, excess)
+	}
+	panic(fmt.Sprintf("unknown undeliverable instructions %T", problem))
 }
 
 // profileRefusal is a profile that cannot start, as the reason its client is
 // given.
 func profileRefusal(id string, err error) error {
-	panic("unported: mj-core/src/config/harness.rs profile_refusal")
+	return RefusalPrecondition(fmt.Sprintf("profile %s: %s", debugString(id), err.Error()))
 }
 
 // ModelService is the service a profile's harness sends model requests to,
@@ -1645,7 +2574,27 @@ func ModelServiceOfHarness(kind HarnessKind) (ModelService, bool) {
 // a trailing slash, so spelling differences in the host or a final `/` do not
 // name a different service. Text that is not a URL is compared as written.
 func normalizedBaseURL(baseURL string) string {
-	panic("unported: mj-core/src/config/harness.rs normalized_base_url")
+	text := baseURL
+	if parsed, err := url.Parse(baseURL); err == nil && parsed.Scheme != "" {
+		text = parsedURLText(parsed)
+	}
+	return strings.TrimRight(text, "/")
+}
+
+// parsedURLText is a URL in the form Rust's url crate serializes it: the
+// scheme and host lowercase, and an empty path written as `/` for a URL with
+// a host.
+func parsedURLText(parsed *url.URL) string {
+	normalized := *parsed
+	normalized.Scheme = strings.ToLower(parsed.Scheme)
+	normalized.Host = strings.ToLower(parsed.Host)
+	if port := parsed.Port(); port == "443" && normalized.Scheme == "https" || port == "80" && normalized.Scheme == "http" {
+		normalized.Host = strings.ToLower(parsed.Hostname())
+	}
+	if normalized.Host != "" && normalized.Path == "" && normalized.Opaque == "" {
+		normalized.Path = "/"
+	}
+	return normalized.String()
 }
 
 // AuthScheme is how a profile proves it may talk to its service.
@@ -1745,18 +2694,55 @@ type openCodeEnvironment struct {
 // opencodeConfiguration parses OpenCode's JSONC (comments and trailing
 // commas, not JavaScript).
 func opencodeConfiguration(text string) (any, bool) {
-	panic("unported: mj-core/src/config/harness.rs opencode_configuration")
+	standard, err := hujson.Standardize([]byte(text))
+	if err != nil {
+		return nil, false
+	}
+	var value any
+	if err := json.Unmarshal(standard, &value); err != nil {
+		return nil, false
+	}
+	return value, true
 }
 
 func openCodeEnvironmentRead(home string) openCodeEnvironment {
-	panic("unported: mj-core/src/config/harness.rs OpenCodeEnvironment::read")
+	environment := openCodeEnvironment{keys: map[string]struct{}{}, references: map[string]struct{}{}}
+	for _, line := range strings.Split(opencodeProviderEnvironment, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if line != "" && !strings.HasPrefix(line, "#") {
+			environment.keys[line] = struct{}{}
+		}
+	}
+	for _, name := range []string{"opencode.json", "opencode.jsonc"} {
+		if text, err := os.ReadFile(filepath.Join(home, name)); err == nil {
+			environment.addConfiguration(string(text))
+		}
+	}
+	return environment
 }
 
 // openCodeEnvironmentReference matches an `{env:NAME}` substitution.
 var openCodeEnvironmentReference = regexp.MustCompile(`\{env:([^}]+)\}`)
 
 func (e *openCodeEnvironment) addConfiguration(text string) {
-	panic("unported: mj-core/src/config/harness.rs OpenCodeEnvironment::add_configuration")
+	configuration, ok := opencodeConfiguration(text)
+	if !ok {
+		return
+	}
+	for _, reference := range openCodeEnvironmentReference.FindAllStringSubmatch(text, -1) {
+		e.references[reference[1]] = struct{}{}
+	}
+	object, _ := configuration.(map[string]any)
+	providers, _ := object["provider"].(map[string]any)
+	for _, provider := range providers {
+		entry, _ := provider.(map[string]any)
+		names, _ := entry["env"].([]any)
+		for _, name := range names {
+			if name, ok := name.(string); ok {
+				e.keys[name] = struct{}{}
+			}
+		}
+	}
 }
 
 // CodexCredentialEnvironment is the variables through which Codex takes a
@@ -1796,7 +2782,25 @@ const (
 // such a profile has no API key of its own: a key could only reach it from
 // somewhere else.
 func (h HarnessProfile) CodexLogin() (CodexLogin, bool) {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::codex_login")
+	if h.Kind != HarnessKindCodex {
+		return 0, false
+	}
+	if provider, err := h.CodexProvider(); err == nil && provider != nil && !provider.UsesCodexLogin() {
+		return 0, false
+	}
+	authMode := ""
+	if bytes, err := os.ReadFile(HarnessAuthenticationMarker(h.Kind, h.Home)); err == nil {
+		var value any
+		if json.Unmarshal(bytes, &value) == nil {
+			if object, ok := value.(map[string]any); ok {
+				authMode, _ = object["auth_mode"].(string)
+			}
+		}
+	}
+	if authMode == "apikey" {
+		return CodexLoginApiKey, true
+	}
+	return CodexLoginChatGpt, true
 }
 
 // ExcludeHarnessEnvironment removes from environment every variable this
@@ -1809,5 +2813,20 @@ func (h HarnessProfile) CodexLogin() (CodexLogin, bool) {
 // the worker adds the target's own login environment later and has to remove
 // them from that too.
 func (h HarnessProfile) ExcludeHarnessEnvironment(environment map[string]string) []string {
-	panic("unported: mj-core/src/config/harness.rs HarnessProfile::exclude_harness_environment")
+	builtInWithoutOpenAIAuth := false
+	if provider, err := h.CodexProvider(); err == nil && provider != nil {
+		if builtIn, ok := provider.BuiltIn(); ok && !builtIn.UsesCodexLogin() {
+			builtInWithoutOpenAIAuth = true
+		}
+	}
+	login, ok := h.CodexLogin()
+	if !(ok && login == CodexLoginChatGpt) && !builtInWithoutOpenAIAuth {
+		return []string{}
+	}
+	names := make([]string, 0, len(CodexCredentialEnvironment))
+	for _, name := range CodexCredentialEnvironment {
+		delete(environment, name)
+		names = append(names, name)
+	}
+	return names
 }

@@ -6,6 +6,12 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -30,13 +36,79 @@ func CredentialWriteGuardAcquire(ctx context.Context, kind HarnessKind, marker s
 // claudeWait as the budget for Claude's native locks. Other harnesses keep
 // their own budgets.
 func CredentialWriteGuardAcquireWithin(ctx context.Context, kind HarnessKind, marker string, claudeWait time.Duration) (*CredentialWriteGuard, error) {
-	panic("unported: mj-core/src/credentials/locking.rs CredentialWriteGuard::acquire_within")
+	parent, ok := credentialParent(marker)
+	if !ok {
+		return nil, errors.New("credential marker has no parent")
+	}
+	if err := os.MkdirAll(parent, 0o777); err != nil {
+		return nil, err
+	}
+	home, err := credentialsCanonicalize(parent)
+	if err != nil {
+		return nil, fmt.Errorf("resolve credential home: %w", err)
+	}
+	if kind == HarnessKindKimi {
+		above := filepath.Dir(home)
+		if above == home {
+			return nil, errors.New("Kimi credentials have no home")
+		}
+		home = above
+	}
+	guard := &CredentialWriteGuard{}
+	switch kind {
+	case HarnessKindClaude:
+		// Claude 2.1.312 takes these proper-lockfile directory locks in this
+		// order during refresh (explicit auth login does not). Preserve the
+		// refresh protocol's 60s stale / 5s heartbeat and Mjolnir's existing
+		// shared acquisition budget.
+		deadline := time.Now().Add(claudeWait)
+		for _, path := range []string{filepath.Join(home, ".oauth_refresh.lock"), home + ".lock"} {
+			lock, err := oauthRefreshLockAcquire(ctx, path, max(time.Until(deadline), 0), 60*time.Second, 5*time.Second)
+			if err != nil {
+				guard.Release()
+				return nil, err
+			}
+			guard.directories = append(guard.directories, lock)
+		}
+	case HarnessKindKimi:
+		lock, err := acquireKimiLock(ctx, home, kimiLockWait)
+		if err != nil {
+			return nil, err
+		}
+		guard.directories = append(guard.directories, lock)
+	case HarnessKindMuse:
+		// Muse serializes auth.json writes with an exclusive OS lock on
+		// .auth.json.lock (native acquisition waits up to 5s). Preserve
+		// Mjolnir's existing 10s acquisition budget.
+		wait := 10 * time.Second
+		lock, err := acquireFileLock(ctx, filepath.Join(home, ".auth.json.lock"), &wait)
+		if err != nil {
+			return nil, err
+		}
+		guard.file = lock
+	default:
+		lock, err := acquireFileLock(ctx, filepath.Join(home, ".mj-auth.lock"), nil)
+		if err != nil {
+			return nil, err
+		}
+		guard.file = lock
+	}
+	return guard, nil
 }
 
-// Release gives up every lock the guard holds, in the reverse of acquisition
-// order (Rust's Drop of the fields).
+// Release gives up every lock the guard holds, in the order Rust's Drop of
+// the fields gives them up: the directory locks as acquired, then the file.
 func (g *CredentialWriteGuard) Release() {
-	panic("unported: mj-core/src/credentials/locking.rs CredentialWriteGuard drop")
+	for _, directory := range g.directories {
+		directory.Release()
+	}
+	g.directories = nil
+	if g.file != nil {
+		file := g.file.File()
+		g.file.Drop()
+		_ = file.Close()
+		g.file = nil
+	}
 }
 
 // CredentialInstall is the snapshot actually retained by the destination
@@ -103,13 +175,63 @@ func InstallSessionCredentials(ctx context.Context, kind HarnessKind, path strin
 }
 
 func installCredentials(ctx context.Context, kind HarnessKind, path string, bytes []byte, policy installPolicy) (CredentialInstall, error) {
-	panic("unported: mj-core/src/credentials/locking.rs install_credentials")
+	if err := ValidateCredentialPayload(kind, bytes); err != nil {
+		return CredentialInstall{}, err
+	}
+	guard, err := CredentialWriteGuardAcquire(ctx, kind, path)
+	if err != nil {
+		return CredentialInstall{}, err
+	}
+	// Blocking writes cannot be cancelled: ownership follows the write.
+	defer guard.Release()
+	if err := refuseSymlinkedToken("credential", path); err != nil {
+		return CredentialInstall{}, err
+	}
+	current, currentBytes, err := ReadCredentialFile(kind, path)
+	if err != nil {
+		return CredentialInstall{}, err
+	}
+	incoming := CredentialSnapshotOf(kind, bytes)
+	if replaces(policy, kind, &current, currentBytes, &incoming, bytes) {
+		if err := WriteCredentialFile(kind, path, bytes); err != nil {
+			return CredentialInstall{}, err
+		}
+		return CredentialInstall{Snapshot: incoming, Installed: true}, nil
+	}
+	return CredentialInstall{Snapshot: current, Installed: false}, nil
 }
 
 // acquireFileLock takes an exclusive OS lock on path, polling every 100 ms;
 // a nil wait waits indefinitely.
 func acquireFileLock(ctx context.Context, path string, wait *time.Duration) (*FileLock, error) {
-	panic("unported: mj-core/src/credentials/locking.rs acquire_file_lock")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o666)
+	if err != nil {
+		return nil, fmt.Errorf("open credential lock %s: %w", path, err)
+	}
+	var deadline time.Time
+	if wait != nil {
+		deadline = time.Now().Add(*wait)
+	}
+	for {
+		locked, err := tryLockFile(file)
+		if err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("lock credential %s: %w", path, err)
+		}
+		if locked {
+			return NewFileLock(file), nil
+		}
+		if wait != nil && !time.Now().Before(deadline) {
+			_ = file.Close()
+			return nil, fmt.Errorf("timed out waiting for credential lock %s", path)
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // Kimi Code uses proper-lockfile on oauth/kimi-code (native stale: 5s).
@@ -122,7 +244,17 @@ const (
 )
 
 func acquireKimiLock(ctx context.Context, home string, wait time.Duration) (*OAuthRefreshLock, error) {
-	panic("unported: mj-core/src/credentials/locking.rs acquire_kimi_lock")
+	oauthDir := filepath.Join(home, "oauth")
+	if err := os.MkdirAll(oauthDir, 0o777); err != nil {
+		return nil, fmt.Errorf("prepare Kimi Code OAuth lock: %w", err)
+	}
+	// proper-lockfile requires the sentinel to exist before taking its lock.
+	sentinel, err := os.OpenFile(filepath.Join(oauthDir, "kimi-code"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o666)
+	if err != nil {
+		return nil, fmt.Errorf("prepare Kimi Code OAuth lock sentinel: %w", err)
+	}
+	_ = sentinel.Close()
+	return oauthRefreshLockAcquire(ctx, filepath.Join(oauthDir, "kimi-code.lock"), wait, kimiLockStaleAfter, kimiLockHeartbeatInterval)
 }
 
 // OAuthRefreshLock is a proper-lockfile directory lock held with a
@@ -139,26 +271,120 @@ type OAuthRefreshLock struct {
 }
 
 func oauthRefreshLockAcquire(ctx context.Context, path string, wait, staleAfter, heartbeatInterval time.Duration) (*OAuthRefreshLock, error) {
-	panic("unported: mj-core/src/credentials/locking.rs OAuthRefreshLock::acquire")
+	deadline := time.Now().Add(wait)
+	for {
+		err := os.Mkdir(path, 0o777)
+		if err == nil {
+			heartbeat, stop := context.WithCancel(context.Background())
+			lock := &OAuthRefreshLock{path: path, stopHeartbeat: stop}
+			go lock.heartbeat(heartbeat, heartbeatInterval)
+			return lock, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("acquire OAuth refresh lock: %w", err)
+		}
+		if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("timed out waiting for OAuth refresh lock %s", path)
+		}
+		if !breakStaleLock(ctx, path, staleAfter) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
 }
 
 // Release stops the heartbeat and removes the lock directory.
 func (l *OAuthRefreshLock) Release() {
-	panic("unported: mj-core/src/credentials/locking.rs OAuthRefreshLock drop")
+	if l.stopHeartbeat != nil {
+		l.stopHeartbeat()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.path == "" {
+		return
+	}
+	path := l.path
+	l.path = ""
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		slog.Warn("release OAuth refresh lock", "path", path, "error", err)
+	}
 }
 
 // mtime is path's modification time, or false when it does not exist.
 func mtime(path string) (time.Time, bool, error) {
-	panic("unported: mj-core/src/credentials/locking.rs mtime")
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return info.ModTime(), true, nil
 }
 
 // touch sets path's modification time; path may be a directory.
 func touch(path string, modified time.Time) error {
-	panic("unported: mj-core/src/credentials/locking.rs touch")
+	// A zero access time leaves it unchanged, as Rust's FileTimes does.
+	return os.Chtimes(path, time.Time{}, modified)
 }
 
 // breakStaleLock removes the lock directory at path when its holder stopped
 // heartbeating more than staleAfter ago. True when the lock is gone.
 func breakStaleLock(ctx context.Context, path string, staleAfter time.Duration) bool {
-	panic("unported: mj-core/src/credentials/locking.rs break_stale_lock")
+	modified, exists, err := mtime(path)
+	if err != nil {
+		slog.Warn("inspect OAuth refresh lock", "path", path, "error", err)
+		return false
+	}
+	if !exists {
+		return true
+	}
+	// proper-lockfile can round its writes into the future.
+	age := time.Since(modified)
+	if age < 0 || age < staleAfter {
+		return false
+	}
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+		slog.Warn("remove stale OAuth refresh lock", "path", path, "error", err)
+		return false
+	}
+	slog.Warn("removed an abandoned OAuth refresh lock", "path", path, "age_seconds", int64(age/time.Second))
+	return true
+}
+
+// heartbeat republishes the lock directory's modification time every
+// interval until the lock is released.
+func (l *OAuthRefreshLock) heartbeat(ctx context.Context, interval time.Duration) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+		l.mu.Lock()
+		if l.path == "" {
+			l.mu.Unlock()
+			return
+		}
+		if err := touch(l.path, time.Now()); err != nil {
+			slog.Warn("heartbeat OAuth refresh lock", "path", l.path, "error", err)
+		}
+		l.mu.Unlock()
+	}
+}
+
+// credentialsCanonicalize is Rust's std::fs::canonicalize: the absolute path
+// with every symbolic link resolved.
+func credentialsCanonicalize(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(absolute)
 }

@@ -21,12 +21,16 @@
 package core
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
 // CodexProvider is the selected Codex provider, represented according to
@@ -358,7 +362,35 @@ type ConfigFilesOverlay struct {
 // `<home>/<overlay>.config.toml`. Only a file that exists but cannot be read
 // is an error here.
 func ConfigFilesRead(home string, overlay *string) (ConfigFiles, error) {
-	panic("unported: mj-core/src/codex_provider.rs ConfigFiles::read")
+	read := func(path string) (*string, error) {
+		data, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		text := string(data)
+		return &text, nil
+	}
+	base, err := read(filepath.Join(home, "config.toml"))
+	if err != nil {
+		return ConfigFiles{}, err
+	}
+	files := ConfigFiles{Base: base}
+	if overlay != nil {
+		name := *overlay
+		files.Overlay = &ConfigFilesOverlay{Name: name}
+		// An invalid name is refused by Layer; never join it to a path.
+		if IsOverlayName(name) {
+			text, err := read(filepath.Join(home, name+OverlaySuffix))
+			if err != nil {
+				return ConfigFiles{}, err
+			}
+			files.Overlay.Text = text
+		}
+	}
+	return files, nil
 }
 
 // Layer is the configuration Codex runs with: `config.toml`, with the overlay
@@ -372,7 +404,41 @@ func ConfigFilesRead(home string, overlay *string) (ConfigFiles, error) {
 // an error: Codex itself would silently run without it, and the session would
 // not be the one that was asked for.
 func (f *ConfigFiles) Layer(home string) (*string, error) {
-	panic("unported: mj-core/src/codex_provider.rs ConfigFiles::layer")
+	if f.Overlay == nil {
+		if f.Base == nil {
+			return nil, nil
+		}
+		base := *f.Base
+		return &base, nil
+	}
+	name := f.Overlay.Name
+	if !IsOverlayName(name) {
+		return nil, fmt.Errorf("invalid Codex profile name %s; use ASCII letters, digits, '-' or '_'", debugString(name))
+	}
+	path := filepath.Join(home, "config.toml")
+	overlayPath := filepath.Join(home, name+OverlaySuffix)
+	if f.Overlay.Text == nil {
+		return nil, fmt.Errorf("Codex profile %s has no file %s", debugString(name), overlayPath)
+	}
+	merged := map[string]any{}
+	if f.Base != nil {
+		if _, err := toml.Decode(*f.Base, &merged); err != nil {
+			return nil, fmt.Errorf("parse Codex configuration %s: %w", path, err)
+		}
+	}
+	layer := map[string]any{}
+	if _, err := toml.Decode(*f.Overlay.Text, &layer); err != nil {
+		return nil, fmt.Errorf("parse Codex configuration %s: %w", overlayPath, err)
+	}
+	mergeTables(merged, layer)
+	var rendered strings.Builder
+	encoder := toml.NewEncoder(&rendered)
+	encoder.Indent = ""
+	if err := encoder.Encode(merged); err != nil {
+		return nil, fmt.Errorf("render %s: %w", DescribeConfig(home, &name), err)
+	}
+	text := rendered.String()
+	return &text, nil
 }
 
 // EffectiveConfig is ConfigFilesRead and then Layer: the configuration Codex
@@ -411,5 +477,114 @@ func ReadCodexProvider(home string, overlay *string) (*CodexProvider, error) {
 // ParseConfig parses the text of a Codex `config.toml`. path names it in
 // error messages.
 func ParseConfig(text, path string) (*CodexProvider, error) {
-	panic("unported: mj-core/src/codex_provider.rs parse_config")
+	var file CodexConfigFile
+	if err := decodeCodexConfigFile(text, &file); err != nil {
+		return nil, fmt.Errorf("parse Codex configuration %s: %w", path, err)
+	}
+	if file.ModelProvider == nil {
+		return nil, nil
+	}
+	id := *file.ModelProvider
+	modelCatalogJSON := file.ModelCatalogJSON
+	if provider, ok := BuiltInCodexProviderFromID(id); ok {
+		return &CodexProvider{
+			Definition:       CodexProviderDefinitionBuiltIn{Provider: provider},
+			ModelCatalogJSON: modelCatalogJSON,
+		}, nil
+	}
+	table, ok := file.ModelProviders[id]
+	if !ok {
+		return nil, fmt.Errorf("%s names model_provider %s, which is not a Codex built-in provider, and has no [model_providers.%s] custom-provider table", path, debugString(id), id)
+	}
+	if table.BaseURL == nil {
+		return nil, fmt.Errorf("%s is missing base_url for model provider %s", path, debugString(id))
+	}
+	switch {
+	case table.WireAPI == nil:
+		return nil, fmt.Errorf("%s is missing wire_api = \"responses\" for model provider %s", path, debugString(id))
+	case *table.WireAPI != "responses":
+		return nil, fmt.Errorf("%s sets wire_api = %s for model provider %s; Codex only supports \"responses\"", path, debugString(*table.WireAPI), debugString(id))
+	}
+	trimmed := func(value *string) *string {
+		if value == nil {
+			return nil
+		}
+		text := strings.TrimSpace(*value)
+		if text == "" {
+			return nil
+		}
+		return &text
+	}
+	bearerToken := trimmed(table.ExperimentalBearerToken)
+	envKey := trimmed(table.EnvKey)
+	if envKey == nil && bearerToken == nil {
+		return nil, fmt.Errorf("%s declares model provider %s with neither env_key nor experimental_bearer_token", path, debugString(id))
+	}
+	return &CodexProvider{
+		Definition: CodexProviderDefinitionCustom{Provider: CustomCodexProvider{
+			ID:          id,
+			BaseURL:     *table.BaseURL,
+			EnvKey:      envKey,
+			BearerToken: bearerToken,
+		}},
+		ModelCatalogJSON: modelCatalogJSON,
+	}, nil
+}
+
+// decodeCodexConfigFile reads the fields serde reads from a Codex
+// `config.toml`: keys match exactly, unknown keys are ignored, and a present
+// key of the wrong type is an error.
+func decodeCodexConfigFile(text string, file *CodexConfigFile) error {
+	document := map[string]any{}
+	if _, err := toml.Decode(text, &document); err != nil {
+		return err
+	}
+	optionalString := func(table map[string]any, key string) (*string, error) {
+		value, ok := table[key]
+		if !ok {
+			return nil, nil
+		}
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("invalid type for `%s`: expected a string", key)
+		}
+		return &text, nil
+	}
+	var err error
+	if file.ModelProvider, err = optionalString(document, "model_provider"); err != nil {
+		return err
+	}
+	if file.ModelCatalogJSON, err = optionalString(document, "model_catalog_json"); err != nil {
+		return err
+	}
+	file.ModelProviders = map[string]ProviderTable{}
+	providers, ok := document["model_providers"]
+	if !ok {
+		return nil
+	}
+	tables, ok := providers.(map[string]any)
+	if !ok {
+		return errors.New("invalid type for `model_providers`: expected a table")
+	}
+	for id, value := range tables {
+		table, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("invalid type for `model_providers.%s`: expected a table", id)
+		}
+		var provider ProviderTable
+		if provider.BaseURL, err = optionalString(table, "base_url"); err != nil {
+			return err
+		}
+		if provider.WireAPI, err = optionalString(table, "wire_api"); err != nil {
+			return err
+		}
+		if provider.EnvKey, err = optionalString(table, "env_key"); err != nil {
+			return err
+		}
+		if provider.ExperimentalBearerToken, err = optionalString(table, "experimental_bearer_token"); err != nil {
+			return err
+		}
+		file.ModelProviders[id] = provider
+	}
+	return nil
 }

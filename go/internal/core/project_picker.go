@@ -80,6 +80,23 @@ type ProjectDiscovery struct {
 	Truncated bool           `json:"truncated"`
 }
 
+// MarshalJSON writes no entries as `[]`, as serde writes an empty Vec.
+func (d ProjectDiscovery) MarshalJSON() ([]byte, error) {
+	type wire ProjectDiscovery
+	if d.Entries == nil {
+		d.Entries = []ProjectEntry{}
+	}
+	return marshalSerdeJSON(wire(d))
+}
+
+func (d *ProjectDiscovery) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "entries", "truncated"); err != nil {
+		return err
+	}
+	type wire ProjectDiscovery
+	return json.Unmarshal(data, (*wire)(d))
+}
+
 type ProjectEntry struct {
 	Name        string           `json:"name"`
 	Source      string           `json:"source"`

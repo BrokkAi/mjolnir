@@ -8,15 +8,27 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // SshTrafficClass: separate TCP connections keep file transfers from
@@ -131,7 +143,20 @@ func SCPDownload(ssh *SshTarget, remote string, local string) CommandSpec {
 // canonicalization (`\\?\C:\...`) would name the host `\\?\C`. Spell it
 // without the verbatim prefix; nothing else about the path changes.
 func scpLocalPath(path string) string {
-	panic("unported: mj-core/src/targets/ssh.rs scp_local_path")
+	if runtime.GOOS != "windows" {
+		return path
+	}
+	const verbatim, verbatimUNC = `\\?\`, `\\?\UNC\`
+	if strings.HasPrefix(path, verbatimUNC) {
+		return `\\` + path[len(verbatimUNC):]
+	}
+	if strings.HasPrefix(path, verbatim) {
+		drive := path[len(verbatim):]
+		if len(drive) >= 2 && drive[1] == ':' && isSSHASCIILetter(drive[0]) && (len(drive) == 2 || drive[2] == '\\') {
+			return drive
+		}
+	}
+	return path
 }
 
 // scpArgs is the connection's `ssh` arguments rewritten for `scp`, which
@@ -238,6 +263,14 @@ func sharingOverride() *SshSharingForTest {
 	return &copied
 }
 
+// The directory resolved from the environment, once per process (Rust: a
+// OnceLock inside control_socket_dir).
+var (
+	controlSocketDirOnce  sync.Once
+	controlSocketDirValue string
+	controlSocketDirOK    bool
+)
+
 // controlSocketDir is the directory holding this instance's control sockets,
 // or false when sharing is off.
 //
@@ -248,13 +281,48 @@ func sharingOverride() *SshSharingForTest {
 // server's per-connection session limit. Neither location is world-writable,
 // and the directory is created 0700 because `ssh` will not create it itself.
 func controlSocketDir() (string, bool) {
-	panic("unported: mj-core/src/targets/ssh.rs control_socket_dir")
+	if override := sharingOverride(); override != nil {
+		switch override.Kind {
+		case SshSharingForTestDisabled:
+			return "", false
+		case SshSharingForTestDirectory:
+			return prepareControlDir(override.Directory)
+		}
+	}
+	controlSocketDirOnce.Do(func() {
+		var setting *string
+		if value, ok := os.LookupEnv(ControlMasterEnv); ok {
+			setting = &value
+		}
+		if sharingDisabled(setting) {
+			return
+		}
+		var dataDirOverride *string
+		if value, ok := EnvOverrideOS("DATA_DIR"); ok {
+			dataDirOverride = &value
+		}
+		var instance *string
+		if value, ok := InstanceName(); ok {
+			instance = &value
+		}
+		identity := controlDirIdentity(instance, dataDirOverride)
+		var runtimeDir *string
+		if value, ok := os.LookupEnv("XDG_RUNTIME_DIR"); ok {
+			runtimeDir = &value
+		}
+		controlSocketDirValue, controlSocketDirOK = prepareControlDir(defaultControlDir(runtimeDir, identity))
+	})
+	return controlSocketDirValue, controlSocketDirOK
 }
 
 // defaultControlDir is where an instance keeps its sockets when no test pins
 // the directory.
 func defaultControlDir(runtimeDir *string, identity string) string {
-	panic("unported: mj-core/src/targets/ssh.rs default_control_dir")
+	if runtimeDir != nil && *runtimeDir != "" {
+		return filepath.Join(*runtimeDir, "mjolnir", identity)
+	}
+	// The data directory is already specific to the instance.
+	return filepath.Join(DataDir(), "ssh")
 }
 
 // controlDirIdentity is the name of this instance's directory under
@@ -265,14 +333,37 @@ func defaultControlDir(runtimeDir *string, identity string) string {
 // masters or sweeps its lock files. The default instance keeps `default`,
 // where its sockets have always been.
 func controlDirIdentity(instance *string, dataDirOverride *string) string {
-	panic("unported: mj-core/src/targets/ssh.rs control_dir_identity")
+	if instance == nil && dataDirOverride == nil {
+		return "default"
+	}
+	dataDir := DataDir()
+	if dataDirOverride != nil {
+		dataDir = *dataDirOverride
+	}
+	name := ""
+	if instance != nil {
+		name = *instance
+	}
+	return InstanceIdentityFor(name, dataDir)
 }
 
 // prepareControlDir creates the socket directory 0700 and rejects one whose
 // sockets would not fit in a Unix socket address. Failure means no sharing,
 // never a failed command.
 func prepareControlDir(dir string) (string, bool) {
-	panic("unported: mj-core/src/targets/ssh.rs prepare_control_dir")
+	if len(dir)+controlSocketNameReserve > maxControlPath {
+		slog.Debug("skipping SSH connection sharing: control socket path would be too long", "directory", dir)
+		return "", false
+	}
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		slog.Debug("skipping SSH connection sharing: control directory is unavailable", "directory", dir, "error", err)
+		return "", false
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		slog.Debug("skipping SSH connection sharing: cannot restrict control directory", "directory", dir, "error", err)
+		return "", false
+	}
+	return dir, true
 }
 
 // connectionKey is the identity of one configured connection: its
@@ -281,7 +372,20 @@ func prepareControlDir(dir string) (string, bool) {
 // The class is spelled as Rust's Debug spells it ("Control", "Bulk"), which
 // the socket name hashes.
 func connectionKey(ssh *SshTarget, class SshTrafficClass) string {
-	panic("unported: mj-core/src/targets/ssh.rs connection_key")
+	// Rust's Debug spelling of the class.
+	name := "Control"
+	if class == SshTrafficClassBulk {
+		name = "Bulk"
+	}
+	var key strings.Builder
+	key.WriteString(name)
+	key.WriteByte(0)
+	key.WriteString(ssh.Destination)
+	for _, argument := range ssh.SSHArgs {
+		key.WriteByte(0)
+		key.WriteString(argument)
+	}
+	return key.String()
 }
 
 // controlSocketName is the socket file name for one shard of a traffic
@@ -292,7 +396,8 @@ func connectionKey(ssh *SshTarget, class SshTrafficClass) string {
 // follows exactly the key the daemon counts sessions under, and so the
 // daemon knows the concrete path when it must remove a stale socket.
 func controlSocketName(ssh *SshTarget, class SshTrafficClass, shard int) string {
-	panic("unported: mj-core/src/targets/ssh.rs control_socket_name")
+	digest := sha256.Sum256([]byte(connectionKey(ssh, class)))
+	return fmt.Sprintf("%s-%d", LowerHex(digest[:connectionHashHex/2]), shard)
 }
 
 // controlPathOption is the `-o` value that points `ssh` at socket.
@@ -303,7 +408,14 @@ func controlSocketName(ssh *SshTarget, class SshTrafficClass, shard int) string 
 // whole command line. `%` starts a token expansion in `ControlPath`, so it is
 // doubled. A path that needs neither is passed exactly as it always was.
 func controlPathOption(socket string) string {
-	panic("unported: mj-core/src/targets/ssh.rs control_path_option")
+	path := strings.ReplaceAll(socket, "%", "%%")
+	if strings.ContainsFunc(path, func(character rune) bool {
+		return unicode.IsSpace(character) || character == '"' || character == '\\'
+	}) {
+		// Inside the quotes OpenSSH unescapes only these two.
+		path = `"` + strings.ReplaceAll(strings.ReplaceAll(path, `\`, `\\`), `"`, `\"`) + `"`
+	}
+	return "ControlPath=" + path
 }
 
 // userConfiguresSharing reports whether the user's own `ssh` arguments
@@ -312,7 +424,19 @@ func controlPathOption(socket string) string {
 // overriding the user or being overridden; a user who configures sharing
 // owns it, and Mjolnir adds none.
 func userConfiguresSharing(sshArgs []string) bool {
-	panic("unported: mj-core/src/targets/ssh.rs user_configures_sharing")
+	for _, argument := range sshArgs {
+		if strings.HasPrefix(argument, "-S") {
+			return true
+		}
+		option := strings.TrimLeftFunc(strings.TrimPrefix(argument, "-o"), unicode.IsSpace)
+		option = sshASCIILower(option)
+		for _, name := range []string{"controlmaster", "controlpath"} {
+			if rest, ok := strings.CutPrefix(option, name); ok && rest != "" && strings.ContainsRune("= \t", rune(rest[0])) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // PushConnectionReuseArgs appends the options that let this command *reuse*
@@ -329,7 +453,15 @@ func userConfiguresSharing(sshArgs []string) bool {
 // counted and are not bound to a master with `ProxyCommand=false`: for a
 // diagnosis, a direct connection is the stated behaviour.
 func PushConnectionReuseArgs(args *[]string, ssh *SshTarget) {
-	panic("unported: mj-core/src/targets/ssh.rs push_connection_reuse_args")
+	if runtime.GOOS == "windows" || userConfiguresSharing(ssh.SSHArgs) {
+		return
+	}
+	dir, ok := controlSocketDir()
+	if !ok {
+		return
+	}
+	socket := filepath.Join(dir, controlSocketName(ssh, SshTrafficClassControl, 0))
+	*args = append(*args, "-o", "ControlMaster=no", "-o", controlPathOption(socket))
 }
 
 // JoinRemoteCommand is args quoted for a POSIX shell, joined into one line.
@@ -385,7 +517,23 @@ func WithMacosSystemPath(args []string) []string {
 // SSHDirectoryExists checks whether a directory exists on the configured SSH
 // host.
 func SSHDirectoryExists(ssh *SshTarget, path string, executor CommandExecutor) (bool, error) {
-	panic("unported: mj-core/src/targets/ssh.rs ssh_directory_exists")
+	command := SSHValidationCommand(ssh, []string{"test", "-d", path}, "validate remote directory")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return false, err
+	}
+	switch output.Status {
+	case 0:
+		return true, nil
+	case 1:
+		return false, nil
+	}
+	stderr := sshLossy(output.Stderr)
+	failure := fmt.Errorf("remote directory check failed with status %d: %s", output.Status, strings.TrimSpace(stderr))
+	if refusal := hostKeyRefusal(stderr, ssh.SSHArgs); refusal != nil {
+		return false, refusal.Wrap(failure)
+	}
+	return false, failure
 }
 
 // hostKeyRefusal is what the caller is told when `ssh` refused the host's
@@ -397,7 +545,23 @@ func SSHDirectoryExists(ssh *SshTarget, path string, executor CommandExecutor) (
 // the full ssh text stays on the error chain for the daemon log. It names
 // the known_hosts file the machine's ssh options name (launch finding R6-5).
 func hostKeyRefusal(stderr string, sshArgs []string) *Refusal {
-	panic("unported: mj-core/src/targets/ssh.rs host_key_refusal")
+	if !strings.Contains(stderr, "Host key verification failed") {
+		return nil
+	}
+	knownHosts := knownHostsFileFromSSHArgs(sshArgs)
+	file := knownHosts.phrase()
+	var message string
+	if strings.Contains(stderr, "REMOTE HOST IDENTIFICATION HAS CHANGED") {
+		keygen := "`ssh-keygen -R`"
+		if path, ok := knownHosts.firstNamed(); ok {
+			keygen = fmt.Sprintf("`ssh-keygen -f %s -R`", path)
+		}
+		message = fmt.Sprintf("ssh reported \"Host key verification failed\": the machine's host key is not the one saved in %s. If you expected the change, remove the old entry with %s and the host name, add the new key, and try again.", file, keygen)
+	} else {
+		message = fmt.Sprintf("ssh reported \"Host key verification failed\": the machine's host key is not in %s, and its ssh options require a known key. Add the host key (for example with `ssh-keyscan`, after checking the fingerprint), or put `-o StrictHostKeyChecking=accept-new` in the machine's extra_args, and try again.", file)
+	}
+	refusal := RefusalPrecondition(message)
+	return &refusal
 }
 
 // KnownHostsFileKind names a KnownHostsFile variant.
@@ -425,7 +589,39 @@ type KnownHostsFile struct {
 // first `UserKnownHostsFile` given with `-o` wins, the keyword is matched
 // without regard to case, and its value follows `=` or a space.
 func knownHostsFileFromSSHArgs(args []string) KnownHostsFile {
-	panic("unported: mj-core/src/targets/ssh.rs KnownHostsFile::from_ssh_args")
+	configFile := false
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		var option string
+		hasOption := false
+		if arg == "-o" {
+			if index+1 < len(args) {
+				index++
+				option, hasOption = args[index], true
+			}
+		} else if rest, ok := strings.CutPrefix(arg, "-o"); ok {
+			option, hasOption = rest, true
+		}
+		if strings.HasPrefix(arg, "-F") {
+			configFile = true
+		}
+		if !hasOption {
+			continue
+		}
+		value, ok := optionValue(option, "UserKnownHostsFile")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(strings.Trim(value, `"`))
+		if value == "" || sshEqualFoldASCII(value, "none") {
+			return KnownHostsFile{Kind: KnownHostsFileUnknown}
+		}
+		return KnownHostsFile{Kind: KnownHostsFileNamed, Paths: value}
+	}
+	if configFile {
+		return KnownHostsFile{Kind: KnownHostsFileUnknown}
+	}
+	return KnownHostsFile{Kind: KnownHostsFileDefault}
 }
 
 // phrase is the file as a refusal names it.
@@ -456,18 +652,55 @@ func (f *KnownHostsFile) firstNamed() (string, bool) {
 // optionValue is the value of keyword in one ssh option (`Keyword=value`,
 // `Keyword value`, or `Keyword = value`), or false for another keyword.
 func optionValue(option, keyword string) (string, bool) {
-	panic("unported: mj-core/src/targets/ssh.rs option_value")
+	option = strings.TrimLeftFunc(option, unicode.IsSpace)
+	end := strings.IndexFunc(option, func(character rune) bool {
+		return character == '=' || unicode.IsSpace(character)
+	})
+	if end < 0 {
+		end = len(option)
+	}
+	name, rest := option[:end], option[end:]
+	if !sshEqualFoldASCII(name, keyword) {
+		return "", false
+	}
+	rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	return strings.TrimSpace(strings.TrimPrefix(rest, "=")), true
 }
 
 // ValidateBareProjectDirectory verifies that a bare-SSH project path exists
 // and has a committed Git HEAD.
 func ValidateBareProjectDirectory(ssh *SshTarget, path string, executor CommandExecutor) error {
-	panic("unported: mj-core/src/targets/ssh.rs validate_bare_project_directory")
+	if err := ValidateBareProjectPath(path); err != nil {
+		return err
+	}
+	exists, err := SSHDirectoryExists(ssh, path, executor)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return RefusalUnusable(fmt.Sprintf("remote project directory %s does not exist or is not a directory on %s", path, ssh.Destination))
+	}
+	command := SSHValidationCommand(ssh, []string{"git", "-C", path, "rev-parse", "--verify", "HEAD"}, "validate bare SSH Git project")
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return err
+	}
+	if output.Status != 0 {
+		detail := strings.TrimSpace(sshLossy(output.Stderr))
+		if detail == "" {
+			return fmt.Errorf("remote project directory %s has no valid Git HEAD", path)
+		}
+		return fmt.Errorf("remote project directory %s has no valid Git HEAD: %s", path, detail)
+	}
+	return nil
 }
 
 // ValidateBareProjectPath requires an absolute path without `..`.
 func ValidateBareProjectPath(path string) error {
-	panic("unported: mj-core/src/targets/ssh.rs validate_bare_project_path")
+	if !IsAbsolute(path) || slices.Contains(sshPathComponents(path), "..") {
+		return errors.New("bare project directory must be an absolute safe path")
+	}
+	return nil
 }
 
 // SSHValidationCommand is a fail-fast `ssh` probe running remoteArgs.
@@ -492,7 +725,62 @@ func PosixQuote(value string) string {
 
 // VerifyLocator refuses a locator that does not belong to sessionID.
 func VerifyLocator(locator *TargetsTargetLocator, sessionID string) error {
-	panic("unported: mj-core/src/targets/ssh.rs verify_locator")
+	if err := ValidateSessionID(sessionID); err != nil {
+		return err
+	}
+	switch locator.Kind {
+	case TargetsTargetLocatorLocalBare:
+		components := sshPathComponents(locator.WorkerRoot)
+		if !IsAbsolute(locator.WorkerRoot) || slices.Contains(components, "..") ||
+			len(components) == 0 || components[len(components)-1] != sessionID {
+			return errors.New("refusing cleanup: invalid local bare worker root")
+		}
+	case TargetsTargetLocatorLocalPodman, TargetsTargetLocatorLocalDocker, TargetsTargetLocatorAppleContainer,
+		TargetsTargetLocatorSshPodman, TargetsTargetLocatorSshDocker, TargetsTargetLocatorSshAppleContainer,
+		TargetsTargetLocatorSshNitro:
+		if owner := locator.BorrowedFrom; owner != nil {
+			if err := ValidateSessionID(*owner); err != nil {
+				return err
+			}
+			if *owner == sessionID {
+				return errors.New("refusing cleanup: a borrowed container cannot be owned by the borrowing session")
+			}
+			belongs, err := ResourceNameBelongsTo(locator.ContainerID, *owner)
+			if err != nil {
+				return err
+			}
+			if !belongs && !IsRuntimeContainerID(locator.ContainerID) {
+				return errors.New("refusing cleanup: borrowed container locator is neither the owning session's generated name nor an immutable runtime ID")
+			}
+		} else {
+			belongs, err := ResourceNameBelongsTo(locator.ContainerID, sessionID)
+			if err != nil {
+				return err
+			}
+			if !belongs && !IsRuntimeContainerID(locator.ContainerID) {
+				return errors.New("refusing cleanup: container locator is neither the generated name nor an immutable runtime ID")
+			}
+		}
+	case TargetsTargetLocatorAwsEc2:
+		if !ValidEc2InstanceID(locator.InstanceID) {
+			return errors.New("refusing cleanup: invalid EC2 instance ID")
+		}
+		return VerifySessionWorkspace(locator.Workspace, sessionID)
+	case TargetsTargetLocatorSshBare:
+		if workerID := locator.WorkerID; workerID != nil {
+			if err := ValidateSessionID(*workerID); err != nil {
+				return err
+			}
+			if *workerID != sessionID {
+				return errors.New("refusing cleanup: SSH worker identity does not match session ID")
+			}
+			return ValidateWorkspacePrefix(locator.Workspace)
+		}
+		return VerifySessionWorkspace(locator.Workspace, sessionID)
+	default:
+		return fmt.Errorf("unknown target locator kind %q", locator.Kind)
+	}
+	return nil
 }
 
 // IsBorrowed reports whether this locator names a target another session
@@ -512,7 +800,14 @@ func IsBorrowed(locator *TargetsTargetLocator) bool {
 // VerifySessionWorkspace requires a safe workspace ending in the exact
 // session ID.
 func VerifySessionWorkspace(workspace, sessionID string) error {
-	panic("unported: mj-core/src/targets/ssh.rs verify_session_workspace")
+	if err := ValidateWorkspacePrefix(workspace); err != nil {
+		return err
+	}
+	trimmed := strings.TrimRight(workspace, "/")
+	if trimmed[strings.LastIndexByte(trimmed, '/')+1:] != sessionID {
+		return errors.New("refusing cleanup: workspace does not end in the exact session ID")
+	}
+	return nil
 }
 
 // ValidateSessionID requires 8-128 ASCII letters, digits, '-' or '_'.
@@ -530,39 +825,87 @@ func ValidateSessionID(value string) error {
 
 // ValidateRelativePath refuses an empty, absolute or non-normal bundle path.
 func ValidateRelativePath(value string) error {
-	panic("unported: mj-core/src/targets/ssh.rs validate_relative_path")
+	unsafe := value == "" || filepath.IsAbs(value) || strings.HasPrefix(value, "/")
+	if runtime.GOOS == "windows" && !unsafe {
+		// A drive or UNC prefix, or a root without one, is not a Normal
+		// component.
+		unsafe = filepath.VolumeName(value) != "" || strings.HasPrefix(value, `\`)
+	}
+	if !unsafe {
+		for index, part := range sshPathSplit(value) {
+			// Rust's components skip an interior "." but keep a leading one.
+			if part == ".." || (part == "." && index == 0) {
+				unsafe = true
+				break
+			}
+		}
+	}
+	if unsafe {
+		return fmt.Errorf("unsafe relative bundle path %s", debugString(value))
+	}
+	return nil
 }
 
 // ValidateWorkspacePrefix refuses an unsafe workspace path.
 func ValidateWorkspacePrefix(value string) error {
-	panic("unported: mj-core/src/targets/ssh.rs validate_workspace_prefix")
+	if value == "" || value == "/" || value == "~" || value == "~/" ||
+		strings.ContainsRune(value, 0) || slices.Contains(strings.Split(value, "/"), "..") {
+		return errors.New("unsafe workspace path")
+	}
+	return nil
 }
 
 // ValidateContainerTemplate refuses an invalid image and run arguments that
 // override the generated name or Mjolnir's ownership labels.
 func ValidateContainerTemplate(template *TargetsContainerTemplate) error {
-	panic("unported: mj-core/src/targets/ssh.rs validate_container_template")
+	if strings.TrimSpace(template.Image) == "" || strings.HasPrefix(template.Image, "-") {
+		return errors.New("invalid container image")
+	}
+	for _, arg := range template.ExtraRunArgs {
+		if arg == "--name" || strings.HasPrefix(arg, "--name=") {
+			return errors.New("container template may not override the generated name")
+		}
+	}
+	for _, arg := range template.ExtraRunArgs {
+		if arg == "--label" {
+			return errors.New("container template may not override Mjolnir ownership labels")
+		}
+		for _, label := range []string{SessionLabel, ManagedLabel, InstanceLabel} {
+			if strings.HasPrefix(arg, "--label="+label+"=") {
+				return errors.New("container template may not override Mjolnir ownership labels")
+			}
+		}
+	}
+	return nil
 }
 
 // ValidateSSH refuses an invalid SSH destination.
 func ValidateSSH(ssh *SshTarget) error {
-	panic("unported: mj-core/src/targets/ssh.rs validate_ssh")
+	if strings.TrimSpace(ssh.Destination) == "" || strings.HasPrefix(ssh.Destination, "-") ||
+		strings.ContainsFunc(ssh.Destination, unicode.IsSpace) {
+		return errors.New("invalid SSH destination")
+	}
+	return nil
 }
 
 // ValidateExecutable refuses an invalid executable name.
 func ValidateExecutable(value string) error {
-	panic("unported: mj-core/src/targets/ssh.rs validate_executable")
+	if value == "" || strings.HasPrefix(value, "-") || strings.ContainsFunc(value, unicode.IsSpace) {
+		return errors.New("invalid executable name")
+	}
+	return nil
 }
 
 // ValidEc2InstanceID reports whether value is `i-` and at least eight hex
 // digits.
 func ValidEc2InstanceID(value string) bool {
-	panic("unported: mj-core/src/targets/ssh.rs valid_ec2_instance_id")
+	rest, ok := strings.CutPrefix(value, "i-")
+	return ok && len(rest) >= 8 && isSSHASCIIHex(rest)
 }
 
 // IsRuntimeContainerID reports whether value is 12-128 hex digits.
 func IsRuntimeContainerID(value string) bool {
-	panic("unported: mj-core/src/targets/ssh.rs is_runtime_container_id")
+	return len(value) >= 12 && len(value) <= 128 && isSSHASCIIHex(value)
 }
 
 // SSHTransportExitStatus: `ssh` reserves exit status 255 for its own
@@ -581,7 +924,28 @@ const SSHTransportExitStatus = 255
 // differently, and those must not match: the remote command may already be
 // running, even if its start marker never arrived.
 func isPreAuthenticationHangup(line string) bool {
-	panic("unported: mj-core/src/targets/ssh.rs is_pre_authentication_hangup")
+	// `kex_exchange_identification` since OpenSSH 8.4,
+	// `ssh_exchange_identification` before it.
+	if strings.Contains(line, "exchange_identification:") ||
+		strings.Contains(line, "Connection timed out during banner exchange") {
+		return true
+	}
+	for _, prefix := range []string{"Connection closed by ", "Connection reset by "} {
+		_, peer, ok := strings.Cut(line, prefix)
+		if !ok {
+			continue
+		}
+		peer = strings.TrimRightFunc(peer, unicode.IsSpace)
+		separator := strings.LastIndex(peer, " port ")
+		if separator < 0 {
+			continue
+		}
+		port := peer[separator+len(" port "):]
+		if port != "" && strings.Trim(port, "0123456789") == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // IsTransportRejection reports whether a finished `ssh` process was turned
@@ -630,7 +994,13 @@ func (r SshRefusal) retryMessage() string {
 // logged at debug level. A connection closed before authentication can mean
 // a master died, so it stays a warning.
 func (r SshRefusal) logRetry(destination, purpose string, attempt int, delay time.Duration, stderr string) {
-	panic("unported: mj-core/src/targets/ssh.rs SshRefusal::log_retry")
+	attrs := []any{"destination", destination, "purpose", purpose, "attempt", attempt,
+		"delay_ms", uint64(delay.Milliseconds()), "stderr", stderr}
+	if r == SshRefusalSessionLimit {
+		slog.Debug(r.retryMessage(), attrs...)
+	} else {
+		slog.Warn(r.retryMessage(), attrs...)
+	}
 }
 
 // sshPersistentRefusal is how long a refusal that the command's walk cannot
@@ -758,7 +1128,41 @@ func (r *SshRefusalRetry) Walk() *SshWalk { return &r.walk }
 // SshSessionLease.NoteRefusal returned: whether the refusal is a step of the
 // walk to another master. This logs the retry or the exhaustion.
 func (r *SshRefusalRetry) Next(refusal SshRefusal, walksOn bool, destination, purpose, stderr string) (time.Duration, error) {
-	panic("unported: mj-core/src/targets/ssh.rs SshRefusalRetry::next")
+	stderr = strings.TrimSpace(stderr)
+	// Ask the walk now, so shards added since the lease count.
+	if walksOn && r.walk.canWalkOn() {
+		// The walk sends the next lease to a shard this command has not
+		// tried, or opens a new one, so this refusal cannot repeat: no wait,
+		// no time spent. The command is no longer stuck, so a later refusal
+		// it cannot route around gets the whole bound again; the walk still
+		// ends, because each walk opens at most one master.
+		r.stuckSince = nil
+		refusal.logRetry(destination, purpose, r.waits, 0, stderr)
+		return 0, nil
+	}
+	// A connection dropped before authentication usually means the master
+	// died: try the same shard again. A session refused on every shard the
+	// command has tried goes back to the one tried least recently.
+	if refusal == SshRefusalBeforeAuthentication {
+		r.walk.RetryLastShard()
+	}
+	if r.stuckSince == nil {
+		now := time.Now()
+		r.stuckSince = &now
+	}
+	elapsed := time.Since(*r.stuckSince)
+	remaining := r.bound - elapsed
+	if remaining <= 0 {
+		slog.Warn("the SSH server kept refusing the command; giving up",
+			"destination", destination, "purpose", purpose, "attempts", r.waits,
+			"elapsed_s", uint64(elapsed/time.Second), "stderr", stderr)
+		return 0, &SshRefusalPersisted{refusal: refusal, destination: destination, elapsed: elapsed, stderr: stderr}
+	}
+	r.waits++
+	// The last wait ends at the bound, so the command is never held longer.
+	delay := min(SSHRetryDelay(r.waits), remaining)
+	refusal.logRetry(destination, purpose, r.waits, delay, stderr)
+	return delay, nil
 }
 
 // SSHRefusal classifies a finished `ssh` process that the server turned
@@ -840,7 +1244,29 @@ func NewStartScan() *StartScan {
 // Push feeds one chunk. The bytes to pass on are appended to out. Returns
 // true the first time a byte arrives, which is the session's start.
 func (s *StartScan) Push(chunk []byte, out *[]byte) bool {
-	panic("unported: mj-core/src/targets/ssh.rs StartScan::push")
+	if len(chunk) == 0 {
+		return false
+	}
+	first := !s.started
+	s.started = true
+	switch s.state {
+	case ScanStatePassing:
+		*out = append(*out, chunk...)
+	case ScanStateMatching:
+		s.held = append(s.held, chunk...)
+		marker := []byte(SSHStartMarker)
+		compared := min(len(s.held), len(marker))
+		if !bytes.Equal(s.held[:compared], marker[:compared]) {
+			s.state = ScanStatePassing
+			*out = append(*out, s.held...)
+			s.held = nil
+		} else if len(s.held) >= len(marker) {
+			s.state = ScanStatePassing
+			*out = append(*out, s.held[len(marker):]...)
+			s.held = nil
+		}
+	}
+	return first
 }
 
 // Finish: the stream ended. Bytes held as a possible marker were ordinary
@@ -926,7 +1352,23 @@ func (g *StartGate) MarkEnded() {
 // WaitBlocking waits until the session has started or ended, polling
 // cancelled.
 func (g *StartGate) WaitBlocking(cancelled func() bool) StartWait {
-	panic("unported: mj-core/src/targets/ssh.rs StartGate::wait_blocking")
+	for {
+		switch g.Phase() {
+		case StartPhaseStarted:
+			return StartWaitStarted
+		case StartPhaseEnded:
+			return StartWaitEnded
+		}
+		if cancelled() {
+			return StartWaitCancelled
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-g.settled:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
 }
 
 // Wait waits until the session has started (true) or ended without starting
@@ -1023,7 +1465,21 @@ type Placement struct {
 }
 
 func placementOf(connection *Connection, walk *SshWalk) Placement {
-	panic("unported: mj-core/src/targets/ssh.rs Placement::of")
+	count := len(connection.shards)
+	start := connection.hint
+	if walk.start != nil {
+		start = *walk.start
+	}
+	for offset := range count {
+		shard := (start + offset) % count
+		if !slices.Contains(walk.visited, shard) {
+			return Placement{Kind: PlacementUntried, Shard: shard}
+		}
+	}
+	if len(walk.visited) > 0 && len(walk.opened) > 0 {
+		return Placement{Kind: PlacementRetryOldest, Shard: walk.visited[0]}
+	}
+	return Placement{Kind: PlacementOpenNew}
 }
 
 // canWalkOn reports whether the next lease of this walk goes to a shard that
@@ -1031,7 +1487,13 @@ func placementOf(connection *Connection, walk *SshWalk) Placement {
 // command has not tried, or a new one. Looked up when asked, so shards added
 // since the last lease count.
 func (w *SshWalk) canWalkOn() bool {
-	panic("unported: mj-core/src/targets/ssh.rs SshWalk::can_walk_on")
+	if w.connection == nil {
+		return false
+	}
+	connections, unlock := w.connection.ledger.lockConnections()
+	defer unlock()
+	connection, ok := connections[w.connection.key]
+	return ok && placementOf(connection, w).Kind != PlacementRetryOldest
 }
 
 // RetryLastShard: the command's last lease cannot be answered by another
@@ -1156,7 +1618,33 @@ func (l *SessionLedger) lockConnections() (map[string]*Connection, func()) {
 // reserve chooses the shard for walk's next lease by Placement. This is the
 // only placement rule, and the ledger's lock makes it one decision.
 func (l *SessionLedger) reserve(key string, walk *SshWalk) Reservation {
-	panic("unported: mj-core/src/targets/ssh.rs SessionLedger::reserve")
+	if walk.connection == nil {
+		walk.connection = &WalkedConnection{ledger: l, key: key}
+	}
+	connections, unlock := l.lockConnections()
+	defer unlock()
+	connection, ok := connections[key]
+	if !ok {
+		connection = &Connection{}
+		connections[key] = connection
+	}
+	if walk.start == nil {
+		hint := connection.hint
+		walk.start = &hint
+	}
+	var index int
+	switch placement := placementOf(connection, walk); placement.Kind {
+	case PlacementUntried:
+		index = placement.Shard
+	case PlacementOpenNew:
+		connection.shards = append(connection.shards, newShard())
+		index = len(connection.shards) - 1
+	case PlacementRetryOldest:
+		walk.visited = slices.DeleteFunc(walk.visited, func(visited int) bool { return visited == placement.Shard })
+		index = placement.Shard
+	}
+	walk.visited = append(walk.visited, index)
+	return Reservation{shard: index, opening: connection.shards[index].opening}
 }
 
 func (l *SessionLedger) slot(key string, reservation *Reservation, socket string) *LeasedSlot {
@@ -1166,7 +1654,30 @@ func (l *SessionLedger) slot(key string, reservation *Reservation, socket string
 // lease leases a session on walk's next shard, opening that shard's master
 // first when it is not known to be running.
 func (l *SessionLedger) lease(ssh *SshTarget, class SshTrafficClass, dir string, executor CommandExecutor, walk *SshWalk) (*SshSessionLease, error) {
-	panic("unported: mj-core/src/targets/ssh.rs SessionLedger::lease")
+	key := connectionKey(ssh, class)
+	reservation := l.reserve(key, walk)
+	slot := l.slot(key, &reservation, filepath.Join(dir, controlSocketName(ssh, class, reservation.shard)))
+	if slot.needsCheck() {
+		opening, err := takeOpening(ssh, &reservation, executor)
+		if err != nil {
+			return nil, err
+		}
+		defer opening.release()
+		// Another lease may have checked or opened the master while this one
+		// waited for the lock.
+		if slot.needsCheck() {
+			opened, err := ensureMaster(ssh, slot.socket, executor)
+			if err != nil {
+				return nil, err
+			}
+			if opened {
+				walk.opened = append(walk.opened, reservation.shard)
+			}
+			now := time.Now()
+			slot.setVerified(&now)
+		}
+	}
+	return newSshSessionLease(slot, false), nil
 }
 
 // leaseProbe places a fail-fast probe on walk's next shard, without
@@ -1179,7 +1690,10 @@ func (l *SessionLedger) lease(ssh *SshTarget, class SshTrafficClass, dir string,
 // takes the next index, which joins that shard's master if some process
 // opened it and otherwise connects directly.
 func (l *SessionLedger) leaseProbe(ssh *SshTarget, dir string, walk *SshWalk) *SshSessionLease {
-	panic("unported: mj-core/src/targets/ssh.rs SessionLedger::lease_probe")
+	key := connectionKey(ssh, SshTrafficClassControl)
+	reservation := l.reserve(key, walk)
+	socket := filepath.Join(dir, controlSocketName(ssh, SshTrafficClassControl, reservation.shard))
+	return newSshSessionLease(l.slot(key, &reservation, socket), true)
 }
 
 // ensureMaster makes sure a master is listening on socket, opening one if
@@ -1192,25 +1706,152 @@ func (l *SessionLedger) leaseProbe(ssh *SshTarget, dir string, walk *SshWalk) *S
 // control socket without these locks, so a refusal of such a session could
 // come from their sessions instead of from the server's `MaxSessions`.
 func ensureMaster(ssh *SshTarget, socket string, executor CommandExecutor) (bool, error) {
-	panic("unported: mj-core/src/targets/ssh.rs ensure_master")
+	// Another process of this instance (the old daemon during a restart) may
+	// be checking and opening the same socket. Without this lock both find no
+	// master and both open one; the second finds the socket bound, prints
+	// "already exists, disabling multiplexing", and keeps a plain background
+	// connection that no ControlPersist ever closes (J-18). The lock also
+	// keeps one process from removing, as stale, a socket the other has just
+	// bound.
+	lock, err := lockMasterOpeningUnless(socket, executor)
+	if err != nil {
+		return false, err
+	}
+	defer releaseMasterLock(lock)
+	running, err := masterRunning(ssh, socket, executor)
+	if err != nil {
+		return false, err
+	}
+	if running {
+		return false, nil
+	}
+	// A master that died without cleaning up leaves its socket behind, and
+	// `ssh` will not bind over it: the opener would print "already exists,
+	// disabling multiplexing" and hold a plain connection instead.
+	if err := os.Remove(socket); err == nil {
+		slog.Debug("removed a stale SSH control socket", "socket", socket)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false, fmt.Errorf("remove stale SSH control socket %s: %w", socket, err)
+	}
+	command := masterOpenCommand(ssh, socket)
+	opened, err := executor.Execute(&command)
+	if err != nil {
+		return false, err
+	}
+	running, err = masterRunning(ssh, socket, executor)
+	if err != nil {
+		return false, err
+	}
+	if running {
+		slog.Info("opened a shared SSH connection", "destination", ssh.Destination, "socket", socket)
+		return true, nil
+	}
+	detail := strings.TrimSpace(sshLossy(opened.Stderr))
+	if detail == "" {
+		detail = fmt.Sprintf("ssh exited with status %d", opened.Status)
+	}
+	return false, fmt.Errorf("could not open a shared SSH connection to %s: %s", ssh.Destination, detail)
 }
 
 // lockMasterOpeningUnless takes the cross-process lock file beside socket,
 // waiting (and reporting the wait as a stage to executor, when given) while
 // another process holds it, unless executor is cancelled.
 func lockMasterOpeningUnless(socket string, executor CommandExecutor) (*FileLock, error) {
-	panic("unported: mj-core/src/targets/ssh.rs lock_master_opening_unless")
+	path := socket + ".lock"
+	var wait *LockWait
+	var queued *ProvisionStageGuard
+	defer func() {
+		if wait != nil {
+			// Does nothing once the wait was acquired.
+			wait.Drop()
+		}
+		if queued != nil {
+			queued.End()
+		}
+	}()
+	for {
+		if executor != nil && executor.CancellationRequested() {
+			return nil, errors.New("operation cancelled while waiting for SSH master lock")
+		}
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o666)
+		if err != nil {
+			return nil, fmt.Errorf("open SSH master lock %s: %w", path, err)
+		}
+		locked, err := sshTryLockFile(file)
+		if err != nil {
+			file.Close()
+			return nil, fmt.Errorf("lock SSH master lock %s: %w", path, err)
+		}
+		if !locked {
+			file.Close()
+			// The lock file is empty, so it cannot name its holder: that is
+			// another process, or another open of the file here.
+			if wait == nil {
+				wait = NewLockWait("an SSH master file lock")
+				if executor != nil {
+					queued = NewProvisionStageGuard(executor, ProvisionStage{Kind: ProvisionStageWaitingForSshConnection})
+				}
+			}
+			wait.Blocked(path, "thread "+currentThreadName(), func() string {
+				return "held by another process (the lock file records no pid)"
+			})
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		lock := NewFileLock(file)
+		// The daemon removes stale locks when it starts. A lock taken on a
+		// file removed meanwhile serializes nothing, so take the one at the
+		// path now.
+		if isFileAt(file, path) {
+			if wait != nil {
+				wait.Acquired()
+			}
+			return lock, nil
+		}
+		releaseMasterLock(lock)
+	}
 }
 
 // removeStaleMasterLocksIn removes lock files, and the sockets of masters
 // that are no longer running, that no process holds in dir.
 func removeStaleMasterLocksIn(dir string) {
-	panic("unported: mj-core/src/targets/ssh.rs remove_stale_master_locks_in")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		slog.Debug("cannot list SSH master locks", "directory", dir, "error", err)
+		return
+	}
+	// Both generations use <16 hex digits>-<shard>. The class is in the
+	// hash, so discovery does not need a target configuration or a class.
+	found := map[string]struct{}{}
+	for _, entry := range entries {
+		name := strings.TrimSuffix(entry.Name(), ".lock")
+		hash, shard, ok := strings.Cut(name, "-")
+		if ok && utf8.ValidString(name) && len(hash) == connectionHashHex && isSSHASCIIHex(hash) &&
+			shard != "" && strings.Trim(shard, "0123456789") == "" {
+			found[filepath.Join(dir, name)] = struct{}{}
+		}
+	}
+	sockets := make([]string, 0, len(found))
+	for socket := range found {
+		sockets = append(sockets, socket)
+	}
+	slices.Sort(sockets)
+	for _, socket := range sockets {
+		removeStaleMasterLock(socket)
+	}
 }
 
 // isFileAt reports whether the open file is still the file at path.
 func isFileAt(file *os.File, path string) bool {
-	panic("unported: mj-core/src/targets/ssh.rs is_file_at")
+	open, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	named, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(open, named)
 }
 
 func masterRunning(ssh *SshTarget, socket string, executor CommandExecutor) (bool, error) {
@@ -1272,11 +1913,22 @@ func (c *SessionConfirm) confirm() {
 }
 
 func (s *LeasedSlot) needsCheck() bool {
-	panic("unported: mj-core/src/targets/ssh.rs LeasedSlot::needs_check")
+	connections, unlock := s.ledger.lockConnections()
+	defer unlock()
+	connection, ok := connections[s.key]
+	if !ok || s.shard >= len(connection.shards) {
+		return true
+	}
+	verified := connection.shards[s.shard].verifiedAt
+	return verified == nil || time.Since(*verified) >= masterCheckInterval
 }
 
 func (s *LeasedSlot) setVerified(verifiedAt *time.Time) {
-	panic("unported: mj-core/src/targets/ssh.rs LeasedSlot::set_verified")
+	connections, unlock := s.ledger.lockConnections()
+	defer unlock()
+	if connection, ok := connections[s.key]; ok && s.shard < len(connection.shards) {
+		connection.shards[s.shard].verifiedAt = verifiedAt
+	}
 }
 
 func (s *LeasedSlot) confirmHandle() *SessionConfirm {
@@ -1340,19 +1992,38 @@ type SshSessions struct{}
 // SshSessionsLease leases a session on ssh's shared connection (Rust:
 // SshSessions::lease).
 func SshSessionsLease(ssh *SshTarget, class SshTrafficClass, executor CommandExecutor, walk *SshWalk) (*SshSessionLease, error) {
-	panic("unported: mj-core/src/targets/ssh.rs SshSessions::lease")
+	if runtime.GOOS == "windows" || userConfiguresSharing(ssh.SSHArgs) {
+		return sshSessionLeaseUnshared(), nil
+	}
+	dir, ok := controlSocketDir()
+	if !ok {
+		return sshSessionLeaseUnshared(), nil
+	}
+	return sessionLedgerGlobal().lease(ssh, class, dir, executor, walk)
 }
 
 // SshSessionsRemoveStaleMasterLocks sweeps this instance's control
 // directory (Rust: SshSessions::remove_stale_master_locks).
 func SshSessionsRemoveStaleMasterLocks() {
-	panic("unported: mj-core/src/targets/ssh.rs SshSessions::remove_stale_master_locks")
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if dir, ok := controlSocketDir(); ok {
+		removeStaleMasterLocksIn(dir)
+	}
 }
 
 // SshSessionsLeaseProbe places a fail-fast probe on ssh's shared connection
 // (Rust: SshSessions::lease_probe).
 func SshSessionsLeaseProbe(ssh *SshTarget, walk *SshWalk) *SshSessionLease {
-	panic("unported: mj-core/src/targets/ssh.rs SshSessions::lease_probe")
+	if runtime.GOOS == "windows" || userConfiguresSharing(ssh.SSHArgs) {
+		return sshSessionLeaseUnshared()
+	}
+	dir, ok := controlSocketDir()
+	if !ok {
+		return sshSessionLeaseUnshared()
+	}
+	return sessionLedgerGlobal().leaseProbe(ssh, dir, walk)
 }
 
 // PushSessionArgs appends the options that bind a command to the lease's
@@ -1386,7 +2057,29 @@ func SessionCommandArgs(program string, args []string, ssh *SshTarget, lease *Ss
 // options, spelling a user's `-J` jump host as `-o ProxyJump=` so it is not
 // mistaken for a session option.
 func appendSessionCommand(session *[]string, program string, args []string, ssh *SshTarget) {
-	panic("unported: mj-core/src/targets/ssh.rs append_session_command")
+	if program == "ssh" && len(args) >= len(ssh.SSHArgs) && slices.Equal(args[:len(ssh.SSHArgs)], ssh.SSHArgs) {
+		user, rest := args[:len(ssh.SSHArgs)], args[len(ssh.SSHArgs):]
+		for index := 0; index < len(user); index++ {
+			argument := user[index]
+			jump, ok := strings.CutPrefix(argument, "-J")
+			switch {
+			case !ok:
+				*session = append(*session, argument)
+			case jump == "":
+				if index+1 < len(user) {
+					index++
+					*session = append(*session, "-o", "ProxyJump="+user[index])
+				} else {
+					*session = append(*session, argument)
+				}
+			default:
+				*session = append(*session, "-o", "ProxyJump="+jump)
+			}
+		}
+		*session = append(*session, rest...)
+	} else {
+		*session = append(*session, args...)
+	}
 }
 
 // sshRetryBackoffMs is the jittered backoff (low, high milliseconds) of the
@@ -1405,5 +2098,161 @@ func SetSSHRetryBackoffForTest(delay *time.Duration) {
 
 // SSHRetryDelay is the jittered wait before retry attemptsMade.
 func SSHRetryDelay(attemptsMade int) time.Duration {
-	panic("unported: mj-core/src/targets/ssh.rs ssh_retry_delay")
+	if override := sshRetryBackoffOverrideMs.Load(); override != math.MaxUint64 {
+		return time.Duration(override) * time.Millisecond
+	}
+	index := min(max(attemptsMade-1, 0), len(sshRetryBackoffMs)-1)
+	low, high := sshRetryBackoffMs[index][0], sshRetryBackoffMs[index][1]
+	// A failed draw only costs jitter, so fall back to the lower bound.
+	var spread uint64
+	var random [8]byte
+	if _, err := rand.Read(random[:]); err == nil {
+		spread = binary.LittleEndian.Uint64(random[:]) % (high - low + 1)
+	}
+	return time.Duration(low+spread) * time.Millisecond
+}
+
+// takeOpening takes reservation's in-process opening lock, polling while
+// another lease holds it. A lease that has to queue reports it as a stage,
+// so a lifecycle watching for stalls does not count the queue.
+func takeOpening(ssh *SshTarget, reservation *Reservation, executor CommandExecutor) (*OpeningGuard, error) {
+	var wait *LockWait
+	var queued *ProvisionStageGuard
+	defer func() {
+		if wait != nil {
+			// Does nothing once the wait was acquired.
+			wait.Drop()
+		}
+		if queued != nil {
+			queued.End()
+		}
+	}()
+	for {
+		if executor.CancellationRequested() {
+			return nil, errors.New("operation cancelled while waiting for SSH master")
+		}
+		if guard := reservation.opening.tryLock(); guard != nil {
+			if wait != nil {
+				wait.Acquired()
+			}
+			return guard, nil
+		}
+		if wait == nil {
+			wait = NewLockWait("an SSH master")
+			queued = NewProvisionStageGuard(executor, ProvisionStage{Kind: ProvisionStageWaitingForSshConnection})
+		}
+		wait.Blocked(fmt.Sprintf("%s shard %d", ssh.Destination, reservation.shard),
+			"thread "+currentThreadName(), reservation.opening.describeHolder)
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// releaseMasterLock unlocks a master lock file and closes it, as dropping
+// Rust's FileLock does.
+func releaseMasterLock(lock *FileLock) {
+	file := lock.File()
+	lock.Drop()
+	file.Close()
+}
+
+// removeStaleMasterLock removes socket, when no master answers on it, and
+// then its lock file, unless another process holds the lock or the lock file
+// was replaced. See removeStaleMasterLocksIn.
+func removeStaleMasterLock(socket string) {
+	lockPath := socket + ".lock"
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_WRONLY, 0o666)
+	if err != nil {
+		return
+	}
+	// Held: another process is checking or opening this master now.
+	if locked, err := sshTryLockFile(file); err != nil || !locked {
+		file.Close()
+		return
+	}
+	lock := NewFileLock(file)
+	defer releaseMasterLock(lock)
+	if !isFileAt(file, lockPath) {
+		return
+	}
+	if _, err := os.Lstat(socket); err == nil {
+		// -O check only contacts the local socket; it never connects to this
+		// placeholder destination. This also finds old-hash masters still
+		// serving workers during daemon handoff.
+		ssh := SshTarget{Destination: "mj-stale-master-check", SSHArgs: []string{"-F", "/dev/null"}}
+		running, err := masterRunning(&ssh, socket, ProcessExecutor{})
+		if err != nil {
+			slog.Warn("cannot check stale SSH master", "socket", socket, "error", err)
+			return
+		}
+		if running {
+			return
+		}
+		if err := os.Remove(socket); err != nil {
+			slog.Debug("cannot remove stale SSH master socket", "socket", socket, "error", err)
+			return
+		}
+	}
+	if err := os.Remove(lockPath); err != nil {
+		slog.Debug("cannot remove a stale SSH master lock", "lock", lockPath, "error", err)
+	} else {
+		slog.Debug("removed a stale SSH master lock", "lock", lockPath)
+	}
+}
+
+// sshLossy is Rust's String::from_utf8_lossy.
+func sshLossy(output []byte) string {
+	return strings.ToValidUTF8(string(output), "�")
+}
+
+// sshASCIILower is Rust's str::to_ascii_lowercase.
+func sshASCIILower(value string) string {
+	return strings.Map(func(character rune) rune {
+		if character >= 'A' && character <= 'Z' {
+			return character + ('a' - 'A')
+		}
+		return character
+	}, value)
+}
+
+// sshEqualFoldASCII is Rust's str::eq_ignore_ascii_case.
+func sshEqualFoldASCII(left, right string) bool {
+	return len(left) == len(right) && sshASCIILower(left) == sshASCIILower(right)
+}
+
+func isSSHASCIILetter(character byte) bool {
+	return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z')
+}
+
+// isSSHASCIIHex reports whether every byte of value is an ASCII hex digit.
+func isSSHASCIIHex(value string) bool {
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// sshPathSplit splits a path at its separators, dropping empty parts: `/`
+// everywhere, and `\` too on Windows, as Rust's Path does.
+func sshPathSplit(path string) []string {
+	return strings.FieldsFunc(path, func(character rune) bool {
+		return character == '/' || (runtime.GOOS == "windows" && character == '\\')
+	})
+}
+
+// sshPathComponents is the parts of path as Rust's Path::components names
+// them for the checks here: a `.` is kept only as the first part of a
+// relative path.
+func sshPathComponents(path string) []string {
+	relative := !filepath.IsAbs(path) && !strings.HasPrefix(path, "/")
+	var components []string
+	for index, part := range sshPathSplit(path) {
+		if part == "." && !(index == 0 && relative) {
+			continue
+		}
+		components = append(components, part)
+	}
+	return components
 }

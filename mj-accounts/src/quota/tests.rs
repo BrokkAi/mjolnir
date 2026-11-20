@@ -657,13 +657,18 @@ read_and_log
 read_and_log
 printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
 read_and_log
-printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+printf '%s\n' '{"id":3,"result":{"rateLimits":{"planType":"pro","primary":{"usedPercent":25,"windowDurationMins":300}}}}'
 "#,
     );
 
     let outcome = poll_codex_profile(directory.path(), environment).await;
 
     assert_eq!(outcome.report.error, None);
+    assert_eq!(outcome.report.monthly_price_usd, Some(200));
+    let [window] = outcome.report.windows.as_slice() else {
+        panic!("expected one quota window")
+    };
+    assert_eq!((window.used, window.limit), (None, None));
     assert!(!outcome.credentials_changed);
 
     let messages = codex_request_log(&log);

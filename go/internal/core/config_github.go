@@ -7,6 +7,7 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -56,7 +57,15 @@ func (g GithubConfig) IsDefault() bool {
 }
 
 func (g GithubConfig) Validate() error {
-	panic("unported: mj-core/src/config/github.rs GithubConfig::validate")
+	if g.SessionTokenPath != nil {
+		if err := ValidateAbsoluteInput(*g.SessionTokenPath); err != nil {
+			return fmt.Errorf("[github] session_token_path: %w", err)
+		}
+	}
+	if g.App != nil {
+		return g.App.Validate()
+	}
+	return nil
 }
 
 // GithubWatchConfig is the configuration for the durable GitHub mailbox
@@ -182,7 +191,39 @@ func (g GithubAppConfig) Validate() error {
 // validatePermissionsAndInstallations is the rest of
 // GithubAppConfig::validate: permission names, then installation owners.
 func (g GithubAppConfig) validatePermissionsAndInstallations() error {
-	panic("unported: mj-core/src/config/github.rs GithubAppConfig::validate")
+	for _, section := range []struct {
+		name        string
+		permissions *GithubPermissionSet
+	}{
+		{"session_permissions", g.SessionPermissions},
+		{"token_permissions", g.TokenPermissions},
+	} {
+		if section.permissions == nil {
+			continue
+		}
+		for _, permission := range sortedKeys(*section.permissions) {
+			if !validGithubPermissionName(permission) {
+				return fmt.Errorf("[github.app.%s] key %s is not a valid GitHub permission name",
+					section.name, debugString(permission))
+			}
+		}
+	}
+	owners := map[string]bool{}
+	for _, owner := range sortedKeys(g.Installations) {
+		if !ValidGithubOwnerLogin(owner) {
+			return fmt.Errorf("[github.app.installations] key %s is not a valid GitHub owner login", debugString(owner))
+		}
+		folded := configASCIILower(owner)
+		if owners[folded] {
+			return fmt.Errorf("[github.app.installations] owner %s is configured more than once with different letter casing",
+				debugString(owner))
+		}
+		owners[folded] = true
+		if g.Installations[owner] == 0 {
+			return fmt.Errorf("[github.app.installations.%s] installation ID must be a positive integer", owner)
+		}
+	}
+	return nil
 }
 
 func validGithubPermissionName(permission string) bool {

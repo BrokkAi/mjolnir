@@ -221,7 +221,34 @@ func (m SnapshotMap[K, V]) Values() iter.Seq[*V] {
 // whose record was added or changed with its new record, and each removed
 // key with nil. Shared records are skipped without calling eq.
 func (m SnapshotMap[K, V]) Changes(next SnapshotMap[K, V], eq func(a, b *V) bool) iter.Seq2[K, *V] {
-	panic("unported: mj-core/src/snapshot_map.rs SnapshotMap::changes")
+	return func(yield func(K, *V) bool) {
+		keys := maps.Keys(m.entries)
+		union := slices.Collect(keys)
+		for key := range next.entries {
+			if _, ok := m.entries[key]; !ok {
+				union = append(union, key)
+			}
+		}
+		slices.Sort(union)
+		for _, key := range union {
+			old, inOld := m.entries[key]
+			value, inNext := next.entries[key]
+			switch {
+			case !inNext:
+				if !yield(key, nil) {
+					return
+				}
+			case !inOld:
+				if !yield(key, value) {
+					return
+				}
+			case old != value && !eq(old, value):
+				if !yield(key, value) {
+					return
+				}
+			}
+		}
+	}
 }
 
 // IntoValues yields copies of the records in key order.
@@ -248,7 +275,19 @@ func (m *SnapshotMap[K, V]) Entry(key K) SnapshotEntry[K, V] {
 }
 
 func (m *SnapshotMap[K, V]) Retain(keep func(K, *V) bool) {
-	panic("unported: mj-core/src/snapshot_map.rs SnapshotMap::retain")
+	var removed []K
+	for _, key := range m.sortedKeys() {
+		if !keep(key, m.entries[key]) {
+			removed = append(removed, key)
+		}
+	}
+	if len(removed) == 0 {
+		return
+	}
+	m.own()
+	for _, key := range removed {
+		delete(m.entries, key)
+	}
 }
 
 // CopyEntry makes key hold source's entry when keep is true and removes it

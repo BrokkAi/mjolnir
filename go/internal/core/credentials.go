@@ -20,19 +20,30 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	acp "github.com/BrokkAi/acp-go"
+	"github.com/BrokkAi/acp-go/jsonvalue"
+	acpschema "github.com/BrokkAi/acp-go/schema"
 )
 
 // MaxCredentialBytes bounds a credential file. Credential files are small
@@ -57,14 +68,31 @@ func CredentialFingerprint(bytes []byte) string {
 // ClaudeOauthLoginPath is the staged OAuth login, excluding setup tokens and
 // API-key/Bedrock launches.
 func ClaudeOauthLoginPath(environment map[string]string) (string, bool) {
-	panic("unported: mj-core/src/credentials.rs claude_oauth_login_path")
+	for _, key := range []string{ClaudeOauthTokenEnv, "ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"} {
+		if value, ok := environment[key]; ok && value != "" && value != "0" {
+			return "", false
+		}
+	}
+	home, ok := environment[HarnessKindClaude.HomeEnv()]
+	if !ok {
+		return "", false
+	}
+	return HarnessAuthenticationMarker(HarnessKindClaude, home), true
 }
 
 // ClaudeAccessTokenFingerprint is the identity of the access token itself.
 // Stripping a refresh token or rewriting the JSON cannot authorize recovery
 // of a prompt that used the same login.
 func ClaudeAccessTokenFingerprint(bytes []byte) (string, bool) {
-	panic("unported: mj-core/src/credentials.rs claude_access_token_fingerprint")
+	login, err := jsonvalue.Parse(bytes)
+	if err != nil {
+		return "", false
+	}
+	token, ok := jvString(jvPointer(login, "/claudeAiOauth/accessToken"))
+	if !ok || token == "" {
+		return "", false
+	}
+	return CredentialFingerprint([]byte(token)), true
 }
 
 type GithubTokenSnapshot struct {
@@ -202,7 +230,21 @@ func ReadClaudeOauthToken(path string) (string, bool, error) {
 }
 
 func WriteClaudeOauthToken(path string, bytes []byte) error {
-	panic("unported: mj-core/src/credentials.rs write_claude_oauth_token")
+	token, err := ValidateClaudeOauthToken(bytes)
+	if err != nil {
+		return err
+	}
+	if err := refuseSymlinkedToken("Claude setup token", path); err != nil {
+		return err
+	}
+	directory, ok := credentialParent(path)
+	if !ok {
+		return errors.New("Claude setup token path has no directory")
+	}
+	if err := CreateOwnerOnlyDirectory(directory); err != nil {
+		return err
+	}
+	return AtomicWriteExisting(path, []byte(token+"\n"))
 }
 
 // CredentialFreshness is epoch milliseconds describing how current a
@@ -227,7 +269,11 @@ func WriteClaudeOauthToken(path string, bytes []byte) error {
 //
 // Anything unparseable is unknown rather than a guess.
 func CredentialFreshness(kind HarnessKind, bytes []byte) (int64, bool) {
-	panic("unported: mj-core/src/credentials.rs credential_freshness")
+	json, err := jsonvalue.Parse(bytes)
+	if err != nil {
+		return 0, false
+	}
+	return kind.CredentialFreshnessMs(json)
 }
 
 // CredentialExpiry is epoch milliseconds at which the stored access token
@@ -241,7 +287,11 @@ func CredentialFreshness(kind HarnessKind, bytes []byte) (int64, bool) {
 //
 // Anything unparseable is unknown rather than a guess.
 func CredentialExpiry(kind HarnessKind, bytes []byte) (int64, bool) {
-	panic("unported: mj-core/src/credentials.rs credential_expiry")
+	json, err := jsonvalue.Parse(bytes)
+	if err != nil {
+		return 0, false
+	}
+	return kind.CredentialExpiryMs(json)
 }
 
 // CopiesOmitRefreshToken is whether the credential copies this host hands to
@@ -269,33 +319,139 @@ func (kind HarnessKind) CopiesOmitRefreshToken() bool {
 // Other harnesses, and a document that is not Claude's JSON shape, are
 // returned unchanged.
 func CredentialCopyForHarness(kind HarnessKind, bytes []byte) []byte {
-	panic("unported: mj-core/src/credentials.rs credential_copy_for_harness")
+	if !CredentialHoldsRefreshToken(kind, bytes) {
+		return bytes
+	}
+	json, err := jsonvalue.Parse(bytes)
+	if err != nil {
+		return bytes
+	}
+	document, ok := json.(jsonvalue.Object)
+	if !ok {
+		return bytes
+	}
+	member, ok := document.Get("claudeAiOauth")
+	if !ok {
+		return bytes
+	}
+	oauth, ok := member.(jsonvalue.Object)
+	if !ok {
+		return bytes
+	}
+	// serde_json's Map::remove with preserve_order is a swap remove.
+	oauth.SwapDelete("refreshToken")
+	document.Set("claudeAiOauth", oauth)
+	stripped, err := jsonvalue.Marshal(document)
+	if err != nil {
+		return bytes
+	}
+	return stripped
 }
 
 // CredentialHoldsRefreshToken is whether a Claude credential carries a
 // refresh token its holder could spend. An empty string is the "login ended"
 // marker, not a token. Other harnesses report none here.
 func CredentialHoldsRefreshToken(kind HarnessKind, bytes []byte) bool {
-	panic("unported: mj-core/src/credentials.rs credential_holds_refresh_token")
+	if kind != HarnessKindClaude {
+		return false
+	}
+	json, err := jsonvalue.Parse(bytes)
+	if err != nil {
+		return false
+	}
+	token, ok := jvString(jvPointer(json, "/claudeAiOauth/refreshToken"))
+	return ok && token != ""
 }
 
 // museLoginExpiryMs reads Muse's Meta login access-token expiry, recorded in
 // epoch seconds. A refresh moves it forward, so it both orders copies and
 // says when the login runs out. A stored API key has none.
 func museLoginExpiryMs(json any) (int64, bool) {
-	panic("unported: mj-core/src/credentials.rs muse_login_expiry_ms")
+	seconds, ok := jvInt64(jvPointer(json, "/providers/meta/expires_at"))
+	if !ok {
+		return 0, false
+	}
+	return credentialCheckedMillis(seconds)
 }
 
 // CredentialFreshnessMs reads CredentialFreshness out of this harness's own
 // credential JSON (a jsonvalue value).
 func (kind HarnessKind) CredentialFreshnessMs(json any) (int64, bool) {
-	panic("unported: mj-core/src/credentials.rs HarnessKind::credential_freshness_ms")
+	switch kind {
+	case HarnessKindAntigravity:
+		token, _ := jvGet(json, "token")
+		expiry, ok := jvString(jvGet(token, "expiry"))
+		if !ok {
+			return 0, false
+		}
+		return credentialRFC3339Millis(expiry)
+	case HarnessKindClaude:
+		oauth, _ := jvGet(json, "claudeAiOauth")
+		return jvInt64(jvGet(oauth, "expiresAt"))
+	case HarnessKindCodex:
+		lastRefresh, ok := jvString(jvGet(json, "last_refresh"))
+		if !ok {
+			return 0, false
+		}
+		return credentialRFC3339Millis(lastRefresh)
+	case HarnessKindKimi:
+		seconds, ok := jvInt64(jvGet(json, "expires_at"))
+		if !ok {
+			return 0, false
+		}
+		return credentialCheckedMillis(seconds)
+	case HarnessKindMuse:
+		return museLoginExpiryMs(json)
+	case HarnessKindGrok:
+		grants, ok := json.(jsonvalue.Object)
+		if !ok {
+			return 0, false
+		}
+		var latest int64
+		found := false
+		for _, key := range grants.Keys() {
+			grant, _ := grants.Get(key)
+			expiresAt, ok := jvString(jvGet(grant, "expires_at"))
+			if !ok {
+				continue
+			}
+			if expiry, ok := credentialRFC3339Millis(expiresAt); ok && (!found || expiry > latest) {
+				latest, found = expiry, true
+			}
+		}
+		return latest, found
+	}
+	// OpenCode's logins live in its database, which no copy orders, and DSH
+	// has no login.
+	return 0, false
 }
 
 // CredentialExpiryMs reads CredentialExpiry out of this harness's own
 // credential JSON (a jsonvalue value).
 func (kind HarnessKind) CredentialExpiryMs(json any) (int64, bool) {
-	panic("unported: mj-core/src/credentials.rs HarnessKind::credential_expiry_ms")
+	switch kind {
+	case HarnessKindClaude:
+		oauth, _ := jvGet(json, "claudeAiOauth")
+		return jvInt64(jvGet(oauth, "expiresAt"))
+	case HarnessKindCodex:
+		tokens, _ := jvGet(json, "tokens")
+		token, ok := jvString(jvGet(tokens, "access_token"))
+		if !ok {
+			return 0, false
+		}
+		return jwtExpiryMillis(token)
+	case HarnessKindKimi:
+		seconds, ok := jvInt64(jvGet(json, "expires_at"))
+		if !ok {
+			return 0, false
+		}
+		return credentialCheckedMillis(seconds)
+	case HarnessKindMuse:
+		return museLoginExpiryMs(json)
+	}
+	// None of the others has a proactive-refresh path, so none reports an
+	// expiry Hel would act on: each refreshes its own tokens on demand.
+	return 0, false
 }
 
 // NativeLoginCommand is the harness CLI's own interactive login command.
@@ -304,7 +460,20 @@ func (kind HarnessKind) CredentialExpiryMs(json any) (int64, bool) {
 // `claude auth login` (there is no bare `claude login`), `kimi login`,
 // `grok login`, `muse login`, and `opencode auth login`.
 func (kind HarnessKind) NativeLoginCommand() (string, []string) {
-	panic("unported: mj-core/src/credentials.rs HarnessKind::native_login_command")
+	var arguments []string
+	switch kind {
+	case HarnessKindClaude, HarnessKindOpenCode:
+		arguments = []string{"auth", "login"}
+	case HarnessKindCodex, HarnessKindKimi, HarnessKindGrok, HarnessKindMuse:
+		arguments = []string{"login"}
+	case HarnessKindDsh:
+		// dsh-acp has no login; its profiles authenticate with an API key,
+		// so LoginCommand refuses before this is reached.
+		arguments = []string{}
+	case HarnessKindAntigravity:
+		arguments = []string{"acp", "--login", "--disable-telemetry"}
+	}
+	return kind.CLIBinaryName(), arguments
 }
 
 // jwtExpiryMillis is the `exp` claim of a JWT, in epoch milliseconds.
@@ -313,13 +482,38 @@ func (kind HarnessKind) NativeLoginCommand() (string, []string) {
 // issuer's business; Hel never accepts the token on anyone's behalf, so there
 // is nothing here for a forged claim to unlock beyond an early refresh.
 func jwtExpiryMillis(token string) (int64, bool) {
-	panic("unported: mj-core/src/credentials.rs jwt_expiry_millis")
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return 0, false
+	}
+	payload := parts[1]
+	// Go's decoder skips newlines, which Rust's base64 refuses.
+	if strings.ContainsAny(payload, "\r\n") {
+		return 0, false
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(payload)
+	if err != nil {
+		return 0, false
+	}
+	claims, err := jsonvalue.Parse(decoded)
+	if err != nil {
+		return 0, false
+	}
+	expiry, ok := jvInt64(jvGet(claims, "exp"))
+	if !ok {
+		return 0, false
+	}
+	return credentialCheckedMillis(expiry)
 }
 
 // credentialRFC3339Millis parses an RFC 3339 timestamp as chrono's
 // parse_from_rfc3339 does, in epoch milliseconds.
 func credentialRFC3339Millis(text string) (int64, bool) {
-	panic("unported: mj-core/src/credentials.rs chrono::DateTime::parse_from_rfc3339")
+	instant, ok := ParseChronoRFC3339(text)
+	if !ok {
+		return 0, false
+	}
+	return instant.UnixMilli(), true
 }
 
 // ValidateCredentialPayload rejects anything that is not a plausible
@@ -394,7 +588,48 @@ func (s LoginStatusUnknown) MarshalJSON() ([]byte, error) {
 
 // UnmarshalLoginStatus decodes serde's externally tagged LoginStatus.
 func UnmarshalLoginStatus(data []byte) (LoginStatus, error) {
-	panic("unported: mj-core/src/credentials.rs LoginStatus deserialize")
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		switch text {
+		case "SignedIn":
+			return LoginStatusSignedIn{}, nil
+		case "Expired":
+			return LoginStatusExpired{}, nil
+		case "SignedOut":
+			return LoginStatusSignedOut{}, nil
+		case "NotRequired", "Unknown":
+			return nil, fmt.Errorf("invalid type: unit variant, expected newtype variant")
+		}
+		return nil, fmt.Errorf("unknown variant `%s`, expected one of `SignedIn`, `Expired`, `SignedOut`, `NotRequired`, `Unknown`", text)
+	}
+	var tagged map[string]json.RawMessage
+	if err := json.Unmarshal(data, &tagged); err != nil {
+		return nil, fmt.Errorf("invalid type: expected enum LoginStatus: %w", err)
+	}
+	if len(tagged) != 1 {
+		return nil, errors.New("invalid type: map, expected map with a single key")
+	}
+	for variant, body := range tagged {
+		switch variant {
+		case "SignedIn", "Expired", "SignedOut":
+			if string(bytes.TrimSpace(body)) != "null" {
+				return nil, errors.New("invalid type: expected unit variant")
+			}
+			return UnmarshalLoginStatus([]byte(strconv.Quote(variant)))
+		case "NotRequired", "Unknown":
+			var detail string
+			if err := json.Unmarshal(body, &detail); err != nil {
+				return nil, err
+			}
+			if variant == "NotRequired" {
+				return LoginStatusNotRequired{Detail: detail}, nil
+			}
+			return LoginStatusUnknown{Detail: detail}, nil
+		default:
+			return nil, fmt.Errorf("unknown variant `%s`, expected one of `SignedIn`, `Expired`, `SignedOut`, `NotRequired`, `Unknown`", variant)
+		}
+	}
+	return nil, errors.New("invalid type: expected enum LoginStatus")
 }
 
 type CredentialSnapshot struct {
@@ -485,7 +720,25 @@ func ReadCredentialFile(kind HarnessKind, path string) (CredentialSnapshot, []by
 // write or widening its permissions. Refuses a symlinked destination so a
 // compromised session home cannot redirect the write.
 func WriteCredentialFile(kind HarnessKind, path string, bytes []byte) error {
-	panic("unported: mj-core/src/credentials.rs write_credential_file")
+	if err := ValidateCredentialPayload(kind, bytes); err != nil {
+		return err
+	}
+	if err := refuseSymlinkedToken("credential", path); err != nil {
+		return err
+	}
+	if parent, ok := credentialParent(path); ok {
+		if err := os.MkdirAll(parent, 0o777); err != nil {
+			return fmt.Errorf("create %s: %w", parent, err)
+		}
+		if runtime.GOOS != "windows" {
+			if err := os.Chmod(parent, 0o700); err != nil {
+				return fmt.Errorf("restrict permissions on %s: %w", parent, err)
+			}
+		}
+	}
+	// AtomicWrite creates the temporary file with mode 0600 and renames it
+	// over the destination, so the installed file is never world-readable.
+	return AtomicWrite(path, bytes)
 }
 
 // authFailurePhrases are full-phrase markers that a harness rejected the
@@ -545,7 +798,18 @@ func containsASCIIIdentifier(text, identifier string) bool {
 }
 
 func containsAuthFailureSignature(text string) bool {
-	panic("unported: mj-core/src/credentials.rs contains_auth_failure_signature")
+	normalized := credentialsASCIILower(text)
+	for _, phrase := range authFailurePhrases {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	for _, identifier := range authFailureIdentifiers {
+		if containsASCIIIdentifier(normalized, identifier) {
+			return true
+		}
+	}
+	return false
 }
 
 func AuthFailureSignature(kind HarnessKind, text string) bool {
@@ -570,7 +834,21 @@ var authFailureErrorKinds = [1]string{AuthFailureKind}
 // an auth failure phrase in its message. A usage limit is never one, as in
 // the worker's warning label.
 func TurnDiagnosticReportsAuthFailure(diagnostic *TurnDiagnostic) bool {
-	panic("unported: mj-core/src/credentials.rs turn_diagnostic_reports_auth_failure")
+	if diagnostic.IsUsageLimit() {
+		return false
+	}
+	if diagnostic.Code != nil {
+		code := *diagnostic.Code
+		if code == acpErrorCodeText(acp.ErrorCodeAuthRequired) {
+			return true
+		}
+		for _, kind := range authFailureErrorKinds {
+			if credentialsASCIIEqualFold(code, kind) {
+				return true
+			}
+		}
+	}
+	return containsAuthFailureSignature(diagnostic.Message)
 }
 
 type CredentialSyncReason string
@@ -611,7 +889,23 @@ type CredentialSyncSignal struct {
 
 // UnmarshalJSON refuses unknown fields, as serde's deny_unknown_fields does.
 func (s *CredentialSyncSignal) UnmarshalJSON(data []byte) error {
-	panic("unported: mj-core/src/credentials.rs CredentialSyncSignal deserialize")
+	var fields struct {
+		Ordinal *uint64               `json:"ordinal"`
+		Reason  *CredentialSyncReason `json:"reason"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&fields); err != nil {
+		return err
+	}
+	if fields.Ordinal == nil {
+		return errors.New("missing field `ordinal`")
+	}
+	if fields.Reason == nil {
+		return errors.New("missing field `reason`")
+	}
+	*s = CredentialSyncSignal{Ordinal: *fields.Ordinal, Reason: *fields.Reason}
+	return nil
 }
 
 type CredentialSyncCause struct {
@@ -626,7 +920,19 @@ type CredentialSyncCause struct {
 // CredentialSyncCauseForFailedTurn is the cause a turn that failed on its
 // login gives, or nil.
 func CredentialSyncCauseForFailedTurn(sessionID string, turn *MaterializedTurnOutcome) *CredentialSyncCause {
-	panic("unported: mj-core/src/credentials.rs CredentialSyncCause::for_failed_turn")
+	if !TurnFailedOnLogin(turn) {
+		return nil
+	}
+	cause := &CredentialSyncCause{
+		SessionID: sessionID,
+		Ordinal:   turn.CompletedOrdinal,
+		Reason:    CredentialSyncReasonAuthenticationFailure,
+	}
+	if turn.Diagnostic != nil && turn.Diagnostic.LoginFingerprint != nil {
+		fingerprint := *turn.Diagnostic.LoginFingerprint
+		cause.LoginFingerprint = &fingerprint
+	}
+	return cause
 }
 
 // ReadLoginUnderNativeLock runs read while holding the native lock every
@@ -636,7 +942,26 @@ func CredentialSyncCauseForFailedTurn(sessionID string, turn *MaterializedTurnOu
 // within lockWait: the answer is unknown, never a reading of a login that is
 // about to change.
 func ReadLoginUnderNativeLock[T any](ctx context.Context, kind HarnessKind, store *HarnessLoginStore, lockWait time.Duration, read func() T) (T, bool) {
-	panic("unported: mj-core/src/credentials.rs read_login_under_native_lock")
+	var zero T
+	marker, err := (*store).LockMarker()
+	if err != nil {
+		slog.Warn("could not find the login's lock directory", "error", err)
+		return zero, false
+	}
+	guard, err := CredentialWriteGuardAcquireWithin(ctx, kind, marker, lockWait)
+	if err != nil {
+		slog.Info("could not take the login lock; the login's identity is unknown", "error", err)
+		return zero, false
+	}
+	value, err := SpawnBlocking(func() T {
+		defer guard.Release()
+		return read()
+	}).Join(ctx)
+	if err != nil {
+		slog.Warn("the locked login read stopped", "error", err)
+		return zero, false
+	}
+	return value, true
 }
 
 // AuthenticationVerdict is what an authentication failure means, decided
@@ -674,7 +999,11 @@ func ClassifyAuthenticationFailure(failedToken, currentToken *string) Authentica
 // RelayEventLoginFingerprint is the failed turn's access-token hash, when
 // this event is a failed prompt.
 func RelayEventLoginFingerprint(event *RelayEvent) (string, bool) {
-	panic("unported: mj-core/src/credentials.rs relay_event_login_fingerprint")
+	diagnostic, ok := relayEventFailedPromptDiagnostic(event)
+	if !ok || !TurnDiagnosticReportsAuthFailure(diagnostic) || diagnostic.LoginFingerprint == nil {
+		return "", false
+	}
+	return *diagnostic.LoginFingerprint, true
 }
 
 // RelayEventCredentialSyncReason detects a reason for immediate credential
@@ -686,7 +1015,23 @@ func RelayEventLoginFingerprint(event *RelayEvent) (string, bool) {
 // The failed turn counts on its own because the worker leaves out a warning
 // that only repeats the harness's last agent message (R14-1).
 func RelayEventCredentialSyncReason(event *RelayEvent) (CredentialSyncReason, bool) {
-	panic("unported: mj-core/src/credentials.rs relay_event_credential_sync_reason")
+	if diagnostic, ok := relayEventFailedPromptDiagnostic(event); ok {
+		if TurnDiagnosticReportsAuthFailure(diagnostic) {
+			return CredentialSyncReasonAuthenticationFailure, true
+		}
+		return "", false
+	}
+	switch observation := event.Observation.(type) {
+	case RelayObservationWarning:
+		return relayWarningCredentialSyncReason(observation.Message)
+	case *RelayObservationWarning:
+		return relayWarningCredentialSyncReason(observation.Message)
+	case RelayObservationSessionUpdate:
+		return sessionUpdateCredentialSyncReason(&observation.Update)
+	case *RelayObservationSessionUpdate:
+		return sessionUpdateCredentialSyncReason(&observation.Update)
+	}
+	return "", false
 }
 
 func EventsReportAuthFailure(kind HarnessKind, events []RelayEvent) bool {
@@ -706,7 +1051,18 @@ func EventsReportAuthFailure(kind HarnessKind, events []RelayEvent) bool {
 // `claude auth login` (there is no bare `claude login`), `kimi login`,
 // `grok login`, and `muse login`.
 func LoginCommand(profile *HarnessProfile) (string, []string, error) {
-	panic("unported: mj-core/src/credentials.rs login_command")
+	switch scheme := profile.AuthScheme().(type) {
+	case AuthSchemeApiKey:
+		return "", nil, fmt.Errorf("this profile authenticates with the %s API key, from its `environment` entry or the environment Mjolnir started with, so it has no interactive login", scheme.EnvKey)
+	case AuthSchemeInlineApiKey:
+		return "", nil, errors.New("this profile inlines its provider API key in its Codex `config.toml`, so it has no interactive login")
+	case AuthSchemeAwsCredentialChain:
+		return "", nil, errors.New("this profile authenticates with the AWS credential chain, so it has no interactive login")
+	case AuthSchemeNoAuthentication:
+		return "", nil, errors.New("this profile's built-in provider does not require an interactive login")
+	}
+	command, arguments := NativeLoginCommand(profile)
+	return command, arguments, nil
 }
 
 // NativeLoginCommand is the harness CLI's own login command, ignoring how
@@ -716,7 +1072,8 @@ func LoginCommand(profile *HarnessProfile) (string, []string, error) {
 // exists, where "this profile needs no login" is not a useful answer: it
 // only wants the program name to run `--version` against.
 func NativeLoginCommand(profile *HarnessProfile) (string, []string) {
-	panic("unported: mj-core/src/credentials.rs native_login_command")
+	command, arguments := profile.Kind.NativeLoginCommand()
+	return command, append(arguments, profile.Kind.HomeCLIArgs(profile.Home)...)
 }
 
 // CredentialSyncTarget is one live session the coordinator may reconcile
@@ -749,7 +1106,7 @@ type CredentialSyncTarget struct {
 
 // Equal compares targets by value, as Rust's PartialEq does.
 func (t *CredentialSyncTarget) Equal(other *CredentialSyncTarget) bool {
-	panic("unported: mj-core/src/credentials.rs CredentialSyncTarget PartialEq")
+	return credentialsValueEqual(reflect.ValueOf(*t), reflect.ValueOf(*other))
 }
 
 type CredentialSyncAction int
@@ -881,7 +1238,16 @@ type CredentialSyncFailure struct {
 // was not triggered by an authentication failure or did not reach the
 // triggering session.
 func (r *CredentialSyncResult) AuthenticationVerdict() (AuthenticationVerdict, bool) {
-	panic("unported: mj-core/src/credentials.rs CredentialSyncResult::authentication_verdict")
+	cause := r.Trigger
+	if cause == nil || cause.Reason != CredentialSyncReasonAuthenticationFailure {
+		return 0, false
+	}
+	for _, outcome := range r.Outcomes {
+		if outcome.SessionID == cause.SessionID {
+			return ClassifyAuthenticationFailure(cause.LoginFingerprint, outcome.CurrentAccessToken), true
+		}
+	}
+	return 0, false
 }
 
 func (r *CredentialSyncResult) PushedTo(sessionID string) bool {
@@ -897,7 +1263,21 @@ func (r *CredentialSyncResult) PushedTo(sessionID string) bool {
 // Failures is every failure, with the step it belongs to (nil for a session
 // whose whole sync failed).
 func (r *CredentialSyncResult) Failures() []CredentialSyncFailure {
-	panic("unported: mj-core/src/credentials.rs CredentialSyncResult::failures")
+	failures := []CredentialSyncFailure{}
+	for _, outcome := range r.Outcomes {
+		if outcome.Failure != nil {
+			failures = append(failures, CredentialSyncFailure{SessionID: outcome.SessionID, Detail: *outcome.Failure})
+		}
+		for _, failure := range outcome.StepFailures {
+			entry := CredentialSyncFailure{SessionID: outcome.SessionID, Detail: failure.Detail}
+			if failure.Step != SyncStepSession {
+				step := failure.Step
+				entry.Step = &step
+			}
+			failures = append(failures, entry)
+		}
+	}
+	return failures
 }
 
 // Actions is the number of sessions that took at least one action of any
@@ -1018,13 +1398,49 @@ func (f LoginFingerprintFile) MarshalJSON() ([]byte, error) {
 // UnmarshalLoginFingerprint decodes serde's externally tagged
 // LoginFingerprint.
 func UnmarshalLoginFingerprint(data []byte) (LoginFingerprint, error) {
-	panic("unported: mj-core/src/credentials.rs LoginFingerprint deserialize")
+	var tagged map[string]json.RawMessage
+	if err := json.Unmarshal(data, &tagged); err != nil {
+		return nil, fmt.Errorf("invalid type: expected enum LoginFingerprint: %w", err)
+	}
+	if len(tagged) != 1 {
+		return nil, errors.New("invalid type: map, expected map with a single key")
+	}
+	for variant, body := range tagged {
+		var value string
+		switch variant {
+		case "access_token", "file":
+			if err := json.Unmarshal(body, &value); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("unknown variant `%s`, expected `access_token` or `file`", variant)
+		}
+		if variant == "access_token" {
+			return LoginFingerprintAccessToken{Value: value}, nil
+		}
+		return LoginFingerprintFile{Value: value}, nil
+	}
+	return nil, errors.New("invalid type: expected enum LoginFingerprint")
 }
 
 // LoginFingerprintReadFile is the identity of the login at marker, or nil
 // when there is none.
 func LoginFingerprintReadFile(kind HarnessKind, marker string) (LoginFingerprint, error) {
-	panic("unported: mj-core/src/credentials.rs LoginFingerprint::read_file")
+	snapshot, bytes, err := ReadCredentialFile(kind, marker)
+	if err != nil {
+		return nil, err
+	}
+	if !snapshot.Present {
+		return nil, nil
+	}
+	if kind == HarnessKindClaude {
+		token, ok := ClaudeAccessTokenFingerprint(bytes)
+		if !ok {
+			return nil, nil
+		}
+		return LoginFingerprintAccessToken{Value: token}, nil
+	}
+	return LoginFingerprintFile{Value: snapshot.Fingerprint}, nil
 }
 
 // LoginFailureVerdict is the one verdict on a failed turn. Its variants are
@@ -1166,7 +1582,16 @@ func (r *RejectedLogins) HeldLoginFingerprint(profileID, sessionID string) (stri
 }
 
 func (r *RejectedLogins) StartDelivery(target *CredentialSyncTarget, fingerprint string) {
-	panic("unported: mj-core/src/credentials.rs RejectedLogins::start_delivery")
+	var state LoginDeliveryState = LoginDeliveryStatePending{}
+	if held, ok := r.HeldLoginFingerprint(target.ProfileID, target.SessionID); ok && held == fingerprint {
+		state = loginDeliveryStateWorkerHoldsCurrentLogin()
+	}
+	if delivery, ok := r.deliveries[target.SessionID]; ok &&
+		delivery.target.Equal(target) && delivery.fingerprint == fingerprint && delivery.mismatch != nil &&
+		state == LoginDeliveryState(LoginDeliveryStatePending{}) {
+		return
+	}
+	r.RecordDelivery(target, fingerprint, state, nil)
 }
 
 func (r *RejectedLogins) RecordDelivery(target *CredentialSyncTarget, fingerprint string, state LoginDeliveryState, mismatch *CredentialSnapshot) {
@@ -1192,7 +1617,28 @@ func (r *RejectedLogins) DeliveryMismatch(target *CredentialSyncTarget, fingerpr
 // the held login, from the one published view, so the hold's inputs (held
 // login, retry intent, delivery state) share this registry's lock.
 func (r *RejectedLogins) ObserveWorker(profileID, sessionID string, publication *WorkerPublication) {
-	panic("unported: mj-core/src/credentials.rs RejectedLogins::observe_worker")
+	// No publication: the worker disconnected or the actor retired.
+	if publication == nil {
+		delete(r.heldLogins, sessionID)
+		return
+	}
+	if r.heldLogins == nil {
+		r.heldLogins = map[string]workerView{}
+	}
+	r.heldLogins[sessionID] = workerView{
+		profileID:       profileID,
+		held:            credentialsCloneString(publication.Held),
+		retryIntent:     credentialsCloneString(publication.RetryIntent),
+		observedThrough: publication.ObservedThrough,
+	}
+	if publication.Held == nil {
+		return
+	}
+	if delivery, ok := r.deliveries[sessionID]; ok &&
+		delivery.target.ProfileID == profileID && delivery.fingerprint == *publication.Held &&
+		delivery.state == LoginDeliveryState(LoginDeliveryStatePending{}) {
+		delivery.state = loginDeliveryStateWorkerHoldsCurrentLogin()
+	}
 }
 
 func (r *RejectedLogins) RetainHeldLogins(keep func(string) bool) {
@@ -1223,7 +1669,23 @@ func (r *RejectedLogins) EndDelivery(target *CredentialSyncTarget, fingerprint *
 // failure. A later turn supersedes it even when the worker used the same
 // token for both.
 func (r *RejectedLogins) Accept(profileID string, cause *CredentialSyncCause) {
-	panic("unported: mj-core/src/credentials.rs RejectedLogins::accept")
+	if cause.Reason != CredentialSyncReasonAuthenticationFailure {
+		return
+	}
+	if r.failures == nil {
+		r.failures = map[string]map[uint64]*loginFailure{}
+	}
+	session, ok := r.failures[cause.SessionID]
+	if !ok {
+		session = map[uint64]*loginFailure{}
+		r.failures[cause.SessionID] = session
+	}
+	if _, ok := session[cause.Ordinal]; !ok {
+		session[cause.Ordinal] = &loginFailure{
+			profileID:   profileID,
+			fingerprint: credentialsCloneString(cause.LoginFingerprint),
+		}
+	}
 }
 
 // WasAccepted: an authentication event can arrive as both a relay signal
@@ -1272,11 +1734,88 @@ func (r *RejectedLogins) Observe(result *CredentialSyncResult, profile *HarnessP
 // the login the profile holds then. A nil profile is one no longer
 // configured; a nil verdict means the result concluded no accepted failure.
 func (r *RejectedLogins) Conclude(result *CredentialSyncResult, profile *HarnessProfile) LoginFailureVerdict {
-	panic("unported: mj-core/src/credentials.rs RejectedLogins::conclude")
+	cause := result.Trigger
+	if cause == nil || cause.Reason != CredentialSyncReasonAuthenticationFailure {
+		return nil
+	}
+	conclusion := r.syncConclusion(result, cause, profile)
+	if refused, ok := conclusion.(loginConclusionRefused); ok && profile != nil {
+		entry := rejectedLoginProfile{
+			kind:     profile.Kind,
+			marker:   HarnessAuthenticationMarker(profile.Kind, profile.Home),
+			identity: refused.identity,
+		}
+		if existing, ok := r.profiles[result.ProfileID]; !ok || existing != entry {
+			slog.Info("credential reconciliation found the profile's login refused",
+				"profile_id", result.ProfileID, "session_id", cause.SessionID)
+			if r.profiles == nil {
+				r.profiles = map[string]rejectedLoginProfile{}
+			}
+			r.profiles[result.ProfileID] = entry
+		}
+	}
+	failure, ok := r.failures[cause.SessionID][cause.Ordinal]
+	if !ok || !failure.matches(result.ProfileID, cause) {
+		return nil
+	}
+	verdict := conclusion.verdict()
+	failure.conclusion = conclusion
+	return verdict
 }
 
 func (r *RejectedLogins) syncConclusion(result *CredentialSyncResult, cause *CredentialSyncCause, profile *HarnessProfile) loginConclusion {
-	panic("unported: mj-core/src/credentials.rs RejectedLogins::sync_conclusion")
+	unrefused := func(reason string) loginConclusion { return loginConclusionUnrefused{reason: reason} }
+	if result.Failure != nil {
+		return unrefused(*result.Failure)
+	}
+	if profile == nil {
+		return unrefused("the profile is no longer configured")
+	}
+	if profile.Kind.KeepsLoginsInDatabase() {
+		return unrefused("this profile stores its login in a database")
+	}
+	// Only targets using a login file can return login evidence. Reading the
+	// profile again here would check a different login or config.
+	var reached *CredentialSyncOutcome
+	for index := range result.Outcomes {
+		if result.Outcomes[index].SessionID == cause.SessionID {
+			reached = &result.Outcomes[index]
+			break
+		}
+	}
+	if reached == nil {
+		return unrefused("credential reconciliation did not reach this session")
+	}
+	if reached.Failure != nil {
+		return unrefused(*reached.Failure)
+	}
+	for _, failure := range reached.StepFailures {
+		if failure.Step == SyncStepHarnessLogin || failure.Step == SyncStepSession {
+			return unrefused(failure.Detail)
+		}
+	}
+	verdict := ClassifyAuthenticationFailure(cause.LoginFingerprint, reached.CurrentAccessToken)
+	if slices.ContainsFunc(reached.Actions, func(action CredentialSyncAction) bool {
+		return action == CredentialSyncActionPushed || action == CredentialSyncActionPulled
+	}) {
+		return loginConclusionDelivered{
+			renewed: profile.Kind == HarnessKindClaude && verdict == AuthenticationVerdictLoginRenewed,
+		}
+	}
+	if profile.Kind == HarnessKindClaude && verdict == AuthenticationVerdictLoginRenewed {
+		return loginConclusionRenewed{}
+	}
+	snapshot := reached.UnchangedLogin
+	if snapshot == nil || !snapshot.Present {
+		return unrefused("credential reconciliation found no unchanged login")
+	}
+	if profile.Kind != HarnessKindClaude {
+		return loginConclusionRefused{identity: LoginFingerprintFile{Value: snapshot.Fingerprint}}
+	}
+	if cause.LoginFingerprint != nil && verdict == AuthenticationVerdictCurrentLoginRefused {
+		return loginConclusionRefused{identity: LoginFingerprintAccessToken{Value: *cause.LoginFingerprint}}
+	}
+	return unrefused("credential reconciliation could not identify the failed login")
 }
 
 // FailureVerdict is the one verdict on a failed turn. The worker's held
@@ -1285,7 +1824,66 @@ func (r *RejectedLogins) syncConclusion(result *CredentialSyncResult, cause *Cre
 // never paired with an older view. No evidence for the session is unknown,
 // never a hold; actorConnected says evidence is on its way.
 func (r *RejectedLogins) FailureVerdict(profileID string, cause *CredentialSyncCause, current LoginFingerprint, actorConnected bool) LoginFailureVerdict {
-	panic("unported: mj-core/src/credentials.rs RejectedLogins::failure_verdict")
+	failure, ok := r.failures[cause.SessionID][cause.Ordinal]
+	if !ok || !failure.matches(profileID, cause) {
+		return LoginFailureVerdictUnrefused{Reason: "credential reconciliation has no result for this turn"}
+	}
+	delivery := r.DeliveryState(profileID, cause.SessionID)
+	if delivery == LoginDeliveryState(LoginDeliveryStatePending{}) {
+		return LoginFailureVerdictDeciding{}
+	}
+	// A view that predates the failed turn cannot say whether the worker owes
+	// its retry, and a connected actor that has published nothing since it
+	// connected will. The first publication follows without any worker
+	// action. A publication that carries no login, or one under another
+	// profile (the session moved after the failure), is still a publication:
+	// it resolves below, never here.
+	published, hasPublished := r.heldLogins[cause.SessionID]
+	if hasPublished && published.observedThrough < cause.Ordinal || !hasPublished && actorConnected {
+		return LoginFailureVerdictDeciding{}
+	}
+	// Only a view under the failed turn's profile speaks for its retry.
+	var observed *workerView
+	if hasPublished && published.profileID == profileID {
+		observed = &published
+	}
+	if failure.conclusion == nil {
+		return LoginFailureVerdictDeciding{}
+	}
+	renewed := func() LoginFailureVerdict {
+		if failure.fingerprint == nil {
+			return LoginFailureVerdictRenewed{}
+		}
+		failed := *failure.fingerprint
+		if observed == nil || observed.retryIntent == nil || *observed.retryIntent != failed {
+			return LoginFailureVerdictRenewed{}
+		}
+		// The delivery is no longer pending. Either the worker holds a login
+		// other than the rejected one and will submit, or the delivery ended
+		// without delivering and nothing else ends this.
+		if observed.held != nil && *observed.held != failed {
+			return LoginFailureVerdictRetryOwed{}
+		}
+		if concluded, ok := delivery.(LoginDeliveryStateConcluded); ok {
+			return LoginFailureVerdictUnrefused{Reason: "the renewed login was not delivered to the worker: " + concluded.Reason}
+		}
+		return LoginFailureVerdictUnrefused{Reason: "no delivery of the renewed login to the worker is recorded"}
+	}
+	if failure.fingerprint != nil {
+		if token, ok := current.(LoginFingerprintAccessToken); ok && *failure.fingerprint != token.Value {
+			return renewed()
+		}
+	}
+	var verdict LoginFailureVerdict
+	if refused, ok := failure.conclusion.(loginConclusionRefused); ok {
+		verdict = r.WakeVerdict(refused.identity, current)
+	} else {
+		verdict = failure.conclusion.verdict()
+	}
+	if _, ok := verdict.(LoginFailureVerdictRenewed); ok {
+		return renewed()
+	}
+	return verdict
 }
 
 func (r *RejectedLogins) WakeVerdict(staged LoginFingerprint, current LoginFingerprint) LoginFailureVerdict {
@@ -1302,7 +1900,22 @@ func (r *RejectedLogins) WakeVerdict(staged LoginFingerprint, current LoginFinge
 // Refusal is why a new session on this profile would fail to sign in, while
 // its login is still the one the provider refused.
 func (r *RejectedLogins) Refusal(profileID string) (string, bool) {
-	panic("unported: mj-core/src/credentials.rs RejectedLogins::refusal")
+	entry, ok := r.profiles[profileID]
+	if !ok {
+		return "", false
+	}
+	// This only re-checks a refusal that a reconciliation already
+	// established, and its callers run concurrently, so it reads the login
+	// without waiting for the native lock: during a renewal it can only keep
+	// a refusal a moment longer, never create one.
+	current, err := LoginFingerprintReadFile(entry.kind, entry.marker)
+	if err != nil {
+		current = nil
+	}
+	if r.WakeVerdict(entry.identity, current) != LoginFailureVerdict(LoginFailureVerdictRefused{}) {
+		return "", false
+	}
+	return LoginInvalidReason(profileID), true
 }
 
 type SyncTrigger struct {
@@ -1318,13 +1931,21 @@ type CredentialSyncHandle struct {
 }
 
 func (h *CredentialSyncHandle) SetTargets(targets []CredentialSyncTarget) {
-	panic("unported: mj-core/src/credentials.rs CredentialSyncHandle::set_targets")
+	current := h.Targets.Borrow()
+	if !credentialsValueEqual(reflect.ValueOf(current), reflect.ValueOf(targets)) {
+		h.Targets.SendReplace(targets)
+	}
 }
 
 // SyncProfileNow reconciles one profile now instead of waiting for the next
 // cycle. False when the coordinator has stopped.
 func (h *CredentialSyncHandle) SyncProfileNow(profileID string, cause *CredentialSyncCause) bool {
-	panic("unported: mj-core/src/credentials.rs CredentialSyncHandle::sync_profile_now")
+	if err := h.Triggers.Send(SyncTrigger{ProfileID: profileID, Cause: cause}); err != nil {
+		slog.Debug("credential sync request dropped because its coordinator stopped",
+			"profile_id", profileID, "error", err)
+		return false
+	}
+	return true
 }
 
 func ProfilesWithTargets(targets []CredentialSyncTarget) []string {
@@ -1362,4 +1983,158 @@ func RemoveGithubAuthenticationEnvironment(environment map[string]string) {
 	for _, name := range GithubAuthenticationEnvironment {
 		delete(environment, name)
 	}
+}
+
+// credentialParent is path's directory, or false when path has none (Rust's
+// `path.parent().filter(|parent| !parent.as_os_str().is_empty())`).
+func credentialParent(path string) (string, bool) {
+	directory, _ := filepath.Split(path)
+	if directory == "" {
+		return "", false
+	}
+	return filepath.Dir(path), true
+}
+
+// credentialCheckedMillis is seconds in milliseconds, or false when that
+// overflows (Rust's `checked_mul(1000)`).
+func credentialCheckedMillis(seconds int64) (int64, bool) {
+	if seconds > math.MaxInt64/1000 || seconds < math.MinInt64/1000 {
+		return 0, false
+	}
+	return seconds * 1000, true
+}
+
+// credentialsASCIILower lowers ASCII letters only, as Rust's
+// to_ascii_lowercase does.
+func credentialsASCIILower(text string) string {
+	lowered := []byte(text)
+	for index, b := range lowered {
+		if b >= 'A' && b <= 'Z' {
+			lowered[index] = b + ('a' - 'A')
+		}
+	}
+	return string(lowered)
+}
+
+// credentialsASCIIEqualFold is Rust's eq_ignore_ascii_case.
+func credentialsASCIIEqualFold(left, right string) bool {
+	return len(left) == len(right) && credentialsASCIILower(left) == credentialsASCIILower(right)
+}
+
+func credentialsCloneString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+// relayEventFailedPromptDiagnostic is the diagnostic of a completed prompt
+// that carries one.
+func relayEventFailedPromptDiagnostic(event *RelayEvent) (*TurnDiagnostic, bool) {
+	var completed RelayObservationCommandCompleted
+	switch observation := event.Observation.(type) {
+	case RelayObservationCommandCompleted:
+		completed = observation
+	case *RelayObservationCommandCompleted:
+		completed = *observation
+	default:
+		return nil, false
+	}
+	var prompt RelayCommandOutcomePrompt
+	switch outcome := completed.Outcome.(type) {
+	case RelayCommandOutcomePrompt:
+		prompt = outcome
+	case *RelayCommandOutcomePrompt:
+		prompt = *outcome
+	default:
+		return nil, false
+	}
+	return prompt.Diagnostic, prompt.Diagnostic != nil
+}
+
+func relayWarningCredentialSyncReason(message string) (CredentialSyncReason, bool) {
+	if containsAuthFailureSignature(message) {
+		return CredentialSyncReasonAuthenticationFailure, true
+	}
+	if strings.Contains(message, PromptEmptyResponseMarker) {
+		return CredentialSyncReasonEmptyPromptResponse, true
+	}
+	return "", false
+}
+
+func sessionUpdateCredentialSyncReason(update *acpschema.SessionUpdate) (CredentialSyncReason, bool) {
+	switch {
+	case update.AgentMessageChunk != nil:
+		content := update.AgentMessageChunk.Content
+		if content.Text != nil && containsAuthFailureSignature(content.Text.Text) {
+			return CredentialSyncReasonAuthenticationFailure, true
+		}
+	case update.SessionInfoUpdate != nil:
+		// A bridge's typed failure record, here one that arrived outside a
+		// turn; a failed turn's record reaches the turn's diagnostic.
+		if failure := SessionFailureFromMeta(update.SessionInfoUpdate.Meta); failure != nil {
+			diagnostic := TurnDiagnosticFromSessionFailure(failure)
+			if TurnDiagnosticReportsAuthFailure(&diagnostic) {
+				return CredentialSyncReasonAuthenticationFailure, true
+			}
+		}
+	}
+	return "", false
+}
+
+// credentialsValueEqual compares two values as Rust's derived PartialEq
+// does: field by field and element by element, with a nil slice or map equal
+// to an empty one, and pointers compared by what they point to.
+func credentialsValueEqual(left, right reflect.Value) bool {
+	if left.Type() != right.Type() {
+		return false
+	}
+	switch left.Kind() {
+	case reflect.Slice, reflect.Array:
+		if left.Len() != right.Len() {
+			return false
+		}
+		for index := range left.Len() {
+			if !credentialsValueEqual(left.Index(index), right.Index(index)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Map:
+		if left.Len() != right.Len() {
+			return false
+		}
+		for _, key := range left.MapKeys() {
+			other := right.MapIndex(key)
+			if !other.IsValid() || !credentialsValueEqual(left.MapIndex(key), other) {
+				return false
+			}
+		}
+		return true
+	case reflect.Pointer, reflect.Interface:
+		if left.IsNil() || right.IsNil() {
+			return left.IsNil() == right.IsNil()
+		}
+		return credentialsValueEqual(left.Elem(), right.Elem())
+	case reflect.Struct:
+		for index := range left.NumField() {
+			if !credentialsValueEqual(left.Field(index), right.Field(index)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Bool:
+		return left.Bool() == right.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return left.Int() == right.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return left.Uint() == right.Uint()
+	case reflect.Float32, reflect.Float64:
+		return left.Float() == right.Float()
+	case reflect.String:
+		return left.String() == right.String()
+	}
+	// Functions and channels have no value equality; Rust's types hold none.
+	return false
 }

@@ -6,10 +6,23 @@ package core
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"math"
+	"math/bits"
+	"reflect"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
 )
 
 // StateVersion is the durable state schema version.
@@ -367,13 +380,53 @@ func unmarshalTurnOutcomeKind(data []byte) (TurnOutcomeKind, error) {
 
 // turnOutcomeKindString is the Display impl of TurnOutcomeKind.
 func turnOutcomeKindString(kind TurnOutcomeKind) string {
-	panic("unported: mj-core/src/state.rs TurnOutcomeKind::fmt")
+	result := kind.Result()
+	switch result.Kind {
+	case TurnResultKindCompleted:
+		return "completed, end of turn"
+	case TurnResultKindInputRequired:
+		return "completed, waiting for input"
+	case TurnResultKindCancelled, TurnResultKindInterrupted:
+		return "interrupted"
+	}
+	if result.Kind == TurnResultKindFailed && result.Reason != nil && *result.Reason == OutcomeReasonQuotaLimit {
+		return "failed: quota limit reached"
+	}
+	message := "unknown failure"
+	if result.Message != nil {
+		message = *result.Message
+	}
+	if result.StopReason != nil {
+		return "failed: " + stopReasonWords(message)
+	}
+	first, _, _ := strings.Cut(message, "\n")
+	first = strings.TrimSuffix(first, "\r")
+	return "failed: " + strings.TrimSpace(first)
 }
 
 // stopReasonWords renders a stop reason as the harness spells it
 // (MaxTokens, max_turn_requests) as lower-case words.
 func stopReasonWords(stopReason string) string {
-	panic("unported: mj-core/src/state.rs stop_reason_words")
+	var words strings.Builder
+	previousLower := false
+	for _, character := range strings.TrimSpace(stopReason) {
+		if character == '_' || character == '-' || unicode.IsSpace(character) {
+			if words.Len() > 0 && !strings.HasSuffix(words.String(), " ") {
+				words.WriteByte(' ')
+			}
+			previousLower = false
+			continue
+		}
+		if unicode.IsUpper(character) && previousLower {
+			words.WriteByte(' ')
+		}
+		previousLower = unicode.IsLower(character) || (character >= '0' && character <= '9')
+		words.WriteString(strings.ToLower(string(character)))
+	}
+	if trimmed := strings.TrimRightFunc(words.String(), unicode.IsSpace); trimmed != "" {
+		return trimmed
+	}
+	return "no reason given"
 }
 
 // PromptCompletion is the shared classification of a prompt's stop reason.
@@ -449,13 +502,29 @@ func (o *MaterializedTurnOutcome) UnmarshalJSON(data []byte) error {
 // again, including provider retries and any generation of worker restart
 // continuation.
 func (o *MaterializedTurnOutcome) IsResubmittedBy(commandID string) bool {
-	panic("unported: mj-core/src/state.rs MaterializedTurnOutcome::is_resubmitted_by")
+	carried := CarriedCommand(commandID)
+	if retried, ok := RetriedTurn(carried); ok && retried == o.CompletedOrdinal {
+		return true
+	}
+	return carried != commandID && carried == CarriedCommand(o.CommandID)
 }
 
 // AnsweredOrdinal is the highest acceptance answered by the projection, or a
 // legacy row.
 func (o *MaterializedTurnOutcome) AnsweredOrdinal() (uint64, bool) {
-	panic("unported: mj-core/src/state.rs MaterializedTurnOutcome::answered_ordinal")
+	if o.AnsweredThrough != nil {
+		return *o.AnsweredThrough, true
+	}
+	if ordinal, ok := RemindedTurnOrdinal(o.CommandID); ok {
+		return ordinal, true
+	}
+	if _, ordinal, ok := HoldFollowUpOf(o.CommandID); ok {
+		return ordinal, true
+	}
+	if o.AcceptedOrdinal != nil {
+		return *o.AcceptedOrdinal, true
+	}
+	return 0, false
 }
 
 func (o *MaterializedTurnOutcome) Answers(ordinal uint64) bool {
@@ -582,13 +651,81 @@ func (s *MaterializedSessionSummary) UnmarshalJSON(data []byte) error {
 // LatestUserPosition is the latest user item, including empty responses, in
 // this projection.
 func (s *MaterializedSession) LatestUserPosition() (uint64, bool) {
-	panic("unported: mj-core/src/state.rs MaterializedSession::latest_user_position")
+	var latest uint64
+	found := false
+	for _, item := range s.Transcript {
+		if _, user := item.Body.(TranscriptBodyUser); user && (!found || item.Position > latest) {
+			latest, found = item.Position, true
+		}
+	}
+	return latest, found
 }
 
 // LatestPersonPosition is the latest prompt written by the person,
 // excluding generated wake messages.
 func (s *MaterializedSession) LatestPersonPosition() (uint64, bool) {
-	panic("unported: mj-core/src/state.rs MaterializedSession::latest_person_position")
+	var latest uint64
+	found := false
+	for _, item := range s.Transcript {
+		user, ok := item.Body.(TranscriptBodyUser)
+		if !ok {
+			continue
+		}
+		stableID := item.StableID
+		if !IsUserAuthoredMessage(&stableID, MaterializedContentText(user.Content)) {
+			continue
+		}
+		if !found || item.Position > latest {
+			latest, found = item.Position, true
+		}
+	}
+	return latest, found
+}
+
+// stateContentRaw is queued prompt content in the form the transcript text
+// helpers read.
+func stateContentRaw(content []any) []json.RawMessage {
+	raw := make([]json.RawMessage, 0, len(content))
+	for _, value := range content {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			encoded = []byte("null")
+		}
+		raw = append(raw, encoded)
+	}
+	return raw
+}
+
+// queuedPromptsTitle is the provisional title of the first queued prompt
+// that yields one.
+func queuedPromptsTitle(prompts []MaterializedQueuedPrompt) (string, bool) {
+	for _, prompt := range prompts {
+		if prompt.Kind != nil && !prompt.Kind.IsPrompt() {
+			continue
+		}
+		if title, ok := ProvisionalSessionTitle(MaterializedContentText(stateContentRaw(prompt.Content))); ok {
+			return title, true
+		}
+	}
+	return "", false
+}
+
+// transcriptProvisionalTitle is the provisional title of the first user
+// prompt that yields one.
+func transcriptProvisionalTitle(transcript []*TranscriptItem) (string, bool) {
+	for _, item := range transcript {
+		if !item.IsUserPrompt() {
+			continue
+		}
+		user, ok := item.Body.(TranscriptBodyUser)
+		if !ok {
+			continue
+		}
+		if title, ok := ProvisionalSessionTitle(MaterializedContentText(user.Content)); ok {
+			return title, true
+		}
+	}
+	return "", false
 }
 
 // UnansweredInputOutcome is the latest input-requiring outcome, unless work
@@ -596,7 +733,18 @@ func (s *MaterializedSession) LatestPersonPosition() (uint64, bool) {
 // supplies the user position retained from its original publication; full
 // sessions pass nil.
 func (s *MaterializedSession) UnansweredInputOutcome(assessment *TurnAssessment, publishedLatestUserPosition *uint64) *MaterializedTurnOutcome {
-	panic("unported: mj-core/src/state.rs MaterializedSession::unanswered_input_outcome")
+	if s.ActiveTurn != nil || len(s.QueuedPrompts) > 0 || s.LastTurnOutcome == nil {
+		return nil
+	}
+	outcome := s.LastTurnOutcome
+	latest, found := s.LatestUserPosition()
+	if publishedLatestUserPosition != nil && (!found || *publishedLatestUserPosition > latest) {
+		latest, found = *publishedLatestUserPosition, true
+	}
+	if outcome.RequiresInput(assessment) && (!found || latest <= outcome.CompletedOrdinal) {
+		return outcome
+	}
+	return nil
 }
 
 // MaterializedSessionEmpty is MaterializedSession::empty.
@@ -620,11 +768,26 @@ func (s *MaterializedSession) GetLastActivityAtMs() *int64 {
 // an untitled transcript. Derive the same bounded fallback from their first
 // visible user prompt when reading them.
 func (s *MaterializedSession) ResolvedTitle() (string, bool) {
-	panic("unported: mj-core/src/state.rs MaterializedSession::resolved_title")
+	if s.SessionTitle != nil {
+		if title, ok := NormalizeSessionTitle(*s.SessionTitle); ok {
+			return title, true
+		}
+	}
+	if title, ok := transcriptProvisionalTitle(s.Transcript); ok {
+		return title, true
+	}
+	return queuedPromptsTitle(s.QueuedPrompts)
 }
 
 func (s *MaterializedSession) UnreadAgentMessagesAfter(viewedThroughEventOrdinal uint64) uint64 {
-	panic("unported: mj-core/src/state.rs MaterializedSession::unread_agent_messages_after")
+	var count uint64
+	for _, item := range s.Transcript {
+		if item.LatestContentEventOrdinal != nil && *item.LatestContentEventOrdinal > viewedThroughEventOrdinal &&
+			item.IsNonemptyAgentMessage() {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *MaterializedSession) UnreadInterruptionsAfter(viewedThroughEventOrdinal uint64) uint64 {
@@ -638,11 +801,56 @@ func (s *MaterializedSession) UnreadInterruptionsAfter(viewedThroughEventOrdinal
 }
 
 func (s *MaterializedSession) InterruptionEventOrdinals() []uint64 {
-	panic("unported: mj-core/src/state.rs MaterializedSession::interruption_event_ordinals")
+	ordinals := []uint64{}
+	for _, item := range s.Transcript {
+		if item.IsWorkInterruption() {
+			ordinals = append(ordinals, item.Position)
+		}
+	}
+	if s.LastTurnOutcome != nil {
+		if ordinal, ok := s.LastTurnOutcome.InterruptionOrdinal(); ok {
+			ordinals = append(ordinals, ordinal)
+		}
+	}
+	slices.Sort(ordinals)
+	return slices.Compact(ordinals)
 }
 
 func (s *MaterializedSession) Validate() error {
-	panic("unported: mj-core/src/state.rs MaterializedSession::validate")
+	if err := ValidateID("session", s.SessionID); err != nil {
+		return err
+	}
+	if err := ValidateRelayEventFrontier(s.AppliedEventOrdinal, s.AppliedEventDigest, "materialized session event frontier"); err != nil {
+		return err
+	}
+	if s.SessionTitle != nil && strings.TrimSpace(*s.SessionTitle) == "" {
+		return errors.New("materialized session has an empty title")
+	}
+	itemIDs := map[string]bool{}
+	for _, item := range s.Transcript {
+		if err := item.Validate(s.AppliedEventOrdinal); err != nil {
+			return err
+		}
+		if itemIDs[item.StableID] {
+			return fmt.Errorf("materialized transcript contains duplicate item %s", debugString(item.StableID))
+		}
+		itemIDs[item.StableID] = true
+	}
+	commandIDs := map[string]bool{}
+	for _, prompt := range s.QueuedPrompts {
+		if strings.TrimSpace(prompt.CommandID) == "" {
+			return errors.New("materialized prompt queue has an empty command id")
+		}
+		if commandIDs[prompt.CommandID] {
+			return fmt.Errorf("materialized prompt queue contains duplicate command %s", debugString(prompt.CommandID))
+		}
+		commandIDs[prompt.CommandID] = true
+		if config, ok := prompt.Kind.(QueuedCommandKindSetConfig); ok &&
+			(strings.TrimSpace(config.Key) == "" || strings.TrimSpace(config.Value) == "") {
+			return fmt.Errorf("materialized queued configuration change %s is incomplete", debugString(prompt.CommandID))
+		}
+	}
+	return nil
 }
 
 // ManagedSessionSnapshot is a materialized session paired with the live
@@ -705,12 +913,105 @@ type ProjectionWindow struct {
 
 // Trim keeps the tail and complete turns containing unsettled content.
 func (w *ProjectionWindow) Trim(session *MaterializedSession, target int) {
-	panic("unported: mj-core/src/state.rs ProjectionWindow::trim")
+	observed := ProjectionWindowOf(session)
+	w.LatestUnreadEventOrdinal = stateMaxOption(w.LatestUnreadEventOrdinal, observed.LatestUnreadEventOrdinal)
+	if w.ProvisionalTitle == nil {
+		w.ProvisionalTitle = observed.ProvisionalTitle
+	}
+	if observed.LatestTurnStartPosition != nil {
+		w.LatestTurnStartPosition = observed.LatestTurnStartPosition
+	}
+	transcript := session.Transcript
+	boundary := max(len(transcript)-max(target, 1), 0)
+	if w.LatestTurnStartPosition != nil {
+		for index, item := range transcript {
+			if item.Position == *w.LatestTurnStartPosition {
+				boundary = min(boundary, index)
+				break
+			}
+		}
+	}
+	cut := 0
+	for index := min(boundary+1, len(transcript)) - 1; index >= 0; index-- {
+		if transcript[index].IsTurnStart() {
+			cut = index
+			break
+		}
+	}
+	keep := make([]bool, cut)
+	for start := 0; start < cut; {
+		end := cut
+		for i := start + 1; i < cut; i++ {
+			if transcript[i].IsTurnStart() {
+				end = i
+				break
+			}
+		}
+		unsettled := false
+		for _, item := range transcript[start:end] {
+			switch body := item.Body.(type) {
+			case TranscriptBodyAgent:
+				unsettled = body.Streaming
+			case TranscriptBodyThought:
+				unsettled = body.Streaming
+			case TranscriptBodyTool:
+				status, ok := body.Call.RawStatus()
+				unsettled = ok && (status == "pending" || status == "in_progress")
+			}
+			if unsettled {
+				break
+			}
+		}
+		for i := start; i < end; i++ {
+			keep[i] = unsettled
+		}
+		start = end
+	}
+	retained := transcript[:0:0]
+	for index, item := range transcript {
+		if index >= cut || keep[index] {
+			retained = append(retained, item)
+		} else {
+			w.OmittedItems++
+		}
+	}
+	session.Transcript = retained
+}
+
+// stateMaxOption is Option::max: None is less than any Some.
+func stateMaxOption(a, b *uint64) *uint64 {
+	if a == nil {
+		return b
+	}
+	if b == nil || *a >= *b {
+		return a
+	}
+	return b
 }
 
 // ProjectionWindowOf is the window of a projection that omits nothing.
 func ProjectionWindowOf(session *MaterializedSession) ProjectionWindow {
-	panic("unported: mj-core/src/state.rs ProjectionWindow::of")
+	var window ProjectionWindow
+	for _, item := range session.Transcript {
+		if item.IsNonemptyAgentMessage() && item.LatestContentEventOrdinal != nil {
+			ordinal := *item.LatestContentEventOrdinal
+			window.LatestUnreadEventOrdinal = stateMaxOption(window.LatestUnreadEventOrdinal, &ordinal)
+		}
+	}
+	for _, ordinal := range session.InterruptionEventOrdinals() {
+		window.LatestUnreadEventOrdinal = stateMaxOption(window.LatestUnreadEventOrdinal, &ordinal)
+	}
+	if title, ok := transcriptProvisionalTitle(session.Transcript); ok {
+		window.ProvisionalTitle = &title
+	}
+	for index := len(session.Transcript) - 1; index >= 0; index-- {
+		if item := session.Transcript[index]; item.IsTurnStart() {
+			position := item.Position
+			window.LatestTurnStartPosition = &position
+			break
+		}
+	}
+	return window
 }
 
 // ResolvedTitle is the session's title, using the same precedence as
@@ -718,7 +1019,15 @@ func ProjectionWindowOf(session *MaterializedSession) ProjectionWindow {
 // the window rather than from a transcript head that a polled projection
 // does not carry.
 func (s *ManagedSessionSnapshot) ResolvedTitle() (string, bool) {
-	panic("unported: mj-core/src/state.rs ManagedSessionSnapshot::resolved_title")
+	if s.Materialized.SessionTitle != nil {
+		if title, ok := NormalizeSessionTitle(*s.Materialized.SessionTitle); ok {
+			return title, true
+		}
+	}
+	if s.Window.ProvisionalTitle != nil {
+		return *s.Window.ProvisionalTitle, true
+	}
+	return queuedPromptsTitle(s.Materialized.QueuedPrompts)
 }
 
 // LatestCompletedTurnOrdinal is the position of the turn this session most
@@ -740,7 +1049,15 @@ func (s *ManagedSessionSnapshot) LatestCompletedTurnOrdinal() (uint64, bool) {
 // starts at a user message or at the marker for a turn the harness began on
 // its own, so autonomous work is covered once it settles.
 func LatestCompletedTurnOrdinal(session *MaterializedSession) (uint64, bool) {
-	panic("unported: mj-core/src/state.rs latest_completed_turn_ordinal")
+	if _, idle := session.Execution.(MaterializedExecutionStateIdle); !idle {
+		return 0, false
+	}
+	for index := len(session.Transcript) - 1; index >= 0; index-- {
+		if item := session.Transcript[index]; item.IsTurnStart() {
+			return item.Position, true
+		}
+	}
+	return 0, false
 }
 
 func ValidateRelayEventDigest(digest, name string) error {
@@ -1199,11 +1516,153 @@ func targetLocatorSkillsScope(l TargetLocator) SkillsScope {
 }
 
 func targetLocatorValidate(l TargetLocator, sessionID string) error {
-	panic("unported: mj-core/src/state.rs TargetLocator::validate")
+	emptyContainer := errors.New("target locator has an empty container id")
+	blank := func(text string) bool { return strings.TrimSpace(text) == "" }
+	switch v := l.(type) {
+	case TargetLocatorLocalBare:
+		if !IsAbsolute(v.WorkerRoot) || statePathHasParentDir(v.WorkerRoot) || !statePathEndsWith(v.WorkerRoot, sessionID) {
+			return errors.New("local bare worker root must be an absolute safe path ending in the session id")
+		}
+	case TargetLocatorLocalPodman:
+		if blank(v.ContainerID) {
+			return emptyContainer
+		}
+	case TargetLocatorLocalDocker:
+		if blank(v.ContainerID) {
+			return emptyContainer
+		}
+	case TargetLocatorAppleContainer:
+		if blank(v.ContainerID) {
+			return emptyContainer
+		}
+	case TargetLocatorAwsEc2:
+		if blank(v.InstanceID) {
+			return errors.New("target locator has an empty AWS instance id")
+		}
+	case TargetLocatorSshBare:
+		if blank(v.Host) {
+			return errors.New("bare SSH target locator has an empty host")
+		}
+		unsafePath := v.Workspace == "" || statePathHasParentDir(v.Workspace)
+		if v.WorkerID != nil {
+			// A sub-agent child works in its parent's workspace under its
+			// own worker identity, as cleanup also requires.
+			if *v.WorkerID != sessionID {
+				return errors.New("bare SSH target locator's worker identity does not match the session id")
+			}
+			if unsafePath {
+				return errors.New("bare SSH target locator must have a safe workspace path")
+			}
+		} else if unsafePath || !statePathEndsWith(v.Workspace, sessionID) {
+			return errors.New("bare SSH target locator must be a safe path ending in the session id")
+		}
+	case TargetLocatorSshPodman:
+		if blank(v.ContainerID) {
+			return emptyContainer
+		}
+		if blank(v.Host) {
+			return errors.New("SSH Podman target locator has an empty host")
+		}
+	case TargetLocatorSshDocker:
+		if blank(v.ContainerID) {
+			return emptyContainer
+		}
+		if blank(v.Host) {
+			return errors.New("SSH Docker target locator has an empty host")
+		}
+	case TargetLocatorSshAppleContainer:
+		if blank(v.ContainerID) {
+			return emptyContainer
+		}
+		if blank(v.Host) {
+			return errors.New("SSH Apple container target locator has an empty host")
+		}
+	case TargetLocatorSshNitro:
+		if blank(v.ContainerID) {
+			return emptyContainer
+		}
+		if blank(v.Host) {
+			return errors.New("SSH Nitro target locator has an empty host")
+		}
+	}
+	return nil
+}
+
+// statePathComponents is a path's components as Rust's Path::components
+// yields them: the root as "/", "." dropped, ".." kept.
+func statePathComponents(path string) []string {
+	separator := func(r rune) bool { return r == '/' || (runtime.GOOS == "windows" && r == '\\') }
+	var components []string
+	if path != "" && separator(rune(path[0])) {
+		components = append(components, "/")
+	}
+	for index, part := range strings.FieldsFunc(path, separator) {
+		if part == "." && !(index == 0 && components == nil && strings.HasPrefix(path, ".")) {
+			continue
+		}
+		components = append(components, part)
+	}
+	return components
+}
+
+func statePathHasParentDir(path string) bool {
+	return slices.Contains(statePathComponents(path), "..")
+}
+
+// statePathEndsWith is Path::ends_with: child's components end path's.
+func statePathEndsWith(path, child string) bool {
+	parts, tail := statePathComponents(path), statePathComponents(child)
+	return len(tail) <= len(parts) && slices.Equal(parts[len(parts)-len(tail):], tail)
+}
+
+// statePathStripPrefix is Path::strip_prefix, by components.
+func statePathStripPrefix(path, base string) ([]string, bool) {
+	parts, prefix := statePathComponents(path), statePathComponents(base)
+	if len(prefix) > len(parts) || !slices.Equal(parts[:len(prefix)], prefix) {
+		return nil, false
+	}
+	return parts[len(prefix):], true
+}
+
+// statePathEqual is PathBuf equality, by components.
+func statePathEqual(a, b string) bool {
+	return slices.Equal(statePathComponents(a), statePathComponents(b))
 }
 
 func targetLocatorSameResource(l, other TargetLocator) bool {
-	panic("unported: mj-core/src/state.rs TargetLocator::same_resource")
+	switch left := l.(type) {
+	case TargetLocatorLocalBare:
+		right, ok := other.(TargetLocatorLocalBare)
+		return ok && statePathEqual(left.WorkerRoot, right.WorkerRoot)
+	case TargetLocatorLocalPodman:
+		right, ok := other.(TargetLocatorLocalPodman)
+		return ok && left.ContainerID == right.ContainerID
+	case TargetLocatorLocalDocker:
+		right, ok := other.(TargetLocatorLocalDocker)
+		return ok && left.ContainerID == right.ContainerID
+	case TargetLocatorAppleContainer:
+		right, ok := other.(TargetLocatorAppleContainer)
+		return ok && left.ContainerID == right.ContainerID
+	case TargetLocatorSshAppleContainer:
+		right, ok := other.(TargetLocatorSshAppleContainer)
+		return ok && left.Host == right.Host && left.ContainerID == right.ContainerID
+	case TargetLocatorAwsEc2:
+		right, ok := other.(TargetLocatorAwsEc2)
+		return ok && left.InstanceID == right.InstanceID
+	case TargetLocatorSshBare:
+		right, ok := other.(TargetLocatorSshBare)
+		return ok && left.Host == right.Host && statePathEqual(left.Workspace, right.Workspace)
+	case TargetLocatorSshPodman:
+		right, ok := other.(TargetLocatorSshPodman)
+		return ok && left.Host == right.Host && left.ContainerID == right.ContainerID
+	case TargetLocatorSshDocker:
+		right, ok := other.(TargetLocatorSshDocker)
+		return ok && left.Host == right.Host && left.ContainerID == right.ContainerID
+	case TargetLocatorSshNitro:
+		right, ok := other.(TargetLocatorSshNitro)
+		return ok && left.Host == right.Host && left.ContainerID == right.ContainerID
+	}
+	return false
 }
 
 func (v TargetLocatorLocalBare) CpuContainerScope() (string, *string, string, bool) {
@@ -1430,7 +1889,42 @@ func unmarshalManagedWorktreeTarget(data []byte) (ManagedWorktreeTarget, error) 
 // a short flag (-p 22, -p22) and an -o spelling (-o Port=22, -oPort 22).
 // OpenSSH keeps the first value it sees.
 func sshLocationOption(args []string, flag rune, option string) (string, bool) {
-	panic("unported: mj-core/src/state.rs ssh_location_option")
+	for index := 0; index < len(args); index++ {
+		rest, ok := strings.CutPrefix(args[index], "-")
+		if !ok || rest == "" {
+			continue
+		}
+		name, size := utf8.DecodeRuneInString(rest)
+		if name != flag && name != 'o' {
+			continue
+		}
+		inline := rest[size:]
+		var value string
+		hasValue := true
+		if inline == "" {
+			if index+1 < len(args) {
+				index++
+				value = args[index]
+			} else {
+				hasValue = false
+			}
+		} else {
+			value = inline
+		}
+		if name == flag {
+			return value, hasValue
+		}
+		if hasValue {
+			key, found := value, ""
+			if at := strings.IndexAny(value, "= \t"); at >= 0 {
+				key, found = value[:at], value[at+1:]
+			}
+			if strings.EqualFold(strings.TrimSpace(key), option) {
+				return strings.TrimSpace(found), true
+			}
+		}
+	}
+	return "", false
 }
 
 // ManagedWorktreeOptions reports whether a selected project can create a
@@ -1500,7 +1994,42 @@ func (k ManagedCheckoutKind) isWorktree() bool {
 }
 
 func (w *ManagedWorktree) validate(sessionID string, projectDirectory *string) error {
-	panic("unported: mj-core/src/state.rs ManagedWorktree::validate")
+	for _, entry := range []struct{ label, path string }{
+		{"source project directory", w.SourceProjectDirectory},
+		{"source repository", w.SourceRepository},
+		{"worktree root", w.WorktreeRoot},
+	} {
+		if !IsAbsolute(entry.path) || statePathHasParentDir(entry.path) {
+			return fmt.Errorf("managed worktree %s must be an absolute safe path", entry.label)
+		}
+	}
+	relative, inside := statePathStripPrefix(w.SourceProjectDirectory, w.SourceRepository)
+	if !inside {
+		return errors.New("managed worktree source directory is outside its repository")
+	}
+	directory := "worktrees"
+	if w.Kind == ManagedCheckoutKindClone {
+		directory = "clones"
+	}
+	expectedRoot := append(statePathComponents(w.SourceRepository), ".mj", directory)
+	expectedRoot = append(expectedRoot, statePathComponents(sessionID)...)
+	if !slices.Equal(statePathComponents(w.WorktreeRoot), expectedRoot) {
+		return errors.New("managed worktree root does not match the session-owned path")
+	}
+	if w.Kind.isWorktree() && w.Branch != "mj/"+sessionID {
+		return errors.New("managed worktree branch does not match the session id")
+	}
+	if w.Kind == ManagedCheckoutKindClone && strings.TrimSpace(w.Branch) == "" {
+		return errors.New("managed clone has no starting branch")
+	}
+	expectedProject := append(statePathComponents(w.WorktreeRoot), relative...)
+	if projectDirectory == nil || !slices.Equal(statePathComponents(*projectDirectory), expectedProject) {
+		return errors.New("session project directory does not match its managed worktree")
+	}
+	if ssh, ok := w.Target.(ManagedWorktreeTargetSsh); ok && strings.TrimSpace(ssh.Destination) == "" {
+		return errors.New("managed SSH worktree has an empty destination")
+	}
+	return nil
 }
 
 // SessionResourceAllocation is a session's requested size. Tag "kind",
@@ -2143,7 +2672,13 @@ const (
 // Capacity messages use the same string as their hard limit so a value
 // shown as available is always accepted when entered back.
 func FloorGibTenths(bytes uint64) string {
-	panic("unported: mj-core/src/state.rs floor_gib_tenths")
+	// bytes * 10 can exceed u64; Rust widens to u128.
+	high, low := bits.Mul64(bytes, 10)
+	tenths, _ := bits.Div64(high, low, gibBytes)
+	if fraction := tenths % 10; fraction != 0 {
+		return fmt.Sprintf("%d.%d", tenths/10, fraction)
+	}
+	return strconv.FormatUint(tenths/10, 10)
 }
 
 // ReservedContainerCapacity reserves one fifth of RAM for the host operating
@@ -2204,7 +2739,54 @@ func CountedContainerAllocation(session *SessionRecord) SessionResourceAllocatio
 // container child whose locator names a parent is skipped because it
 // already consumes the parent's allocation.
 func ComputeHostContainerCapacity(total HostContainerSize, memoryIsPool bool, targetIDs []string, sessions []*SessionRecord) HostContainerCapacity {
-	panic("unported: mj-core/src/state.rs host_container_capacity")
+	// A pool set aside at boot is already net of the host's own needs.
+	reserved := HostContainerSize{}
+	if !memoryIsPool {
+		reserved = ReservedContainerCapacity(total)
+	}
+	saturatingSub := func(a, b uint64) uint64 {
+		if a < b {
+			return 0
+		}
+		return a - b
+	}
+	saturatingAdd := func(a, b uint64) uint64 {
+		if sum := a + b; sum >= a {
+			return sum
+		}
+		return math.MaxUint64
+	}
+	usable := HostContainerSize{
+		Cpus:        saturatingSub(total.Cpus, reserved.Cpus),
+		MemoryBytes: saturatingSub(total.MemoryBytes, reserved.MemoryBytes),
+	}
+	var committed HostContainerSize
+	complete := true
+	for _, session := range sessions {
+		if !slices.Contains(targetIDs, session.TargetTemplateID) || !SessionOwnsContainer(session) {
+			continue
+		}
+		container, ok := CountedContainerAllocation(session).(SessionResourceAllocationContainer)
+		if !ok {
+			complete = false
+			continue
+		}
+		committed.Cpus = saturatingAdd(committed.Cpus, container.Cpus)
+		committed.MemoryBytes = saturatingAdd(committed.MemoryBytes, container.MemoryBytes)
+	}
+	if !complete {
+		committed = usable
+	}
+	return HostContainerCapacity{
+		Total:     total,
+		Reserved:  reserved,
+		Committed: committed,
+		Remaining: HostContainerSize{
+			Cpus:        saturatingSub(usable.Cpus, committed.Cpus),
+			MemoryBytes: saturatingSub(usable.MemoryBytes, committed.MemoryBytes),
+		},
+		Complete: complete,
+	}
 }
 
 // Refuses reports whether admission must refuse this allocation. CPU is
@@ -2221,7 +2803,15 @@ func (c *HostContainerCapacity) Refuses(allocation SessionResourceAllocation, me
 
 // RefusalMessage is why Refuses refused, for the person.
 func (c *HostContainerCapacity) RefusalMessage(allocation SessionResourceAllocation) string {
-	panic("unported: mj-core/src/state.rs HostContainerCapacity::refusal_message")
+	if !c.Complete {
+		return "a live container on this host has no recorded RAM size, so Mjolnir cannot work out the RAM left safely"
+	}
+	var requested uint64
+	if container, ok := allocation.(SessionResourceAllocationContainer); ok {
+		requested = container.MemoryBytes
+	}
+	return fmt.Sprintf("this session asks for %s GiB of RAM, but this host has %s GiB left after its reserve and live containers. RAM is a hard limit on this host, so Mjolnir does not overcommit it: Apple containers do not give freed memory back to macOS, and Nitro sandboxes take theirs from the memory pool the host reserved at boot. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically",
+		FloorGibTenths(requested), FloorGibTenths(c.Remaining.MemoryBytes))
 }
 
 // OvercommitWarning is the one-sentence warning a launch surface shows when
@@ -2230,7 +2820,15 @@ func (c *HostContainerCapacity) RefusalMessage(allocation SessionResourceAllocat
 // budget has nothing left, so it warns that the RAM left is unknown; a
 // surface that already says so itself skips it.
 func (c *HostContainerCapacity) OvercommitWarning(allocation SessionResourceAllocation) (string, bool) {
-	panic("unported: mj-core/src/state.rs HostContainerCapacity::overcommit_warning")
+	container, ok := allocation.(SessionResourceAllocationContainer)
+	if !ok || c.Remaining.MemoryBytes >= container.MemoryBytes {
+		return "", false
+	}
+	if c.Complete {
+		return fmt.Sprintf("Asks for more RAM than the %s GiB left on this host; it will still start.",
+			FloorGibTenths(c.Remaining.MemoryBytes)), true
+	}
+	return "A live container on this host has no recorded size, so the RAM left is unknown; it will still start.", true
 }
 
 // ClampContainerSize clamps a container size to a host reading, preserving
@@ -2305,7 +2903,33 @@ func IsPublicLifecycleError(text string) bool {
 // cannot drift apart: SessionRecord.ProjectTarget calls this, and so does
 // the archived row built from the SessionWiki index.
 func TargetLabel(config *Config, targetID string, project *string) string {
-	panic("unported: mj-core/src/state.rs target_label")
+	switch config.Targets[targetID].(type) {
+	case TargetTemplateLocalBare, TargetTemplateSshBare:
+	default:
+		return targetID
+	}
+	if project == nil {
+		return targetID
+	}
+	directory, ok := stateFileName(*project)
+	if !ok {
+		return targetID
+	}
+	return targetID + "/" + directory
+}
+
+// stateFileName is Path::file_name: the last component unless it is "..",
+// or false when the path ends at a root or prefix.
+func stateFileName(path string) (string, bool) {
+	components := statePathComponents(path)
+	if len(components) == 0 {
+		return "", false
+	}
+	last := components[len(components)-1]
+	if last == "/" || last == ".." || last == "." {
+		return "", false
+	}
+	return last, true
 }
 
 // StartSelection is a session's starting selection in the terms the API and
@@ -2334,7 +2958,17 @@ func (r *SessionRecord) IsYoloTarget(config *Config) bool {
 // Oracle choice is off, else its own override or the global oracle for its
 // target mode.
 func (r *SessionRecord) EffectiveOracle(subagents *SubagentConfig, yolo bool) *SubagentChoice {
-	panic("unported: mj-core/src/state.rs SessionRecord::effective_oracle")
+	if !r.Oracle {
+		return nil
+	}
+	choice := r.OracleChoice
+	if choice == nil {
+		choice = subagents.ChoiceFor(SubagentTaskTypeOracle, yolo)
+	}
+	if choice == nil || strings.TrimSpace(choice.Model) == "" {
+		return nil
+	}
+	return choice
 }
 
 // IsCleanlyStopped: a completed close has no failure left to report. A
@@ -2366,14 +3000,47 @@ func (r *SessionRecord) RecordCheckout() Checkout {
 // branch and base. The record keeps the older field layout, so this is the
 // one place that maps it to the public names.
 func (r *SessionRecord) StartSelection() StartSelection {
-	panic("unported: mj-core/src/state.rs SessionRecord::start_selection")
+	var selection StartSelection
+	if r.Checkout != nil {
+		at := r.Checkout.Commit
+		selection.At = &at
+		selection.Branch = cloneStringPointer(r.Checkout.Branch)
+		selection.NoLaterHistory = r.Checkout.NoLaterHistory
+	}
+	if selection.Branch == nil {
+		selection.Branch = cloneStringPointer(r.LaunchBranch)
+	}
+	selection.Base = cloneStringPointer(r.LaunchBase)
+	if selection.Base == nil {
+		selection.Base = cloneStringPointer(selection.At)
+	}
+	return selection
 }
 
 // PublicationState is the cached verdict for an independent clone. Active
 // checkouts are unknown until a new checkpoint binds an assessment to their
 // exact contents.
 func (r *SessionRecord) PublicationState() (PublicationState, bool) {
-	panic("unported: mj-core/src/state.rs SessionRecord::publication_state")
+	independentClone := false
+	switch checkout := r.RecordCheckout().Effective().(type) {
+	case CheckoutManagedWorktree:
+		independentClone = checkout.Worktree.Kind == ManagedCheckoutKindClone
+	case CheckoutManagedWorkspace:
+		independentClone = true
+	}
+	if !independentClone {
+		return "", false
+	}
+	if r.State.IsActive() {
+		return PublicationStateUnknown, true
+	}
+	if r.Checkpoint == nil || r.Publication == nil || r.Publication.CheckpointSha256 != r.Checkpoint.Sha256 {
+		return PublicationStateUnknown, true
+	}
+	if r.Publication.Dirty || r.Publication.Stashed {
+		return PublicationStateUnpublished, true
+	}
+	return r.Publication.State, true
 }
 
 // ExecutionEnforcement is how this session's harness realizes its target's
@@ -2382,7 +3049,15 @@ func (r *SessionRecord) PublicationState() (PublicationState, bool) {
 // approval choices (Muse auto-review, Claude permission mode). False when
 // the policy cannot be resolved or the harness keeps its own configuration.
 func (r *SessionRecord) ExecutionEnforcement(config *Config) (ExecutionEnforcement, bool) {
-	panic("unported: mj-core/src/state.rs SessionRecord::execution_enforcement")
+	settings, err := r.TargetRuntimeSettings(config)
+	if err != nil {
+		return ExecutionEnforcement{}, false
+	}
+	choices := ApprovalChoices{ClaudePermissionMode: ClaudePermissionModeAuto}
+	if profile, ok := config.Profiles[r.LastProfile]; ok {
+		choices = profile.ApprovalChoices()
+	}
+	return r.HarnessKind.ResolveExecutionEnforcement(settings.ExecutionPolicy, choices)
 }
 
 // TargetRuntimeSettings is the target access settings this session's
@@ -2407,7 +3082,50 @@ func (r *SessionRecord) PublicError() (string, bool) {
 // entire controller. The diagnostic contains only public identifiers, so
 // both UIs can show it.
 func (r *SessionRecord) ConfigurationIssue(config *Config) (string, bool) {
-	panic("unported: mj-core/src/state.rs SessionRecord::configuration_issue")
+	if !r.State.IsActive() {
+		return "", false
+	}
+	var issues []string
+	if profile, ok := config.Profiles[r.LastProfile]; !ok {
+		issues = append(issues, fmt.Sprintf("missing profile %s", debugString(r.LastProfile)))
+	} else if profile.Kind != r.HarnessKind {
+		issues = append(issues, fmt.Sprintf("expects %s, but profile %s is %s",
+			harnessKindDebug(r.HarnessKind), debugString(r.LastProfile), harnessKindDebug(profile.Kind)))
+	}
+	if _, ok := r.RecordCheckout().ProjectDirectory(); !ok && r.ProjectBundle(config) == nil {
+		issues = append(issues, fmt.Sprintf("missing bundle %s", debugString(r.BundleID)))
+	}
+	if _, ok := config.Targets[r.TargetTemplateID]; r.TargetRuntime == nil && !ok {
+		issues = append(issues, fmt.Sprintf("missing target template %s", debugString(r.TargetTemplateID)))
+	}
+	if len(issues) == 0 {
+		return "", false
+	}
+	return fmt.Sprintf("Session %s needs configuration repair: %s. Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+		debugString(r.ID), strings.Join(issues, "; ")), true
+}
+
+// harnessKindDebug is HarnessKind's Rust Debug name.
+func harnessKindDebug(kind HarnessKind) string {
+	switch kind {
+	case HarnessKindCodex:
+		return "Codex"
+	case HarnessKindClaude:
+		return "Claude"
+	case HarnessKindKimi:
+		return "Kimi"
+	case HarnessKindGrok:
+		return "Grok"
+	case HarnessKindMuse:
+		return "Muse"
+	case HarnessKindOpenCode:
+		return "OpenCode"
+	case HarnessKindDsh:
+		return "Dsh"
+	case HarnessKindAntigravity:
+		return "Antigravity"
+	}
+	return string(kind)
 }
 
 func (r *SessionRecord) ValidateConfiguration(config *Config) error {
@@ -2467,14 +3185,37 @@ func (r *SessionRecord) MessageName() string {
 // worktree, else the project directory, else the bundle's primary
 // repository, else the bundle id.
 func (r *SessionRecord) ProjectName(config *Config) string {
-	panic("unported: mj-core/src/state.rs SessionRecord::project_name")
+	if r.Project != nil {
+		return r.Project.Name()
+	}
+	switch checkout := r.RecordCheckout().Effective().(type) {
+	case CheckoutManagedWorktree:
+		return pathLeaf(checkout.Worktree.SourceRepository)
+	case CheckoutAttached:
+		return pathLeaf(checkout.Path)
+	case CheckoutManagedWorkspace:
+		return r.bundleSourceName(config)
+	}
+	panic("effective checkout resolves borrowing")
 }
 
 // ProjectTarget is the target label used by the live session summary. Bare
 // targets identify the project directory they open directly; workspace
 // targets already identify the provisioned environment on their own.
 func (r *SessionRecord) ProjectTarget(config *Config, targetID string) string {
-	panic("unported: mj-core/src/state.rs SessionRecord::project_target")
+	var project *string
+	switch checkout := r.RecordCheckout().Effective().(type) {
+	case CheckoutManagedWorktree:
+		directory := checkout.Worktree.SourceProjectDirectory
+		project = &directory
+	case CheckoutAttached:
+		path := checkout.Path
+		project = &path
+	case CheckoutManagedWorkspace:
+	default:
+		panic("effective checkout resolves borrowing")
+	}
+	return TargetLabel(config, targetID, project)
 }
 
 // ProjectSource is the stable source identity used to group sessions.
@@ -2482,32 +3223,98 @@ func (r *SessionRecord) ProjectTarget(config *Config, targetID string) string {
 // their project directory until their Git origin is resolved, and bundle
 // sessions use their complete canonical repository set when configured.
 func (r *SessionRecord) ProjectSource(config *Config) ProjectSourceIdentity {
-	panic("unported: mj-core/src/state.rs SessionRecord::project_source")
+	if r.Project != nil {
+		key, err := r.Project.SourceKey()
+		if err != nil {
+			panic("accepted project has complete identities")
+		}
+		full := make([]string, 0, len(r.Project.Identities))
+		for _, name := range slices.Sorted(maps.Keys(r.Project.Identities)) {
+			full = append(full, r.Project.Identities[name].Key())
+		}
+		return ProjectSourceIdentity{Key: key, Short: r.Project.Name(), Full: strings.Join(full, " + ")}
+	}
+	switch checkout := r.RecordCheckout().Effective().(type) {
+	case CheckoutManagedWorktree:
+		return ProjectSourceIdentityPath(checkout.Worktree.SourceRepository, nil)
+	case CheckoutAttached:
+		var remote *string
+		if bare, ok := r.Target.(TargetLocatorSshBare); ok {
+			host := bare.Host
+			remote = &host
+		}
+		return ProjectSourceIdentityPath(checkout.Path, remote)
+	case CheckoutManagedWorkspace:
+		if identity := r.bundleSourceIdentity(config); identity != nil {
+			return *identity
+		}
+		return ProjectSourceIdentity{
+			Key:   "bundle:" + r.BundleID,
+			Short: pathLeaf(r.BundleID),
+			Full:  r.BundleID,
+		}
+	}
+	panic("effective checkout resolves borrowing")
 }
 
 // bundleSourceName resolves the display name shared by session headings,
 // chat headers, and resume details for a bundle-backed session.
 func (r *SessionRecord) bundleSourceName(config *Config) string {
-	panic("unported: mj-core/src/state.rs SessionRecord::bundle_source_name")
+	if identity := r.bundleSourceIdentity(config); identity != nil {
+		return identity.Short
+	}
+	return pathLeaf(r.BundleID)
 }
 
 // bundleSourceIdentity resolves the canonical identity of every repository
 // in a bundle for grouping and display naming.
 func (r *SessionRecord) bundleSourceIdentity(config *Config) *ProjectSourceIdentity {
-	panic("unported: mj-core/src/state.rs SessionRecord::bundle_source_identity")
+	bundle := r.ProjectBundle(config)
+	if bundle == nil {
+		return nil
+	}
+	sources := make([]ProjectSourceIdentity, 0, len(bundle.Repositories))
+	for i := range bundle.Repositories {
+		source := repositorySourceIdentity(&bundle.Repositories[i])
+		if source == nil {
+			return nil
+		}
+		sources = append(sources, *source)
+	}
+	return ProjectSourceIdentityBundle(sources)
 }
 
 // ProjectBundle: the accepted definition survives saved-project merges and
 // config edits.
 func (r *SessionRecord) ProjectBundle(config *Config) *ProjectBundle {
-	panic("unported: mj-core/src/state.rs SessionRecord::project_bundle")
+	if r.Project != nil {
+		return &r.Project.Bundle
+	}
+	if bundle, ok := config.Bundles[r.BundleID]; ok {
+		return &bundle
+	}
+	return nil
 }
 
 // CompareByCreation orders two sessions the way the session list's sequence
 // view does: oldest first by creation time, with the id as a stable
 // tiebreak. A session whose timestamp does not parse sorts last.
 func (r *SessionRecord) CompareByCreation(other *SessionRecord) int {
-	panic("unported: mj-core/src/state.rs SessionRecord::compare_by_creation")
+	leftMissing, leftTime, leftID := r.CreationOrderKey()
+	rightMissing, rightTime, rightID := other.CreationOrderKey()
+	if leftMissing != rightMissing {
+		if leftMissing {
+			return 1
+		}
+		return -1
+	}
+	if leftTime != nil && rightTime != nil && *leftTime != *rightTime {
+		if *leftTime < *rightTime {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(leftID, rightID)
 }
 
 // CreationOrderKey: parse once per session when used with a cached sort key.
@@ -2521,11 +3328,80 @@ func (r *SessionRecord) CreationOrderKey() (bool, *int64, string) {
 }
 
 func (r *SessionRecord) validate(mapID string) error {
-	panic("unported: mj-core/src/state.rs SessionRecord::validate")
+	if err := ValidateID("session", r.ID); err != nil {
+		return err
+	}
+	if r.ID != mapID {
+		return fmt.Errorf("session map key %s does not match record id %s", debugString(mapID), debugString(r.ID))
+	}
+	if r.Project != nil {
+		if _, err := r.Project.Key(); err != nil {
+			return err
+		}
+	}
+	if err := ValidateID("workspace", r.WorkspaceID); err != nil {
+		return err
+	}
+	if err := ValidateID("profile", r.LastProfile); err != nil {
+		return err
+	}
+	if err := ValidateID("bundle", r.BundleID); err != nil {
+		return err
+	}
+	if r.ProjectDirectory != nil &&
+		(!IsAbsoluteOnHostOrTarget(*r.ProjectDirectory) || statePathHasParentDir(*r.ProjectDirectory)) {
+		return fmt.Errorf("session %s has an unsafe project directory", debugString(r.ID))
+	}
+	if r.ManagedWorktree != nil {
+		if err := r.ManagedWorktree.validate(r.ID, r.ProjectDirectory); err != nil {
+			return err
+		}
+	}
+	if err := ValidateID("target template", r.TargetTemplateID); err != nil {
+		return err
+	}
+	if r.ResourceAllocation != nil {
+		if err := r.ResourceAllocation.Validate(); err != nil {
+			return err
+		}
+	}
+	if err := ValidateAdditionalMounts(r.AdditionalMounts); err != nil {
+		return err
+	}
+	if strings.TrimSpace(r.Title) == "" {
+		return fmt.Errorf("session %s has an empty title", debugString(r.ID))
+	}
+	if (r.ACPSessionTitle != nil && strings.TrimSpace(*r.ACPSessionTitle) == "") ||
+		(r.SessionTitleOverride != nil && strings.TrimSpace(*r.SessionTitleOverride) == "") {
+		return fmt.Errorf("session %s has an empty display title", debugString(r.ID))
+	}
+	if strings.TrimSpace(r.CreatedAt) == "" || strings.TrimSpace(r.UpdatedAt) == "" {
+		return fmt.Errorf("session %s has an empty timestamp", debugString(r.ID))
+	}
+	if r.Target != nil {
+		if err := r.Target.validate(r.ID); err != nil {
+			return err
+		}
+	}
+	if r.Checkpoint != nil {
+		if err := r.Checkpoint.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func repositorySourceIdentity(repository *ProjectRepository) *ProjectSourceIdentity {
-	panic("unported: mj-core/src/state.rs repository_source_identity")
+	if repository.Github != nil {
+		if identity := ProjectSourceIdentityGitRemote(*repository.Github, ShorthandAllowed); identity != nil {
+			return identity
+		}
+	}
+	if repository.Local != nil {
+		identity := ProjectSourceIdentityPath(*repository.Local, nil)
+		return &identity
+	}
+	return nil
 }
 
 type ProjectSourceIdentity struct {
@@ -2542,7 +3418,50 @@ func (p *ProjectSourceIdentity) UnmarshalJSON(data []byte) error {
 // ProjectSourceIdentityBundle combines repository identities into one
 // stable bundle identity.
 func ProjectSourceIdentityBundle(sources []ProjectSourceIdentity) *ProjectSourceIdentity {
-	panic("unported: mj-core/src/state.rs ProjectSourceIdentity::bundle")
+	if len(sources) == 0 {
+		return nil
+	}
+	sources = slices.Clone(sources)
+	slices.SortStableFunc(sources, func(left, right ProjectSourceIdentity) int {
+		if c := strings.Compare(left.Key, right.Key); c != 0 {
+			return c
+		}
+		if c := strings.Compare(left.Full, right.Full); c != 0 {
+			return c
+		}
+		return strings.Compare(left.Short, right.Short)
+	})
+	sources = slices.CompactFunc(sources, func(left, right ProjectSourceIdentity) bool { return left.Key == right.Key })
+	if len(sources) == 1 {
+		return &sources[0]
+	}
+	keys := make([]string, 0, len(sources))
+	shorts := make([]string, 0, len(sources))
+	fulls := make([]string, 0, len(sources))
+	for _, source := range sources {
+		keys = append(keys, source.Key)
+		shorts = append(shorts, source.Short)
+		fulls = append(fulls, source.Full)
+	}
+	key, err := jsonvalue.Marshal(stateStringsAsValues(keys))
+	if err != nil {
+		return nil
+	}
+	return &ProjectSourceIdentity{
+		Key:   "bundle:" + string(key),
+		Short: strings.Join(shorts, " + "),
+		Full:  strings.Join(fulls, " + "),
+	}
+}
+
+// stateStringsAsValues holds strings as a JSON array value, so they encode
+// with serde_json's escapes.
+func stateStringsAsValues(texts []string) []any {
+	values := make([]any, len(texts))
+	for i, text := range texts {
+		values[i] = text
+	}
+	return values
 }
 
 // ProjectSourceIdentityGitRemote canonicalizes a Git remote so raw checkouts
@@ -2550,24 +3469,73 @@ func ProjectSourceIdentityBundle(sources []ProjectSourceIdentity) *ProjectSource
 // shorthand says whether a bare owner/repository is GitHub; text read from
 // git config must not allow it, because there it is a relative path.
 func ProjectSourceIdentityGitRemote(source string, shorthand Shorthand) *ProjectSourceIdentity {
-	panic("unported: mj-core/src/state.rs ProjectSourceIdentity::git_remote")
+	identity := RepositoryIdentityFromRemoteWith(source, shorthand)
+	if identity == nil {
+		return nil
+	}
+	full, ok := RepositoryIdentityRemoteLabelWith(source, shorthand)
+	if !ok {
+		return nil
+	}
+	short := full
+	if at := strings.LastIndexAny(full, "/:"); at >= 0 {
+		short = full[at+1:]
+	}
+	return &ProjectSourceIdentity{Key: identity.Key(), Short: short, Full: full}
 }
 
 // ProjectSourceIdentityPath builds a local-root identity, qualified by host
 // for remote directories. The directory is the session target's, so its
 // text is POSIX.
 func ProjectSourceIdentityPath(path string, remote *string) ProjectSourceIdentity {
-	panic("unported: mj-core/src/state.rs ProjectSourceIdentity::path")
+	pathText := Text(statePathCollect(path))
+	full := pathText
+	key := "path:" + pathText
+	if remote != nil {
+		full = *remote + ":" + pathText
+		key = "path:" + strings.ToLower(*remote) + ":" + pathText
+	}
+	return ProjectSourceIdentity{Key: key, Short: pathLeaf(path), Full: full}
+}
+
+// statePathCollect is path.components().collect::<PathBuf>(): the path
+// rebuilt from its components, without "." or repeated separators.
+func statePathCollect(path string) string {
+	separator := "/"
+	if runtime.GOOS == "windows" {
+		separator = `\`
+	}
+	components := statePathComponents(path)
+	if len(components) > 0 && components[0] == "/" {
+		return separator + strings.Join(components[1:], separator)
+	}
+	return strings.Join(components, separator)
 }
 
 // pathLeaf is the last component of a path, falling back to the whole path
 // when it has none.
 func pathLeaf(path string) string {
-	panic("unported: mj-core/src/state.rs path_leaf")
+	if leaf, ok := stateFileName(path); ok {
+		return leaf
+	}
+	return path
 }
 
 func createdAtSeconds(timestamp string) (int64, bool) {
-	panic("unported: mj-core/src/state.rs created_at_seconds")
+	// chrono's parse_from_rfc3339 also takes a lower-case `t` or a space
+	// between date and time, and a lower-case `z`.
+	normalized := timestamp
+	if len(normalized) > 10 && (normalized[10] == 't' || normalized[10] == ' ') {
+		normalized = normalized[:10] + "T" + normalized[11:]
+	}
+	if strings.HasSuffix(normalized, "z") {
+		normalized = strings.TrimSuffix(normalized, "z") + "Z"
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, normalized)
+	if err != nil {
+		return 0, false
+	}
+	return parsed.Unix(), true
 }
 
 // OperatorPresence is durable operator availability. Revisions order
@@ -2683,7 +3651,13 @@ func NewStateState() StateState {
 // back to the legacy global choice and then the default when that profile
 // has no saved choice.
 func (s *StateState) LastSubagentPolicyFor(profileID string) SubagentPolicy {
-	panic("unported: mj-core/src/state.rs State::last_subagent_policy_for")
+	if policy, ok := s.LastSubagentPolicies[profileID]; ok {
+		return policy
+	}
+	if policy, ok := s.LastSubagentPolicies[""]; ok {
+		return policy
+	}
+	return SubagentPolicy{Mode: SubagentPolicyNative}
 }
 
 // LastOracleChoiceFor is the remembered Oracle choice for a profile;
@@ -2704,7 +3678,19 @@ func (s *StateState) LastOracleChoiceFor(profileID string) bool {
 // Fails with the id of a missing ancestor record, or with the session
 // itself when the parent chain loops (the string result, ok false).
 func (s *StateState) reviewOwner(sessionID string) (owner *SessionRecord, failed string, ok bool) {
-	panic("unported: mj-core/src/state.rs State::review_owner")
+	current := sessionID
+	// A chain longer than the relation table repeats a session.
+	for range s.Subagents.Len() + 1 {
+		child, isChild := s.Subagents.Get(current)
+		if !isChild || child.Kind != SubagentKindWorker {
+			return s.Sessions.GetShared(current), "", true
+		}
+		if !s.Sessions.ContainsKey(child.ParentSessionID) {
+			return nil, child.ParentSessionID, false
+		}
+		current = child.ParentSessionID
+	}
+	return nil, sessionID, false
 }
 
 // EffectiveReview is the stored review choice that governs sessionID,
@@ -2731,7 +3717,16 @@ func (s *StateState) EffectiveReview(sessionID string) (review *SessionReview, f
 // review host, child review requests, delegation completion and the viewer
 // all read the effective review through this one rule.
 func (s *StateState) EffectiveReviewConfig(review *ReviewConfig, sessionID string) ReviewConfig {
-	panic("unported: mj-core/src/state.rs State::effective_review_config")
+	owner, _, ok := s.reviewOwner(sessionID)
+	if !ok {
+		return review.ForSession(SessionReviewOff{})
+	}
+	plain := owner != nil && owner.Project != nil && owner.Project.PrimaryIsPlainDirectory()
+	var choice SessionReview
+	if owner != nil && owner.Review != nil {
+		choice = *owner.Review
+	}
+	return EffectiveReviewConfig(review, choice, plain)
 }
 
 // Checkout is the effective code checkout for one session, including who
@@ -2853,20 +3848,59 @@ func SessionIsLive(record *SessionRecord, inOperation, parentLive bool) bool {
 // have an operation in flight. A stopped sub-agent follows its parent, so
 // membership settles parent before child.
 func LiveSessionIDs(sessions *SnapshotMap[string, SessionRecord], subagents *SnapshotMap[string, SubagentMetadata], operations map[string]struct{}) map[string]struct{} {
-	panic("unported: mj-core/src/state.rs live_session_ids")
+	live := map[string]struct{}{}
+	for id, record := range sessions.All() {
+		_, inOperation := operations[id]
+		if SessionIsLive(record, inOperation, false) {
+			live[id] = struct{}{}
+		}
+	}
+	for {
+		var joined []string
+		for child, relation := range subagents.All() {
+			_, childLive := live[child]
+			_, parentLive := live[relation.ParentSessionID]
+			if !childLive && sessions.ContainsKey(child) && parentLive {
+				joined = append(joined, child)
+			}
+		}
+		if len(joined) == 0 {
+			return live
+		}
+		for _, child := range joined {
+			live[child] = struct{}{}
+		}
+	}
 }
 
 // ActiveChildSessionIDs is the managed children that a parent suspend or
 // Move stop hook must end, including parked children and oracles.
 func (s *StateState) ActiveChildSessionIDs(parentSessionID string) []string {
-	panic("unported: mj-core/src/state.rs State::active_child_session_ids")
+	ids := []string{}
+	for child := range s.Subagents.Values() {
+		if child.ParentSessionID != parentSessionID {
+			continue
+		}
+		if session := s.Sessions.GetShared(child.ChildSessionID); session != nil && session.State.IsActive() {
+			ids = append(ids, child.ChildSessionID)
+		}
+	}
+	return ids
 }
 
 // SubagentsOccupyContainer reports whether a sub-agent of parentSessionID
 // still has a target. A child's worker, parked or live, runs in its
 // parent's container, so recreating that container would end it.
 func (s *StateState) SubagentsOccupyContainer(parentSessionID string) bool {
-	panic("unported: mj-core/src/state.rs State::subagents_occupy_container")
+	for child := range s.Subagents.Values() {
+		if child.ParentSessionID != parentSessionID {
+			continue
+		}
+		if session := s.Sessions.GetShared(child.ChildSessionID); session != nil && session.Target != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // Checkout derives the checkout location and its owner for a session.
@@ -2885,7 +3919,11 @@ func (s *StateState) SubagentsOccupyContainer(parentSessionID string) bool {
 // child whose parent record has already been removed falls back to its
 // stored checkout fields, preserving the older cleanup path.
 func (s *StateState) Checkout(sessionID string) (Checkout, error) {
-	panic("unported: mj-core/src/state.rs State::checkout")
+	session := s.Sessions.GetShared(sessionID)
+	if session == nil {
+		return nil, fmt.Errorf("unknown session %s", sessionID)
+	}
+	return s.CheckoutForRecord(sessionID, session)
 }
 
 // CheckoutForRecord derives checkout ownership for a projected record while
@@ -2895,7 +3933,22 @@ func (s *StateState) CheckoutForRecord(sessionID string, session *SessionRecord)
 }
 
 func (s *StateState) checkoutForRecordInner(sessionID string, session *SessionRecord, visited map[string]struct{}) (Checkout, error) {
-	panic("unported: mj-core/src/state.rs State::checkout_for_record_inner")
+	if _, seen := visited[sessionID]; seen {
+		return nil, fmt.Errorf("sub-agent checkout ownership contains a cycle at %s", sessionID)
+	}
+	visited[sessionID] = struct{}{}
+	if relation := s.Subagents.GetShared(sessionID); relation != nil {
+		owner := s.Sessions.GetShared(relation.ParentSessionID)
+		if owner == nil {
+			return session.RecordCheckout(), nil
+		}
+		checkout, err := s.checkoutForRecordInner(owner.ID, owner, visited)
+		if err != nil {
+			return nil, err
+		}
+		return CheckoutBorrowed{OwnerRecord: owner, Checkout: checkout}, nil
+	}
+	return session.RecordCheckout(), nil
 }
 
 // WorkspaceOwner is the record whose workspace sessionID works in: the
@@ -2904,7 +3957,18 @@ func (s *StateState) checkoutForRecordInner(sessionID string, session *SessionRe
 // cutoff) belong to that record, so a reader asks here instead of the
 // child's own fields, which a child leaves empty.
 func (s *StateState) WorkspaceOwner(sessionID string) (*SessionRecord, error) {
-	panic("unported: mj-core/src/state.rs State::workspace_owner")
+	session := s.Sessions.GetShared(sessionID)
+	if session == nil {
+		return nil, fmt.Errorf("unknown session %s", sessionID)
+	}
+	checkout, err := s.Checkout(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if owner := checkout.Owner(); owner != nil {
+		return owner, nil
+	}
+	return session, nil
 }
 
 // SessionNoticeName is how a notice names a session: the title the session
@@ -2912,7 +3976,10 @@ func (s *StateState) WorkspaceOwner(sessionID string) (*SessionRecord, error) {
 // or its short id when it has no title or its record is gone (launch
 // findings B-3, R5-5 and R8-3).
 func (s *StateState) SessionNoticeName(sessionID string) string {
-	panic("unported: mj-core/src/state.rs State::session_notice_name")
+	if session := s.Sessions.GetShared(sessionID); session != nil && !session.IsNamedByID() {
+		return session.ListedTitle()
+	}
+	return ShortID(sessionID)
 }
 
 // ProjectIdentitySession is the session whose project identity names a row.
@@ -2923,7 +3990,12 @@ func (s *StateState) SessionNoticeName(sessionID string) string {
 // identity from the parent instead keeps a child under the same project
 // heading and target label as the session it belongs to.
 func (s *StateState) ProjectIdentitySession(session *SessionRecord) *SessionRecord {
-	panic("unported: mj-core/src/state.rs State::project_identity_session")
+	if record := s.Subagents.GetShared(session.ID); record != nil {
+		if parent := s.Sessions.GetShared(record.ParentSessionID); parent != nil {
+			return parent
+		}
+	}
+	return session
 }
 
 // IsSubagentSession reports whether id names a sub-agent rather than a
@@ -2933,7 +4005,7 @@ func (s *StateState) ProjectIdentitySession(session *SessionRecord) *SessionReco
 // Every list of top-level sessions filters with this, so the lists cannot
 // disagree about what a sub-agent is.
 func (s *StateState) IsSubagentSession(id string) bool {
-	panic("unported: mj-core/src/state.rs State::is_subagent_session")
+	return s.Subagents.ContainsKey(id) || IsViewID(id)
 }
 
 // IsStoppedSubagent reports whether id is a Mjolnir sub-agent whose session
@@ -2944,21 +4016,99 @@ func (s *StateState) IsSubagentSession(id string) bool {
 // about which children are readable. Callers that also know of a transition
 // bringing the session back add that check themselves.
 func (s *StateState) IsStoppedSubagent(id string) bool {
-	panic("unported: mj-core/src/state.rs State::is_stopped_subagent")
+	if !s.Subagents.ContainsKey(id) {
+		return false
+	}
+	session := s.Sessions.GetShared(id)
+	return session != nil && !session.State.HasLiveWorker()
 }
 
 func (s *StateState) Validate() error {
-	panic("unported: mj-core/src/state.rs State::validate")
+	if s.Version != StateVersion {
+		return fmt.Errorf("unsupported Mjolnir state version %d; expected %d", s.Version, StateVersion)
+	}
+	for id, session := range s.Sessions.All() {
+		if err := session.validate(id); err != nil {
+			return err
+		}
+	}
+	for childID := range s.Subagents.Keys() {
+		if err := s.ValidateSubagent(childID); err != nil {
+			return err
+		}
+	}
+	for host, sources := range s.MountHistory.All() {
+		if strings.TrimSpace(host) == "" {
+			return errors.New("mount history contains an empty host key")
+		}
+		for _, source := range *sources {
+			if !IsAbsoluteOnHostOrTarget(source) {
+				return fmt.Errorf("mount history for %s contains a non-absolute source path", debugString(host))
+			}
+		}
+	}
+	for host, size := range s.ContainerSizes.All() {
+		if strings.TrimSpace(host) == "" {
+			return errors.New("container size history contains an empty host key")
+		}
+		if size.Cpus == 0 || size.MemoryBytes == 0 {
+			return fmt.Errorf("container size history for %s contains a zero value", debugString(host))
+		}
+		if size.Cpus > math.MaxInt64 || size.MemoryBytes > math.MaxInt64 {
+			return fmt.Errorf("container size history for %s exceeds SQLite integer range", debugString(host))
+		}
+	}
+	return nil
 }
 
 // ValidateSubagent validates one relationship after an incremental
 // committed update.
 func (s *StateState) ValidateSubagent(childID string) error {
-	panic("unported: mj-core/src/state.rs State::validate_subagent")
+	subagent := s.Subagents.GetShared(childID)
+	if subagent == nil {
+		return nil
+	}
+	child := debugString(childID)
+	if childID != subagent.ChildSessionID {
+		return fmt.Errorf("sub-agent key %s does not match its child session id", child)
+	}
+	if childID == subagent.ParentSessionID {
+		return fmt.Errorf("sub-agent %s cannot be its own parent", child)
+	}
+	if !s.Sessions.ContainsKey(childID) {
+		return fmt.Errorf("sub-agent %s has no child session", child)
+	}
+	if !s.Sessions.ContainsKey(subagent.ParentSessionID) {
+		return fmt.Errorf("sub-agent %s has unknown parent %s", child, debugString(subagent.ParentSessionID))
+	}
+	if subagent.Kind != SubagentKindReviewer && s.Subagents.ContainsKey(subagent.ParentSessionID) {
+		return fmt.Errorf("sub-agent %s cannot belong to another sub-agent", child)
+	}
+	// The shared checkout derivation validates the complete ownership chain
+	// and rejects cycles for nested reviewer relationships.
+	if _, err := s.Checkout(childID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(subagent.TaskName) == "" || strings.TrimSpace(subagent.ProfileID) == "" ||
+		strings.TrimSpace(subagent.RequestKey) == "" {
+		return fmt.Errorf("sub-agent %s has incomplete relationship metadata", child)
+	}
+	return nil
 }
 
 func (s *StateState) RememberMountSources(host string, mounts []AdditionalMount) {
-	panic("unported: mj-core/src/state.rs State::remember_mount_sources")
+	if len(mounts) == 0 {
+		return
+	}
+	sources := s.MountHistory.Entry(host).OrInsertWith(func() []string { return []string{} })
+	for i := len(mounts) - 1; i >= 0; i-- {
+		source := mounts[i].Source
+		*sources = slices.DeleteFunc(*sources, func(existing string) bool { return statePathEqual(existing, source) })
+		*sources = slices.Insert(*sources, 0, source)
+	}
+	if len(*sources) > 20 {
+		*sources = (*sources)[:20]
+	}
 }
 
 func (s *StateState) RememberContainerSize(host string, size HostContainerSize) {
@@ -2966,15 +4116,31 @@ func (s *StateState) RememberContainerSize(host string, size HostContainerSize) 
 }
 
 func (s *StateState) ProjectDirectories(host string) []string {
-	panic("unported: mj-core/src/state.rs State::project_directories")
+	if directories := s.MountHistory.GetShared(projectHistoryKey(host)); directories != nil {
+		return *directories
+	}
+	return []string{}
 }
 
 func (s *StateState) RememberProjectDirectory(host string, directory string) {
-	panic("unported: mj-core/src/state.rs State::remember_project_directory")
+	directories := s.MountHistory.Entry(projectHistoryKey(host)).OrInsertWith(func() []string { return []string{} })
+	*directories = slices.DeleteFunc(*directories, func(existing string) bool { return statePathEqual(existing, directory) })
+	*directories = slices.Insert(*directories, 0, directory)
+	if len(*directories) > 20 {
+		*directories = (*directories)[:20]
+	}
 }
 
 func (s *StateState) DestroyStoppedSession(sessionID string) (SessionRecord, error) {
-	panic("unported: mj-core/src/state.rs State::destroy_stopped_session")
+	session := s.Sessions.GetShared(sessionID)
+	if session == nil {
+		return SessionRecord{}, fmt.Errorf("unknown session %s", sessionID)
+	}
+	if session.State.IsActive() {
+		return SessionRecord{}, fmt.Errorf("refusing to destroy active session %s", sessionID)
+	}
+	removed, _ := s.Sessions.Remove(sessionID)
+	return removed, nil
 }
 
 // DestroySessionForce removes a session record from state regardless of
@@ -2984,7 +4150,11 @@ func (s *StateState) DestroyStoppedSession(sessionID string) (SessionRecord, err
 // artifact has been torn down or its loss accepted, so no state is refused
 // here.
 func (s *StateState) DestroySessionForce(sessionID string) (SessionRecord, error) {
-	panic("unported: mj-core/src/state.rs State::destroy_session_force")
+	if !s.Sessions.ContainsKey(sessionID) {
+		return SessionRecord{}, fmt.Errorf("unknown session %s", sessionID)
+	}
+	removed, _ := s.Sessions.Remove(sessionID)
+	return removed, nil
 }
 
 // BundleUsers is the sessions that still read bundleID from the config. A
@@ -2992,25 +4162,127 @@ func (s *StateState) DestroySessionForce(sessionID string) (SessionRecord, error
 // session opened on a plain directory, or one whose data is already gone,
 // does not need it.
 func (s *StateState) BundleUsers(bundleID string) []*SessionRecord {
-	panic("unported: mj-core/src/state.rs State::bundle_users")
+	users := []*SessionRecord{}
+	for session := range s.Sessions.Values() {
+		if session.BundleID != bundleID || session.State == SessionStateDestroyedWithDataLoss {
+			continue
+		}
+		checkout, err := s.Checkout(session.ID)
+		if err != nil {
+			continue
+		}
+		if _, hasDirectory := checkout.ProjectDirectory(); !hasDirectory {
+			users = append(users, session)
+		}
+	}
+	return users
 }
 
 // BundleRemovalRefusal is why bundleID cannot be removed from the config,
 // or false when no session uses it.
 func (s *StateState) BundleRemovalRefusal(bundleID string) (string, bool) {
-	panic("unported: mj-core/src/state.rs State::bundle_removal_refusal")
+	users := s.BundleUsers(bundleID)
+	if len(users) == 0 {
+		return "", false
+	}
+	var names []string
+	for _, session := range users[:min(3, len(users))] {
+		names = append(names, debugString(session.ListedTitle()))
+	}
+	if len(users) > 3 {
+		names = append(names, fmt.Sprintf("%d more", len(users)-3))
+	}
+	usedBy := "sessions"
+	if len(users) == 1 {
+		usedBy = "a session"
+	}
+	return fmt.Sprintf("Project %s is used by %s: %s. Destroy those sessions before removing it.",
+		debugString(bundleID), usedBy, strings.Join(names, ", ")), true
 }
 
 // ValidateSetupUpdate: setup may add replacements under new names, but must
 // not rewrite dependencies still owned by active sessions.
 func (s *StateState) ValidateSetupUpdate(before, after *Config) error {
-	panic("unported: mj-core/src/state.rs State::validate_setup_update")
+	for session := range s.Sessions.Values() {
+		if !session.State.IsActive() {
+			continue
+		}
+		protected := false
+		if profile, ok := before.Profiles[session.LastProfile]; ok {
+			comparable := profile
+			updated, hasUpdated := after.Profiles[session.LastProfile]
+			if hasUpdated {
+				comparable.Enabled = updated.Enabled
+				comparable.LegacySubagents = updated.LegacySubagents
+				// Which models are offered does not change a running session.
+				comparable.Models = updated.Models
+			}
+			// A mismatched harness is already broken; allow repairing it.
+			protected = profile.Kind == session.HarnessKind &&
+				(!hasUpdated || !reflect.DeepEqual(updated, comparable))
+		}
+		bundleChanged := false
+		if checkout, err := s.Checkout(session.ID); err == nil {
+			if _, hasDirectory := checkout.ProjectDirectory(); !hasDirectory {
+				if bundle, ok := before.Bundles[session.BundleID]; ok {
+					updated, hasUpdated := after.Bundles[session.BundleID]
+					bundleChanged = !hasUpdated || !reflect.DeepEqual(updated, bundle)
+				}
+			}
+		}
+		// Build cache settings are resolved at provisioning time and kept on
+		// the session record, so editing them does not disturb a running
+		// session.
+		targetChanged := false
+		if target, ok := before.Targets[session.TargetTemplateID]; ok {
+			updated, hasUpdated := after.Targets[session.TargetTemplateID]
+			targetChanged = !hasUpdated ||
+				!reflect.DeepEqual(updated.WithoutLaunchOnlySettings(), target.WithoutLaunchOnlySettings())
+		}
+		if !protected && !bundleChanged && !targetChanged {
+			continue
+		}
+		// Named as the screen names them: the session by its title, the
+		// project by its name rather than the internal bundle id, and only
+		// the parts this change touches.
+		var used []string
+		if protected {
+			used = append(used, "agent profile "+debugString(session.LastProfile))
+		}
+		if bundleChanged {
+			used = append(used, "project "+debugString(session.ProjectName(before)))
+		}
+		if targetChanged {
+			used = append(used, "runtime "+debugString(session.TargetTemplateID))
+		}
+		usedText := used[0]
+		if len(used) > 1 {
+			usedText = strings.Join(used[:len(used)-1], ", ") + " and " + used[len(used)-1]
+		}
+		named := "the running session " + debugString(session.ListedTitle())
+		if session.IsNamedByID() {
+			named = "a running session in project " + debugString(session.ProjectName(before))
+		}
+		return fmt.Errorf("Setup would change the %s that %s uses. Save the new settings under a new name, or stop the session first.", usedText, named)
+	}
+	return nil
 }
 
 // ValidateAgainstConfig is strict validation for callers that need all
 // active references intact.
 func (s *StateState) ValidateAgainstConfig(config *Config) error {
-	panic("unported: mj-core/src/state.rs State::validate_against_config")
+	if err := s.Validate(); err != nil {
+		return err
+	}
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	for session := range s.Sessions.Values() {
+		if err := session.ValidateConfiguration(config); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func projectHistoryKey(host string) string { return "project:" + host }
@@ -3018,13 +4290,53 @@ func projectHistoryKey(host string) string { return "project:" + host }
 // NewSessionID generates an opaque, filesystem-safe stable id for a new
 // logical session.
 func NewSessionID() (string, error) {
-	panic("unported: mj-core/src/state.rs new_session_id")
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate Mjolnir session id: %w", err)
+	}
+	return LowerHex(random[:]), nil
 }
 
 // HarnessSessionTitle returns the newest clean ACP session title from
 // canonical worker events.
 func HarnessSessionTitle(events []SequencedEvent) (string, bool) {
-	panic("unported: mj-core/src/state.rs harness_session_title")
+	for index := len(events) - 1; index >= 0; index-- {
+		adapter, ok := events[index].Event.(WorkerEventAdapter)
+		if !ok {
+			if pointer, isPointer := events[index].Event.(*WorkerEventAdapter); isPointer && pointer != nil {
+				adapter, ok = *pointer, true
+			}
+		}
+		if !ok {
+			continue
+		}
+		event, err := UnmarshalRuntimeEvent(adapter.Payload)
+		if err != nil {
+			continue
+		}
+		update, ok := event.(RuntimeEventSessionUpdate)
+		if !ok {
+			continue
+		}
+		var fields struct {
+			SessionUpdate *string `json:"sessionUpdate"`
+			Title         any     `json:"title"`
+		}
+		if json.Unmarshal(update.Update, &fields) != nil || fields.SessionUpdate == nil {
+			continue
+		}
+		if *fields.SessionUpdate != "session_info_update" && *fields.SessionUpdate != "session_title" {
+			continue
+		}
+		title, ok := fields.Title.(string)
+		if !ok {
+			continue
+		}
+		if normalized, ok := NormalizeSessionTitle(title); ok {
+			return normalized, true
+		}
+	}
+	return "", false
 }
 
 // DefaultSessionTitle is the title a new session gets when whoever starts
@@ -3033,7 +4345,13 @@ func HarnessSessionTitle(events []SequencedEvent) (string, bool) {
 // mj new all use it, so a session reads the same way whichever surface
 // started it.
 func DefaultSessionTitle(projectDirectory *string, bundleID, profileID string) string {
-	panic("unported: mj-core/src/state.rs default_session_title")
+	project := bundleID
+	if projectDirectory != nil {
+		if name, ok := stateFileName(*projectDirectory); ok {
+			project = name
+		}
+	}
+	return project + " via " + profileID
 }
 
 const MaxSessionTitleChars = 256
@@ -3054,7 +4372,14 @@ func NormalizeSessionTitle(title string) (string, bool) {
 }
 
 func truncateSessionTitle(title string, maximumChars int) string {
-	panic("unported: mj-core/src/state.rs truncate_session_title")
+	if utf8.RuneCountInString(title) <= maximumChars {
+		return title
+	}
+	truncated := string([]rune(title)[:maximumChars-1])
+	if boundary := strings.LastIndexFunc(truncated, unicode.IsSpace); boundary >= 0 {
+		truncated = truncated[:boundary]
+	}
+	return truncated + "…"
 }
 
 // ListedSessionTitle is SessionRecord.ListedTitle from the stored columns,
@@ -3263,7 +4588,32 @@ func (r *ResumeRepositorySourceReceipt) UnmarshalJSON(data []byte) error {
 // TargetRuntimeSettingsFor is the access settings for a recorded physical
 // placement, independent of its session.
 func TargetRuntimeSettingsFor(sessionID, targetTemplateID string, target TargetLocator, runtime *TargetRuntimeSettings, config *Config) (*TargetRuntimeSettings, error) {
-	panic("unported: mj-core/src/state.rs target_runtime_settings_for")
+	if runtime != nil {
+		// How to reach the target follows the machine's current ssh options;
+		// where it is stays as recorded (launch finding R3-7).
+		if template, ok := config.Targets[targetTemplateID]; ok {
+			current := TargetRuntimeSettingsFromTemplate(template)
+			if refreshed := runtime.WithCurrentSSHOptions(&current); refreshed != nil {
+				return refreshed, nil
+			}
+		}
+		return runtime, nil
+	}
+	template, ok := config.Targets[targetTemplateID]
+	if !ok {
+		return nil, RefusalPrecondition(fmt.Sprintf(
+			"Session %s has no recorded target access settings. Restore target %s in config.toml once, then retry.",
+			debugString(sessionID), debugString(targetTemplateID)))
+	}
+	settings := TargetRuntimeSettingsFromTemplate(template)
+	if target != nil {
+		if _, err := TargetsTargetLocatorFromRecordedTarget(RecordedTarget{Locator: target, Runtime: &settings, SessionID: sessionID}); err != nil {
+			return nil, RefusalPrecondition(fmt.Sprintf(
+				"Session %s cannot recover target %s: %s. Restore its original target settings, then retry.",
+				debugString(sessionID), debugString(targetTemplateID), err))
+		}
+	}
+	return &settings, nil
 }
 
 // Serde encodings shared by this module and its sibling modules

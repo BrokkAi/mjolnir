@@ -11,9 +11,14 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -82,23 +87,41 @@ func ManagedHarnessManifestForInstall(harness HarnessKind, installID string) Man
 // resulting base must be absolute on every target. An empty argument is the
 // same as an absent one.
 func ManagedHarnessCacheRoot(xdgCacheHome, home string) (string, error) {
-	panic("unported: mj-core/src/harness_runtime.rs managed_harness_cache_root")
+	base, err := managedCacheBase(xdgCacheHome, home)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, managedHarnessesDir), nil
 }
 
 // ManagedNodeCacheRoot resolves the cache directory that holds Mjolnir's
 // pinned Node.js releases.
 func ManagedNodeCacheRoot(xdgCacheHome, home string) (string, error) {
-	panic("unported: mj-core/src/harness_runtime.rs managed_node_cache_root")
+	base, err := managedCacheBase(xdgCacheHome, home)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, managedNodeDir), nil
 }
 
 func managedCacheBase(xdgCacheHome, home string) (string, error) {
-	panic("unported: mj-core/src/harness_runtime.rs managed_cache_base")
+	base := xdgCacheHome
+	if base == "" {
+		if home == "" {
+			return "", errors.New("managed harness installation needs HOME or XDG_CACHE_HOME")
+		}
+		base = filepath.Join(home, ".cache")
+	}
+	if !filepath.IsAbs(base) {
+		return "", fmt.Errorf("managed harness cache root must be absolute: %s", base)
+	}
+	return filepath.Join(base, managedRuntimesDir), nil
 }
 
 // ManagedHarnessInstallDir resolves the pinned install directory under a
 // managed-harness cache root.
 func ManagedHarnessInstallDir(cacheRoot string, harness HarnessKind) string {
-	panic("unported: mj-core/src/harness_runtime.rs managed_harness_install_dir")
+	return filepath.Join(cacheRoot, harness.ID(), Pin(harness).InstallID)
 }
 
 // ManagedHarnessManifestMatches checks that an installation carries the
@@ -106,7 +129,19 @@ func ManagedHarnessInstallDir(cacheRoot string, harness HarnessKind) string {
 // incomplete installs; other read failures are returned with their path for
 // diagnostics.
 func ManagedHarnessManifestMatches(path string, harness HarnessKind, installID string) (bool, error) {
-	panic("unported: mj-core/src/harness_runtime.rs managed_harness_manifest_matches")
+	manifestPath := filepath.Join(path, ManifestFile)
+	body, err := os.ReadFile(manifestPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read managed harness manifest %s: %w", manifestPath, err)
+	}
+	var manifest ManagedHarnessManifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return false, nil
+	}
+	return manifest == ManagedHarnessManifestForInstall(harness, installID), nil
 }
 
 const (
@@ -183,7 +218,44 @@ func (UndeliverableDshInstructionsNotUtf8) isUndeliverableDshInstructions()     
 // because the type has the same Go name). A nil result means it can. Like
 // dsh-acp, this reads only a regular file.
 func FindUndeliverableDshInstructions(path string) (UndeliverableDshInstructions, error) {
-	panic("unported: mj-core/src/harness_runtime.rs undeliverable_dsh_instructions")
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return UndeliverableDshInstructionsNotRegularFile{}, nil
+	}
+	tooLong := func(bytes uint64) UndeliverableDshInstructions {
+		if bytes > DshACPInstructionsLimit {
+			return UndeliverableDshInstructionsTooLong{Bytes: bytes}
+		}
+		return nil
+	}
+	if problem := tooLong(uint64(info.Size())); problem != nil {
+		return problem, nil
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if problem := tooLong(uint64(len(contents))); problem != nil {
+		return problem, nil
+	}
+	if utf8.Valid(contents) {
+		return nil, nil
+	}
+	validUpTo := 0
+	for validUpTo < len(contents) {
+		r, size := utf8.DecodeRune(contents[validUpTo:])
+		if r == utf8.RuneError && size <= 1 {
+			break
+		}
+		validUpTo += size
+	}
+	return UndeliverableDshInstructionsNotUtf8{Line: bytes.Count(contents[:validUpTo], []byte{'\n'}) + 1}, nil
 }
 
 // DshACPScript is the shell commands that start dsh-acp, which the positional
@@ -274,7 +346,27 @@ func DshACPLaunchScript() string {
 // also use this value to distinguish the built-in fallback from a custom
 // launch command.
 func FallbackLaunch(harness HarnessKind, policy ExecutionPolicy) (string, []string) {
-	panic("unported: mj-core/src/harness_runtime.rs fallback_launch")
+	switch harness {
+	case HarnessKindAntigravity:
+		flag, _ := harness.LaunchFlagFor(policy)
+		return "sh", []string{"-c", fmt.Sprintf("if command -v agy >/dev/null 2>&1; then agy=agy; elif [ -x \"$HOME/.local/bin/agy\" ]; then agy=\"$HOME/.local/bin/agy\"; else echo 'Antigravity requires agy installed on this target (PATH or ~/.local/bin/agy)' >&2; exit 127; fi; exec \"$agy\" acp --gemini-dir \"$MJ_ANTIGRAVITY_HOME\" --disable-telemetry %s", flag)}
+	case HarnessKindCodex, HarnessKindClaude, HarnessKindMuse:
+		bridge, ok := NpmBridgeFor(harness)
+		if !ok {
+			panic("npm harness has a bridge")
+		}
+		return "sh", []string{"-c", bridge.BootstrapScript()}
+	case HarnessKindKimi:
+		return "sh", []string{"-c", "if command -v kimi >/dev/null 2>&1; then exec kimi acp; elif [ -x \"$HOME/.kimi-code/bin/kimi\" ]; then exec \"$HOME/.kimi-code/bin/kimi\" acp; else echo 'Mjolnir needs compatible Kimi Code on PATH or a Mjolnir-managed installation' >&2; exit 127; fi"}
+	case HarnessKindGrok:
+		acp := strings.Join(harness.BridgeArgs(policy), " ")
+		return "sh", []string{"-c", fmt.Sprintf("if command -v grok >/dev/null 2>&1; then exec grok %s; elif [ -x \"$GROK_HOME/bin/grok\" ]; then exec \"$GROK_HOME/bin/grok\" %s; elif [ -x \"$HOME/.grok/bin/grok\" ]; then exec \"$HOME/.grok/bin/grok\" %s; else echo 'Mjolnir needs compatible Grok Build on PATH or a Mjolnir-managed installation' >&2; exit 127; fi", acp, acp, acp)}
+	case HarnessKindOpenCode:
+		return "sh", []string{"-c", "if command -v opencode >/dev/null 2>&1; then opencode=opencode; elif [ -x \"$HOME/.opencode/bin/opencode\" ]; then opencode=\"$HOME/.opencode/bin/opencode\"; else echo 'Mjolnir needs compatible OpenCode on PATH or a Mjolnir-managed installation' >&2; exit 127; fi; " + OpencodeACPScript()}
+	case HarnessKindDsh:
+		return "sh", []string{"-c", DshACPLaunchScript()}
+	}
+	panic(fmt.Sprintf("unknown harness kind %v", harness))
 }
 
 // IsFallbackLaunch reports whether a persisted launch description is the one
