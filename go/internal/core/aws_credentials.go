@@ -14,9 +14,14 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"math"
 	"os"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
 )
@@ -124,7 +129,7 @@ type AwsCredentialSource struct {
 
 // Equal compares sources by value, as Rust's PartialEq does.
 func (s *AwsCredentialSource) Equal(other *AwsCredentialSource) bool {
-	panic("unported: mj-core/src/aws_credentials.rs AwsCredentialSource PartialEq")
+	return credentialsValueEqual(reflect.ValueOf(*s), reflect.ValueOf(*other))
 }
 
 // String is Rust's Debug form, which leaves the environment's values out.
@@ -163,17 +168,6 @@ type AwsCredentials struct {
 	scope *AwsCredentialScope
 }
 
-// awsCredentialsWire is the serde form of AwsCredentials (PascalCase keys,
-// optional members skipped when absent, Profile defaulting to "default").
-type awsCredentialsWire struct {
-	Version         uint32  `json:"Version"`
-	AccessKeyID     string  `json:"AccessKeyId"`
-	SecretAccessKey string  `json:"SecretAccessKey"`
-	SessionToken    *string `json:"SessionToken,omitempty"`
-	Expiration      *string `json:"Expiration,omitempty"`
-	Profile         *string `json:"Profile,omitempty"`
-}
-
 // MarshalJSON writes serde's encoding byte for byte: members in declaration
 // order, with serde_json's string escapes.
 func (c AwsCredentials) MarshalJSON() ([]byte, error) {
@@ -192,24 +186,76 @@ func (c AwsCredentials) MarshalJSON() ([]byte, error) {
 	return jsonvalue.Marshal(object)
 }
 
-// UnmarshalJSON reads serde's encoding; a missing Profile is "default".
+// UnmarshalJSON reads serde's encoding: keys match exactly, Version,
+// AccessKeyId and SecretAccessKey are required, a null optional member is
+// absent, and a missing Profile is "default".
 func (c *AwsCredentials) UnmarshalJSON(data []byte) error {
-	var wire awsCredentialsWire
-	if err := json.Unmarshal(data, &wire); err != nil {
+	value, err := jsonvalue.Parse(data)
+	if err != nil {
 		return err
 	}
-	profile := awsCredentialsDefaultProfile()
-	if wire.Profile != nil {
-		profile = *wire.Profile
+	object, ok := value.(jsonvalue.Object)
+	if !ok {
+		return errors.New("invalid type: expected struct AwsCredentials")
 	}
-	*c = AwsCredentials{
-		version:         wire.Version,
-		accessKeyID:     wire.AccessKeyID,
-		secretAccessKey: wire.SecretAccessKey,
-		sessionToken:    wire.SessionToken,
-		expiration:      wire.Expiration,
-		profile:         profile,
+	required := func(name string) (any, error) {
+		member, ok := object.Get(name)
+		if !ok {
+			return nil, fmt.Errorf("missing field `%s`", name)
+		}
+		return member, nil
 	}
+	text := func(name string, member any) (string, error) {
+		value, ok := member.(string)
+		if !ok {
+			return "", fmt.Errorf("invalid type for `%s`, expected a string", name)
+		}
+		return value, nil
+	}
+	optional := func(name string) (*string, error) {
+		member, ok := object.Get(name)
+		if !ok || member == nil {
+			return nil, nil
+		}
+		value, err := text(name, member)
+		if err != nil {
+			return nil, err
+		}
+		return &value, nil
+	}
+	versionMember, err := required("Version")
+	if err != nil {
+		return err
+	}
+	version, ok := jvUint64(versionMember, true)
+	if !ok || version > math.MaxUint32 {
+		return errors.New("invalid value for `Version`, expected u32")
+	}
+	decoded := AwsCredentials{version: uint32(version), profile: awsCredentialsDefaultProfile()}
+	for _, field := range []struct {
+		name  string
+		value *string
+	}{{"AccessKeyId", &decoded.accessKeyID}, {"SecretAccessKey", &decoded.secretAccessKey}} {
+		member, err := required(field.name)
+		if err != nil {
+			return err
+		}
+		if *field.value, err = text(field.name, member); err != nil {
+			return err
+		}
+	}
+	if decoded.sessionToken, err = optional("SessionToken"); err != nil {
+		return err
+	}
+	if decoded.expiration, err = optional("Expiration"); err != nil {
+		return err
+	}
+	if member, ok := object.Get("Profile"); ok {
+		if decoded.profile, err = text("Profile", member); err != nil {
+			return err
+		}
+	}
+	*c = decoded
 	return nil
 }
 
@@ -237,7 +283,42 @@ func AwsCredentialsFromExport(profile string, bytes []byte) (AwsCredentials, err
 // --output json`, whose output nests the same four fields under
 // `Credentials`.
 func AwsCredentialsFromAssumeRole(profile string, bytes []byte) (AwsCredentials, error) {
-	panic("unported: mj-core/src/aws_credentials.rs AwsCredentials::from_assume_role")
+	if len(bytes) > MaxCredentialBytes {
+		return AwsCredentials{}, errors.New("AWS assume-role output is too large")
+	}
+	// Serde's detailed errors can include an offending secret value.
+	invalid := errors.New("AWS assume-role output is not the expected JSON")
+	output, err := jsonvalue.Parse(bytes)
+	if err != nil {
+		return AwsCredentials{}, invalid
+	}
+	issued, ok := jvGet(output, "Credentials")
+	if !ok {
+		return AwsCredentials{}, invalid
+	}
+	if _, isObject := issued.(jsonvalue.Object); !isObject {
+		return AwsCredentials{}, invalid
+	}
+	field := func(name string) (string, bool) { return jvString(jvGet(issued, name)) }
+	accessKeyID, ok1 := field("AccessKeyId")
+	secretAccessKey, ok2 := field("SecretAccessKey")
+	sessionToken, ok3 := field("SessionToken")
+	expiration, ok4 := field("Expiration")
+	if !ok1 || !ok2 || !ok3 || !ok4 {
+		return AwsCredentials{}, invalid
+	}
+	credentials := AwsCredentials{
+		version:         1,
+		accessKeyID:     accessKeyID,
+		secretAccessKey: secretAccessKey,
+		sessionToken:    &sessionToken,
+		expiration:      &expiration,
+		profile:         profile,
+	}
+	if err := credentials.validate(); err != nil {
+		return AwsCredentials{}, err
+	}
+	return credentials, nil
 }
 
 // IssuedFor is these credentials, recorded as issued by Mjolnir for roleArn
@@ -337,27 +418,100 @@ func (c AwsCredentials) Encode() ([]byte, error) {
 }
 
 func (c AwsCredentials) validate() error {
-	panic("unported: mj-core/src/aws_credentials.rs AwsCredentials::validate")
+	if c.version != 1 {
+		return errors.New("unsupported AWS credential export version")
+	}
+	if !AwsCredentialsValidProfileName(c.profile) {
+		return errors.New("AWS profile name cannot be represented in a shared credentials file")
+	}
+	validSecret := func(value string) bool {
+		return value != "" && !strings.ContainsFunc(value, unicode.IsSpace)
+	}
+	if !validSecret(c.accessKeyID) || !validSecret(c.secretAccessKey) ||
+		(c.sessionToken != nil && !validSecret(*c.sessionToken)) {
+		return errors.New("AWS credential export contains missing or invalid credentials")
+	}
+	if c.expiration != nil {
+		expiry, ok := ParseChronoRFC3339(*c.expiration)
+		if !ok {
+			return errors.New("AWS credential export has an invalid expiration")
+		}
+		if expiry.UnixMilli() <= EpochMillis() {
+			return errors.New("AWS credential export has expired; renew the selected AWS login")
+		}
+	}
+	return nil
 }
 
 // Configuration is the AWS configuration naming the credential process. The
 // native process provider honors expiration and reloads renewed
 // credentials. A static INI entry can be cached forever by an AWS SDK.
 func (c AwsCredentials) Configuration(targetHome string) ([]byte, error) {
-	panic("unported: mj-core/src/aws_credentials.rs AwsCredentials::configuration")
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
+	path := Join(targetHome, AwsCredentialsSharedCredentialsFile)
+	quoted := PosixQuote(Text(path))
+	var command string
+	if IsAbsolute(path) {
+		command = "cat " + quoted
+	} else {
+		// SSH profile roots are relative to the target user's home;
+		// credential_process itself runs in the project directory.
+		script := `exec cat "$HOME"/` + quoted
+		command = "sh -c " + PosixQuote(script)
+	}
+	return []byte(fmt.Sprintf("[profile %s]\ncredential_process = %s\n", c.profile, command)), nil
 }
 
 // Install installs the complete provider, in staging or at its final home.
 // The JSON is published last, after the files the SDK needs to resolve it.
 func (c AwsCredentials) Install(home, targetHome string) (CredentialSnapshot, error) {
-	panic("unported: mj-core/src/aws_credentials.rs AwsCredentials::install")
+	bytes, err := c.Encode()
+	if err != nil {
+		return CredentialSnapshot{}, err
+	}
+	configuration, err := c.Configuration(targetHome)
+	if err != nil {
+		return CredentialSnapshot{}, err
+	}
+	if err := AtomicWrite(filepath.Join(home, AwsCredentialsConfigFile), configuration); err != nil {
+		return CredentialSnapshot{}, err
+	}
+	if err := AtomicWrite(filepath.Join(home, AwsCredentialsEmptyCredentialsFile), []byte{}); err != nil {
+		return CredentialSnapshot{}, err
+	}
+	// The scope record goes first, so the secret is never published without
+	// the record of what it is; credentials Mjolnir did not issue leave no
+	// record, and a stale one is removed.
+	if c.scope != nil {
+		record, err := awsSerdeJSON(awsStoredScope{Scope: *c.scope, SecretFingerprint: CredentialFingerprint(bytes)})
+		if err != nil {
+			return CredentialSnapshot{}, fmt.Errorf("encode AWS credential scope: %w", err)
+		}
+		if err := AtomicWrite(filepath.Join(home, AwsCredentialsScopeFile), record); err != nil {
+			return CredentialSnapshot{}, err
+		}
+	} else if err := removeIfPresent(filepath.Join(home, AwsCredentialsScopeFile)); err != nil {
+		return CredentialSnapshot{}, err
+	}
+	if err := AtomicWrite(filepath.Join(home, AwsCredentialsSharedCredentialsFile), bytes); err != nil {
+		return CredentialSnapshot{}, err
+	}
+	return AwsCredentialsSnapshot(bytes), nil
 }
 
 // AwsCredentialsRemove withdraws the session's AWS credentials. The
 // credential file is the secret; without it the native process provider
 // finds nothing to use, and a later install writes every file again.
 func AwsCredentialsRemove(home string) (CredentialSnapshot, error) {
-	panic("unported: mj-core/src/aws_credentials.rs remove")
+	if err := removeIfPresent(filepath.Join(home, AwsCredentialsSharedCredentialsFile)); err != nil {
+		return CredentialSnapshot{}, err
+	}
+	if err := removeIfPresent(filepath.Join(home, AwsCredentialsScopeFile)); err != nil {
+		return CredentialSnapshot{}, err
+	}
+	return AwsCredentialsState(home)
 }
 
 func removeIfPresent(path string) error {
@@ -388,13 +542,47 @@ func AwsCredentialsValidProfileName(name string) bool {
 // name changes where those credentials are written, not what they allow.
 // False when nothing was staged or no section has a valid name.
 func AwsCredentialsStagedProfile(home string) (string, bool, error) {
-	panic("unported: mj-core/src/aws_credentials.rs staged_profile")
+	bytes, err := os.ReadFile(filepath.Join(home, AwsCredentialsConfigFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err == nil && !utf8.Valid(bytes) {
+		err = errors.New("stream did not contain valid UTF-8")
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read session AWS configuration: %w", err)
+	}
+	for _, line := range awsRustLines(string(bytes)) {
+		name, ok := strings.CutPrefix(strings.TrimSpace(line), "[profile ")
+		if !ok {
+			continue
+		}
+		if name, ok = strings.CutSuffix(name, "]"); ok && AwsCredentialsValidProfileName(name) {
+			return name, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // AwsCredentialsScope is the scope Mjolnir recorded for the credentials in
 // home, when the record describes the secret that is there now.
 func AwsCredentialsScope(home string) (*AwsCredentialScope, error) {
-	panic("unported: mj-core/src/aws_credentials.rs scope")
+	record, hasRecord, err := awsReadSessionFile(home, AwsCredentialsScopeFile)
+	if err != nil {
+		return nil, err
+	}
+	secret, hasSecret, err := awsReadSessionFile(home, AwsCredentialsSharedCredentialsFile)
+	if err != nil {
+		return nil, err
+	}
+	if !hasRecord || !hasSecret {
+		return nil, nil
+	}
+	stored, ok := awsDecodeStoredScope(record)
+	if !ok || stored.SecretFingerprint != CredentialFingerprint(secret) {
+		return nil, nil
+	}
+	return &stored.Scope, nil
 }
 
 func AwsCredentialsSnapshot(bytes []byte) CredentialSnapshot {
@@ -417,7 +605,35 @@ func userHome() (string, bool) {
 // AwsCredentialsStateForUser is AwsCredentialsState for a user whose home
 // directory is userHome.
 func AwsCredentialsStateForUser(home string, userHome *string) (CredentialSnapshot, error) {
-	panic("unported: mj-core/src/aws_credentials.rs state_for_user")
+	bytes, err := os.ReadFile(filepath.Join(home, AwsCredentialsSharedCredentialsFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return CredentialSnapshotAbsent(), nil
+	}
+	if err != nil {
+		return CredentialSnapshot{}, fmt.Errorf("read session AWS credentials: %w", err)
+	}
+	// Matching JSON alone does not make the provider usable. Worker upgrades
+	// can introduce these launch paths without restaging the profile. Invalid
+	// or expired JSON must likewise allow reconciliation to replace it.
+	credentials, err := AwsCredentialsDecode(bytes)
+	if err != nil {
+		return CredentialSnapshotAbsent(), nil
+	}
+	configuration, ok, err := awsReadSessionFile(home, AwsCredentialsConfigFile)
+	if err != nil {
+		return CredentialSnapshot{}, err
+	}
+	if !ok || !configurationNames(configuration, credentials.Profile(), filepath.Join(home, AwsCredentialsSharedCredentialsFile), userHome) {
+		return CredentialSnapshotAbsent(), nil
+	}
+	empty, ok, err := awsReadSessionFile(home, AwsCredentialsEmptyCredentialsFile)
+	if err != nil {
+		return CredentialSnapshot{}, err
+	}
+	if !ok || len(empty) != 0 {
+		return CredentialSnapshotAbsent(), nil
+	}
+	return AwsCredentialsSnapshot(bytes), nil
 }
 
 // configurationNames is whether the AWS configuration actual is the one for
@@ -428,14 +644,65 @@ func AwsCredentialsStateForUser(home string, userHome *string) (CredentialSnapsh
 // against userHome and compares the paths, not their text. This is the one
 // place the configured path is compared.
 func configurationNames(actual []byte, profile, secret string, userHome *string) bool {
-	panic("unported: mj-core/src/aws_credentials.rs configuration_names")
+	if !utf8.Valid(actual) {
+		return false
+	}
+	lines := awsRustLines(string(actual))
+	if len(lines) != 2 {
+		return false
+	}
+	if lines[0] != "[profile "+profile+"]" {
+		return false
+	}
+	command, ok := strings.CutPrefix(lines[1], "credential_process = ")
+	if !ok {
+		return false
+	}
+	configured, ok := configuredSecretPath(command)
+	if !ok {
+		return false
+	}
+	resolved := configured
+	if !filepath.IsAbs(configured) {
+		if userHome == nil {
+			return false
+		}
+		resolved = filepath.Join(*userHome, configured)
+	}
+	return awsCredentialsSamePath(resolved, secret)
 }
 
 // configuredSecretPath is the path in a `credential_process` command written
 // by AwsCredentials.Configuration: `cat '<absolute path>'`, or for a path
 // relative to the user's home, `sh -c 'exec cat "$HOME"/'<path>”`.
 func configuredSecretPath(command string) (string, bool) {
-	panic("unported: mj-core/src/aws_credentials.rs configured_secret_path")
+	unquote := func(text string) (string, bool) {
+		text, ok := strings.CutPrefix(text, "'")
+		if !ok {
+			return "", false
+		}
+		text, ok = strings.CutSuffix(text, "'")
+		if !ok {
+			return "", false
+		}
+		return strings.ReplaceAll(text, `'\''`, "'"), true
+	}
+	if path, ok := strings.CutPrefix(command, "cat "); ok {
+		return unquote(path)
+	}
+	quotedScript, ok := strings.CutPrefix(command, "sh -c ")
+	if !ok {
+		return "", false
+	}
+	script, ok := unquote(quotedScript)
+	if !ok {
+		return "", false
+	}
+	path, ok := strings.CutPrefix(script, `exec cat "$HOME"/`)
+	if !ok {
+		return "", false
+	}
+	return unquote(path)
 }
 
 // awsCredentialsSamePath reports two spellings of one path: equal once
@@ -443,5 +710,125 @@ func configuredSecretPath(command string) (string, bool) {
 // by component. (Rust's aws_credentials::same_path; config_loading.go
 // already has a samePath.)
 func awsCredentialsSamePath(left, right string) bool {
-	panic("unported: mj-core/src/aws_credentials.rs same_path")
+	resolved := func(path string) string {
+		if canonical, err := credentialsCanonicalize(path); err == nil {
+			return canonical
+		}
+		return awsPathComponents(path)
+	}
+	return resolved(left) == resolved(right)
+}
+
+// awsPathComponents is path rebuilt from its components, as Rust's
+// `path.components().collect::<PathBuf>()` does: repeated separators, a
+// trailing separator and `.` after the start go, and `..` stays.
+func awsPathComponents(path string) string {
+	volume := filepath.VolumeName(path)
+	rest := path[len(volume):]
+	rooted := rest != "" && os.IsPathSeparator(rest[0])
+	parts := []string{}
+	for index, part := range strings.FieldsFunc(rest, func(c rune) bool { return c < 0x80 && os.IsPathSeparator(byte(c)) }) {
+		if part == "." && (index > 0 || rooted) {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	joined := strings.Join(parts, string(filepath.Separator))
+	if rooted {
+		joined = string(filepath.Separator) + joined
+	}
+	return volume + joined
+}
+
+// awsRustLines is Rust's str::lines: lines split at `\n`, each without a
+// trailing `\r`, and no empty last line for a final newline.
+func awsRustLines(text string) []string {
+	lines := []string{}
+	for text != "" {
+		line, rest, found := strings.Cut(text, "\n")
+		if found {
+			line = strings.TrimSuffix(line, "\r")
+		}
+		lines = append(lines, line)
+		text = rest
+	}
+	return lines
+}
+
+// awsReadSessionFile reads one of the session's AWS files; false when it is
+// missing.
+func awsReadSessionFile(home, name string) ([]byte, bool, error) {
+	bytes, err := os.ReadFile(filepath.Join(home, name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read session AWS %s: %w", name, err)
+	}
+	return bytes, true, nil
+}
+
+// awsDecodeStoredScope reads a stored scope record as serde does: every
+// field but `source_identity` and `tag` is required, with its type.
+func awsDecodeStoredScope(record []byte) (awsStoredScope, bool) {
+	value, err := jsonvalue.Parse(record)
+	if err != nil {
+		return awsStoredScope{}, false
+	}
+	if _, ok := value.(jsonvalue.Object); !ok {
+		return awsStoredScope{}, false
+	}
+	fingerprint, ok := jvString(jvGet(value, "secret_fingerprint"))
+	if !ok {
+		return awsStoredScope{}, false
+	}
+	scope, ok := jvGet(value, "scope")
+	if !ok {
+		return awsStoredScope{}, false
+	}
+	if _, isObject := scope.(jsonvalue.Object); !isObject {
+		return awsStoredScope{}, false
+	}
+	roleArn, ok1 := jvString(jvGet(scope, "role_arn"))
+	roleSessionName, ok2 := jvString(jvGet(scope, "role_session_name"))
+	policy, ok3 := jvString(jvGet(scope, "session_policy_fingerprint"))
+	expiresAt, ok4 := jvInt64(jvGet(scope, "expires_at_epoch_millis"))
+	if !ok1 || !ok2 || !ok3 || !ok4 {
+		return awsStoredScope{}, false
+	}
+	stored := awsStoredScope{SecretFingerprint: fingerprint, Scope: AwsCredentialScope{
+		RoleArn:                  roleArn,
+		RoleSessionName:          roleSessionName,
+		SessionPolicyFingerprint: policy,
+		ExpiresAtEpochMillis:     expiresAt,
+	}}
+	if member, ok := jvGet(scope, "source_identity"); ok && member != nil {
+		identity, isString := member.(string)
+		if !isString {
+			return awsStoredScope{}, false
+		}
+		stored.Scope.SourceIdentity = &identity
+	}
+	if member, ok := jvGet(scope, "tag"); ok {
+		tag, isString := member.(string)
+		if !isString {
+			return awsStoredScope{}, false
+		}
+		stored.Scope.Tag = tag
+	}
+	return stored, true
+}
+
+// awsSerdeJSON encodes value as serde_json writes it: Go's encoding first,
+// then rewritten without Go's HTML and line-separator escapes.
+func awsSerdeJSON(value any) ([]byte, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := jsonvalue.Parse(encoded)
+	if err != nil {
+		return nil, err
+	}
+	return jsonvalue.Marshal(parsed)
 }

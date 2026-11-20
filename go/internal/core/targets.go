@@ -10,18 +10,25 @@ package core
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 const SessionLabel = "dev.mj.session"
@@ -117,7 +124,25 @@ type ProvisionStage struct {
 // Compare orders stages as Rust's derived Ord does: by variant, then by
 // the variant's fields.
 func (s ProvisionStage) Compare(other ProvisionStage) int {
-	panic("unported: mj-core/src/targets.rs ProvisionStage::cmp")
+	rank := func(kind ProvisionStageKind) int {
+		return slices.Index(provisionStageOrder, kind)
+	}
+	if c := cmp.Compare(rank(s.Kind), rank(other.Kind)); c != 0 {
+		return c
+	}
+	switch s.Kind {
+	case ProvisionStageInstalling:
+		return cmp.Compare(HarnessKindOrdinal(s.Harness), HarnessKindOrdinal(other.Harness))
+	case ProvisionStagePreparingHarness:
+		if c := cmp.Compare(HarnessKindOrdinal(s.Harness), HarnessKindOrdinal(other.Harness)); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(s.Step, other.Step); c != 0 {
+			return c
+		}
+		return cmp.Compare(s.SinceMs, other.SinceMs)
+	}
+	return 0
 }
 
 // MarshalJSON writes serde's externally tagged form: a unit variant as its
@@ -184,7 +209,52 @@ func (s *ProvisionStage) UnmarshalJSON(data []byte) error {
 
 // Label is the stage's name in launch progress.
 func (s ProvisionStage) Label() string {
-	panic("unported: mj-core/src/targets.rs ProvisionStage::label")
+	switch s.Kind {
+	case ProvisionStagePullingImage:
+		return "Pull image"
+	case ProvisionStageWaitingForImagePull:
+		return "Waiting for another image pull"
+	case ProvisionStageWaitingForContainerUpgrade:
+		return "Container upgrade pending; waiting for accepted work"
+	case ProvisionStageWaitingForWorkerStore:
+		return "Waiting for shared target content"
+	case ProvisionStageWaitingForSshConnection:
+		return "Waiting for an SSH connection to open"
+	case ProvisionStageWaitingForStartSlot:
+		return "Waiting for a container start slot"
+	case ProvisionStageProvisioning:
+		return "Provision"
+	case ProvisionStageBooting:
+		return "Boot"
+	case ProvisionStageCloning:
+		return "Clone"
+	case ProvisionStageSyncing:
+		return "Sync"
+	case ProvisionStageRestoring:
+		return "Restore"
+	case ProvisionStageStarting:
+		return "Start"
+	case ProvisionStageInstalling:
+		return "Installing " + s.Harness.DisplayName()
+	case ProvisionStagePreparingHarness:
+		return fmt.Sprintf("Preparing %s: %s", s.Harness.DisplayName(), s.Step)
+	case ProvisionStageCompacting:
+		return "Compact"
+	case ProvisionStageRecoveryCopy:
+		return "Recovery copy"
+	case ProvisionStageVerifying:
+		return "Verify"
+	case ProvisionStageClosing:
+		return "Shut down agent"
+	case ProvisionStageStoppingTarget:
+		return "Stop target"
+	case ProvisionStageRemovingContainer:
+		return "Remove container"
+	case ProvisionStageRemovingStorage:
+		return "Remove container storage"
+	default:
+		return "Clean cache"
+	}
 }
 
 // PausesStallClock reports whether time in this stage stays off a stall
@@ -509,7 +579,38 @@ func (c *CommandSpec) OpenSSHSessionWithoutMarker(executor CommandExecutor, walk
 }
 
 func (c *CommandSpec) leaseSSHSession(executor CommandExecutor, walk *SshWalk, marker bool) (*SessionCommand, error) {
-	panic("unported: mj-core/src/targets.rs CommandSpec::lease_ssh_session")
+	if c.SSHSession == nil {
+		return &SessionCommand{command: c}, nil
+	}
+	ssh := &c.SSHSession.Target
+	waiting := BlockingOperationStart(
+		fmt.Sprintf("lease SSH connection to %s for %s", ssh.Destination, c.Purpose),
+		"ssh",
+	)
+	defer waiting.End()
+	var lease *SshSessionLease
+	if c.SSHSessionProbe {
+		lease = SshSessionsLeaseProbe(ssh, walk)
+	} else {
+		reporting := &SshStageReporter{executor: executor, observer: c.observer}
+		var err error
+		lease, err = SshSessionsLease(ssh, c.SSHSession.Class, reporting, walk)
+		if err != nil {
+			return nil, err
+		}
+	}
+	command := *c
+	command.SSHSession = nil
+	command.SSHSessionProbe = false
+	command.Args = SessionCommandArgs(c.Program, c.Args, ssh, lease)
+	// The remote command line is the last argument of every `ssh` session
+	// the builders in targets_ssh.go make; `scp` has none.
+	if marker && c.Program == "ssh" && len(command.Args) > 0 {
+		last := len(command.Args) - 1
+		command.Args[last] = withStartMarker(command.Args[last])
+		command.sshStartMarker = true
+	}
+	return &SessionCommand{command: &command, lease: lease}, nil
 }
 
 // ExpectsSSHStartMarker reports whether the command's stdout starts with
@@ -740,25 +841,106 @@ func (m *AdditionalMount) UnmarshalJSON(data []byte) error {
 // The names are those Linux `stat -f -c %T` and macOS `mount` report,
 // matched case-insensitively.
 func OverlayUnsupportedFilesystem(filesystem string) (string, bool) {
-	panic("unported: mj-core/src/targets.rs overlay_unsupported_filesystem")
+	name := strings.ToLower(strings.TrimSpace(filesystem))
+	// FUSE reports the backing driver as `fuse.sshfs`, `fuse.s3fs`, and so
+	// on; macFUSE reports itself.
+	if name == "fuse" || name == "fuseblk" || strings.HasPrefix(name, "fuse.") || name == "macfuse" || name == "osxfuse" {
+		return "FUSE filesystem", true
+	}
+	switch name {
+	case "nfs", "nfs4", "cifs", "smb2", "smb3", "9p", "v9fs", "virtiofs", "ceph",
+		"lustre", "afs", "glusterfs", "ocfs2", "gfs", "gfs2", "smbfs", "afpfs", "webdav":
+		return "network filesystem", true
+	case "msdos", "vfat", "fat", "exfat", "ntfs", "ntfs3":
+		return "no POSIX metadata", true
+	case "overlayfs":
+		return "overlay stacking limit", true
+	}
+	return "", false
 }
 
 // ValidateMountDestination: container destinations cannot use the
 // controller or login user's home.
 func ValidateMountDestination(path string) error {
-	panic("unported: mj-core/src/targets.rs validate_mount_destination")
+	if !IsAbsolute(path) || slices.Contains(targetsPathComponents(path), "..") {
+		return errors.New("additional mount destination must be a safe absolute container path; ~ is not supported")
+	}
+	return nil
 }
 
 // ValidateAdditionalMounts checks every mount's source and destination and
 // refuses a destination configured twice.
 func ValidateAdditionalMounts(mounts []AdditionalMount) error {
-	panic("unported: mj-core/src/targets.rs validate_additional_mounts")
+	destinations := map[string]bool{}
+	for _, mount := range mounts {
+		if !IsAbsoluteOnHostOrTarget(mount.Source) || mount.Source == "" {
+			return errors.New("additional mount source must be an absolute directory path")
+		}
+		if err := ValidateMountDestination(mount.Destination); err != nil {
+			return err
+		}
+		if destinations[mount.Destination] {
+			return fmt.Errorf("additional mount destination %q is configured more than once", mount.Destination)
+		}
+		destinations[mount.Destination] = true
+	}
+	return nil
 }
 
 // DefaultMountDestination chooses the editable default destination for an
 // additional host directory.
 func DefaultMountDestination(source string, existing []AdditionalMount) string {
-	panic("unported: mj-core/src/targets.rs default_mount_destination")
+	basename, ok := targetsFileName(source)
+	if !ok {
+		basename = "mount"
+	}
+	// A container path: POSIX separators on a Windows controller too.
+	const mnt = "/mnt"
+	taken := func(candidate string) bool {
+		return slices.ContainsFunc(existing, func(mount AdditionalMount) bool {
+			return mount.Destination == candidate
+		})
+	}
+	base := Join(mnt, basename)
+	if !taken(base) {
+		return base
+	}
+	for number := 2; ; number++ {
+		candidate := Join(mnt, fmt.Sprintf("%s-%d", basename, number))
+		if !taken(candidate) {
+			return candidate
+		}
+	}
+}
+
+// targetsPathComponents splits path into its components as Rust's
+// Path::components does for these checks: separators (on Windows, either
+// slash) are dropped and `.` components are skipped.
+func targetsPathComponents(path string) []string {
+	parts := strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || (runtime.GOOS == "windows" && r == '\\')
+	})
+	components := parts[:0]
+	for _, part := range parts {
+		if part != "." {
+			components = append(components, part)
+		}
+	}
+	return components
+}
+
+// targetsFileName is Rust's Path::file_name: the final component when it is
+// a normal, non-empty name rather than `..` or a root.
+func targetsFileName(path string) (string, bool) {
+	components := targetsPathComponents(path)
+	if len(components) == 0 {
+		return "", false
+	}
+	last := components[len(components)-1]
+	if last == ".." || (runtime.GOOS == "windows" && strings.HasSuffix(last, ":")) {
+		return "", false
+	}
+	return last, true
 }
 
 // CommandExecutor runs target commands. Rust's trait has default methods;
@@ -1057,7 +1239,41 @@ func withSSHRefusalRetry(
 	isCancelled func() bool,
 	run func(command *CommandSpec, gate *StartGate) (CommandOutput, error),
 ) (CommandOutput, error) {
-	panic("unported: mj-core/src/targets.rs with_ssh_refusal_retry")
+	if command.SSHDestination == nil {
+		return run(command, nil)
+	}
+	destination := *command.SSHDestination
+	if isCancelled == nil {
+		isCancelled = func() bool { return false }
+	}
+	retry := SshRefusalRetryForCommand(command)
+	for {
+		session, err := command.OpenSSHSession(executor, retry.Walk())
+		if err != nil {
+			return CommandOutput{}, err
+		}
+		output, err := run(session.Command(), session.Gate())
+		if err != nil {
+			return CommandOutput{}, err
+		}
+		refusal, walksOn, refused := noteSessionRefusal(session, &output)
+		if !refused {
+			return output, nil
+		}
+		stderr := targetsLossyText(output.Stderr)
+		delay, err := retry.Next(refusal, walksOn, destination, command.Purpose, stderr)
+		if err != nil {
+			return CommandOutput{}, fmt.Errorf("%s failed: %w", command.Purpose, err)
+		}
+		if !SleepUnlessCancelled(delay, isCancelled) {
+			return CommandOutput{}, fmt.Errorf("operation cancelled while %s", command.Purpose)
+		}
+	}
+}
+
+// targetsLossyText is Rust's String::from_utf8_lossy for command output.
+func targetsLossyText(data []byte) string {
+	return strings.ToValidUTF8(string(data), "�")
 }
 
 // noteSessionRefusal classifies a finished command's refusal by the server
@@ -1067,7 +1283,32 @@ func withSSHRefusalRetry(
 // refused. A command that printed the start marker was not refused, whatever
 // its exit status.
 func noteSessionRefusal(session *SessionCommand, output *CommandOutput) (refusal SshRefusal, walksOn bool, ok bool) {
-	panic("unported: mj-core/src/targets.rs note_session_refusal")
+	stderr := targetsLossyText(output.Stderr)
+	// `scp` exits with a status of its own (normally 1) while relaying the
+	// refusal of the `ssh` it runs, and carries no start marker, so only that
+	// stderr can tell. Copying again is safe, as with Move's rsync.
+	isSCP := session.Command().Program == "scp"
+	lease := session.Lease()
+	if lease == nil {
+		if isSCP {
+			refusal, ok = SSHRefusalInStderr(stderr)
+		} else {
+			refusal, ok = SSHRefusal(output.Status, stderr)
+		}
+		return refusal, false, ok
+	}
+	if isSCP {
+		if output.Status == 0 {
+			return 0, false, false
+		}
+		refusal, ok = SSHRefusalInStderr(stderr)
+	} else {
+		refusal, ok = lease.Gate().Refusal(output.Status, stderr)
+	}
+	if !ok {
+		return 0, false, false
+	}
+	return refusal, lease.NoteRefusal(refusal), true
 }
 
 // SleepUnlessCancelled waits out delay, giving up early if the supervising
@@ -1091,7 +1332,17 @@ func SleepUnlessCancelled(delay time.Duration, isCancelled func() bool) bool {
 // of re-profiled by hand, and one look at a failure for a full disk on the
 // target.
 func finishedCommand(command *CommandSpec, started time.Time, status int, stdout, stderr []byte) CommandOutput {
-	panic("unported: mj-core/src/targets.rs finished_command")
+	slog.Debug("target command finished",
+		"purpose", command.Purpose,
+		"program", command.Program,
+		"status", status,
+		"elapsed_ms", uint64(time.Since(started).Milliseconds()),
+	)
+	output := CommandOutput{Status: status, Stdout: stdout, Stderr: stderr}
+	if !command.SensitiveOutput {
+		observeCommandOutput(command, &output)
+	}
+	return output
 }
 
 // runOnce is one attempt, with no retry of its own.
@@ -1129,11 +1380,22 @@ func (e ProcessExecutor) ExecuteCleanupWithTimeout(command *CommandSpec, _ time.
 }
 
 func (e ProcessExecutor) Execute(command *CommandSpec) (CommandOutput, error) {
-	panic("unported: mj-core/src/targets.rs ProcessExecutor::execute")
+	running := blockingOperationCommand(command)
+	defer running.End()
+	return withSSHRefusalRetry(command, e, nil, func(command *CommandSpec, gate *StartGate) (CommandOutput, error) {
+		return e.runOnce(command, gate)
+	})
 }
 
 func (e ProcessExecutor) ExecuteWithStdin(command *CommandSpec, input io.Reader) (CommandOutput, error) {
-	panic("unported: mj-core/src/targets.rs ProcessExecutor::execute_with_stdin")
+	running := blockingOperationCommand(command)
+	defer running.End()
+	// The stream is not read until the session has started, so a refused
+	// session is retried with the same stream. Plain process execution is not
+	// cancellable, so a transfer only ends when the child does.
+	return withSSHRefusalRetry(command, e, nil, func(command *CommandSpec, gate *StartGate) (CommandOutput, error) {
+		return streamCommandWithStdin(cancellableCommand(command), command, input, func() bool { return false }, gate, nil)
+	})
 }
 
 // CommandOutputObserver observes bytes as a supervised command drains them.
@@ -1159,7 +1421,25 @@ type ProgressWriter struct {
 }
 
 func (w *ProgressWriter) Write(data []byte) (int, error) {
-	panic("unported: mj-core/src/targets.rs ProgressWriter::write")
+	if w.observer == nil {
+		return w.stdin.Write(data)
+	}
+	// A blocking pipe write can wait for the whole request. Use smaller
+	// writes on observed streams so backpressure exposes progress before a
+	// full input buffer has drained.
+	written := 0
+	for written < len(data) {
+		chunk := data[written:min(len(data), written+4096)]
+		count, err := w.stdin.Write(chunk)
+		if count != 0 {
+			w.observer.reportActivity(CommandActivity{Kind: CommandActivityStdinBytes, Bytes: count})
+		}
+		written += count
+		if err != nil {
+			return written, err
+		}
+	}
+	return written, nil
 }
 
 // streamCommandWithStdin streams input into a freshly spawned child and
@@ -1184,7 +1464,226 @@ func streamCommandWithStdin(
 	gate *StartGate,
 	observer CommandOutputObserver,
 ) (CommandOutput, error) {
-	panic("unported: mj-core/src/targets.rs stream_command_with_stdin")
+	started := time.Now()
+	if isCancelled() {
+		return CommandOutput{}, errors.New("operation cancelled")
+	}
+	child, stdin, stdout, stderr, err := spawnTargetChild(process, true)
+	if err != nil {
+		return CommandOutput{}, fmt.Errorf("run %s for %s: %w", command.Program, command.Purpose, err)
+	}
+	var group *ProcessGroupGuard
+	if !command.Detaches {
+		group = NewProcessGroupGuard(child.pid())
+		defer group.Close()
+	}
+	// Reader goroutines keep the child's output pipes drained; a child that
+	// fills one while nobody reads would block instead of exiting.
+	reply := command.streamReply
+	var replyObserver CommandOutputObserver
+	if reply != nil {
+		replyObserver = func(data []byte) {
+			if len(data) != 0 {
+				reply.observer(data)
+			}
+			if observer != nil {
+				observer(data)
+			}
+		}
+	}
+	replyEnded := false
+	endReply := func() {
+		if !replyEnded && reply != nil && (gate == nil || gate.Phase() == StartPhaseStarted) {
+			replyEnded = true
+			reply.observer(nil)
+		}
+	}
+	stdoutObserver := replyObserver
+	if stdoutObserver == nil {
+		stdoutObserver = observer
+	}
+	stdoutReader := pipeCollectorSpawnObserved(stdout, gate, nil, stdoutObserver)
+	defer stdoutReader.close()
+	stderrReader := pipeCollectorSpawnObserved(stderr, nil, nil, observer)
+	defer stderrReader.close()
+
+	// Pipe writes can block forever when a remote helper stops reading. Keep
+	// the writer off the supervising goroutine so cancellation can kill the
+	// process group and thereby close the blocked pipe.
+	type inputResult struct {
+		delivered bool
+		err       error
+	}
+	writerDone := make(chan inputResult, 1)
+	go func() {
+		writerDone <- func() (result inputResult) {
+			var progress *ObservedStdin
+			// Closing stdin is what ends the transfer for the child: a child
+			// that reads to EOF, such as `mj worker export-checkpoint
+			// --spec -`, never exits while the write end is still open. It
+			// closes before the progress guard reports the end.
+			defer func() {
+				stdin.Close()
+				if progress != nil {
+					progress.end()
+				}
+			}()
+			if gate != nil {
+				switch gate.WaitBlocking(isCancelled) {
+				case StartWaitStarted:
+				case StartWaitEnded:
+					// The session ended without starting. Nothing was read,
+					// and the exit status says why.
+					return inputResult{}
+				default:
+					return inputResult{err: errors.New("operation cancelled")}
+				}
+			}
+			// The command stage owns SSH startup and post-EOF work. Start the
+			// transfer clock once the writer can send and close stdin before
+			// ending the progress guard.
+			if command.observer != nil {
+				command.observer.reportActivity(CommandActivity{Kind: CommandActivityStdinStarted})
+				progress = &ObservedStdin{observer: command.observer}
+			}
+			writer := &ProgressWriter{stdin: stdin, observer: command.observer}
+			buffer := make([]byte, 64*1024)
+			for {
+				// Checking before each chunk makes large checkpoint copies
+				// cooperatively cancellable without changing the executor
+				// interface.
+				if isCancelled() {
+					return inputResult{err: errors.New("operation cancelled")}
+				}
+				count, err := input.Read(buffer)
+				if count > 0 {
+					if _, writeErr := writer.Write(buffer[:count]); writeErr != nil {
+						return inputResult{err: fmt.Errorf("stream command input: %w", writeErr)}
+					}
+				}
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					return inputResult{err: fmt.Errorf("read command input: %w", err)}
+				}
+			}
+			return inputResult{delivered: true}
+		}()
+	}()
+
+	var written *inputResult
+	writerFinished := func() bool {
+		if written != nil {
+			return true
+		}
+		select {
+		case result := <-writerDone:
+			written = &result
+			return true
+		default:
+			return false
+		}
+	}
+	joinWriter := func() inputResult {
+		if written == nil {
+			result := <-writerDone
+			written = &result
+		}
+		return *written
+	}
+	supervise := func() (*os.ProcessState, error) {
+		var status *os.ProcessState
+		var exitedAt *time.Time
+		groupKilled := false
+		// Each timed wait says whether the child may have exited, so nothing
+		// polls twice; the first pass checks once.
+		maybeExited := true
+		for {
+			if status == nil && (stdoutReader.failed() || stderrReader.failed()) {
+				terminateCancellableChild(child, false)
+				state, err := child.tryWait()
+				if err != nil {
+					return nil, fmt.Errorf("reap command after pipe failure: %w", err)
+				}
+				status = state
+			}
+			if isCancelled() {
+				terminateCancellableChild(child, false)
+				endReply()
+				joinWriter()
+				return nil, fmt.Errorf("operation cancelled while %s", command.Purpose)
+			}
+			if stdoutReader.isFinished() {
+				endReply()
+			}
+			if status == nil && maybeExited {
+				state, err := child.tryWait()
+				if err != nil {
+					terminateCancellableChild(child, false)
+					endReply()
+					joinWriter()
+					return nil, fmt.Errorf("wait for %s: %w", command.Purpose, err)
+				}
+				status = state
+			}
+			// The command completes when its leader exits. Descendants can
+			// retain the pipes, so output is collected for a bounded time;
+			// then the owned group is terminated, which also releases a
+			// writer blocked on a pipe a descendant holds.
+			if status != nil {
+				if exitedAt == nil {
+					now := time.Now()
+					exitedAt = &now
+				}
+				drained := (stdoutReader.isFinished() && stderrReader.isFinished()) ||
+					time.Since(*exitedAt) >= targetsIODrainTimeout
+				if drained && !writerFinished() && !groupKilled {
+					endReply()
+					groupKilled = true
+					if group != nil {
+						group.Kill()
+					}
+				}
+				if drained && writerFinished() {
+					return status, nil
+				}
+			}
+			// A reaped child stays reaped; sleep while draining.
+			if status != nil {
+				time.Sleep(25 * time.Millisecond)
+				maybeExited = true
+			} else {
+				maybeExited = child.waitExit(25 * time.Millisecond)
+			}
+		}
+	}
+	status, processErr := supervise()
+	deadline := time.Now()
+	stdoutBytes, err := stdoutReader.finish("stdout", deadline)
+	if err != nil {
+		return CommandOutput{}, err
+	}
+	stderrBytes, err := stderrReader.finish("stderr", deadline)
+	if err != nil {
+		return CommandOutput{}, err
+	}
+	if processErr != nil {
+		return CommandOutput{}, processErr
+	}
+	delivered := joinWriter()
+	if status.Success() {
+		// A child that exited first explains the failure through its own
+		// status and stderr; the broken pipe that exit caused would only
+		// hide it. A successful child must not hide an input error.
+		if delivered.err != nil {
+			return CommandOutput{}, delivered.err
+		}
+		if !delivered.delivered {
+			return CommandOutput{}, fmt.Errorf("%s exited successfully without reporting that its command started, so its input was never sent", command.Purpose)
+		}
+	}
+	return finishedCommand(command, started, status.ExitCode(), stdoutBytes, stderrBytes), nil
 }
 
 // CancellableProcessExecutor runs commands as local processes in their own
@@ -1234,13 +1733,38 @@ type DeadlinePause struct {
 func DeadlinePauseNone() *DeadlinePause { return &DeadlinePause{} }
 
 func newDeadlinePause(deadline *ProcessDeadline) *DeadlinePause {
-	panic("unported: mj-core/src/targets.rs DeadlinePause::new")
+	if deadline != nil {
+		deadline.mu.Lock()
+		if deadline.pausedSince != nil {
+			deadline.pauseDepth++
+		} else {
+			now := time.Now()
+			deadline.pausedSince = &now
+			deadline.pauseDepth = 1
+		}
+		deadline.mu.Unlock()
+	}
+	return &DeadlinePause{deadline: deadline}
 }
 
 // End ends the pause; the deadline moves by the paused time once every
 // overlapping pause has ended.
 func (p *DeadlinePause) End() {
-	panic("unported: mj-core/src/targets.rs DeadlinePause::drop")
+	deadline := p.deadline
+	if deadline == nil {
+		return
+	}
+	p.deadline = nil
+	deadline.mu.Lock()
+	defer deadline.mu.Unlock()
+	if deadline.pausedSince == nil {
+		panic("a held deadline pause")
+	}
+	deadline.pauseDepth--
+	if deadline.pauseDepth == 0 {
+		deadline.expires = deadline.expires.Add(time.Since(*deadline.pausedSince))
+		deadline.pausedSince = nil
+	}
 }
 
 // ProcessCancellationGuard cancels synchronous executor work when its
@@ -1256,7 +1780,16 @@ func (g *ProcessCancellationGuard) Cancel() { g.cancelled.Store(true) }
 // both output streams while retaining the executor's process-group,
 // cancellation and SSH ownership.
 func (e CancellableProcessExecutor) ExecuteWithStdinObserved(command *CommandSpec, input io.Reader, observer CommandOutputObserver) (CommandOutput, error) {
-	panic("unported: mj-core/src/targets.rs CancellableProcessExecutor::execute_with_stdin_observed")
+	running := blockingOperationCommand(command)
+	defer running.End()
+	// The stream is not read until the session has started, so a refused
+	// session is retried with the same stream. The child runs in its own
+	// process group so cancellation can kill the whole group, which is what
+	// releases a writer blocked on a full pipe.
+	output, err := withSSHRefusalRetry(command, e, e.IsCancelled, func(command *CommandSpec, gate *StartGate) (CommandOutput, error) {
+		return streamCommandWithStdin(cancellableCommand(command), command, input, e.IsCancelled, gate, observer)
+	})
+	return output, e.describeCancellation(command, err)
 }
 
 // CancelOnDrop returns a guard that cancels this executor when cancelled.
@@ -1317,7 +1850,22 @@ func (e CancellableProcessExecutor) WithDeadline(timeout time.Duration) Cancella
 }
 
 func (e CancellableProcessExecutor) cancellationMessage(purpose string) string {
-	panic("unported: mj-core/src/targets.rs CancellableProcessExecutor::cancellation_message")
+	if !e.cancelled.Load() && (e.token == nil || e.token.Err() == nil) && e.deadline != nil {
+		e.deadline.mu.Lock()
+		expired := e.deadline.expired()
+		timeout := e.deadline.timeout
+		e.deadline.mu.Unlock()
+		if expired {
+			return fmt.Sprintf("timed out after %s s while %s", targetsSeconds(timeout), purpose)
+		}
+	}
+	return "operation cancelled while " + purpose
+}
+
+// targetsSeconds formats a duration in seconds as Rust's `{}` prints an f64:
+// the shortest text that reads back as the same value, with no exponent.
+func targetsSeconds(duration time.Duration) string {
+	return strconv.FormatFloat(duration.Seconds(), 'f', -1, 64)
 }
 
 func (e CancellableProcessExecutor) checkCancelled(purpose string) error {
@@ -1330,15 +1878,192 @@ func (e CancellableProcessExecutor) checkCancelled(purpose string) error {
 // describeCancellation replaces an "operation cancelled" error with the
 // executor's cancellation message.
 func (e CancellableProcessExecutor) describeCancellation(command *CommandSpec, err error) error {
-	panic("unported: mj-core/src/targets.rs CancellableProcessExecutor::describe_cancellation")
+	if err == nil || !e.IsCancelled() {
+		return err
+	}
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if strings.HasPrefix(cause.Error(), "operation cancelled") {
+			return errors.New(e.cancellationMessage(command.Purpose))
+		}
+	}
+	return err
 }
 
 func configuredCommand(command *CommandSpec) *exec.Cmd {
-	panic("unported: mj-core/src/targets.rs configured_command")
+	process := exec.Command(command.Program, command.Args...)
+	if command.arg0 != nil && runtime.GOOS != "windows" {
+		process.Args[0] = *command.arg0
+	}
+	if command.ClearEnv || len(command.Env) > 0 || len(command.EnvRemove) > 0 {
+		process.Env = targetsCommandEnvironment(command)
+	}
+	// As Rust's Command does, a PATH given to the child is also where its
+	// program is looked up.
+	if path, ok := command.Env["PATH"]; ok && !strings.ContainsAny(command.Program, `/\`) {
+		if resolved, found := targetsLookPathIn(command.Program, path); found {
+			process.Path = resolved
+			process.Err = nil
+		}
+	}
+	if command.Cwd != nil {
+		process.Dir = *command.Cwd
+	}
+	return process
+}
+
+// targetsCommandEnvironment is the child's environment: the inherited one
+// unless cleared, with command.Env set and command.EnvRemove removed.
+func targetsCommandEnvironment(command *CommandSpec) []string {
+	sameName := func(left, right string) bool {
+		if runtime.GOOS == "windows" {
+			return strings.EqualFold(left, right)
+		}
+		return left == right
+	}
+	overridden := func(name string) bool {
+		for key := range command.Env {
+			if sameName(key, name) {
+				return true
+			}
+		}
+		return slices.ContainsFunc(command.EnvRemove, func(removed string) bool { return sameName(removed, name) })
+	}
+	var environment []string
+	if !command.ClearEnv {
+		for _, entry := range os.Environ() {
+			name, _, _ := strings.Cut(entry, "=")
+			if !overridden(name) {
+				environment = append(environment, entry)
+			}
+		}
+	}
+	names := make([]string, 0, len(command.Env))
+	for name := range command.Env {
+		if !slices.ContainsFunc(command.EnvRemove, func(removed string) bool { return sameName(removed, name) }) {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		environment = append(environment, name+"="+command.Env[name])
+	}
+	if environment == nil {
+		environment = []string{}
+	}
+	return environment
+}
+
+// targetsLookPathIn finds program on the search path path.
+func targetsLookPathIn(program, path string) (string, bool) {
+	for _, directory := range filepath.SplitList(path) {
+		if directory == "" {
+			directory = "."
+		}
+		if resolved, err := exec.LookPath(filepath.Join(directory, program)); err == nil {
+			return resolved, true
+		}
+	}
+	return "", false
 }
 
 func cancellableCommand(command *CommandSpec) *exec.Cmd {
-	panic("unported: mj-core/src/targets.rs cancellable_command")
+	process := configuredCommand(command)
+	targetsSetProcessGroup(process)
+	return process
+}
+
+// targetChild is a spawned command and the goroutine that reaps it.
+type targetChild struct {
+	process *exec.Cmd
+	exited  chan struct{}
+	state   *os.ProcessState
+	err     error
+}
+
+// spawnTargetChild starts process with piped stdout and stderr, and piped
+// stdin when stdin is true (otherwise the null device). It returns the
+// parent's ends of the pipes.
+func spawnTargetChild(process *exec.Cmd, stdin bool) (child *targetChild, input, stdout, stderr *os.File, err error) {
+	var parentEnds, childEnds []*os.File
+	closeAll := func(files []*os.File) {
+		for _, file := range files {
+			file.Close()
+		}
+	}
+	pipe := func() (read, write *os.File, err error) {
+		read, write, err = os.Pipe()
+		if err == nil {
+			parentEnds = append(parentEnds, read, write)
+		}
+		return read, write, err
+	}
+	fail := func(err error) (*targetChild, *os.File, *os.File, *os.File, error) {
+		closeAll(parentEnds)
+		return nil, nil, nil, nil, err
+	}
+	process.Stdin = nil
+	if stdin {
+		read, write, err := pipe()
+		if err != nil {
+			return fail(err)
+		}
+		process.Stdin = read
+		input = write
+		childEnds = append(childEnds, read)
+	}
+	stdoutRead, stdoutWrite, err := pipe()
+	if err != nil {
+		return fail(err)
+	}
+	stderrRead, stderrWrite, err := pipe()
+	if err != nil {
+		return fail(err)
+	}
+	process.Stdout = stdoutWrite
+	process.Stderr = stderrWrite
+	childEnds = append(childEnds, stdoutWrite, stderrWrite)
+	if err := process.Start(); err != nil {
+		return fail(err)
+	}
+	// The child holds its own copies now; the parent's would keep the pipes
+	// open past the child's exit.
+	closeAll(childEnds)
+	child = &targetChild{process: process, exited: make(chan struct{})}
+	go func() {
+		err := process.Wait()
+		child.state = process.ProcessState
+		if child.state == nil {
+			child.err = err
+		}
+		close(child.exited)
+	}()
+	return child, input, stdoutRead, stderrRead, nil
+}
+
+func (c *targetChild) pid() int { return c.process.Process.Pid }
+
+// tryWait is the child's exit status once it has been reaped, without
+// waiting for it.
+func (c *targetChild) tryWait() (*os.ProcessState, error) {
+	select {
+	case <-c.exited:
+		return c.state, c.err
+	default:
+		return nil, nil
+	}
+}
+
+// waitExit sleeps up to timeout, returning early once the child exits.
+// Returns whether the child may have exited.
+func (c *targetChild) waitExit(timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-c.exited:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // targetsIODrainTimeout is how long a command's output may keep arriving
@@ -1349,12 +2074,12 @@ func cancellableCommand(command *CommandSpec) *exec.Cmd {
 // drain ends.
 const targetsIODrainTimeout = 2 * time.Second
 
-// PollablePipe is a child pipe that can be waited on with a timeout, so its
-// reader can be stopped while a descendant still holds the write end.
-type PollablePipe interface {
-	io.Reader
-	readable(timeout time.Duration) bool
-}
+// pipePollInterval is how long a pipe reader waits for data before it looks
+// at its stop flag again. A child pipe is read with a deadline, so its
+// reader can be stopped while a descendant still holds the write end. Where
+// the pipe cannot take a deadline (Windows), a read blocks until the pipe
+// closes, as Rust's non-Unix build does.
+const pipePollInterval = 25 * time.Millisecond
 
 // PipeCollector collects one child pipe on its own goroutine. Stopping it
 // drops the goroutine's end of the pipe, so a descendant that keeps the pipe
@@ -1373,7 +2098,7 @@ type PipeTask struct {
 	err  error
 }
 
-func pipeCollectorSpawn(pipe PollablePipe) *PipeCollector {
+func pipeCollectorSpawn(pipe *os.File) *PipeCollector {
 	return pipeCollectorSpawnScanning(pipe, nil)
 }
 
@@ -1381,16 +2106,80 @@ func pipeCollectorSpawn(pipe PollablePipe) *PipeCollector {
 // start marker is removed from the front, the first byte reports the
 // session's start, and the end of the pipe reports that it ended; the gate
 // settles however the goroutine stops.
-func pipeCollectorSpawnScanning(pipe PollablePipe, gate *StartGate) *PipeCollector {
+func pipeCollectorSpawnScanning(pipe *os.File, gate *StartGate) *PipeCollector {
 	return pipeCollectorSpawnOutput(pipe, gate, nil)
 }
 
-func pipeCollectorSpawnOutput(pipe PollablePipe, gate *StartGate, output *os.File) *PipeCollector {
+func pipeCollectorSpawnOutput(pipe *os.File, gate *StartGate, output *os.File) *PipeCollector {
 	return pipeCollectorSpawnObserved(pipe, gate, output, nil)
 }
 
-func pipeCollectorSpawnObserved(pipe PollablePipe, gate *StartGate, output *os.File, observer CommandOutputObserver) *PipeCollector {
-	panic("unported: mj-core/src/targets.rs PipeCollector::spawn_observed")
+func pipeCollectorSpawnObserved(pipe *os.File, gate *StartGate, output *os.File, observer CommandOutputObserver) *PipeCollector {
+	collector := &PipeCollector{stop: new(atomic.Bool), task: PipeTask{done: make(chan struct{})}}
+	go func() {
+		defer close(collector.task.done)
+		// Stopping drops this end of the pipe.
+		defer pipe.Close()
+		var scan *StartScan
+		if gate != nil {
+			scan = NewStartScan()
+		}
+		deliver := func(data []byte) error {
+			if observer != nil {
+				observer(data)
+			}
+			if output != nil {
+				_, err := output.Write(data)
+				return err
+			}
+			collector.mu.Lock()
+			collector.bytes = append(collector.bytes, data...)
+			collector.mu.Unlock()
+			return nil
+		}
+		chunk := make([]byte, 8192)
+		var passed []byte
+		err := func() error {
+			pollable := true
+			for !collector.stop.Load() {
+				if pollable && pipe.SetReadDeadline(time.Now().Add(pipePollInterval)) != nil {
+					pollable = false
+				}
+				count, err := pipe.Read(chunk)
+				if count > 0 {
+					data := chunk[:count]
+					if scan != nil {
+						passed = passed[:0]
+						if scan.Push(data, &passed) {
+							gate.MarkStarted()
+						}
+						data = passed
+					}
+					if err := deliver(data); err != nil {
+						return err
+					}
+				}
+				switch {
+				case err == nil, errors.Is(err, os.ErrDeadlineExceeded):
+				case errors.Is(err, io.EOF):
+					return nil
+				default:
+					return err
+				}
+			}
+			return nil
+		}()
+		if err == nil && scan != nil {
+			passed = passed[:0]
+			scan.Finish(&passed)
+			err = deliver(passed)
+		}
+		if gate != nil {
+			gate.MarkEnded()
+		}
+		collector.task.err = err
+	}()
+	return collector
 }
 
 func (c *PipeCollector) isFinished() bool {
@@ -1416,14 +2205,40 @@ func (c *PipeCollector) failed() bool {
 // finish waits for end of stream until deadline, then stops the reader and
 // returns everything it collected.
 func (c *PipeCollector) finish(stream string, deadline time.Time) ([]byte, error) {
-	panic("unported: mj-core/src/targets.rs PipeCollector::finish")
+	if wait := time.Until(deadline); wait > 0 {
+		timer := time.NewTimer(wait)
+		select {
+		case <-c.task.done:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+	c.stop.Store(true)
+	c.join()
+	if c.task.err != nil {
+		return nil, fmt.Errorf("read command %s: %w", stream, c.task.err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	collected := c.bytes
+	c.bytes = nil
+	if collected == nil {
+		collected = []byte{}
+	}
+	return collected, nil
 }
 
 // close stops the reader (Rust: Drop).
 func (c *PipeCollector) close() { c.stop.Store(true) }
 
-func terminateCancellableChild(child *exec.Cmd, preserveChildren bool) {
-	panic("unported: mj-core/src/targets.rs terminate_cancellable_child")
+// terminateCancellableChild kills the child (and its process group, unless
+// its children are preserved) and reaps it.
+func terminateCancellableChild(child *targetChild, preserveChildren bool) {
+	targetsKillChild(child, preserveChildren)
+	<-child.exited
+	if child.err != nil {
+		slog.Warn("could not reap cancelled command", "pid", child.pid(), "error", child.err)
+	}
 }
 
 // runOnce is one attempt, with no retry of its own. A gate makes the attempt
@@ -1436,11 +2251,119 @@ func (e CancellableProcessExecutor) runOnce(command *CommandSpec, gate *StartGat
 // cancellation, process-group, and SSH refusal/start-marker semantics.
 // Returned stdout is empty.
 func (e CancellableProcessExecutor) ExecuteToFile(command *CommandSpec, output *os.File) (CommandOutput, error) {
-	panic("unported: mj-core/src/targets.rs CancellableProcessExecutor::execute_to_file")
+	if command.sensitiveStdin != nil {
+		return CommandOutput{}, errors.New("file-output commands cannot carry buffered stdin")
+	}
+	running := blockingOperationCommand(command)
+	defer running.End()
+	result, err := withSSHRefusalRetry(command, e, e.IsCancelled, func(command *CommandSpec, gate *StartGate) (CommandOutput, error) {
+		if err := output.Truncate(0); err != nil {
+			return CommandOutput{}, fmt.Errorf("reset command output file: %w", err)
+		}
+		if _, err := output.Seek(0, io.SeekStart); err != nil {
+			return CommandOutput{}, fmt.Errorf("rewind command output file: %w", err)
+		}
+		return e.runOnceOutput(command, gate, output)
+	})
+	return result, e.describeCancellation(command, err)
 }
 
 func (e CancellableProcessExecutor) runOnceOutput(command *CommandSpec, gate *StartGate, output *os.File) (CommandOutput, error) {
-	panic("unported: mj-core/src/targets.rs CancellableProcessExecutor::run_once_output")
+	process := cancellableCommand(command)
+	if e.foregroundTerminal && runtime.GOOS != "windows" {
+		foreground, err := foregroundGroupPrepare(process)
+		if err != nil {
+			return CommandOutput{}, err
+		}
+		if foreground != nil {
+			defer foreground.Close()
+		}
+	}
+	if command.sensitiveStdin != nil {
+		// Owned bytes, so each attempt gets its own reader.
+		input := bytes.NewReader(command.sensitiveStdin.bytes)
+		return streamCommandWithStdin(process, command, input, e.IsCancelled, gate, nil)
+	}
+	started := time.Now()
+	if err := e.checkCancelled(command.Purpose); err != nil {
+		return CommandOutput{}, err
+	}
+	child, _, stdout, stderr, err := spawnTargetChild(process, false)
+	if err != nil {
+		return CommandOutput{}, fmt.Errorf("run %s for %s: %w", command.Program, command.Purpose, err)
+	}
+	if !command.Detaches && !command.preserveChildrenOnCancel {
+		group := NewProcessGroupGuard(child.pid())
+		defer group.Close()
+	}
+	stdoutReader := pipeCollectorSpawnOutput(stdout, gate, output)
+	defer stdoutReader.close()
+	stderrReader := pipeCollectorSpawn(stderr)
+	defer stderrReader.close()
+	var status *os.ProcessState
+	var exitedAt *time.Time
+	// Each timed wait says whether the child may have exited, so nothing
+	// polls twice; the first pass checks once.
+	maybeExited := true
+	for {
+		if status == nil && (stdoutReader.failed() || stderrReader.failed()) {
+			terminateCancellableChild(child, command.preserveChildrenOnCancel)
+			state, err := child.tryWait()
+			if err != nil {
+				return CommandOutput{}, fmt.Errorf("reap command after pipe failure: %w", err)
+			}
+			status = state
+		}
+		if e.IsCancelled() {
+			terminateCancellableChild(child, command.preserveChildrenOnCancel)
+			deadline := time.Now().Add(targetsIODrainTimeout)
+			for _, stream := range []struct {
+				name   string
+				reader *PipeCollector
+			}{{"stdout", stdoutReader}, {"stderr", stderrReader}} {
+				if _, err := stream.reader.finish(stream.name, deadline); err != nil {
+					slog.Warn("cancelled command reader failed", "stream", stream.name, "error", err)
+				}
+			}
+			return CommandOutput{}, errors.New(e.cancellationMessage(command.Purpose))
+		}
+		if status == nil && maybeExited {
+			state, err := child.tryWait()
+			if err != nil {
+				return CommandOutput{}, fmt.Errorf("wait for %s: %w", command.Purpose, err)
+			}
+			status = state
+		}
+		// The command completes when its leader exits. Descendants can
+		// retain the pipes, so output is collected for a bounded time.
+		if status != nil {
+			if exitedAt == nil {
+				now := time.Now()
+				exitedAt = &now
+			}
+			if (stdoutReader.isFinished() && stderrReader.isFinished()) ||
+				time.Since(*exitedAt) >= targetsIODrainTimeout {
+				break
+			}
+		}
+		// A reaped child stays reaped; sleep while draining.
+		if status != nil {
+			time.Sleep(25 * time.Millisecond)
+			maybeExited = true
+		} else {
+			maybeExited = child.waitExit(25 * time.Millisecond)
+		}
+	}
+	deadline := time.Now()
+	stdoutBytes, err := stdoutReader.finish("stdout", deadline)
+	if err != nil {
+		return CommandOutput{}, err
+	}
+	stderrBytes, err := stderrReader.finish("stderr", deadline)
+	if err != nil {
+		return CommandOutput{}, err
+	}
+	return finishedCommand(command, started, status.ExitCode(), stdoutBytes, stderrBytes), nil
 }
 
 func (e CancellableProcessExecutor) PauseDeadline() *DeadlinePause {
@@ -1472,7 +2395,12 @@ func (e CancellableProcessExecutor) ExecuteWithStdinWithoutDeadline(command *Com
 }
 
 func (e CancellableProcessExecutor) Execute(command *CommandSpec) (CommandOutput, error) {
-	panic("unported: mj-core/src/targets.rs CancellableProcessExecutor::execute")
+	running := blockingOperationCommand(command)
+	defer running.End()
+	output, err := withSSHRefusalRetry(command, e, e.IsCancelled, func(command *CommandSpec, gate *StartGate) (CommandOutput, error) {
+		return e.runOnce(command, gate)
+	})
+	return output, e.describeCancellation(command, err)
 }
 
 func (e CancellableProcessExecutor) ExecuteWithStdin(command *CommandSpec, input io.Reader) (CommandOutput, error) {
@@ -1618,7 +2546,55 @@ func (s CommandStep) BestEffortCleanup() CommandStep {
 // selection stay with the caller; only these already-decided operations run
 // in the script.
 func StepScript(steps []CommandStep) []string {
-	panic("unported: mj-core/src/targets.rs step_script")
+	var script strings.Builder
+	for index, step := range steps {
+		quoted := make([]string, len(step.argv))
+		for i, arg := range step.argv {
+			quoted[i] = PosixQuote(arg)
+		}
+		statuses := make([]string, len(step.acceptedStatuses))
+		for i, status := range step.acceptedStatuses {
+			statuses[i] = strconv.Itoa(status)
+		}
+		purpose := targetsJSONString(step.purpose)
+		marker := "MJ_STEP_FAILED"
+		returned := `"$mj_status"`
+		if step.bestEffort {
+			marker = "MJ_STEP_WARNING"
+			returned = "0"
+		}
+		fmt.Fprintf(&script,
+			"mj_step_%d() {\n( %s )\nmj_status=$?\ncase $mj_status in %s) return 0;; esac\nprintf '\\n%s %d %%s %%s\\n' \"$mj_status\" %s >&2\nreturn %s\n}\n",
+			index, strings.Join(quoted, " "), strings.Join(statuses, "|"), marker, index, PosixQuote(purpose), returned)
+	}
+	if slices.ContainsFunc(steps, func(step CommandStep) bool { return step.cleanup }) {
+		script.WriteString("mj_cleanup() {\nmj_original=$?\ntrap - EXIT HUP INT TERM\n")
+		for index, step := range steps {
+			if step.cleanup {
+				fmt.Fprintf(&script, "mj_step_%d\nmj_result=$?\nif [ \"$mj_original\" -eq 0 ]; then mj_original=$mj_result; fi\n", index)
+			}
+		}
+		script.WriteString("exit \"$mj_original\"\n}\ntrap mj_cleanup EXIT\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\n")
+	}
+	for index, step := range steps {
+		if !step.cleanup {
+			fmt.Fprintf(&script, "mj_step_%d || exit $?\n", index)
+		}
+	}
+	script.WriteString("exit 0\n")
+	return []string{"sh", "-c", script.String(), "mj-steps"}
+}
+
+// targetsJSONString is value as a JSON string, as serde_json writes it:
+// HTML characters are not escaped.
+func targetsJSONString(value string) string {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		panic(fmt.Sprintf("serialize step purpose: %v", err))
+	}
+	return strings.TrimSuffix(buffer.String(), "\n")
 }
 
 // StepScriptError decodes the first failed step, preserving its stderr and
@@ -1626,18 +2602,92 @@ func StepScript(steps []CommandStep) []string {
 // transports and serialized plans need no extra metadata, including for
 // purposes containing newlines.
 func StepScriptError(output *CommandOutput) (string, bool) {
-	panic("unported: mj-core/src/targets.rs step_script_error")
+	if output.Status == 0 {
+		return "", false
+	}
+	var failure *struct {
+		status  int
+		purpose string
+	}
+	var detail []string
+	for _, line := range targetsLines(targetsLossyText(output.Stderr)) {
+		if status, purpose, ok := parseStepMarker(line, "MJ_STEP_FAILED "); ok {
+			if failure == nil {
+				failure = &struct {
+					status  int
+					purpose string
+				}{status, purpose}
+			}
+		} else if _, _, ok := parseStepMarker(line, "MJ_STEP_WARNING "); !ok {
+			detail = append(detail, line)
+		}
+	}
+	if failure == nil {
+		return "", false
+	}
+	return fmt.Sprintf("%s failed with status %d: %s", failure.purpose, failure.status,
+		strings.TrimSpace(strings.Join(detail, "\n"))), true
+}
+
+// targetsLines splits text into lines as Rust's str::lines does: on `\n`,
+// dropping a `\r` before it, with no empty final line after a trailing
+// newline.
+func targetsLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	return lines
 }
 
 // StepScriptWarnings are failures of cleanup steps marked best-effort.
 // Always inspect these before checking the command result, so an earlier
 // failure cannot hide cleanup errors.
 func StepScriptWarnings(output *CommandOutput) []string {
-	panic("unported: mj-core/src/targets.rs step_script_warnings")
+	lines := targetsLines(targetsLossyText(output.Stderr))
+	var detailLines []string
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "MJ_STEP_") {
+			detailLines = append(detailLines, line)
+		}
+	}
+	detail := strings.TrimSpace(strings.Join(detailLines, "\n"))
+	warnings := []string{}
+	for _, line := range lines {
+		if status, purpose, ok := parseStepMarker(line, "MJ_STEP_WARNING "); ok {
+			warnings = append(warnings, fmt.Sprintf("%s failed with status %d: %s", purpose, status, detail))
+		}
+	}
+	return warnings
 }
 
 func parseStepMarker(line, prefix string) (status int, purpose string, ok bool) {
-	panic("unported: mj-core/src/targets.rs parse_step_marker")
+	rest, found := strings.CutPrefix(line, prefix)
+	if !found {
+		return 0, "", false
+	}
+	fields := strings.SplitN(rest, " ", 3)
+	if len(fields) != 3 {
+		return 0, "", false
+	}
+	if _, err := strconv.ParseUint(fields[0], 10, 64); err != nil {
+		return 0, "", false
+	}
+	parsed, err := strconv.ParseInt(fields[1], 10, 32)
+	if err != nil {
+		return 0, "", false
+	}
+	// Only a JSON string is a purpose; Go would read `null` as empty.
+	if !strings.HasPrefix(strings.TrimLeft(fields[2], " \t\r\n"), `"`) {
+		return 0, "", false
+	}
+	if err := json.Unmarshal([]byte(fields[2]), &purpose); err != nil {
+		return 0, "", false
+	}
+	return int(parsed), purpose, true
 }
 
 // ProvideTargetEnvironmentSecret supplies one container environment value
@@ -1653,7 +2703,51 @@ func (p *CommandPlan) ProvideTargetEnvironmentSecret(target *TargetsTargetTempla
 // each, and the container engine is asked to inherit it by name
 // (`--env NAME`).
 func (p *CommandPlan) ProvideTargetEnvironmentSecrets(target *TargetsTargetTemplate, secrets [][2]string) error {
-	panic("unported: mj-core/src/targets.rs CommandPlan::provide_target_environment_secrets")
+	if len(secrets) == 0 {
+		return errors.New("no secret environment values to supply")
+	}
+	var readAndExport strings.Builder
+	var input []byte
+	for index, secret := range secrets {
+		name, value := secret[0], secret[1]
+		if err := ValidateInheritedEnvironmentName(name); err != nil {
+			return err
+		}
+		for _, earlier := range secrets[:index] {
+			if earlier[0] == name {
+				return fmt.Errorf("secret environment variable %s is supplied twice", name)
+			}
+		}
+		if strings.ContainsAny(value, "\n\r") {
+			return errors.New("secret environment value cannot contain a newline")
+		}
+		fmt.Fprintf(&readAndExport, "IFS= read -r %s || exit 1; export %s; ", name, name)
+		input = append(input, value...)
+		input = append(input, '\n')
+	}
+	index := slices.IndexFunc(p.Commands, func(command CommandSpec) bool { return command.CreatesTarget })
+	if index < 0 {
+		return errors.New("provisioning plan has no target creation command")
+	}
+	command := &p.Commands[index]
+	switch target.Kind {
+	case TargetsTargetTemplateLocalPodman, TargetsTargetTemplateLocalDocker, TargetsTargetTemplateAppleContainer:
+		program := command.Program
+		command.Program = "sh"
+		args := command.Args
+		command.Args = append([]string{"-c", readAndExport.String() + `exec "$@"`, "mj-secret-env", program}, args...)
+	case TargetsTargetTemplateSshPodman, TargetsTargetTemplateSshDocker,
+		TargetsTargetTemplateSshAppleContainer, TargetsTargetTemplateSshNitro:
+		if len(command.Args) == 0 {
+			return errors.New("remote container command has no SSH command argument")
+		}
+		last := len(command.Args) - 1
+		command.Args[last] = readAndExport.String() + "exec " + command.Args[last]
+	default:
+		return errors.New("target does not support inherited container environment")
+	}
+	command.sensitiveStdin = &SensitiveCommandInput{bytes: input}
+	return nil
 }
 
 // Execute runs the plan's commands in order, failing at the first failure.
@@ -1684,7 +2778,62 @@ func (p *CommandPlan) Execute(executor CommandExecutor) ([]CommandOutput, error)
 // between individual commands. The executor must be safe for concurrent
 // use.
 func (p *CommandPlan) ExecuteConcurrent(executor CommandExecutor) ([]CommandOutput, error) {
-	panic("unported: mj-core/src/targets.rs CommandPlan::execute_concurrent")
+	outputs := make([]CommandOutput, 0, len(p.Commands))
+	index := 0
+	for index < len(p.Commands) {
+		group := p.Commands[index].ParallelGroup
+		end := index + 1
+		if group != nil {
+			for end < len(p.Commands) && p.Commands[end].ParallelGroup != nil && *p.Commands[end].ParallelGroup == *group {
+				end++
+			}
+		}
+		batch := p.Commands[index:end]
+		if len(batch) == 1 {
+			output, err := executor.Execute(&batch[0])
+			if err != nil {
+				return nil, err
+			}
+			checked, err := CheckedCommandOutput(&batch[0], output)
+			if err != nil {
+				return nil, err
+			}
+			outputs = append(outputs, checked)
+		} else {
+			type result struct {
+				output CommandOutput
+				err    error
+			}
+			results := make([]result, len(batch))
+			var wait sync.WaitGroup
+			for i := range batch {
+				wait.Add(1)
+				go func() {
+					defer wait.Done()
+					defer func() {
+						if payload := recover(); payload != nil {
+							results[i] = result{err: fmt.Errorf("concurrent command thread panicked: %s", CommandThreadPanicMessage(payload))}
+						}
+					}()
+					output, err := executor.Execute(&batch[i])
+					results[i] = result{output: output, err: err}
+				}()
+			}
+			wait.Wait()
+			for i, result := range results {
+				if result.err != nil {
+					return nil, result.err
+				}
+				checked, err := CheckedCommandOutput(&batch[i], result.output)
+				if err != nil {
+					return nil, err
+				}
+				outputs = append(outputs, checked)
+			}
+		}
+		index = end
+	}
+	return outputs, nil
 }
 
 // SplitAtTargetCreation splits the plan around the command that creates the
@@ -1708,14 +2857,26 @@ func (p *CommandPlan) SplitAtTargetCreation() (creation, remainder CommandPlan, 
 // LogCommandWarnings emits a WARN log if a command succeeded with non-empty
 // stderr and opted in.
 func LogCommandWarnings(command *CommandSpec, output *CommandOutput) {
-	panic("unported: mj-core/src/targets.rs log_command_warnings")
+	if command.WarnOnStderr && !command.SensitiveOutput {
+		warning := strings.TrimSpace(targetsLossyText(output.Stderr))
+		if warning != "" {
+			slog.Warn("command succeeded with warnings", "purpose", command.Purpose, "stderr", warning)
+		}
+	}
 }
 
 // CheckedCommandOutput fails the same way CommandPlan.Execute does for a
 // non-zero exit status; kept as a shared helper so ExecuteConcurrent reports
 // identical error text.
 func CheckedCommandOutput(command *CommandSpec, output CommandOutput) (CommandOutput, error) {
-	panic("unported: mj-core/src/targets.rs checked_command_output")
+	if message, failed := StepScriptError(&output); failed {
+		return CommandOutput{}, errors.New(message)
+	}
+	if output.Status != 0 {
+		return CommandOutput{}, fmt.Errorf("%s failed with status %d: %s", command.Purpose, output.Status, targetsLossyText(output.Stderr))
+	}
+	LogCommandWarnings(command, &output)
+	return output, nil
 }
 
 // CommandThreadPanicMessage describes a recovered panic payload for error
@@ -1794,7 +2955,15 @@ func (c *HistoryCutoff) Commits() []string {
 // Validate requires lowercase full object IDs and a base distinct from the
 // head.
 func (c *HistoryCutoff) Validate() error {
-	panic("unported: mj-core/src/targets.rs HistoryCutoff::validate")
+	for _, commit := range c.Commits() {
+		if !IsObjectID(commit) || strings.ToLower(commit) != commit {
+			return fmt.Errorf("history cutoff commit %q is not a lowercase full object ID", commit)
+		}
+	}
+	if c.Base != nil && *c.Base == c.Head {
+		return errors.New("history cutoff base repeats its head")
+	}
+	return nil
 }
 
 // ProjectBundleSpec is the repositories of one isolated project.
@@ -1814,7 +2983,46 @@ func (s ProjectBundleSpec) MarshalJSON() ([]byte, error) {
 
 // Validate checks the bundle's paths, remotes and primary repository.
 func (s *ProjectBundleSpec) Validate() error {
-	panic("unported: mj-core/src/targets.rs ProjectBundleSpec::validate")
+	if err := ValidateRelativePath(s.Primary); err != nil {
+		return err
+	}
+	if len(s.Repositories) == 0 {
+		return errors.New("a project bundle must contain at least one repository")
+	}
+	destinations := map[string]bool{}
+	for _, repository := range s.Repositories {
+		if err := ValidateRelativePath(repository.Destination); err != nil {
+			return err
+		}
+		url := repository.URL
+		if url == nil || strings.TrimSpace(*url) == "" || strings.HasPrefix(*url, "-") {
+			return errors.New("isolated repositories require a network Git remote; configure a remote or use a raw local session")
+		}
+		if err := ValidateNetworkURL(*url); err != nil {
+			return err
+		}
+		for _, pushURL := range repository.PushURLs {
+			if err := ValidateNetworkURL(pushURL); err != nil {
+				return err
+			}
+		}
+		if repository.GitRef != nil {
+			return errors.New("git_ref is no longer supported; remove it to start from the remote's default branch")
+		}
+		if repository.HistoryCutoff != nil {
+			if err := repository.HistoryCutoff.Validate(); err != nil {
+				return err
+			}
+		}
+		if destinations[repository.Destination] {
+			return fmt.Errorf("duplicate repository destination %s", repository.Destination)
+		}
+		destinations[repository.Destination] = true
+	}
+	if !destinations[s.Primary] {
+		return errors.New("primary repository is not present in the bundle")
+	}
+	return nil
 }
 
 // TargetsPodmanWorkspaceStorageKind names a TargetsPodmanWorkspaceStorage
@@ -1929,7 +3137,7 @@ func (t *TargetsContainerTemplate) UnmarshalJSON(data []byte) error {
 // Resolve is how fresh this target wants its image, with Auto read from the
 // image reference. This is the freshness the background refresher acts on.
 func (p ImagePullPolicy) Resolve(image string) ImagePullPolicy {
-	if p != ImagePullPolicyAuto {
+	if !p.isAuto() {
 		return p
 	}
 	if imageIsDigestPinned(image) {
@@ -1946,7 +3154,7 @@ func (p ImagePullPolicy) Resolve(image string) ImagePullPolicy {
 // session starts from the cached image instead of blocking a launch on a
 // multi-gigabyte download. An explicit policy still means what it says.
 func (p ImagePullPolicy) AtLaunch(image string) ImagePullPolicy {
-	if p == ImagePullPolicyAuto {
+	if p.isAuto() {
 		return ImagePullPolicyMissing
 	}
 	return p.Resolve(image)
@@ -2108,13 +3316,36 @@ func (h *ImageHost) Engine() string {
 
 // Label is how this host is named in a log line.
 func (h *ImageHost) Label() string {
-	panic("unported: mj-core/src/targets.rs ImageHost::label")
+	switch h.Kind {
+	case ImageHostLocalPodman:
+		return "local podman"
+	case ImageHostLocalDocker:
+		return "local docker"
+	case ImageHostAppleContainer:
+		return "apple container"
+	case ImageHostSshPodman:
+		return "podman on " + h.SSH.Destination
+	case ImageHostSshDocker:
+		return "docker on " + h.SSH.Destination
+	case ImageHostSshAppleContainer:
+		return "apple container on " + h.SSH.Destination
+	default:
+		return "nitro sandboxes on " + h.SSH.Destination
+	}
 }
 
 // Command runs args (an engine command line, starting with the engine's
 // name) on this host.
 func (h *ImageHost) Command(args []string, purpose string) CommandSpec {
-	panic("unported: mj-core/src/targets.rs ImageHost::command")
+	var command CommandSpec
+	switch h.Kind {
+	case ImageHostLocalPodman, ImageHostLocalDocker, ImageHostAppleContainer:
+		command = NewCommandSpec(args[0], args[1:])
+	default:
+		argv := append(EngineArgv(args[0]), args[1:]...)
+		command = SSHCommandOwned(SshTrafficClassControl, h.SSH, argv)
+	}
+	return command.WithPurpose(purpose)
 }
 
 // RefreshWhen is when a background refresh downloads an image.
@@ -2163,7 +3394,59 @@ type ImageRefresh struct {
 // have a copy, so the daemon downloads a missing image once; `always` and
 // `newer` keep the hourly pull they always had.
 func ImageRefreshFor(host ImageHost, image string, platform *string, pullPolicy ImagePullPolicy) (ImageRefresh, bool) {
-	panic("unported: mj-core/src/targets.rs image_refresh")
+	var when RefreshWhen
+	switch pullPolicy.Resolve(image) {
+	case ImagePullPolicyAlways, ImagePullPolicyNewer:
+		when = RefreshWhenAlways
+	case ImagePullPolicyMissing:
+		when = RefreshWhenWhenAbsent
+	case ImagePullPolicyNever:
+		return ImageRefresh{}, false
+	default:
+		panic("auto pull policy must resolve")
+	}
+	engine := host.Engine()
+	// Apple's `container` CLI has no `--format` on `image inspect`: the exit
+	// status is what says the image is present, and the printed description
+	// stands in for the id when comparing before and after a pull.
+	apple := host.Kind == ImageHostAppleContainer || host.Kind == ImageHostSshAppleContainer
+	imageIDArgs := []string{engine, "image", "inspect"}
+	if !apple {
+		imageIDArgs = append(imageIDArgs, "--format", "{{.Id}}")
+	}
+	imageIDArgs = append(imageIDArgs, image)
+	imageID := host.Command(imageIDArgs, "read the cached id of container image "+image)
+	pullArgs := []string{engine}
+	if apple {
+		pullArgs = append(pullArgs, "image")
+	}
+	pullArgs = append(pullArgs, "pull")
+	// Apple's engine runs only native images, so it takes no platform.
+	if platform != nil && !apple {
+		pullArgs = append(pullArgs, "--platform="+*platform)
+	}
+	pullArgs = append(pullArgs, image)
+	pull := host.Command(pullArgs, "refresh container image "+image)
+	pruneArgs := []string{engine, "image", "prune"}
+	// Apple prunes without prompting and does not accept Docker/Podman's -f.
+	if !apple {
+		pruneArgs = append(pruneArgs, "-f")
+	}
+	prune := host.Command(pruneArgs, "remove dangling container images")
+	var ownPlatform *string
+	if platform != nil {
+		copied := *platform
+		ownPlatform = &copied
+	}
+	return ImageRefresh{
+		Host:     host,
+		Image:    image,
+		Platform: ownPlatform,
+		When:     when,
+		ImageID:  imageID,
+		Pull:     pull,
+		Prune:    prune,
+	}, true
 }
 
 func imageIsDigestPinned(image string) bool {
@@ -2236,13 +3519,132 @@ type TargetsTargetTemplate struct {
 
 // MarshalJSON writes serde's internally tagged form.
 func (t TargetsTargetTemplate) MarshalJSON() ([]byte, error) {
-	panic("unported: mj-core/src/targets.rs TargetTemplate serialize")
+	var object serdeObject
+	object.field("kind", t.Kind)
+	switch t.Kind {
+	case TargetsTargetTemplateLocalBare:
+	case TargetsTargetTemplateLocalPodman, TargetsTargetTemplateLocalDocker, TargetsTargetTemplateAppleContainer:
+		object.flatten(targetsContainerOrZero(t.Container))
+	case TargetsTargetTemplateSshBare:
+		object.field("ssh", targetsSSHOrZero(t.SSH))
+		object.field("workspace_prefix", t.WorkspacePrefix)
+	case TargetsTargetTemplateSshPodman, TargetsTargetTemplateSshDocker,
+		TargetsTargetTemplateSshAppleContainer, TargetsTargetTemplateSshNitro:
+		object.field("ssh", targetsSSHOrZero(t.SSH))
+		object.field("container", targetsContainerOrZero(t.Container))
+	default:
+		return nil, fmt.Errorf("unknown target template kind %q", t.Kind)
+	}
+	return object.finish()
+}
+
+func targetsSSHOrZero(ssh *SshTarget) SshTarget {
+	if ssh == nil {
+		return SshTarget{}
+	}
+	return *ssh
+}
+
+func targetsContainerOrZero(container *TargetsContainerTemplate) TargetsContainerTemplate {
+	if container == nil {
+		return TargetsContainerTemplate{PullPolicy: ImagePullPolicyAuto}
+	}
+	return *container
 }
 
 // UnmarshalJSON reads serde's internally tagged form; a missing
 // workspace_prefix of ssh_bare defaults to defaultSSHPrefix().
 func (t *TargetsTargetTemplate) UnmarshalJSON(data []byte) error {
-	panic("unported: mj-core/src/targets.rs TargetTemplate deserialize")
+	kind, err := serdeTag(data, "kind")
+	if err != nil {
+		return err
+	}
+	decodeContainer := func(raw []byte) (*TargetsContainerTemplate, error) {
+		if err := requireFields(raw, "image"); err != nil {
+			return nil, err
+		}
+		var container TargetsContainerTemplate
+		if err := json.Unmarshal(raw, &container); err != nil {
+			return nil, err
+		}
+		return &container, nil
+	}
+	decodeSSH := func(raw []byte) (*SshTarget, error) {
+		var ssh SshTarget
+		if err := json.Unmarshal(raw, &ssh); err != nil {
+			return nil, err
+		}
+		return &ssh, nil
+	}
+	switch TargetsTargetTemplateKind(kind) {
+	case TargetsTargetTemplateLocalBare:
+		*t = TargetsTargetTemplate{Kind: TargetsTargetTemplateLocalBare}
+	case TargetsTargetTemplateLocalPodman, TargetsTargetTemplateLocalDocker, TargetsTargetTemplateAppleContainer:
+		container, err := decodeContainer(data)
+		if err != nil {
+			return err
+		}
+		*t = TargetsTargetTemplate{Kind: TargetsTargetTemplateKind(kind), Container: container}
+	case TargetsTargetTemplateSshBare:
+		var wire struct {
+			SSH             json.RawMessage `json:"ssh"`
+			WorkspacePrefix *string         `json:"workspace_prefix"`
+		}
+		if err := requireFields(data, "ssh"); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &wire); err != nil {
+			return err
+		}
+		ssh, err := decodeSSH(wire.SSH)
+		if err != nil {
+			return err
+		}
+		prefix := defaultSSHPrefix()
+		if wire.WorkspacePrefix != nil {
+			prefix = *wire.WorkspacePrefix
+		}
+		*t = TargetsTargetTemplate{Kind: TargetsTargetTemplateSshBare, SSH: ssh, WorkspacePrefix: prefix}
+	case TargetsTargetTemplateSshPodman, TargetsTargetTemplateSshDocker,
+		TargetsTargetTemplateSshAppleContainer, TargetsTargetTemplateSshNitro:
+		var wire struct {
+			SSH       json.RawMessage `json:"ssh"`
+			Container json.RawMessage `json:"container"`
+		}
+		if err := requireFields(data, "ssh", "container"); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &wire); err != nil {
+			return err
+		}
+		ssh, err := decodeSSH(wire.SSH)
+		if err != nil {
+			return err
+		}
+		container, err := decodeContainer(wire.Container)
+		if err != nil {
+			return err
+		}
+		*t = TargetsTargetTemplate{Kind: TargetsTargetTemplateKind(kind), SSH: ssh, Container: container}
+	default:
+		return serdeUnknownVariant(kind, "local_bare", "local_podman", "local_docker", "apple_container",
+			"ssh_bare", "ssh_podman", "ssh_docker", "ssh_apple_container", "ssh_nitro")
+	}
+	return nil
+}
+
+// UnmarshalJSON requires `destination`, as serde does.
+func (t *SshTarget) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "destination"); err != nil {
+		return err
+	}
+	type plain SshTarget
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*t = SshTarget(value)
+	return nil
 }
 
 func defaultSSHPrefix() string {
@@ -2312,7 +3714,41 @@ func (l TargetsPodmanWorkspaceLocator) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON reads serde's internally tagged form.
 func (l *TargetsPodmanWorkspaceLocator) UnmarshalJSON(data []byte) error {
-	panic("unported: mj-core/src/targets.rs PodmanWorkspaceLocator deserialize")
+	kind, err := serdeTag(data, "kind")
+	if err != nil {
+		return err
+	}
+	switch TargetsPodmanWorkspaceLocatorKind(kind) {
+	case TargetsPodmanWorkspaceLocatorContainerLayer:
+		*l = TargetsPodmanWorkspaceLocator{Kind: TargetsPodmanWorkspaceLocatorContainerLayer}
+	case TargetsPodmanWorkspaceLocatorVolume:
+		if err := requireFields(data, "name"); err != nil {
+			return err
+		}
+		var wire struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(data, &wire); err != nil {
+			return err
+		}
+		*l = TargetsPodmanWorkspaceLocator{Kind: TargetsPodmanWorkspaceLocatorVolume, Name: wire.Name}
+	case TargetsPodmanWorkspaceLocatorHostPath:
+		if err := requireFields(data, "path", "helper", "resource"); err != nil {
+			return err
+		}
+		var wire struct {
+			Path     string   `json:"path"`
+			Helper   []string `json:"helper"`
+			Resource string   `json:"resource"`
+		}
+		if err := json.Unmarshal(data, &wire); err != nil {
+			return err
+		}
+		*l = TargetsPodmanWorkspaceLocator{Kind: TargetsPodmanWorkspaceLocatorHostPath, Path: wire.Path, Helper: wire.Helper, Resource: wire.Resource}
+	default:
+		return serdeUnknownVariant(kind, "container_layer", "volume", "host_path")
+	}
+	return nil
 }
 
 // TargetsTargetLocatorKind names a TargetsTargetLocator variant (serde tag
@@ -2369,12 +3805,101 @@ type TargetsTargetLocator struct {
 // MarshalJSON writes serde's internally tagged form, with each kind's fields
 // in declaration order.
 func (l TargetsTargetLocator) MarshalJSON() ([]byte, error) {
-	panic("unported: mj-core/src/targets.rs TargetLocator serialize")
+	var object serdeObject
+	object.field("kind", l.Kind)
+	switch l.Kind {
+	case TargetsTargetLocatorLocalBare:
+		object.field("worker_root", l.WorkerRoot)
+	case TargetsTargetLocatorLocalPodman:
+		object.field("container_id", l.ContainerID)
+		object.field("workspace_storage", l.WorkspaceStorage)
+		object.fieldUnless(l.BorrowedFrom == nil, "borrowed_from", l.BorrowedFrom)
+	case TargetsTargetLocatorLocalDocker, TargetsTargetLocatorAppleContainer:
+		object.field("container_id", l.ContainerID)
+		object.fieldUnless(l.BorrowedFrom == nil, "borrowed_from", l.BorrowedFrom)
+	case TargetsTargetLocatorAwsEc2:
+		object.field("profile", l.Profile)
+		object.field("region", l.Region)
+		object.field("instance_id", l.InstanceID)
+		object.field("ssh", targetsSSHOrZero(l.SSH))
+		object.field("workspace", l.Workspace)
+	case TargetsTargetLocatorSshBare:
+		object.field("ssh", targetsSSHOrZero(l.SSH))
+		object.field("workspace", l.Workspace)
+		object.fieldUnless(l.WorkerID == nil, "worker_id", l.WorkerID)
+	case TargetsTargetLocatorSshPodman:
+		object.field("ssh", targetsSSHOrZero(l.SSH))
+		object.field("container_id", l.ContainerID)
+		object.field("workspace_storage", l.WorkspaceStorage)
+		object.fieldUnless(l.BorrowedFrom == nil, "borrowed_from", l.BorrowedFrom)
+	case TargetsTargetLocatorSshDocker, TargetsTargetLocatorSshAppleContainer, TargetsTargetLocatorSshNitro:
+		object.field("ssh", targetsSSHOrZero(l.SSH))
+		object.field("container_id", l.ContainerID)
+		object.fieldUnless(l.BorrowedFrom == nil, "borrowed_from", l.BorrowedFrom)
+	default:
+		return nil, fmt.Errorf("unknown target locator kind %q", l.Kind)
+	}
+	return object.finish()
 }
 
 // UnmarshalJSON reads serde's internally tagged form.
 func (l *TargetsTargetLocator) UnmarshalJSON(data []byte) error {
-	panic("unported: mj-core/src/targets.rs TargetLocator deserialize")
+	kind, err := serdeTag(data, "kind")
+	if err != nil {
+		return err
+	}
+	var required []string
+	switch TargetsTargetLocatorKind(kind) {
+	case TargetsTargetLocatorLocalBare:
+		required = []string{"worker_root"}
+	case TargetsTargetLocatorLocalPodman, TargetsTargetLocatorLocalDocker, TargetsTargetLocatorAppleContainer:
+		required = []string{"container_id"}
+	case TargetsTargetLocatorAwsEc2:
+		required = []string{"profile", "region", "instance_id", "ssh", "workspace"}
+	case TargetsTargetLocatorSshBare:
+		required = []string{"ssh", "workspace"}
+	case TargetsTargetLocatorSshPodman, TargetsTargetLocatorSshDocker,
+		TargetsTargetLocatorSshAppleContainer, TargetsTargetLocatorSshNitro:
+		required = []string{"ssh", "container_id"}
+	default:
+		return serdeUnknownVariant(kind, "local_bare", "local_podman", "local_docker", "apple_container",
+			"aws_ec2", "ssh_bare", "ssh_podman", "ssh_docker", "ssh_apple_container", "ssh_nitro")
+	}
+	if err := requireFields(data, required...); err != nil {
+		return err
+	}
+	locator := TargetsTargetLocator{Kind: TargetsTargetLocatorKind(kind)}
+	// Only the fields of this kind are read; serde ignores the others.
+	var fields map[string]any
+	switch locator.Kind {
+	case TargetsTargetLocatorLocalBare:
+		fields = map[string]any{"worker_root": &locator.WorkerRoot}
+	case TargetsTargetLocatorLocalPodman:
+		fields = map[string]any{"container_id": &locator.ContainerID, "workspace_storage": &locator.WorkspaceStorage, "borrowed_from": &locator.BorrowedFrom}
+	case TargetsTargetLocatorLocalDocker, TargetsTargetLocatorAppleContainer:
+		fields = map[string]any{"container_id": &locator.ContainerID, "borrowed_from": &locator.BorrowedFrom}
+	case TargetsTargetLocatorAwsEc2:
+		fields = map[string]any{"profile": &locator.Profile, "region": &locator.Region, "instance_id": &locator.InstanceID, "ssh": &locator.SSH, "workspace": &locator.Workspace}
+	case TargetsTargetLocatorSshBare:
+		fields = map[string]any{"ssh": &locator.SSH, "workspace": &locator.Workspace, "worker_id": &locator.WorkerID}
+	case TargetsTargetLocatorSshPodman:
+		fields = map[string]any{"ssh": &locator.SSH, "container_id": &locator.ContainerID, "workspace_storage": &locator.WorkspaceStorage, "borrowed_from": &locator.BorrowedFrom}
+	default:
+		fields = map[string]any{"ssh": &locator.SSH, "container_id": &locator.ContainerID, "borrowed_from": &locator.BorrowedFrom}
+	}
+	raw, err := decodeObject(data)
+	if err != nil {
+		return err
+	}
+	for name, target := range fields {
+		if value, ok := raw[name]; ok {
+			if err := json.Unmarshal(value, target); err != nil {
+				return err
+			}
+		}
+	}
+	*l = locator
+	return nil
 }
 
 // ContainerEngine is the engine this template's target runs, when it runs
@@ -2397,7 +3922,31 @@ func (t *TargetsTargetTemplate) ContainerEngine() (string, bool) {
 // container settings that name the image. false for targets that run no
 // image.
 func (t *TargetsTargetTemplate) ImageHost() (ImageHost, *TargetsContainerTemplate, bool) {
-	panic("unported: mj-core/src/targets.rs TargetTemplate::image_host")
+	var kind ImageHostKind
+	switch t.Kind {
+	case TargetsTargetTemplateLocalPodman:
+		kind = ImageHostLocalPodman
+	case TargetsTargetTemplateLocalDocker:
+		kind = ImageHostLocalDocker
+	case TargetsTargetTemplateAppleContainer:
+		kind = ImageHostAppleContainer
+	case TargetsTargetTemplateSshPodman:
+		kind = ImageHostSshPodman
+	case TargetsTargetTemplateSshDocker:
+		kind = ImageHostSshDocker
+	case TargetsTargetTemplateSshAppleContainer:
+		kind = ImageHostSshAppleContainer
+	case TargetsTargetTemplateSshNitro:
+		kind = ImageHostSshNitro
+	default:
+		return ImageHost{}, nil, false
+	}
+	host := ImageHost{Kind: kind}
+	if t.SSH != nil && strings.HasPrefix(string(kind), "Ssh") {
+		ssh := t.SSH.Clone()
+		host.SSH = &ssh
+	}
+	return host, t.Container, true
 }
 
 // CPUAccounting: container placement includes borrowed workers: each can
@@ -2454,19 +4003,54 @@ const (
 
 // ResourceName is the container and volume name for a session.
 func ResourceName(sessionID string) (string, error) {
-	panic("unported: mj-core/src/targets.rs resource_name")
+	if err := ValidateSessionID(sessionID); err != nil {
+		return "", err
+	}
+	var readable strings.Builder
+	for _, character := range sessionID {
+		if readable.Len() == 12 {
+			break
+		}
+		if character < 0x80 && (unicode.IsLetter(character) || unicode.IsDigit(character)) {
+			readable.WriteRune(unicode.ToLower(character))
+		}
+	}
+	digest := sha256.Sum256([]byte(sessionID))
+	return fmt.Sprintf("mj-%s-%02x%02x%02x", readable.String(), digest[0], digest[1], digest[2]), nil
 }
 
 // MoveResourceName: resource generations let a Move retain its source while
 // provisioning the destination.
 func MoveResourceName(sessionID, operationID string) (string, error) {
-	panic("unported: mj-core/src/targets.rs move_resource_name")
+	digest := sha256.Sum256([]byte(operationID))
+	base, err := ResourceName(sessionID)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s-move-%s", base, LowerHex(digest[:8])), nil
 }
 
 // ResourceNameBelongsTo reports whether name is the session's resource name
 // or one of its Move generations.
 func ResourceNameBelongsTo(name, sessionID string) (bool, error) {
-	panic("unported: mj-core/src/targets.rs resource_name_belongs_to")
+	base, err := ResourceName(sessionID)
+	if err != nil {
+		return false, err
+	}
+	if name == base {
+		return true, nil
+	}
+	suffix, ok := strings.CutPrefix(name, base+"-move-")
+	if !ok || len(suffix) != 16 {
+		return false, nil
+	}
+	for i := 0; i < len(suffix); i++ {
+		b := suffix[i]
+		if !(b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F') {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // PodmanWorkspaceLocatorFor is the workspace locator for a session's new
@@ -2483,7 +4067,27 @@ func PodmanWorkspaceLocatorFor(template *TargetsContainerTemplate, sessionID str
 // PodmanWorkspaceLocatorNamed is the workspace locator for the container
 // resource name.
 func PodmanWorkspaceLocatorNamed(template *TargetsContainerTemplate, name string) (TargetsPodmanWorkspaceLocator, error) {
-	panic("unported: mj-core/src/targets.rs podman_workspace_locator_named")
+	resource := name + "-workspace"
+	storage := template.WorkspaceStorage
+	switch storage.EffectiveKind() {
+	case TargetsPodmanWorkspaceStoragePodmanVolume:
+		return TargetsPodmanWorkspaceLocator{Kind: TargetsPodmanWorkspaceLocatorVolume, Name: resource}, nil
+	case TargetsPodmanWorkspaceStorageHostHelper:
+		if !IsAbsolute(storage.Root) {
+			return TargetsPodmanWorkspaceLocator{}, errors.New("Podman workspace storage root must be absolute")
+		}
+		if len(storage.Helper) == 0 || slices.Contains(storage.Helper, "") {
+			return TargetsPodmanWorkspaceLocator{}, errors.New("Podman workspace storage helper must contain non-empty arguments")
+		}
+		return TargetsPodmanWorkspaceLocator{
+			Kind:     TargetsPodmanWorkspaceLocatorHostPath,
+			Path:     Text(Join(storage.Root, resource)),
+			Helper:   append([]string{}, storage.Helper...),
+			Resource: resource,
+		}, nil
+	default:
+		return TargetsPodmanWorkspaceLocator{Kind: TargetsPodmanWorkspaceLocatorContainerLayer}, nil
+	}
 }
 
 // ContainerWorkspaceRoot is the in-container workspace root a session's
@@ -2495,13 +4099,19 @@ func PodmanWorkspaceLocatorNamed(template *TargetsContainerTemplate, name string
 // `/workspace/<session id>`, so a build cache shared by every container on a
 // host never sees two checkouts of one project at the same absolute path.
 func ContainerWorkspaceRoot(recorded *string) string {
-	panic("unported: mj-core/src/targets.rs container_workspace_root")
+	if recorded == nil {
+		return ContainerWorkspace
+	}
+	return Text(*recorded)
 }
 
 // NewContainerWorkspace is the per-session container workspace recorded for
 // a session created now.
 func NewContainerWorkspace(sessionID string) (string, error) {
-	panic("unported: mj-core/src/targets.rs new_container_workspace")
+	if err := ValidateSessionID(sessionID); err != nil {
+		return "", err
+	}
+	return Join(ContainerWorkspace, sessionID), nil
 }
 
 // AWSWorkspace is the workspace directory an EC2 session owns in its login
@@ -2516,7 +4126,27 @@ func AWSWorkspace(sessionID string) string {
 
 // WorkspaceFor is the workspace an SSH bare session owns.
 func WorkspaceFor(template *TargetsTargetTemplate, sessionID string) (string, error) {
-	panic("unported: mj-core/src/targets.rs workspace_for")
+	if err := ValidateSessionID(sessionID); err != nil {
+		return "", err
+	}
+	switch template.Kind {
+	case TargetsTargetTemplateLocalBare:
+		return "", errors.New("local bare projects use their selected directory")
+	case TargetsTargetTemplateSshBare:
+		if err := ValidateWorkspacePrefix(template.WorkspacePrefix); err != nil {
+			return "", err
+		}
+		// Interpret a leading "~/" as home-relative. Remote commands are
+		// single-quoted, so a literal tilde would name a directory called
+		// "~"; a relative path resolves against the login home for ssh and
+		// scp alike.
+		prefix := strings.TrimPrefix(template.WorkspacePrefix, "~/")
+		return strings.TrimRight(prefix, "/") + "/" + sessionID, nil
+	default:
+		// A container workspace is per session and recorded on the session
+		// record, so it is read with ContainerWorkspaceRoot instead.
+		return "", errors.New("container targets use the session's recorded container workspace")
+	}
 }
 
 // CommandOnLocator wraps an argv vector for execution at a provisioned
@@ -2535,12 +4165,44 @@ func CommandOnLocator(class SshTrafficClass, locator *TargetsTargetLocator, sess
 // without checking that the locator belongs to a particular session. Every
 // per-target command is built here, so each target kind is spelled out once.
 func LocatorCommand(class SshTrafficClass, locator *TargetsTargetLocator, args []string) CommandSpec {
-	panic("unported: mj-core/src/targets.rs locator_command")
+	switch locator.Kind {
+	case TargetsTargetLocatorLocalBare:
+		if len(args) == 0 {
+			panic("target command must not be empty")
+		}
+		return NewCommandSpec(args[0], args[1:])
+	case TargetsTargetLocatorLocalPodman, TargetsTargetLocatorLocalDocker, TargetsTargetLocatorAppleContainer:
+		engine, _ := locator.ContainerEngine()
+		return ContainerExec(engine, locator.ContainerID, args)
+	case TargetsTargetLocatorAwsEc2, TargetsTargetLocatorSshBare:
+		return SSHCommandOwned(class, locator.SSH, args)
+	default:
+		engine, _ := locator.ContainerEngine()
+		remote := DrainedContainerExec(engine, locator.ContainerID, args)
+		argv := append([]string{remote.Program}, remote.Args...)
+		return SSHCommandOwned(class, locator.SSH, argv)
+	}
 }
 
 // WorkerRoot is the worker root of a session on its target.
 func WorkerRoot(locator *TargetsTargetLocator, sessionID string) (string, error) {
-	panic("unported: mj-core/src/targets.rs worker_root")
+	if err := VerifyLocator(locator, sessionID); err != nil {
+		return "", err
+	}
+	switch locator.Kind {
+	case TargetsTargetLocatorLocalBare:
+		return locator.WorkerRoot, nil
+	case TargetsTargetLocatorAwsEc2:
+		return ".local/share/hel/workers/" + sessionID, nil
+	case TargetsTargetLocatorSshBare:
+		worker := sessionID
+		if locator.WorkerID != nil {
+			worker = *locator.WorkerID
+		}
+		return ".local/share/hel/workers/" + worker, nil
+	default:
+		return "/var/lib/hel/workers/" + sessionID, nil
+	}
 }
 
 // ContainerExec runs args in a container with stdin attached.

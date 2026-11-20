@@ -125,7 +125,52 @@ type legacyMailboxHookLease struct {
 // legacyMailboxObservationFrom is the legacy form of an observation that
 // carries mailbox events; false for any other observation.
 func legacyMailboxObservationFrom(observation RelayObservation) (legacyMailboxObservation, bool) {
-	panic("unported: mj-core/src/relay/snapshot/digest.rs LegacyMailboxObservation::from_observation")
+	legacyEvents := func(events []MailboxEvent) []legacyMailboxEvent {
+		legacy := make([]legacyMailboxEvent, 0, len(events))
+		for i := range events {
+			legacy = append(legacy, events[i].legacyRepresentation())
+		}
+		return legacy
+	}
+	switch observation := observation.(type) {
+	case RelayObservationCommandQueued:
+		var command legacyMailboxCommand
+		switch queued := observation.Command.(type) {
+		case RelayCommandDeliverMailboxEvent:
+			event := queued.Event.legacyRepresentation()
+			command.deliverMailboxEvent = &event
+		case RelayCommandMailboxWake:
+			command.mailboxWake = legacyEvents(queued.Events)
+		default:
+			return nil, false
+		}
+		return legacyMailboxObservationCommandQueued{
+			CommandID:   observation.CommandID,
+			Command:     command,
+			CreatedAtMs: observation.CreatedAtMs,
+		}, true
+	case RelayObservationMailboxHookLeaseCreated:
+		return legacyMailboxObservationMailboxHookLeaseCreated{Lease: legacyMailboxHookLease{
+			LeaseID:     observation.Lease.LeaseID,
+			Events:      legacyEvents(observation.Lease.Events),
+			HookEvent:   observation.Lease.HookEvent,
+			ExpiresAtMs: observation.Lease.ExpiresAtMs,
+		}}, true
+	case RelayObservationMailboxEventsDelivered:
+		eventKeys := observation.EventKeys
+		if eventKeys == nil {
+			eventKeys = []string{}
+		}
+		return legacyMailboxObservationMailboxEventsDelivered{
+			EventKeys:       eventKeys,
+			Path:            observation.Path,
+			PromptCommandID: observation.PromptCommandID,
+			HookEvent:       observation.HookEvent,
+			Events:          legacyEvents(observation.Events),
+			LeaseID:         observation.LeaseID,
+		}, true
+	}
+	return nil, false
 }
 
 func digestOver(domain, encoded []byte) string {
@@ -226,7 +271,38 @@ func ValidateRelayEvent(previousOrdinal uint64, previousDigest string, event *Re
 // the events around it. It does not check ordinal continuity or (for v1) the
 // chain link; those are the caller's job where a trusted cursor is available.
 func ValidateRelayEventSelf(event *RelayEvent) error {
-	panic("unported: mj-core/src/relay/snapshot/digest.rs validate_relay_event_self")
+	if err := ValidateRelayDigest(event.Digest, "event digest"); err != nil {
+		return err
+	}
+	expectedDigest, err := RelayEventDigest(event)
+	if err != nil {
+		return err
+	}
+	if event.Digest == expectedDigest {
+		return nil
+	}
+	if opened, ok := event.Observation.(RelayObservationSessionOpened); ok && !opened.NativeContinuityLost && opened.ReplacedUnusedNativeSessionID == nil {
+		legacy, err := relayEventDigestOver(event, legacyFlaggedObservationSessionOpened{
+			NativeSessionID: opened.NativeSessionID,
+			Resumed:         opened.Resumed,
+		})
+		if err != nil {
+			return err
+		}
+		if event.Digest == legacy {
+			return nil
+		}
+	}
+	if observation, ok := legacyMailboxObservationFrom(event.Observation); ok {
+		legacy, err := relayEventDigestOver(event, observation)
+		if err != nil {
+			return err
+		}
+		if event.Digest == legacy {
+			return nil
+		}
+	}
+	return fmt.Errorf("relay event %d digest is invalid", event.Ordinal)
 }
 
 func ValidateRelayDigest(digest, name string) error {

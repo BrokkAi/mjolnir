@@ -43,7 +43,43 @@ func (f ReviewModelFamily) Compare(other ReviewModelFamily) int {
 // ReviewModelFamilyForModel is the family a model id belongs to, or false
 // for an empty id.
 func ReviewModelFamilyForModel(model string) (ReviewModelFamily, bool) {
-	panic("unported: mj-core/src/review/settings.rs ReviewModelFamily::for_model")
+	model = NormalizeModel(model)
+	segments := strings.Split(model, "/")
+	// Kimi Code qualifies its version as `kimi-code/k3`, so the provider
+	// segment is part of the family identity.
+	if len(segments) >= 2 && segments[len(segments)-2] == "kimi-code" {
+		return ReviewModelFamily{Kind: ReviewModelFamilyKimi}, true
+	}
+	model = segments[len(segments)-1]
+	if strings.TrimSpace(model) == "" {
+		return ReviewModelFamily{}, false
+	}
+	switch {
+	case strings.HasPrefix(model, "gpt-") && modelMatchesFamily(model, "terra"):
+		return ReviewModelFamily{Kind: ReviewModelFamilyTerra}, true
+	case strings.HasPrefix(model, "gpt-") && modelMatchesFamily(model, "sol"):
+		return ReviewModelFamily{Kind: ReviewModelFamilySol}, true
+	case strings.HasPrefix(model, "claude-") && modelMatchesFamily(model, "sonnet"):
+		return ReviewModelFamily{Kind: ReviewModelFamilySonnet}, true
+	case strings.HasPrefix(model, "deepseek-") && modelMatchesFamily(model, "pro"):
+		return ReviewModelFamily{Kind: ReviewModelFamilyDeepSeek}, true
+	case strings.HasPrefix(model, "grok-") &&
+		!strings.Contains(model, "non-reasoning") &&
+		!strings.Contains(model, "multi-agent") &&
+		!strings.Contains(model, "build"):
+		return ReviewModelFamily{Kind: ReviewModelFamilyGrok}, true
+	case strings.HasPrefix(model, "kimi-"):
+		return ReviewModelFamily{Kind: ReviewModelFamilyKimi}, true
+	}
+	// Keep versions and reduced variants in one advertised family, including
+	// names such as gemini-3-pro, glm-5.3 and qwen3-235b.
+	family := model
+	if end := strings.IndexFunc(model, func(c rune) bool {
+		return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z')
+	}); end > 0 {
+		family = model[:end]
+	}
+	return ReviewModelFamily{Kind: ReviewModelFamilyOther, Other: family}, true
 }
 
 type ReviewModelSettings struct {
@@ -126,12 +162,35 @@ func (r AutomaticReviewOff) Notice() string {
 //
 // A nil choice is Rust's None.
 func AutomaticReviewOffFor(review *ReviewConfig, choice SessionReview, plainDirectory bool) (AutomaticReviewOff, bool) {
-	panic("unported: mj-core/src/review/settings.rs automatic_review_off")
+	noReviewers := false
+	switch choice := choice.(type) {
+	case SessionReviewPush:
+		if choice.Reviewers != nil {
+			noReviewers = len(*choice.Reviewers) == 0
+		} else {
+			noReviewers = !review.IsLegacy() && len(review.Reviewers) == 0
+		}
+	case SessionReviewInherit:
+		if choice.Reviewers != nil {
+			noReviewers = len(*choice.Reviewers) == 0 && review.Trigger() != ReviewTriggerOff
+		}
+	}
+	if noReviewers {
+		return AutomaticReviewOffNoReviewers, true
+	}
+	if plainDirectory && review.ForSession(choice).Trigger() != ReviewTriggerOff {
+		return AutomaticReviewOffPlainDirectory, true
+	}
+	return 0, false
 }
 
 // EffectiveReviewConfig is the review configuration that governs a launch:
 // the current global `[review]` under the session's stored choice, then the
 // automatic rules. Every reader of a session's effective review asks this.
 func EffectiveReviewConfig(review *ReviewConfig, choice SessionReview, plainDirectory bool) ReviewConfig {
-	panic("unported: mj-core/src/review/settings.rs effective_review_config")
+	effective := review.ForSession(choice)
+	if _, off := AutomaticReviewOffFor(review, choice, plainDirectory); off {
+		effective.Disabled = true
+	}
+	return effective
 }

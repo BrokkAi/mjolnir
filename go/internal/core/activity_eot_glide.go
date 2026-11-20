@@ -6,6 +6,7 @@ package core
 
 import (
 	_ "embed"
+	"encoding/json"
 )
 
 // Questions is the frozen GLiDE turn question set.
@@ -49,11 +50,85 @@ const BackgroundFloor = 0.90
 // JSON value). Missing probabilities abstain; callers must validate
 // distributions at the provider boundary.
 func Action(answers any) AssessmentAction {
-	panic("unported: mj-core/src/activity/eot_glide.rs action")
+	p := func(axis, name string) float64 {
+		value, _ := agentJSONPointer(answers, axis, "probabilities", name)
+		number, _ := agentJSONFloat(value)
+		return number
+	}
+	if p("failure", "quota") >= FailureFloor {
+		return AssessmentActionRecoverQuota
+	}
+	required := p("input", "required")
+	// A reply that delivers requested advice with only a weak question signal
+	// is Important (cleared on viewing), not needs input (cleared only by an
+	// answer). A missing attention answer reads as 0 and never demotes.
+	demoted := required < DemoteRequiredCeiling && p("attention", "important") >= ImportantAttention
+	if required >= RequiredInput && !demoted {
+		return AssessmentActionAwaitInput
+	}
+	if p("failure", "transient_provider") >= FailureFloor {
+		return AssessmentActionRetryProvider
+	}
+	if p("failure", "other") >= FailureFloor {
+		return AssessmentActionAwaitInput
+	}
+	safe := p("failure", "none") >= FailureFloor
+	// The frozen rule once chose Continue here. Automatic continuation was
+	// removed (#1532) and the branch with it: whenever its condition held,
+	// `turn_state.continue` >= .90 left `finished` below FinishedCategorical
+	// and `work.authorized_unfinished` >= .90 left `waiting` below
+	// WaitingWorkWinner, so the rule already fell through to Uncertain.
+	if safe && p("input", "none") >= SafeInputNone {
+		if p("turn_state", "finished") >= FinishedCategorical {
+			return AssessmentActionFinished
+		}
+		waiting := p("work", "waiting")
+		if waiting >= WaitingWorkWinner &&
+			waiting >= p("work", "authorized_unfinished") &&
+			waiting >= p("work", "finished") &&
+			waiting >= p("work", "unclear") {
+			return AssessmentActionWait
+		}
+	}
+	return AssessmentActionUncertain
+}
+
+// agentJSONFloat is serde_json's Value::as_f64: any JSON number, as a
+// float64.
+func agentJSONFloat(value any) (float64, bool) {
+	switch value := value.(type) {
+	case float64:
+		return value, true
+	case int64:
+		return float64(value), true
+	case uint64:
+		return float64(value), true
+	case int:
+		return float64(value), true
+	case json.Number:
+		number, err := value.Float64()
+		return number, err == nil
+	}
+	return 0, false
 }
 
 // BackgroundNeeded reads the background judgment out of validated provider
 // answers; false when the session holds no background work.
 func BackgroundNeeded(answers any, hasBackground bool) *bool {
-	panic("unported: mj-core/src/activity/eot_glide.rs background_needed")
+	if !hasBackground {
+		return nil
+	}
+	p := func(name string) float64 {
+		value, _ := agentJSONPointer(answers, "background", "probabilities", name)
+		number, _ := agentJSONFloat(value)
+		return number
+	}
+	verdict := func(needed bool) *bool { return &needed }
+	if p("needed") >= BackgroundFloor {
+		return verdict(true)
+	}
+	if p("unneeded") >= BackgroundFloor {
+		return verdict(false)
+	}
+	return nil
 }

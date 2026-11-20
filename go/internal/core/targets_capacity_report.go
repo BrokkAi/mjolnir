@@ -12,6 +12,10 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // CapacitySampleStaleAfterSeconds: a reading older than this stopped
@@ -160,7 +164,41 @@ func (r HostCapacityRow) MarshalJSON() ([]byte, error) {
 // NewHostCapacityRow builds the row for target from its state and the
 // storage views (Rust: HostCapacityRow::new).
 func NewHostCapacityRow(target *DeploymentCapacityTarget, state *TargetCapacityState, storage []TargetStorageView) HostCapacityRow {
-	panic("unported: mj-core/src/targets/capacity_report.rs HostCapacityRow::new")
+	usage := state.Usage
+	hosts := CapacityStorageHosts(target, usage)
+	filesystems := []HostFilesystemRow{}
+	for _, view := range ViewsFor(storage, hosts) {
+		for _, filesystem := range view.Filesystems {
+			filesystems = append(filesystems, HostFilesystemRow{
+				Host:           view.Host,
+				Mount:          filesystem.Mount,
+				AvailableBytes: filesystem.AvailableBytes,
+				TotalBytes:     filesystem.TotalBytes,
+				Condition:      filesystem.Condition,
+			})
+		}
+	}
+	row := HostCapacityRow{
+		ID:                    target.ID,
+		Host:                  target.Host,
+		TargetIDs:             append([]string{}, target.TargetIDs...),
+		Kind:                  target.Kind,
+		HasReading:            usage != nil,
+		Filesystems:           filesystems,
+		SampledAtEpochSeconds: state.SampledAtEpochSeconds,
+		ProbeError:            state.ProbeError,
+		OnDemand:              state.OnDemand,
+	}
+	if instances, ok := state.FleetInstances(target); ok {
+		row.FleetInstances = &instances
+	}
+	if usage != nil {
+		row.CPUPercent = usage.CPUPercent
+		row.MemoryUsedBytes = usage.MemoryUsedBytes
+		row.MemoryTotalBytes = usage.MemoryTotalBytes
+		row.LogicalCores = usage.LogicalCores
+	}
+	return row
 }
 
 // Matches reports whether name selects this row: its host, or a target it
@@ -185,7 +223,17 @@ func (r *HostCapacityRow) Staleness(nowEpochSeconds uint64) (string, bool) {
 // MemoryPercent is used memory as a whole percent, or false when the total is
 // unknown.
 func (r *HostCapacityRow) MemoryPercent() (uint8, bool) {
-	panic("unported: mj-core/src/targets/capacity_report.rs HostCapacityRow::memory_percent")
+	if r.MemoryTotalBytes == 0 {
+		return 0, false
+	}
+	var used, total, percent big.Int
+	used.SetUint64(r.MemoryUsedBytes)
+	total.SetUint64(r.MemoryTotalBytes)
+	percent.Quo(used.Mul(&used, big.NewInt(100)), &total)
+	if percent.Cmp(big.NewInt(100)) > 0 {
+		return 100, true
+	}
+	return uint8(percent.Uint64()), true
 }
 
 // FleetMachinesLabel counts the fleet's VMs.
@@ -199,7 +247,25 @@ func (r *HostCapacityRow) FleetMachinesLabel() string {
 
 // CPUAndMemory are the CPU and RAM cells.
 func (r *HostCapacityRow) CPUAndMemory() (cpu, memory string) {
-	panic("unported: mj-core/src/targets/capacity_report.rs HostCapacityRow::cpu_and_memory")
+	const unavailable = "unavailable"
+	switch {
+	case r.Kind == DeploymentCapacityKindHost && r.HasReading:
+		cpu, memory = unavailable, unavailable
+		if r.CPUPercent != nil {
+			cpu = fmt.Sprintf("%d%%", *r.CPUPercent)
+		}
+		if percent, ok := r.MemoryPercent(); ok {
+			memory = fmt.Sprintf("%d%% (%s/%s)", percent, FormatResourceBytes(r.MemoryUsedBytes), FormatResourceBytes(r.MemoryTotalBytes))
+		}
+		return cpu, memory
+	case r.Kind == DeploymentCapacityKindAwsFleet && r.HasReading:
+		return fmt.Sprintf("%d cores on %s", r.LogicalCores, r.FleetMachinesLabel()), FormatResourceBytes(r.MemoryTotalBytes)
+	case r.Kind == DeploymentCapacityKindAwsFleet && r.OnDemand:
+		// A fleet with nothing running has no capacity figures, and the
+		// count is the whole answer.
+		return r.FleetMachinesLabel(), ""
+	}
+	return unavailable, ""
 }
 
 // FilesystemPlace is where a filesystem is: its mount, qualified by machine
@@ -227,5 +293,51 @@ func StorageConditionFlag(condition StorageCondition) string {
 // RenderHostCapacity is `mj hosts` text: a table of hosts with CPU and RAM,
 // then each host's filesystems and why its reading is stale, if it is.
 func RenderHostCapacity(rows []HostCapacityRow, nowEpochSeconds uint64) string {
-	panic("unported: mj-core/src/targets/capacity_report.rs render_host_capacity")
+	if len(rows) == 0 {
+		return "no hosts"
+	}
+	cells := make([][4]string, len(rows))
+	for i := range rows {
+		cpu, memory := rows[i].CPUAndMemory()
+		cells[i] = [4]string{rows[i].Host, strings.Join(rows[i].TargetIDs, ", "), cpu, memory}
+	}
+	headers := [4]string{"HOST / FLEET", "TARGETS", "CPU", "RAM"}
+	var widths [4]int
+	for column := range widths {
+		widths[column] = utf8.RuneCountInString(headers[column])
+		for _, cell := range cells {
+			widths[column] = max(widths[column], utf8.RuneCountInString(cell[column]))
+		}
+	}
+	line := func(cell [4]string) string {
+		var text strings.Builder
+		for column, value := range cell {
+			if column+1 == len(cell) {
+				text.WriteString(value)
+			} else {
+				// Rust's `{:<width$}` pads by characters.
+				text.WriteString(value)
+				text.WriteString(strings.Repeat(" ", max(0, widths[column]-utf8.RuneCountInString(value))))
+				text.WriteString("  ")
+			}
+		}
+		return strings.TrimRightFunc(text.String(), unicode.IsSpace)
+	}
+	lines := []string{line(headers)}
+	for i := range rows {
+		row := &rows[i]
+		lines = append(lines, line(cells[i]))
+		for j := range row.Filesystems {
+			filesystem := &row.Filesystems[j]
+			lines = append(lines, fmt.Sprintf("  %s %s free of %s%s",
+				row.FilesystemPlace(filesystem),
+				FormatResourceBytes(filesystem.AvailableBytes),
+				FormatResourceBytes(filesystem.TotalBytes),
+				StorageConditionFlag(filesystem.Condition)))
+		}
+		if stale, ok := row.Staleness(nowEpochSeconds); ok {
+			lines = append(lines, "  "+stale)
+		}
+	}
+	return strings.Join(lines, "\n")
 }

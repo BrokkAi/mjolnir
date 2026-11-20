@@ -8,6 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"slices"
+	"strings"
+	"syscall"
 )
 
 // ProjectBundleSnapshot is a session's accepted project shape. Catalog
@@ -25,7 +31,34 @@ type ProjectBundleSnapshot struct {
 	PlainDirectories []string `json:"plain_directories,omitempty"`
 }
 
+// MarshalJSON writes empty maps as `{}`, as serde writes an empty BTreeMap.
+func (s ProjectBundleSnapshot) MarshalJSON() ([]byte, error) {
+	identities := s.Identities
+	if identities == nil {
+		identities = map[string]RepositoryIdentity{}
+	}
+	sources := s.NetworkSources
+	if sources == nil {
+		sources = map[string]NetworkGitSource{}
+	}
+	var plain []string
+	if len(s.PlainDirectories) > 0 {
+		plain = slices.Clone(s.PlainDirectories)
+		slices.Sort(plain)
+		plain = slices.Compact(plain)
+	}
+	return marshalSerdeJSON(struct {
+		Bundle           ProjectBundle                 `json:"bundle"`
+		Identities       map[string]RepositoryIdentity `json:"identities"`
+		NetworkSources   map[string]NetworkGitSource   `json:"network_sources"`
+		PlainDirectories []string                      `json:"plain_directories,omitempty"`
+	}{s.Bundle, identities, sources, plain})
+}
+
 func (s *ProjectBundleSnapshot) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "bundle", "identities"); err != nil {
+		return err
+	}
 	var wire struct {
 		Bundle           ProjectBundle               `json:"bundle"`
 		Identities       map[string]json.RawMessage  `json:"identities"`
@@ -43,11 +76,16 @@ func (s *ProjectBundleSnapshot) UnmarshalJSON(data []byte) error {
 		}
 		identities[id] = identity
 	}
+	plain := wire.PlainDirectories
+	if len(plain) > 0 {
+		slices.Sort(plain)
+		plain = slices.Compact(plain)
+	}
 	*s = ProjectBundleSnapshot{
 		Bundle:           wire.Bundle,
 		Identities:       identities,
 		NetworkSources:   wire.NetworkSources,
-		PlainDirectories: wire.PlainDirectories,
+		PlainDirectories: plain,
 	}
 	return nil
 }
@@ -65,15 +103,69 @@ func (s *ProjectBundleSnapshot) PrimaryIsPlainDirectory() bool {
 }
 
 func (s *ProjectBundleSnapshot) Key() (string, error) {
-	panic("unported: mj-core/src/repository.rs ProjectBundleSnapshot::key")
+	if len(s.Identities) != len(s.Bundle.Repositories) {
+		return "", errors.New("project identities do not cover its repositories")
+	}
+	for _, id := range s.PlainDirectories {
+		member := false
+		for _, repository := range s.Bundle.Repositories {
+			if repository.ID == id {
+				member = true
+				break
+			}
+		}
+		if !member {
+			return "", fmt.Errorf("plain project directory %s is not a project repository", debugString(id))
+		}
+		if _, local := s.Identities[id].(RepositoryIdentityLocal); !local {
+			return "", fmt.Errorf("plain project directory %s has a non-local identity", debugString(id))
+		}
+	}
+	primary, ok := s.Identities[s.Bundle.PrimaryRepo]
+	if !ok || primary == nil {
+		return "", errors.New("project primary identity is missing")
+	}
+	members := [][2]string{}
+	for _, repository := range s.Bundle.Repositories {
+		identity, ok := s.Identities[repository.ID]
+		if !ok || identity == nil {
+			return "", errors.New("project member identity is missing")
+		}
+		members = append(members, [2]string{identity.Key(), repository.Destination})
+	}
+	slices.SortFunc(members, func(a, b [2]string) int {
+		if order := strings.Compare(a[0], b[0]); order != 0 {
+			return order
+		}
+		return strings.Compare(a[1], b[1])
+	})
+	encoded, err := marshalSerdeJSON([]any{primary.Key(), members})
+	if err != nil {
+		return "", err
+	}
+	return "bundle:" + string(encoded), nil
 }
 
 func (s *ProjectBundleSnapshot) SourceKey() (string, error) {
-	panic("unported: mj-core/src/repository.rs ProjectBundleSnapshot::source_key")
+	if len(s.Bundle.Repositories) == 1 {
+		primary, ok := s.Identities[s.Bundle.PrimaryRepo]
+		if !ok || primary == nil {
+			return "", errors.New("project primary identity is missing")
+		}
+		return primary.Key(), nil
+	}
+	return s.Key()
 }
 
 func (s *ProjectBundleSnapshot) Name() string {
-	panic("unported: mj-core/src/repository.rs ProjectBundleSnapshot::name")
+	var names []string
+	for _, repository := range s.Bundle.Repositories {
+		if identity, ok := s.Identities[repository.ID]; ok && identity != nil {
+			names = append(names, identity.Name())
+		}
+	}
+	names = slices.Compact(names)
+	return strings.Join(names, " + ")
 }
 
 // RepositoryIdentity is a sealed interface over RepositoryIdentityGithub,
@@ -110,20 +202,20 @@ func (RepositoryIdentityLocal) isRepositoryIdentity()           {}
 func (RepositoryIdentityRemoteDirectory) isRepositoryIdentity() {}
 
 func (i RepositoryIdentityGithub) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string][2]string{"github": {i.Owner, i.Repository}})
+	return marshalSerdeJSON(map[string][2]string{"github": {i.Owner, i.Repository}})
 }
 
 func (i RepositoryIdentityNetwork) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]string{"network": i.URL})
+	return marshalSerdeJSON(map[string]string{"network": i.URL})
 }
 
 func (i RepositoryIdentityLocal) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]string{"local": i.Root})
+	return marshalSerdeJSON(map[string]string{"local": i.Root})
 }
 
 func (i RepositoryIdentityRemoteDirectory) MarshalJSON() ([]byte, error) {
 	type wire RepositoryIdentityRemoteDirectory
-	return json.Marshal(map[string]wire{"remote_directory": wire(i)})
+	return marshalSerdeJSON(map[string]wire{"remote_directory": wire(i)})
 }
 
 // unmarshalRepositoryIdentity decodes serde's externally tagged form.
@@ -156,6 +248,9 @@ func unmarshalRepositoryIdentity(data []byte) (RepositoryIdentity, error) {
 			}
 			return RepositoryIdentityLocal{Root: root}, nil
 		case "remote_directory":
+			if err := requireFields(content, "host", "root"); err != nil {
+				return nil, err
+			}
 			type wire RepositoryIdentityRemoteDirectory
 			var directory wire
 			if err := json.Unmarshal(content, &directory); err != nil {
@@ -169,10 +264,47 @@ func unmarshalRepositoryIdentity(data []byte) (RepositoryIdentity, error) {
 	panic("unreachable")
 }
 
+// repositoryIdentityVariant is the declaration order Rust's derived Ord
+// compares first.
+func repositoryIdentityVariant(identity RepositoryIdentity) int {
+	switch identity.(type) {
+	case RepositoryIdentityGithub:
+		return 0
+	case RepositoryIdentityNetwork:
+		return 1
+	case RepositoryIdentityLocal:
+		return 2
+	case RepositoryIdentityRemoteDirectory:
+		return 3
+	}
+	return 4
+}
+
 // CompareRepositoryIdentity is the Rust derived Ord: variant order, then
 // fields (paths compare by component).
 func CompareRepositoryIdentity(a, b RepositoryIdentity) int {
-	panic("unported: mj-core/src/repository.rs RepositoryIdentity Ord")
+	if order := repositoryIdentityVariant(a) - repositoryIdentityVariant(b); order != 0 {
+		return order
+	}
+	switch left := a.(type) {
+	case RepositoryIdentityGithub:
+		right := b.(RepositoryIdentityGithub)
+		if order := strings.Compare(left.Owner, right.Owner); order != 0 {
+			return order
+		}
+		return strings.Compare(left.Repository, right.Repository)
+	case RepositoryIdentityNetwork:
+		return strings.Compare(left.URL, b.(RepositoryIdentityNetwork).URL)
+	case RepositoryIdentityLocal:
+		return comparePaths(left.Root, b.(RepositoryIdentityLocal).Root)
+	case RepositoryIdentityRemoteDirectory:
+		right := b.(RepositoryIdentityRemoteDirectory)
+		if order := strings.Compare(left.Host, right.Host); order != 0 {
+			return order
+		}
+		return comparePaths(left.Root, right.Root)
+	}
+	return 0
 }
 
 // RepositoryIdentityFromRemote normalizes only equivalences guaranteed by
@@ -197,7 +329,22 @@ func RepositoryIdentityFromRemoteWith(source string, shorthand Shorthand) Reposi
 // or an explicit SSH port stays Network, because stored identities
 // distinguish them.
 func repositoryIdentityAndLabel(source string, shorthand Shorthand) (RepositoryIdentity, string, bool) {
-	panic("unported: mj-core/src/repository.rs RepositoryIdentity::identity_and_label")
+	source = DisplayURL(strings.TrimSpace(source))
+	if remote := ParseGithubRemote(source, shorthand); remote != nil && remote.IsDefaultEndpoint() {
+		label := remote.Owner + "/" + remote.Repository
+		return RepositoryIdentityGithub{
+			Owner:      asciiLowercase(remote.Owner),
+			Repository: asciiLowercase(remote.Repository),
+		}, label, true
+	}
+	if ValidateNetworkURL(source) != nil {
+		return nil, "", false
+	}
+	url := strings.TrimRight(DisplayURL(source), "/")
+	for strings.HasSuffix(url, ".git") {
+		url = strings.TrimSuffix(url, ".git")
+	}
+	return RepositoryIdentityNetwork{URL: url}, url, true
 }
 
 func RepositoryIdentityRemoteLabel(source string) (string, bool) {
@@ -205,7 +352,9 @@ func RepositoryIdentityRemoteLabel(source string) (string, bool) {
 }
 
 func RepositoryIdentityRemoteLabelWith(source string, shorthand Shorthand) (string, bool) {
-	panic("unported: mj-core/src/repository.rs RepositoryIdentity::remote_label_with")
+	clean := DisplayURL(strings.TrimSpace(source))
+	_, label, ok := repositoryIdentityAndLabel(clean, shorthand)
+	return label, ok
 }
 
 func (i RepositoryIdentityGithub) Key() string  { return "github:" + i.Owner + "/" + i.Repository }
@@ -217,13 +366,19 @@ func (i RepositoryIdentityRemoteDirectory) Key() string {
 
 func (i RepositoryIdentityGithub) Name() string { return i.Repository }
 func (i RepositoryIdentityNetwork) Name() string {
-	panic("unported: mj-core/src/repository.rs RepositoryIdentity::name (Network)")
+	return i.URL[strings.LastIndexAny(i.URL, "/:")+1:]
 }
-func (i RepositoryIdentityLocal) Name() string {
-	panic("unported: mj-core/src/repository.rs RepositoryIdentity::name (Local)")
-}
+func (i RepositoryIdentityLocal) Name() string { return rootName(i.Root) }
 func (i RepositoryIdentityRemoteDirectory) Name() string {
-	panic("unported: mj-core/src/repository.rs RepositoryIdentity::name (RemoteDirectory)")
+	return rootName(i.Root)
+}
+
+// rootName is a directory's last name, or the whole path when it has none.
+func rootName(root string) string {
+	if name, ok := pathFileName(root); ok {
+		return name
+	}
+	return root
 }
 
 // LocalIdentity resolves identity without using the current feature branch
@@ -295,11 +450,115 @@ type directoryRoots struct {
 }
 
 func resolveDirectoryRoots(path string, host *string, executor CommandExecutor) (directoryRoots, error) {
-	panic("unported: mj-core/src/repository.rs resolve_directory_roots")
+	var directory string
+	if host == nil {
+		canonical, err := canonicalizePath(path)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+				err = RepositoryUnavailableDirectory{Path: path}
+			}
+			return directoryRoots{}, fmt.Errorf("resolve project directory %s: %w", path, err)
+		}
+		directory = canonical
+		info, err := os.Stat(directory)
+		if err != nil {
+			return directoryRoots{}, fmt.Errorf("inspect project directory %s: %w", directory, err)
+		}
+		if !info.IsDir() {
+			return directoryRoots{}, RepositoryUnavailableDirectory{Path: path}
+		}
+	} else {
+		if !IsAbsolute(path) {
+			return directoryRoots{}, errors.New("remote project directory must be absolute")
+		}
+		directory = path
+	}
+	command := NewCommandSpec("git", []string{
+		"-C", directory, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir",
+	}).WithPurpose("resolve project repository and checkout")
+	command.Env["LC_ALL"] = "C"
+	output, err := executor.Execute(&command)
+	if err != nil {
+		return directoryRoots{}, err
+	}
+	if output.Status == 128 {
+		diagnostic := strings.TrimSpace(fromUTF8Lossy(output.Stderr))
+		if strings.HasPrefix(diagnostic, "fatal: not a git repository") {
+			return directoryRoots{}, RepositoryUnavailableNotRepository{Path: path}
+		}
+		// Remote paths cannot be inspected on the controller. Git's explicit
+		// absence diagnosis is distinct from SSH or filesystem access errors.
+		if strings.HasPrefix(diagnostic, "fatal: cannot change to '") &&
+			(strings.HasSuffix(diagnostic, "': No such file or directory") ||
+				strings.HasSuffix(diagnostic, "': Not a directory")) {
+			return directoryRoots{}, RepositoryUnavailableDirectory{Path: path}
+		}
+	}
+	if output.Status != 0 {
+		return directoryRoots{}, fmt.Errorf("%s is not a Git repository with a readable checkout: %s", path, strings.TrimSpace(fromUTF8Lossy(output.Stderr)))
+	}
+	text, err := decodeUTF8(output.Stdout, "decode project Git roots")
+	if err != nil {
+		return directoryRoots{}, err
+	}
+	roots := rustLines(text)
+	if len(roots) == 0 {
+		return directoryRoots{}, errors.New("Git omitted the checkout root")
+	}
+	checkoutRoot := roots[0]
+	if !IsAbsoluteOnHostOrTarget(checkoutRoot) {
+		return directoryRoots{}, fmt.Errorf("Git returned a non-absolute checkout root: %s", checkoutRoot)
+	}
+	if host == nil {
+		checkoutRoot, err = CanonicalGitOutputPath(checkoutRoot)
+		if err != nil {
+			return directoryRoots{}, err
+		}
+	}
+	if len(roots) < 2 {
+		return directoryRoots{}, errors.New("Git omitted the shared repository directory")
+	}
+	common, err := ResolveGitPath(directory, roots[1])
+	if err != nil {
+		return directoryRoots{}, err
+	}
+	if len(roots) > 2 {
+		return directoryRoots{}, fmt.Errorf("Git returned unexpected project roots: %s", debugString(text))
+	}
+	root := checkoutRoot
+	if name, ok := pathFileName(common); ok && name == ".git" {
+		parent, ok := pathParent(common)
+		if !ok {
+			return directoryRoots{}, errors.New("Git common directory has no parent")
+		}
+		root = parent
+	}
+	repositoryRoot := root
+	if host == nil {
+		repositoryRoot, err = canonicalizePath(root)
+		if err != nil {
+			return directoryRoots{}, err
+		}
+	}
+	return directoryRoots{checkoutRoot: checkoutRoot, repositoryRoot: repositoryRoot}, nil
 }
 
 func directoryIdentity(path string, host *string, repositoryRoot string, executor CommandExecutor) (RepositoryIdentity, error) {
-	panic("unported: mj-core/src/repository.rs directory_identity")
+	url, err := IdentityFetchURL(path, executor)
+	if err != nil {
+		return nil, err
+	}
+	if url != nil {
+		identity := RepositoryIdentityFromRemote(*url)
+		if identity == nil {
+			return nil, fmt.Errorf("invalid repository identity remote for %s", path)
+		}
+		return identity, nil
+	}
+	if host != nil {
+		return RepositoryIdentityRemoteDirectory{Host: *host, Root: repositoryRoot}, nil
+	}
+	return RepositoryIdentityLocal{Root: repositoryRoot}, nil
 }
 
 // ResolveLocalDirectory resolves a directory a bare local session may run in.
@@ -313,13 +572,63 @@ func directoryIdentity(path string, host *string, repositoryRoot string, executo
 // still has to be a repository because it is addressed by the repository it
 // shares with its sessions.
 func ResolveLocalDirectory(path string, executor CommandExecutor) (ResolvedDirectory, error) {
-	panic("unported: mj-core/src/repository.rs resolve_local_directory")
+	roots, err := resolveDirectoryRoots(path, nil, executor)
+	if err != nil {
+		var notRepository RepositoryUnavailableNotRepository
+		// Git is only used to recognize a richer project shape. A local
+		// directory does not need Git to be used directly, so a missing
+		// executable selects that shape instead of refusing the session.
+		if errors.As(err, &notRepository) || commandNotFound(err) {
+			return plainLocalDirectory(path)
+		}
+		return ResolvedDirectory{}, err
+	}
+	command := NewCommandSpec("git", []string{"-C", path, "rev-parse", "--verify", "--quiet", "HEAD"}).
+		WithPurpose("inspect local project commit")
+	command.Env["LC_ALL"] = "C"
+	head, err := executor.Execute(&command)
+	if err != nil {
+		if commandNotFound(err) {
+			return plainLocalDirectory(path)
+		}
+		return ResolvedDirectory{}, err
+	}
+	switch {
+	case head.Status == 0 && strings.TrimSpace(fromUTF8Lossy(head.Stdout)) != "":
+	// A repository with no first commit can still be a working directory.
+	// It becomes a plain project at acceptance, before a later commit can
+	// change checkpoint semantics.
+	case head.Status == 0 || head.Status == 1:
+		return plainLocalDirectory(path)
+	default:
+		return ResolvedDirectory{}, fmt.Errorf("inspect local project commit failed with status %d: %s", head.Status, strings.TrimSpace(fromUTF8Lossy(head.Stderr)))
+	}
+	identity, err := directoryIdentity(path, nil, roots.repositoryRoot, executor)
+	if err != nil {
+		return ResolvedDirectory{}, err
+	}
+	return ResolvedDirectory{
+		CheckoutRoot:   roots.checkoutRoot,
+		RepositoryRoot: roots.repositoryRoot,
+		Identity:       identity,
+	}, nil
 }
 
 func plainLocalDirectory(path string) (ResolvedDirectory, error) {
-	panic("unported: mj-core/src/repository.rs plain_local_directory")
+	root, err := canonicalizePath(path)
+	if err != nil {
+		return ResolvedDirectory{}, fmt.Errorf("resolve project directory %s: %w", path, err)
+	}
+	return ResolvedDirectory{
+		CheckoutRoot:   root,
+		RepositoryRoot: root,
+		Identity:       RepositoryIdentityLocal{Root: root},
+		PlainDirectory: true,
+	}, nil
 }
 
+// commandNotFound is whether any cause of err is a missing file or
+// executable (Rust's io::ErrorKind::NotFound).
 func commandNotFound(err error) bool {
-	panic("unported: mj-core/src/repository.rs command_not_found")
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, exec.ErrNotFound)
 }

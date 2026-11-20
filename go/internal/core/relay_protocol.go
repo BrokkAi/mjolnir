@@ -17,7 +17,10 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // RelayVersionRange refuses unknown fields.
@@ -345,7 +348,111 @@ func ReviewerRequestActionName(request ReviewerRequest) string {
 }
 
 func RelayRequestMethodName(request RelayRequest) string {
-	panic("unported: mj-core/src/relay/protocol.rs RelayRequest::method_name")
+	switch request := request.(type) {
+	case RelayRequestHello:
+		return "hello"
+	case RelayRequestAttach:
+		return "attach"
+	case RelayRequestAcknowledge:
+		return "acknowledge"
+	case RelayRequestSubmit:
+		return "submit"
+	case RelayRequestReadPendingElicitation:
+		return "read_pending_elicitation"
+	case RelayRequestReadQueuedCommand:
+		return "read_queued_command"
+	case RelayRequestBeginLiveBaseline:
+		return "begin_live_baseline"
+	case RelayRequestReadLiveBaselinePage:
+		return "read_live_baseline_page"
+	case RelayRequestAbortLiveBaseline:
+		return "abort_live_baseline"
+	case RelayRequestCommandRetentionStatus:
+		return "command_retention_status"
+	case RelayRequestUpdateCommandRetention:
+		return "update_command_retention"
+	case RelayRequestStatus:
+		return "status"
+	case RelayRequestDrainMailbox:
+		return "drain_mailbox"
+	case RelayRequestAckMailbox:
+		return "ack_mailbox"
+	case RelayRequestReserveIdle:
+		return "reserve_idle"
+	case RelayRequestInstallPromptContext:
+		return "install_prompt_context"
+	case RelayRequestProjectMemorySnapshot:
+		return "project_memory_snapshot"
+	case RelayRequestInstallProjectMemorySnapshot:
+		return "install_project_memory_snapshot"
+	case RelayRequestReplaceProjectMemoryTree:
+		return "replace_project_memory_tree"
+	case RelayRequestProjectMemoryTransfer:
+		return "project_memory_transfer"
+	case RelayRequestAttachmentPresent:
+		return "attachment_present"
+	case RelayRequestInstallAttachment:
+		return "install_attachment"
+	case RelayRequestReadAttachment:
+		return "read_attachment"
+	case RelayRequestCpuUsage:
+		return "cpu_usage"
+	case RelayRequestCredentialState:
+		return "credential_state"
+	case RelayRequestReadCredentials:
+		return "read_credentials"
+	case RelayRequestInstallCredentials:
+		return "install_credentials"
+	case RelayRequestSkillsState:
+		return "skills_state"
+	case RelayRequestInstallSkills:
+		return "install_skills"
+	case RelayRequestGithubTokenState:
+		return "github_token_state"
+	case RelayRequestInstallGithubToken:
+		return "install_github_token"
+	case RelayRequestRemoveGithubToken:
+		return "remove_github_token"
+	case RelayRequestAwsCredentialsState:
+		return "aws_credentials_state"
+	case RelayRequestInstallAwsCredentials:
+		return "install_aws_credentials"
+	case RelayRequestRemoveAwsCredentials:
+		return "remove_aws_credentials"
+	case RelayRequestAwsCredentialsScope:
+		return "aws_credentials_scope"
+	case RelayRequestSlopcopLoginState:
+		return "slopcop_login_state"
+	case RelayRequestInstallSlopcopLogin:
+		return "install_slopcop_login"
+	case RelayRequestRemoveSlopcopLogin:
+		return "remove_slopcop_login"
+	case RelayRequestRespondElicitation:
+		return "respond_elicitation"
+	case RelayRequestStopBackgroundTask:
+		return "stop_background_task"
+	case RelayRequestSubagentRequests:
+		return "subagent_requests"
+	case RelayRequestPollSubagentQueue:
+		return "poll_subagent_queue"
+	case RelayRequestWaitForChange:
+		return "wait_for_change"
+	case RelayRequestSetSubagentAdmission:
+		return "set_subagent_admission"
+	case RelayRequestSetOperatorAway:
+		return "set_operator_away"
+	case RelayRequestHistoryQuery:
+		return "history_query"
+	case RelayRequestHistoryRequests:
+		return "history_requests"
+	case RelayRequestCompleteHistoryRequest:
+		return "complete_history_request"
+	case RelayRequestCompleteSubagentRequest:
+		return "complete_subagent_request"
+	case RelayRequestReviewer:
+		return ReviewerRequestActionName(request.Request)
+	}
+	panic(fmt.Sprintf("unknown relay request %T", request))
 }
 
 // RelayRequestMinimumProtocol is the oldest protocol that understands this
@@ -354,7 +461,68 @@ func RelayRequestMethodName(request RelayRequest) string {
 // reviewer sidecar in 6, the non-steering turn cancellation in 7, and
 // project-memory replacement in protocol 31.
 func RelayRequestMinimumProtocol(request RelayRequest) uint32 {
-	panic("unported: mj-core/src/relay/protocol.rs RelayRequest::minimum_protocol")
+	switch request := request.(type) {
+	case RelayRequestAwsCredentialsState, RelayRequestInstallAwsCredentials:
+		return RelayAwsCredentialsProtocol
+	case RelayRequestRemoveAwsCredentials, RelayRequestAwsCredentialsScope:
+		return RelayAwsCredentialsRemovalProtocol
+	case RelayRequestSlopcopLoginState, RelayRequestInstallSlopcopLogin, RelayRequestRemoveSlopcopLogin:
+		return RelaySlopcopLoginProtocol
+	case RelayRequestCpuUsage:
+		return RelayCpuUsageProtocol
+	case RelayRequestDrainMailbox, RelayRequestAckMailbox:
+		return 33
+	case RelayRequestReserveIdle:
+		return 21
+	case RelayRequestHistoryQuery, RelayRequestHistoryRequests, RelayRequestCompleteHistoryRequest:
+		return 16
+	case RelayRequestAttachmentPresent, RelayRequestInstallAttachment, RelayRequestReadAttachment:
+		return 8
+	case RelayRequestStopBackgroundTask:
+		return 9
+	case RelayRequestSubagentRequests, RelayRequestCompleteSubagentRequest:
+		return 12
+	case RelayRequestPollSubagentQueue:
+		return RelaySubagentFeedProtocol
+	case RelayRequestWaitForChange:
+		return RelayChangeWaitProtocol
+	case RelayRequestSetSubagentAdmission:
+		return 32
+	case RelayRequestSetOperatorAway:
+		return RelayOperatorAwayProtocol
+	case RelayRequestRespondElicitation:
+		return 2
+	case RelayRequestInstallPromptContext:
+		return 3
+	case RelayRequestProjectMemorySnapshot, RelayRequestInstallProjectMemorySnapshot:
+		return 4
+	case RelayRequestReplaceProjectMemoryTree:
+		return RelayProjectMemoryReplaceProtocol
+	case RelayRequestProjectMemoryTransfer:
+		return RelayProjectMemoryTransferProtocol
+	case RelayRequestBeginLiveBaseline, RelayRequestReadLiveBaselinePage, RelayRequestAbortLiveBaseline:
+		return RelayLiveBaselineProtocol
+	case RelayRequestReadPendingElicitation, RelayRequestReadQueuedCommand, RelayRequestCommandRetentionStatus,
+		RelayRequestUpdateCommandRetention:
+		return RelayCommandRetentionProtocol
+	case RelayRequestSubmit:
+		return RelayCommandMinimumProtocol(request.Command)
+	case RelayRequestReviewer:
+		switch reviewer := request.Request.(type) {
+		case ReviewerRequestCaptureDelta:
+			if reviewer.Repositories != nil {
+				return RelayWorktreeReviewProtocol
+			}
+			if reviewer.Scope == CaptureScopePushableCommits {
+				return RelayPushReviewProtocol
+			}
+		case ReviewerRequestRecordOverridden, ReviewerRequestSetReviewBase:
+			return RelayReviewBaseProtocol
+		case ReviewerRequestRecordReviewed:
+			return RelayPushReviewProtocol
+		}
+	}
+	return RelayMinProtocolVersion
 }
 
 func RelayRequestSupportedAt(request RelayRequest, protocolVersion uint32) bool {
@@ -441,7 +609,151 @@ func (e *RelayRequestEnvelope) UnmarshalJSON(data []byte) error {
 // commands into the protocol-33 legacy event representation, keeping every
 // other byte and key order as written.
 func rewriteProtocol33MailboxCommands(request []byte) ([]byte, error) {
-	panic("unported: mj-core/src/relay/protocol.rs rewrite_protocol_33_mailbox_commands")
+	method, err := relayObjectPath(request, "method")
+	if err != nil {
+		return nil, err
+	}
+	var commandPath []string
+	switch relayJSONString(method) {
+	case "submit":
+		commandPath = []string{"params", "command"}
+	case "reviewer":
+		action, err := relayObjectPath(request, "params", "request", "action")
+		if err != nil {
+			return nil, err
+		}
+		if relayJSONString(action) == "submit" {
+			commandPath = []string{"params", "request", "params", "command"}
+		}
+	}
+	if commandPath == nil {
+		return request, nil
+	}
+	return relayRewritePath(request, commandPath, func(command json.RawMessage) (json.RawMessage, error) {
+		commandType, err := relayObjectPath(command, "type")
+		if err != nil {
+			return nil, err
+		}
+		switch relayJSONString(commandType) {
+		case "deliver_mailbox_event":
+			return relayRewritePath(command, []string{"data", "event"}, rewriteProtocol33Event)
+		case "mailbox_wake":
+			return relayRewritePath(command, []string{"data", "events"}, func(events json.RawMessage) (json.RawMessage, error) {
+				var items []json.RawMessage
+				if err := json.Unmarshal(events, &items); err != nil || items == nil {
+					return events, nil
+				}
+				for i, event := range items {
+					rewritten, err := rewriteProtocol33Event(event)
+					if err != nil {
+						return nil, err
+					}
+					items[i] = rewritten
+				}
+				return relayMarshalJSON(items)
+			})
+		}
+		return command, nil
+	})
+}
+
+// relayJSONString is the string a raw JSON value holds; empty when it holds
+// another kind of value or nothing.
+func relayJSONString(value json.RawMessage) string {
+	var text string
+	if json.Unmarshal(value, &text) != nil {
+		return ""
+	}
+	return text
+}
+
+// relayObjectPath is the raw value at path through nested objects; nil when a
+// step is absent or not an object.
+func relayObjectPath(value json.RawMessage, path ...string) (json.RawMessage, error) {
+	for _, key := range path {
+		members, err := relayOrderedObject(value)
+		if err != nil || members == nil {
+			return nil, err
+		}
+		value = nil
+		for _, member := range members {
+			if member.key == key {
+				value = member.value
+			}
+		}
+		if value == nil {
+			return nil, nil
+		}
+	}
+	return value, nil
+}
+
+type relayObjectMember struct {
+	key   string
+	value json.RawMessage
+}
+
+// relayOrderedObject reads an object's members in written order, as
+// serde_json's order-preserving Value does; nil without error when value is
+// not an object.
+func relayOrderedObject(value json.RawMessage) ([]relayObjectMember, error) {
+	trimmed := bytes.TrimSpace(value)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+	members := []relayObjectMember{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, _ := token.(string)
+		var member json.RawMessage
+		if err := decoder.Decode(&member); err != nil {
+			return nil, err
+		}
+		members = append(members, relayObjectMember{key: key, value: member})
+	}
+	return members, nil
+}
+
+// relayRewritePath replaces the value at path through nested objects with
+// rewrite's result, keeping every other member and its order. A missing step
+// leaves value unchanged.
+func relayRewritePath(value json.RawMessage, path []string, rewrite func(json.RawMessage) (json.RawMessage, error)) (json.RawMessage, error) {
+	if len(path) == 0 {
+		return rewrite(value)
+	}
+	members, err := relayOrderedObject(value)
+	if err != nil || members == nil {
+		return value, err
+	}
+	for i, member := range members {
+		if member.key != path[0] {
+			continue
+		}
+		rewritten, err := relayRewritePath(member.value, path[1:], rewrite)
+		if err != nil {
+			return nil, err
+		}
+		members[i].value = rewritten
+		var b bytes.Buffer
+		b.WriteByte('{')
+		for j, member := range members {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			relayWriteKey(&b, member.key)
+			b.Write(member.value)
+		}
+		b.WriteByte('}')
+		return b.Bytes(), nil
+	}
+	return value, nil
 }
 
 func rewriteProtocol33Event(value json.RawMessage) (json.RawMessage, error) {
@@ -618,7 +930,34 @@ func InvalidRelayRequestResponse(requestID string, protocolVersion uint32, messa
 
 // rustDebugString renders text as Rust's {:?} does for a str.
 func rustDebugString(text string) string {
-	panic("unported: Rust str Debug formatting for relay error messages")
+	var b strings.Builder
+	b.WriteByte('"')
+	for i, r := range text {
+		switch {
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r == '"':
+			b.WriteString(`\"`)
+		case r == 0:
+			b.WriteString(`\0`)
+		case r == utf8.RuneError && !strings.HasPrefix(text[i:], "�"):
+			// Invalid UTF-8 cannot occur in a Rust str; keep the byte visible.
+			fmt.Fprintf(&b, `\u{%x}`, text[i])
+		case !unicode.IsGraphic(r) || unicode.In(r, unicode.Mn, unicode.Me):
+			// Rust escapes non-printable and grapheme-extending characters.
+			fmt.Fprintf(&b, `\u{%x}`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // ReadRelayFrame reads one request frame; nil at a clean end of stream.
@@ -1765,57 +2104,57 @@ func (v *RelayRequestReviewer) UnmarshalJSON(data []byte) error {
 
 // relayRequestVariants decodes each RelayRequest variant by its wire name.
 var relayRequestVariants = map[string]func(json.RawMessage) (RelayRequest, error){
-	"hello":                           relayVariant[RelayRequestHello, RelayRequest](true),
-	"attach":                          relayVariant[RelayRequestAttach, RelayRequest](true),
-	"acknowledge":                     relayVariant[RelayRequestAcknowledge, RelayRequest](true),
-	"submit":                          relayVariant[RelayRequestSubmit, RelayRequest](true),
-	"command_retention_status":        relayVariant[RelayRequestCommandRetentionStatus, RelayRequest](true),
-	"begin_live_baseline":             relayVariant[RelayRequestBeginLiveBaseline, RelayRequest](true),
-	"read_live_baseline_page":         relayVariant[RelayRequestReadLiveBaselinePage, RelayRequest](true),
-	"abort_live_baseline":             relayVariant[RelayRequestAbortLiveBaseline, RelayRequest](true),
-	"read_queued_command":             relayVariant[RelayRequestReadQueuedCommand, RelayRequest](true),
-	"read_pending_elicitation":        relayVariant[RelayRequestReadPendingElicitation, RelayRequest](true),
-	"update_command_retention":        relayVariant[RelayRequestUpdateCommandRetention, RelayRequest](true),
-	"status":                          relayVariant[RelayRequestStatus, RelayRequest](true),
-	"drain_mailbox":                   relayVariant[RelayRequestDrainMailbox, RelayRequest](true),
-	"ack_mailbox":                     relayVariant[RelayRequestAckMailbox, RelayRequest](true),
-	"reserve_idle":                    relayVariant[RelayRequestReserveIdle, RelayRequest](true),
-	"attachment_present":              relayVariant[RelayRequestAttachmentPresent, RelayRequest](true),
-	"install_attachment":              relayVariant[RelayRequestInstallAttachment, RelayRequest](true),
-	"read_attachment":                 relayVariant[RelayRequestReadAttachment, RelayRequest](true),
-	"install_prompt_context":          relayVariant[RelayRequestInstallPromptContext, RelayRequest](true),
-	"project_memory_snapshot":         relayVariant[RelayRequestProjectMemorySnapshot, RelayRequest](true),
-	"install_project_memory_snapshot": relayVariant[RelayRequestInstallProjectMemorySnapshot, RelayRequest](true),
-	"replace_project_memory_tree":     relayVariant[RelayRequestReplaceProjectMemoryTree, RelayRequest](true),
-	"project_memory_transfer":         relayVariant[RelayRequestProjectMemoryTransfer, RelayRequest](true),
-	"cpu_usage":                       relayVariant[RelayRequestCpuUsage, RelayRequest](true),
-	"credential_state":                relayVariant[RelayRequestCredentialState, RelayRequest](true),
-	"read_credentials":                relayVariant[RelayRequestReadCredentials, RelayRequest](true),
-	"install_credentials":             relayVariant[RelayRequestInstallCredentials, RelayRequest](true),
-	"skills_state":                    relayVariant[RelayRequestSkillsState, RelayRequest](true),
-	"install_skills":                  relayVariant[RelayRequestInstallSkills, RelayRequest](true),
-	"github_token_state":              relayVariant[RelayRequestGithubTokenState, RelayRequest](true),
-	"install_github_token":            relayVariant[RelayRequestInstallGithubToken, RelayRequest](true),
-	"remove_github_token":             relayVariant[RelayRequestRemoveGithubToken, RelayRequest](true),
-	"aws_credentials_state":           relayVariant[RelayRequestAwsCredentialsState, RelayRequest](true),
-	"install_aws_credentials":         relayVariant[RelayRequestInstallAwsCredentials, RelayRequest](true),
-	"remove_aws_credentials":          relayVariant[RelayRequestRemoveAwsCredentials, RelayRequest](true),
-	"aws_credentials_scope":           relayVariant[RelayRequestAwsCredentialsScope, RelayRequest](true),
-	"slopcop_login_state":             relayVariant[RelayRequestSlopcopLoginState, RelayRequest](true),
-	"install_slopcop_login":           relayVariant[RelayRequestInstallSlopcopLogin, RelayRequest](true),
-	"remove_slopcop_login":            relayVariant[RelayRequestRemoveSlopcopLogin, RelayRequest](true),
-	"respond_elicitation":             relayVariant[RelayRequestRespondElicitation, RelayRequest](true),
-	"stop_background_task":            relayVariant[RelayRequestStopBackgroundTask, RelayRequest](true),
-	"subagent_requests":               relayVariant[RelayRequestSubagentRequests, RelayRequest](true),
-	"poll_subagent_queue":             relayVariant[RelayRequestPollSubagentQueue, RelayRequest](true),
-	"wait_for_change":                 relayVariant[RelayRequestWaitForChange, RelayRequest](true),
-	"set_operator_away":               relayVariant[RelayRequestSetOperatorAway, RelayRequest](true),
-	"set_subagent_admission":          relayVariant[RelayRequestSetSubagentAdmission, RelayRequest](true),
-	"history_query":                   relayVariant[RelayRequestHistoryQuery, RelayRequest](true),
-	"history_requests":                relayVariant[RelayRequestHistoryRequests, RelayRequest](true),
-	"complete_history_request":        relayVariant[RelayRequestCompleteHistoryRequest, RelayRequest](true),
-	"complete_subagent_request":       relayVariant[RelayRequestCompleteSubagentRequest, RelayRequest](true),
-	"reviewer":                        relayVariant[RelayRequestReviewer, RelayRequest](true),
+	"hello":                           relayRequiredVariant[RelayRequestHello, RelayRequest](),
+	"attach":                          relayRequiredVariant[RelayRequestAttach, RelayRequest](),
+	"acknowledge":                     relayRequiredVariant[RelayRequestAcknowledge, RelayRequest](),
+	"submit":                          relayRequiredVariant[RelayRequestSubmit, RelayRequest](),
+	"command_retention_status":        relayRequiredVariant[RelayRequestCommandRetentionStatus, RelayRequest](),
+	"begin_live_baseline":             relayRequiredVariant[RelayRequestBeginLiveBaseline, RelayRequest](),
+	"read_live_baseline_page":         relayRequiredVariant[RelayRequestReadLiveBaselinePage, RelayRequest](),
+	"abort_live_baseline":             relayRequiredVariant[RelayRequestAbortLiveBaseline, RelayRequest](),
+	"read_queued_command":             relayRequiredVariant[RelayRequestReadQueuedCommand, RelayRequest](),
+	"read_pending_elicitation":        relayRequiredVariant[RelayRequestReadPendingElicitation, RelayRequest](),
+	"update_command_retention":        relayRequiredVariant[RelayRequestUpdateCommandRetention, RelayRequest](),
+	"status":                          relayRequiredVariant[RelayRequestStatus, RelayRequest](),
+	"drain_mailbox":                   relayRequiredVariant[RelayRequestDrainMailbox, RelayRequest](),
+	"ack_mailbox":                     relayRequiredVariant[RelayRequestAckMailbox, RelayRequest](),
+	"reserve_idle":                    relayRequiredVariant[RelayRequestReserveIdle, RelayRequest](),
+	"attachment_present":              relayRequiredVariant[RelayRequestAttachmentPresent, RelayRequest](),
+	"install_attachment":              relayRequiredVariant[RelayRequestInstallAttachment, RelayRequest](),
+	"read_attachment":                 relayRequiredVariant[RelayRequestReadAttachment, RelayRequest](),
+	"install_prompt_context":          relayRequiredVariant[RelayRequestInstallPromptContext, RelayRequest](),
+	"project_memory_snapshot":         relayRequiredVariant[RelayRequestProjectMemorySnapshot, RelayRequest](),
+	"install_project_memory_snapshot": relayRequiredVariant[RelayRequestInstallProjectMemorySnapshot, RelayRequest](),
+	"replace_project_memory_tree":     relayRequiredVariant[RelayRequestReplaceProjectMemoryTree, RelayRequest](),
+	"project_memory_transfer":         relayRequiredVariant[RelayRequestProjectMemoryTransfer, RelayRequest](),
+	"cpu_usage":                       relayRequiredVariant[RelayRequestCpuUsage, RelayRequest](),
+	"credential_state":                relayRequiredVariant[RelayRequestCredentialState, RelayRequest](),
+	"read_credentials":                relayRequiredVariant[RelayRequestReadCredentials, RelayRequest](),
+	"install_credentials":             relayRequiredVariant[RelayRequestInstallCredentials, RelayRequest](),
+	"skills_state":                    relayRequiredVariant[RelayRequestSkillsState, RelayRequest](),
+	"install_skills":                  relayRequiredVariant[RelayRequestInstallSkills, RelayRequest](),
+	"github_token_state":              relayRequiredVariant[RelayRequestGithubTokenState, RelayRequest](),
+	"install_github_token":            relayRequiredVariant[RelayRequestInstallGithubToken, RelayRequest](),
+	"remove_github_token":             relayRequiredVariant[RelayRequestRemoveGithubToken, RelayRequest](),
+	"aws_credentials_state":           relayRequiredVariant[RelayRequestAwsCredentialsState, RelayRequest](),
+	"install_aws_credentials":         relayRequiredVariant[RelayRequestInstallAwsCredentials, RelayRequest](),
+	"remove_aws_credentials":          relayRequiredVariant[RelayRequestRemoveAwsCredentials, RelayRequest](),
+	"aws_credentials_scope":           relayRequiredVariant[RelayRequestAwsCredentialsScope, RelayRequest](),
+	"slopcop_login_state":             relayRequiredVariant[RelayRequestSlopcopLoginState, RelayRequest](),
+	"install_slopcop_login":           relayRequiredVariant[RelayRequestInstallSlopcopLogin, RelayRequest](),
+	"remove_slopcop_login":            relayRequiredVariant[RelayRequestRemoveSlopcopLogin, RelayRequest](),
+	"respond_elicitation":             relayRequiredVariant[RelayRequestRespondElicitation, RelayRequest](),
+	"stop_background_task":            relayRequiredVariant[RelayRequestStopBackgroundTask, RelayRequest](),
+	"subagent_requests":               relayRequiredVariant[RelayRequestSubagentRequests, RelayRequest](),
+	"poll_subagent_queue":             relayRequiredVariant[RelayRequestPollSubagentQueue, RelayRequest](),
+	"wait_for_change":                 relayRequiredVariant[RelayRequestWaitForChange, RelayRequest](),
+	"set_operator_away":               relayRequiredVariant[RelayRequestSetOperatorAway, RelayRequest](),
+	"set_subagent_admission":          relayRequiredVariant[RelayRequestSetSubagentAdmission, RelayRequest](),
+	"history_query":                   relayRequiredVariant[RelayRequestHistoryQuery, RelayRequest](),
+	"history_requests":                relayRequiredVariant[RelayRequestHistoryRequests, RelayRequest](),
+	"complete_history_request":        relayRequiredVariant[RelayRequestCompleteHistoryRequest, RelayRequest](),
+	"complete_subagent_request":       relayRequiredVariant[RelayRequestCompleteSubagentRequest, RelayRequest](),
+	"reviewer":                        relayRequiredVariant[RelayRequestReviewer, RelayRequest](),
 }
 
 // UnmarshalRelayRequestJSON decodes the serde-tagged form of RelayRequest.

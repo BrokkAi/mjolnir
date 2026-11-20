@@ -150,3 +150,35 @@ declaration agents left open.
   required fields must be required, exactly as serde decodes.
 - Fields holding a sealed interface must decode through the owner's
   decoder; plain encoding/json cannot fill an interface.
+
+## Crates above mj-core
+
+Every other crate follows the same rules with these changes.
+
+- Package: one Go package per crate, `go/internal/<crate without mj->`
+  with dashes removed (`mj-transcript` -> `go/internal/transcript`, package
+  `transcript`; `mj-build-id` -> `go/internal/buildid`; `mj-worker` ->
+  `go/internal/worker`). A crate's internal modules all go in its package,
+  files named as in mj-core (`archive_git_operation.go`). Binaries
+  (`mj-worker-bin`, `mj-cli`'s `main`) go under `go/cmd/`.
+- Imports: a crate's dependencies are the Go packages of its Cargo
+  dependencies (`github.com/BrokkAi/mjolnir/go/internal/core`, ...). Use the
+  existing exported API of those packages; if it lacks something the Rust
+  crate uses from the dependency, it is a porting gap there: add it to the
+  dependency's file that ports the Rust item, following the Rust source.
+- Name collisions only matter within a package; prefix with the module
+  name as for mj-core.
+- Files a crate `include_str!`s, and its `tests/golden` and `tests/fixtures`
+  files, are copied under the package's `testdata/` (or `data/` when not
+  test-only) and embedded or read from there.
+- Golden tests compare with the copied expected files, which must stay
+  identical to the Rust ones; `MJ_UPDATE_GOLDEN` never rewrites them from Go
+  output.
+- Tests that need a crate not yet ported (a Rust dev-dependency such as
+  mj-controller) are ported with `t.Skip("needs <crate> (not yet ported)")`
+  and listed in the result, so they are enabled when that crate lands.
+- mj-build-id: Go records the commit and its time itself
+  (`runtime/debug.ReadBuildInfo`, `vcs.revision`/`vcs.time`); release-only
+  values come from `-ldflags -X`. The worker build identity is computed by
+  `go/scripts/build.sh` from the Git tree of the Go worker's inputs and
+  passed with `-ldflags -X`.

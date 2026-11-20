@@ -8,6 +8,24 @@
 
 package core
 
+import (
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"syscall"
+	"time"
+)
+
+var (
+	fakeWorkerOnce sync.Once
+	fakeWorkerPath string
+)
+
 // ReachTestHook stops at the named crash boundary when an isolated test asks
 // for it through MJ_TEST_HOOK; in the default build it does nothing.
 func ReachTestHook(name string) error {
@@ -21,20 +39,101 @@ func ReachTestHook(name string) error {
 // <MJ_TEST_HOOK_DIR>/<name>.reached and waits up to 120 seconds for
 // <name>.continue.
 func reachTestHookEnabled(name string) error {
-	panic("unported: mj-core/src/test_hooks.rs reach_test_hook")
+	if value, ok := os.LookupEnv("MJ_TEST_HOOK"); !ok || value != name {
+		return nil
+	}
+	if value, ok := os.LookupEnv("MJ_CHAOS_ISOLATED"); !ok || value != "1" {
+		return fmt.Errorf("test hook %s requires MJ_CHAOS_ISOLATED=1", name)
+	}
+	for _, b := range []byte(name) {
+		if !(b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '_') {
+			return fmt.Errorf("invalid test hook name %q", name)
+		}
+	}
+	directory, ok := os.LookupEnv("MJ_TEST_HOOK_DIR")
+	if !ok {
+		return errors.New("active test hook requires MJ_TEST_HOOK_DIR")
+	}
+	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
+		return fmt.Errorf("test hook directory %s does not exist", directory)
+	}
+	reached := filepath.Join(directory, name+".reached")
+	marker, err := os.OpenFile(reached, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+	switch {
+	case err == nil:
+		_, writeErr := fmt.Fprintf(marker, "pid=%d\n", os.Getpid())
+		if writeErr != nil {
+			_ = marker.Close()
+			return fmt.Errorf("write test hook marker %s: %w", reached, writeErr)
+		}
+		if syncErr := marker.Sync(); syncErr != nil {
+			_ = marker.Close()
+			return fmt.Errorf("sync test hook marker %s: %w", reached, syncErr)
+		}
+		_ = marker.Close()
+	case errors.Is(err, fs.ErrExist):
+	default:
+		return fmt.Errorf("create test hook marker %s: %w", reached, err)
+	}
+	continuation := filepath.Join(directory, name+".continue")
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		if info, err := os.Stat(continuation); err == nil && info.Mode().IsRegular() {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("test hook %s timed out waiting for %s", name, continuation)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // FakeCommandDispatcher is the checked-in executable used by fake commands
 // and worker fixtures (testdata/test_hooks/fake-command.sh). Unix only.
 func FakeCommandDispatcher() string {
-	panic("unported: mj-core/src/test_hooks.rs fake_command_dispatcher")
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("the fake command dispatcher's source directory is unknown")
+	}
+	return filepath.Join(filepath.Dir(source), "testdata", "test_hooks", "fake-command.sh")
 }
 
 // FakeWorkerDispatcher is a worker stand-in carrying the build identity a
 // test binary reports. Built before tests start, so executing it cannot race
 // a test's writer. Unix only.
 func FakeWorkerDispatcher() string {
-	panic("unported: mj-core/src/test_hooks.rs fake_worker_dispatcher")
+	fakeWorkerOnce.Do(func() {
+		script, err := os.ReadFile(FakeCommandDispatcher())
+		if err != nil {
+			panic(fmt.Sprintf("fake command fixture: %v", err))
+		}
+		identity := PackageVersion + "+" + testRevision
+		stamped := fmt.Sprintf("%s\n#MJ-BUILD-ID:%s\n#\x00MJ-WORKER-BUILD:%s\x00\n", script, identity, identity)
+		sum := sha256.Sum256([]byte(stamped))
+		path := filepath.Join(os.TempDir(), "mj-go-fake-worker-"+LowerHex(sum[:8])+".sh")
+		if existing, err := os.ReadFile(path); err == nil && string(existing) == stamped {
+			fakeWorkerPath = path
+			return
+		}
+		// Rust generates this file at build time, before any test runs. Here
+		// it is written with the fork lock held, so no child started
+		// meanwhile inherits the write descriptor (ETXTBSY), and renamed into
+		// place complete.
+		syscall.ForkLock.Lock()
+		defer syscall.ForkLock.Unlock()
+		temporary := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
+		if err := os.WriteFile(temporary, []byte(stamped), 0o755); err != nil {
+			panic(fmt.Sprintf("write stamped fake worker: %v", err))
+		}
+		if err := os.Chmod(temporary, 0o755); err != nil {
+			panic(fmt.Sprintf("make fake worker executable: %v", err))
+		}
+		if err := os.Rename(temporary, path); err != nil {
+			panic(fmt.Sprintf("install stamped fake worker: %v", err))
+		}
+		fakeWorkerPath = path
+	})
+	return fakeWorkerPath
 }
 
 // InstallFakeCommand installs a shell stand-in, under program, for a command
@@ -71,7 +170,20 @@ func InstallFakeWorkerFrom(dispatcher, directory, program, script string) {
 }
 
 func installFakeWithDispatcher(dispatcher, directory, program, script string) {
-	panic("unported: mj-core/src/test_hooks.rs install_fake_with_dispatcher")
+	if info, err := os.Stat(dispatcher); err != nil || !info.Mode().IsRegular() {
+		panic(fmt.Sprintf("fake command dispatcher is missing at %s", dispatcher))
+	}
+	if err := os.WriteFile(filepath.Join(directory, program+".script"), []byte(script), 0o666); err != nil {
+		panic(fmt.Sprintf("write the %s stand-in: %v", program, err))
+	}
+	installed := filepath.Join(directory, program)
+	// A directory may host several fakes, and a test may replace one.
+	if err := os.Remove(installed); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		panic(fmt.Sprintf("replace the %s stand-in: %v", program, err))
+	}
+	if err := os.Symlink(dispatcher, installed); err != nil {
+		panic(fmt.Sprintf("link the %s stand-in: %v", program, err))
+	}
 }
 
 // Environment shared by the controller and daemon tests that run a stand-in

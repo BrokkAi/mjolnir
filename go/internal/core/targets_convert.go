@@ -17,7 +17,7 @@ import "fmt"
 
 // pathText is the single place path text crosses into an execution plan.
 func pathText(path string) string {
-	panic("unported: mj-core/src/targets/convert.rs path_text")
+	return Text(path)
 }
 
 // TargetConversionErrorKind names a TargetConversionError variant.
@@ -96,7 +96,11 @@ func SSHArgsWithIdentity(args []string, identity *string) []string {
 // SshTargetFromSshConnection is the execution-plan form of a configured SSH
 // connection (Rust: From<&SshConnection> for targets::SshTarget).
 func SshTargetFromSshConnection(ssh *SshConnection) SshTarget {
-	panic("unported: mj-core/src/targets/convert.rs From<&SshConnection> for SshTarget")
+	destination := ssh.Host
+	if ssh.User != nil {
+		destination = *ssh.User + "@" + ssh.Host
+	}
+	return SshTarget{Destination: destination, SSHArgs: SSHArgsWithIdentity(ssh.ExtraArgs, ssh.IdentityFile)}
 }
 
 // TargetTemplateImageHost is the host that downloads this configured
@@ -109,28 +113,80 @@ func SshTargetFromSshConnection(ssh *SshConnection) SshTarget {
 // target, which is what the daemon reads when it decides what to download;
 // the two template families never share a type.
 func TargetTemplateImageHost(template TargetTemplate) (ImageHost, *ContainerTemplate, bool) {
-	panic("unported: mj-core/src/targets/convert.rs config::TargetTemplate::image_host")
+	withSSH := func(kind ImageHostKind, ssh SshConnection, container ContainerTemplate) (ImageHost, *ContainerTemplate, bool) {
+		target := SshTargetFromSshConnection(&ssh)
+		return ImageHost{Kind: kind, SSH: &target}, &container, true
+	}
+	switch template := template.(type) {
+	case TargetTemplateLocalPodman:
+		return ImageHost{Kind: ImageHostLocalPodman}, &template.ContainerTemplate, true
+	case TargetTemplateLocalDocker:
+		return ImageHost{Kind: ImageHostLocalDocker}, &template.ContainerTemplate, true
+	case TargetTemplateAppleContainer:
+		return ImageHost{Kind: ImageHostAppleContainer}, &template.ContainerTemplate, true
+	case TargetTemplateSshPodman:
+		return withSSH(ImageHostSshPodman, template.SSH, template.ContainerTemplate)
+	case TargetTemplateSshDocker:
+		return withSSH(ImageHostSshDocker, template.SSH, template.ContainerTemplate)
+	case TargetTemplateSshAppleContainer:
+		return withSSH(ImageHostSshAppleContainer, template.SSH, template.ContainerTemplate)
+	case TargetTemplateSshNitro:
+		return withSSH(ImageHostSshNitro, template.SSH, template.ContainerTemplate)
+	}
+	return ImageHost{}, nil, false
 }
 
 // TargetsPodmanWorkspaceStorageFromPodmanWorkspaceStorage converts the
 // configured workspace storage (Rust: From<&PodmanWorkspaceStorage> for
 // targets::PodmanWorkspaceStorage).
 func TargetsPodmanWorkspaceStorageFromPodmanWorkspaceStorage(storage PodmanWorkspaceStorage) TargetsPodmanWorkspaceStorage {
-	panic("unported: mj-core/src/targets/convert.rs From<&PodmanWorkspaceStorage>")
+	switch storage := storage.(type) {
+	case PodmanWorkspaceStorageHostHelper:
+		return TargetsPodmanWorkspaceStorage{
+			Kind:   TargetsPodmanWorkspaceStorageHostHelper,
+			Root:   pathText(storage.Root),
+			Helper: append([]string{}, storage.Helper...),
+		}
+	case PodmanWorkspaceStorageContainerLayer:
+		return TargetsPodmanWorkspaceStorage{Kind: TargetsPodmanWorkspaceStorageContainerLayer}
+	default:
+		// PodmanVolume, the configured default.
+		return TargetsPodmanWorkspaceStorage{Kind: TargetsPodmanWorkspaceStoragePodmanVolume}
+	}
 }
 
 // TargetsPodmanWorkspaceLocatorFromPodmanWorkspaceLocator converts the
 // stored workspace locator (Rust: From<&PodmanWorkspaceLocator> for
 // targets::PodmanWorkspaceLocator).
 func TargetsPodmanWorkspaceLocatorFromPodmanWorkspaceLocator(storage PodmanWorkspaceLocator) TargetsPodmanWorkspaceLocator {
-	panic("unported: mj-core/src/targets/convert.rs From<&PodmanWorkspaceLocator>")
+	switch storage := storage.(type) {
+	case PodmanWorkspaceLocatorVolume:
+		return TargetsPodmanWorkspaceLocator{Kind: TargetsPodmanWorkspaceLocatorVolume, Name: storage.Name}
+	case PodmanWorkspaceLocatorHostPath:
+		return TargetsPodmanWorkspaceLocator{
+			Kind:     TargetsPodmanWorkspaceLocatorHostPath,
+			Path:     pathText(storage.Path),
+			Helper:   append([]string{}, storage.Helper...),
+			Resource: storage.Resource,
+		}
+	default:
+		// ContainerLayer, the stored default.
+		return TargetsPodmanWorkspaceLocator{Kind: TargetsPodmanWorkspaceLocatorContainerLayer}
+	}
 }
 
 // PodmanWorkspaceLocatorFromTargetsPodmanWorkspaceLocator converts back to
 // the stored workspace locator (Rust: From<targets::PodmanWorkspaceLocator>
 // for PodmanWorkspaceLocator).
 func PodmanWorkspaceLocatorFromTargetsPodmanWorkspaceLocator(storage TargetsPodmanWorkspaceLocator) PodmanWorkspaceLocator {
-	panic("unported: mj-core/src/targets/convert.rs From<targets::PodmanWorkspaceLocator>")
+	switch storage.EffectiveKind() {
+	case TargetsPodmanWorkspaceLocatorVolume:
+		return PodmanWorkspaceLocatorVolume{Name: storage.Name}
+	case TargetsPodmanWorkspaceLocatorHostPath:
+		return PodmanWorkspaceLocatorHostPath{Path: storage.Path, Helper: storage.Helper, Resource: storage.Resource}
+	default:
+		return PodmanWorkspaceLocatorContainerLayer{}
+	}
 }
 
 // TargetsStoredTarget is one session's stored target: what the store holds,
@@ -158,24 +214,176 @@ type RecordedTarget struct {
 // TargetsTargetLocatorFromStoredTarget converts a stored target (Rust:
 // TryFrom<StoredTarget> for targets::TargetLocator).
 func TargetsTargetLocatorFromStoredTarget(stored TargetsStoredTarget) (TargetsTargetLocator, error) {
-	panic("unported: mj-core/src/targets/convert.rs TryFrom<StoredTarget>")
+	if LocatorKindName(stored.Locator) != stored.Template.KindName() {
+		return TargetsTargetLocator{}, &TargetConversionError{
+			Kind:     TargetConversionErrorKindMismatch,
+			Locator:  LocatorKindName(stored.Locator),
+			Template: stored.Template.KindName(),
+		}
+	}
+	runtime := TargetRuntimeSettingsFromTemplate(stored.Template)
+	return TargetsTargetLocatorFromRecordedTarget(RecordedTarget{
+		Locator:   stored.Locator,
+		Runtime:   &runtime,
+		SessionID: stored.SessionID,
+	})
 }
 
 // TargetsTargetLocatorFromRecordedTarget converts a recorded target (Rust:
 // TryFrom<RecordedTarget> for targets::TargetLocator).
 func TargetsTargetLocatorFromRecordedTarget(stored RecordedTarget) (TargetsTargetLocator, error) {
-	panic("unported: mj-core/src/targets/convert.rs TryFrom<RecordedTarget>")
+	locator, runtime := stored.Locator, stored.Runtime
+	if runtime != nil {
+		if LocatorKindName(locator) != runtime.Kind {
+			return TargetsTargetLocator{}, &TargetConversionError{
+				Kind:     TargetConversionErrorRecordedKindMismatch,
+				Locator:  LocatorKindName(locator),
+				Recorded: runtime.Kind,
+			}
+		}
+		if _, local := runtime.Connection.(TargetConnectionLocal); !LocatorNeedsConnection(locator) && !local {
+			return TargetsTargetLocator{}, &TargetConversionError{Kind: TargetConversionErrorInvalidRecordedConnection}
+		}
+	}
+	ssh := func(host string) (*SshTarget, error) {
+		var connection TargetConnectionSsh
+		ok := false
+		if runtime != nil {
+			connection, ok = runtime.Connection.(TargetConnectionSsh)
+		}
+		if !ok {
+			return nil, &TargetConversionError{Kind: TargetConversionErrorInvalidRecordedConnection}
+		}
+		if host != connection.SSH.Host {
+			return nil, &TargetConversionError{
+				Kind:     TargetConversionErrorSshHostMismatch,
+				Locator:  host,
+				Template: connection.SSH.Host,
+			}
+		}
+		target := SshTargetFromSshConnection(&connection.SSH)
+		return &target, nil
+	}
+	cloned := func(value *string) *string {
+		if value == nil {
+			return nil
+		}
+		copied := *value
+		return &copied
+	}
+	switch locator := locator.(type) {
+	case TargetLocatorLocalBare:
+		return TargetsTargetLocator{Kind: TargetsTargetLocatorLocalBare, WorkerRoot: pathText(locator.WorkerRoot)}, nil
+	case TargetLocatorLocalPodman:
+		return TargetsTargetLocator{
+			Kind:             TargetsTargetLocatorLocalPodman,
+			ContainerID:      locator.ContainerID,
+			WorkspaceStorage: TargetsPodmanWorkspaceLocatorFromPodmanWorkspaceLocator(locator.WorkspaceStorage),
+			BorrowedFrom:     cloned(locator.BorrowedFrom),
+		}, nil
+	case TargetLocatorLocalDocker:
+		return TargetsTargetLocator{Kind: TargetsTargetLocatorLocalDocker, ContainerID: locator.ContainerID, BorrowedFrom: cloned(locator.BorrowedFrom)}, nil
+	case TargetLocatorAppleContainer:
+		return TargetsTargetLocator{Kind: TargetsTargetLocatorAppleContainer, ContainerID: locator.ContainerID, BorrowedFrom: cloned(locator.BorrowedFrom)}, nil
+	case TargetLocatorSshBare:
+		target, err := ssh(locator.Host)
+		if err != nil {
+			return TargetsTargetLocator{}, err
+		}
+		return TargetsTargetLocator{Kind: TargetsTargetLocatorSshBare, SSH: target, Workspace: pathText(locator.Workspace), WorkerID: cloned(locator.WorkerID)}, nil
+	case TargetLocatorSshPodman:
+		target, err := ssh(locator.Host)
+		if err != nil {
+			return TargetsTargetLocator{}, err
+		}
+		return TargetsTargetLocator{
+			Kind:             TargetsTargetLocatorSshPodman,
+			SSH:              target,
+			ContainerID:      locator.ContainerID,
+			WorkspaceStorage: TargetsPodmanWorkspaceLocatorFromPodmanWorkspaceLocator(locator.WorkspaceStorage),
+			BorrowedFrom:     cloned(locator.BorrowedFrom),
+		}, nil
+	case TargetLocatorSshDocker:
+		target, err := ssh(locator.Host)
+		if err != nil {
+			return TargetsTargetLocator{}, err
+		}
+		return TargetsTargetLocator{Kind: TargetsTargetLocatorSshDocker, SSH: target, ContainerID: locator.ContainerID, BorrowedFrom: cloned(locator.BorrowedFrom)}, nil
+	case TargetLocatorSshAppleContainer:
+		target, err := ssh(locator.Host)
+		if err != nil {
+			return TargetsTargetLocator{}, err
+		}
+		return TargetsTargetLocator{Kind: TargetsTargetLocatorSshAppleContainer, SSH: target, ContainerID: locator.ContainerID, BorrowedFrom: cloned(locator.BorrowedFrom)}, nil
+	case TargetLocatorSshNitro:
+		target, err := ssh(locator.Host)
+		if err != nil {
+			return TargetsTargetLocator{}, err
+		}
+		return TargetsTargetLocator{Kind: TargetsTargetLocatorSshNitro, SSH: target, ContainerID: locator.ContainerID, BorrowedFrom: cloned(locator.BorrowedFrom)}, nil
+	case TargetLocatorAwsEc2:
+		var connection TargetConnectionAws
+		ok := false
+		if runtime != nil {
+			connection, ok = runtime.Connection.(TargetConnectionAws)
+		}
+		if !ok {
+			return TargetsTargetLocator{}, &TargetConversionError{Kind: TargetConversionErrorInvalidRecordedConnection}
+		}
+		if locator.Address == nil {
+			return TargetsTargetLocator{}, &TargetConversionError{Kind: TargetConversionErrorMissingAwsAddress}
+		}
+		return TargetsTargetLocator{
+			Kind:       TargetsTargetLocatorAwsEc2,
+			Profile:    connection.Profile,
+			Region:     connection.Region,
+			InstanceID: locator.InstanceID,
+			SSH: &SshTarget{
+				Destination: connection.SSHUser + "@" + *locator.Address,
+				SSHArgs:     SSHArgsWithIdentity(connection.SSHArgs, connection.IdentityFile),
+			},
+			Workspace: AWSWorkspace(stored.SessionID),
+		}, nil
+	}
+	panic(fmt.Sprintf("unknown target locator %T", locator))
 }
 
 // LocatorKindName is the stored locator's target kind, spelled as the
 // configured TargetTemplate's kind name spells it so a mismatch names both
 // sides the same way.
 func LocatorKindName(locator TargetLocator) string {
-	panic("unported: mj-core/src/targets/convert.rs locator_kind_name")
+	switch locator.(type) {
+	case TargetLocatorLocalBare:
+		return "local-bare"
+	case TargetLocatorLocalPodman:
+		return "local-podman"
+	case TargetLocatorLocalDocker:
+		return "local-docker"
+	case TargetLocatorAppleContainer:
+		return "apple-container"
+	case TargetLocatorAwsEc2:
+		return "aws-ec2"
+	case TargetLocatorSshBare:
+		return "ssh-bare"
+	case TargetLocatorSshPodman:
+		return "ssh-podman"
+	case TargetLocatorSshDocker:
+		return "ssh-docker"
+	case TargetLocatorSshAppleContainer:
+		return "ssh-apple-container"
+	case TargetLocatorSshNitro:
+		return "ssh-nitro"
+	}
+	panic(fmt.Sprintf("unknown target locator %T", locator))
 }
 
 // LocatorNeedsConnection: local resource locators contain everything needed
 // to reach the resource.
 func LocatorNeedsConnection(locator TargetLocator) bool {
-	panic("unported: mj-core/src/targets/convert.rs locator_needs_connection")
+	switch locator.(type) {
+	case TargetLocatorSshBare, TargetLocatorSshPodman, TargetLocatorSshDocker,
+		TargetLocatorSshAppleContainer, TargetLocatorSshNitro, TargetLocatorAwsEc2:
+		return true
+	}
+	return false
 }

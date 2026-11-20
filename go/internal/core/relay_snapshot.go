@@ -21,10 +21,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 
 	acpschema "github.com/BrokkAi/acp-go/schema"
+	acpunstable "github.com/BrokkAi/acp-go/schema/unstable"
 )
 
 // relayTextBlock is a text content block, Rust's ContentBlock::from(String).
@@ -79,16 +82,105 @@ func HoldFollowUpText(kind HoldFollowUpKind, running []string) string {
 // RelayCommandPromptBlocksForCommand is the effective prompt, including the
 // worker-authored restart note. False when the command carries no prompt.
 func RelayCommandPromptBlocksForCommand(command RelayCommand, commandID string) ([]acpschema.ContentBlock, bool) {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayCommand::prompt_blocks_for_command")
+	prompt, ok := RelayCommandPromptBlocks(command)
+	if !ok {
+		return nil, false
+	}
+	if IsRestartContinuation(commandID) && !PromptIsSlashCommand(prompt) {
+		return append([]acpschema.ContentBlock{relayTextBlock(RestartRecoveryNote)}, prompt...), true
+	}
+	return prompt, true
 }
 
 // RelayCommandPromptBlocks is the prompt a command sends, if it sends one.
 func RelayCommandPromptBlocks(command RelayCommand) ([]acpschema.ContentBlock, bool) {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayCommand::prompt_blocks")
+	switch command := command.(type) {
+	case RelayCommandPrompt:
+		return command.Prompt, true
+	case RelayCommandHandbackReminder:
+		return []acpschema.ContentBlock{relayTextBlock(HandbackReminderText(command.Running))}, true
+	case RelayCommandHoldFollowUp:
+		return []acpschema.ContentBlock{relayTextBlock(HoldFollowUpText(command.Kind, command.Running))}, true
+	case RelayCommandMailboxWake:
+		return []acpschema.ContentBlock{relayTextBlock(RenderMailboxEvents(command.Events))}, true
+	case RelayCommandContinueAuthorizedWork, RelayCommandResumeAfterQuota:
+		return PromptBlocks(), true
+	}
+	return nil, false
 }
 
 func RelayCommandMinimumProtocol(command RelayCommand) uint32 {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayCommand::minimum_protocol")
+	switch command := command.(type) {
+	case RelayCommandDismissQuestion:
+		return RelayDismissQuestionProtocol
+	case RelayCommandClearNotifications, RelayCommandNotificationsRead:
+		return RelayNotificationStackProtocol
+	case RelayCommandApplyQueuedFor:
+		return RelayTurnControlsProtocol
+	case RelayCommandSetSubagentWait:
+		return RelaySubagentWaitProtocol
+	case RelayCommandDeliverMailboxEvent:
+		return command.Event.Body.MinimumRelayProtocol()
+	case RelayCommandMailboxWake:
+		if len(command.Events) == 0 {
+			return RelayLegacyMailboxProtocol
+		}
+		minimum := uint32(0)
+		for i := range command.Events {
+			minimum = max(minimum, command.Events[i].Body.MinimumRelayProtocol())
+		}
+		return minimum
+	case RelayCommandRestoreExecutionMode:
+		return 28
+	case RelayCommandHoldFollowUp:
+		return RelayWorkLivenessProtocol
+	case RelayCommandHandbackReminder:
+		if len(command.Running) > 0 {
+			return RelayWorkLivenessProtocol
+		}
+		return 26
+	case RelayCommandInstallPromptContext:
+		return 26
+	case RelayCommandSeedAssessmentContext:
+		return Protocol
+	case RelayCommandSetQuotaRecovery, RelayCommandResumeAfterQuota:
+		return 20
+	case RelayCommandContinueAuthorizedWork:
+		return 18
+	case RelayCommandSteer, RelayCommandCancelTurnFor, RelayCommandResolveSteering:
+		return 17
+	case RelayCommandClearContext:
+		return 15
+	case RelayCommandRunUserShell, RelayCommandCancelUserShell:
+		return 5
+	case RelayCommandGoalControl:
+		return 11
+	case RelayCommandCancelTurn:
+		return 7
+	case RelayCommandPrompt:
+		if kind, _, ok := ContextCommandOf(command.Prompt); ok && kind == ContextCommandClear {
+			return 15
+		}
+		if relayPromptHasAttachmentReferences(command.Prompt) {
+			return 8
+		}
+	}
+	return RelayMinProtocolVersion
+}
+
+// relayPromptHasAttachmentReferences asks the attachment module, which reads
+// prompts as the unstable ACP schema, about a stable-schema prompt. The two
+// schemas share the wire form, so the prompt crosses by its JSON.
+func relayPromptHasAttachmentReferences(prompt []acpschema.ContentBlock) bool {
+	encoded, err := relayMarshalJSON(prompt)
+	if err != nil {
+		return false
+	}
+	var unstable []acpunstable.ContentBlock
+	if json.Unmarshal(encoded, &unstable) != nil {
+		return false
+	}
+	return HasReferences(unstable)
 }
 
 // RelayCommandIsQueueEntry reports whether this command waits its turn in the
@@ -136,7 +228,52 @@ func RelayCommandIsEffectfulUserShell(command RelayCommand) bool {
 
 // RelayCommandKindOf is Rust's RelayCommand::kind.
 func RelayCommandKindOf(command RelayCommand) RelayCommandKind {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayCommand::kind")
+	switch command.(type) {
+	case RelayCommandClearContext:
+		return RelayCommandKindClearContext
+	case RelayCommandPrompt, RelayCommandHandbackReminder, RelayCommandHoldFollowUp, RelayCommandMailboxWake,
+		RelayCommandContinueAuthorizedWork, RelayCommandResumeAfterQuota:
+		return RelayCommandKindPrompt
+	case RelayCommandRunUserShell:
+		return RelayCommandKindRunUserShell
+	case RelayCommandCancelUserShell:
+		return RelayCommandKindCancelUserShell
+	case RelayCommandRemoveQueuedPrompt:
+		return RelayCommandKindRemoveQueuedPrompt
+	case RelayCommandClearQueuedPrompts:
+		return RelayCommandKindClearQueuedPrompts
+	case RelayCommandSetConfig:
+		return RelayCommandKindSetConfig
+	case RelayCommandRestoreExecutionMode:
+		return RelayCommandKindRestoreExecutionMode
+	case RelayCommandGoalControl:
+		return RelayCommandKindGoalControl
+	case RelayCommandSetSessionMode:
+		return RelayCommandKindSetSessionMode
+	case RelayCommandCancelTurn, RelayCommandCancelTurnFor, RelayCommandApplyQueuedFor:
+		return RelayCommandKindCancelTurn
+	case RelayCommandSteer:
+		return RelayCommandKindSteer
+	case RelayCommandResolveSteering:
+		return RelayCommandKindResolveSteering
+	case RelayCommandCancel:
+		return RelayCommandKindCancel
+	case RelayCommandClose:
+		return RelayCommandKindClose
+	case RelayCommandBeginCheckpoint:
+		return RelayCommandKindBeginCheckpoint
+	case RelayCommandCompleteCheckpoint:
+		return RelayCommandKindCompleteCheckpoint
+	case RelayCommandReleaseCheckpoint:
+		return RelayCommandKindReleaseCheckpoint
+	case RelayCommandAdvanceRecoveryFloor:
+		return RelayCommandKindAdvanceRecoveryFloor
+	case RelayCommandRecordNotice, RelayCommandSetSubagentWait, RelayCommandSetQuotaRecovery,
+		RelayCommandSeedAssessmentContext, RelayCommandDismissQuestion, RelayCommandClearNotifications,
+		RelayCommandNotificationsRead, RelayCommandInstallPromptContext, RelayCommandDeliverMailboxEvent:
+		return RelayCommandKindRecordNotice
+	}
+	panic(fmt.Sprintf("unknown relay command %T", command))
 }
 
 type RelayCommandKind string
@@ -312,7 +449,28 @@ func (r *UserShellResult) UnmarshalJSON(data []byte) error {
 }
 
 func (r UserShellResult) PromptContext() string {
-	panic("unported: mj-core/src/relay/snapshot.rs UserShellResult::prompt_context")
+	escaped := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace
+	var result strings.Builder
+	fmt.Fprintf(&result, "status: %s\nduration_ms: %d", r.Status, r.DurationMs)
+	if r.ExitCode != nil {
+		fmt.Fprintf(&result, "\nexit_code: %d", *r.ExitCode)
+	}
+	if r.Signal != nil {
+		fmt.Fprintf(&result, "\nsignal: %s", escaped(*r.Signal))
+	}
+	if r.Error != nil {
+		fmt.Fprintf(&result, "\nerror: %s", escaped(*r.Error))
+	}
+	if r.Stdout != "" {
+		fmt.Fprintf(&result, "\nstdout:\n%s", escaped(r.Stdout))
+	}
+	if r.Stderr != "" {
+		fmt.Fprintf(&result, "\nstderr:\n%s", escaped(r.Stderr))
+	}
+	return fmt.Sprintf(
+		"<user_shell_command>\n<command>%s</command>\n<result>%s</result>\n</user_shell_command>",
+		escaped(r.Command), result.String(),
+	)
 }
 
 // StoredQueuedRelayCommand is one entry of the durable command queue. Prompts
@@ -568,8 +726,8 @@ type RelayOperationalState struct {
 	// worker that does not send it classifies Facts with the same
 	// function the worker used, so the answer is identical either way;
 	// there is no second implementation.
-	// Nil when absent.
-	Activity ActivityState `json:"activity,omitempty"`
+	// The zero value (empty Kind) when absent.
+	Activity ActivityState `json:"activity,omitzero"`
 	// The turn the harness started on its own, while it is open.
 	HarnessTurn *HarnessTurn `json:"harness_turn,omitempty"`
 	// Ordinal of the newest harness_turn_started event, whether or not that
@@ -631,13 +789,33 @@ func (s *RelayOperationalState) SupportsOpenRequest() bool {
 // QuestionMessage is the original question target, with compatibility for
 // pre-64 workers.
 func (s *RelayOperationalState) QuestionMessage() (string, bool) {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayOperationalState::question_message")
+	if s.SupportsOpenRequest() {
+		if s.OpenRequest != nil && s.OpenRequest.QuestionMessage != nil {
+			return *s.OpenRequest.QuestionMessage, true
+		}
+		return "", false
+	}
+	if s.Assessment != nil && s.Assessment.InferredQuestion() != nil && s.Assessment.QuestionMessage != nil {
+		return *s.Assessment.QuestionMessage, true
+	}
+	return "", false
 }
 
 // ShareUnchangedFields reuses unchanged payloads after decoding a new worker
 // response.
 func (s *RelayOperationalState) ShareUnchangedFields(previous *RelayOperationalState) {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayOperationalState::share_unchanged_fields")
+	if reflect.DeepEqual(s.Assessment, previous.Assessment) {
+		s.Assessment = previous.Assessment
+	}
+	if reflect.DeepEqual(s.AssessmentContext, previous.AssessmentContext) {
+		s.AssessmentContext = previous.AssessmentContext
+	}
+	if reflect.DeepEqual(s.AvailableCommands, previous.AvailableCommands) {
+		s.AvailableCommands = previous.AvailableCommands
+	}
+	if reflect.DeepEqual(s.ConfigOptions, previous.ConfigOptions) {
+		s.ConfigOptions = previous.ConfigOptions
+	}
 }
 
 // AcceptsPromptImages: missing initialization advertises no support for
@@ -671,14 +849,90 @@ func (s *RelayOperationalState) NativeSessionIsReady() bool {
 // decision. Every predicate below goes through it, so none of them can read a
 // different subset of the facts than another.
 func (s *RelayOperationalState) Facts() ActivityFacts {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayOperationalState::facts")
+	promptStartedAtMs := s.ClearContextStartedAtMs
+	if s.ActivePrompt != nil {
+		promptStartedAtMs = &s.ActivePrompt.StartedAtMs
+	}
+	var harnessTurnStartedAtMs *int64
+	if s.HarnessTurn != nil {
+		harnessTurnStartedAtMs = &s.HarnessTurn.StartedAtMs
+	}
+	toolsInFlight := slices.Clone(s.ToolsInFlight)
+	if len(s.ToolsInFlight) == 0 {
+		toolsInFlight = []InFlightToolCall{}
+		startedAtMs := s.ForegroundToolStartedAtMs
+		// A step in flight under a running turn is foreground work even
+		// when the harness has named no tool call for it. It has always
+		// counted as such; naming it here keeps that in one place.
+		if startedAtMs == nil && s.Execution == RelayExecutionStateRunning &&
+			s.CurrentStepStartedAtMs != nil && *s.CurrentStepStartedAtMs >= 0 {
+			startedAtMs = s.CurrentStepStartedAtMs
+		}
+		// A worker too old to list its open tool calls still reports the
+		// newest one's start, and that is enough to know a tool is running.
+		// Reading only the list would quietly lose the fact and call a
+		// working session idle.
+		if startedAtMs != nil {
+			toolsInFlight = append(toolsInFlight, InFlightToolCall{
+				Status:      acpschema.ToolCallStatusInProgress,
+				StartedAtMs: *startedAtMs,
+			})
+		}
+	}
+	var backgroundStartedAtMs *int64
+	earliest := func(startedAtMs int64) {
+		if backgroundStartedAtMs == nil || startedAtMs < *backgroundStartedAtMs {
+			backgroundStartedAtMs = &startedAtMs
+		}
+	}
+	for _, command := range s.BackgroundCommands {
+		earliest(command.StartedAtMs)
+	}
+	for _, shell := range s.ActiveUserShells {
+		if shell.StartedAtMs != nil {
+			earliest(*shell.StartedAtMs)
+		}
+	}
+	return ActivityFacts{
+		Execution:              s.Execution,
+		PromptStartedAtMs:      promptStartedAtMs,
+		HarnessTurnStartedAtMs: harnessTurnStartedAtMs,
+		TurnStartedAtMs:        s.ActivityTurnStartedAtMs,
+		QueuedCommands:         len(s.QueuedPrompts),
+		ToolsInFlight:          toolsInFlight,
+		BackgroundStartedAtMs:  backgroundStartedAtMs,
+		BackgroundCommands:     len(s.BackgroundCommands) + s.NativeAgentCount,
+		ExpectedContinuation:   s.ExpectedContinuation,
+		InferredIdleSinceMs:    s.InferredIdleSinceMs,
+		ActiveUserShells:       len(s.ActiveUserShells),
+		ActiveAgentTerminals:   len(s.ActiveAgentTerminals),
+		GoalActive:             s.Goal.Active(),
+		GoalRunning:            s.Goal.Running(),
+		GoalPendingResume:      s.Goal.PendingResume != nil,
+		GoalDecision:           s.Goal.Decision != nil,
+		GoalSynchronized:       s.Goal.Synchronized(),
+		BackgroundWorkKnown:    s.BackgroundWorkKnown,
+		AcpReady:               s.ACPReady,
+		CheckpointOnly:         s.CheckpointOnly,
+		CheckpointBarrier:      s.CheckpointBarrier != nil,
+		CapacityRetryArmed:     s.CapacityRetry != nil && !s.CapacityRetry.Submitted,
+		LastAcpActivityAtMs:    s.LastACPActivityAtMs,
+		CurrentStepStartedAtMs: s.CurrentStepStartedAtMs,
+		TaskSettledAtMs:        s.TaskSettledAtMs,
+		BackgroundNeeded:       s.BackgroundNeeded,
+		IdleSinceMs:            s.IdleSinceMs,
+	}
 }
 
 // ActivityState is what this session is doing: the worker's published
 // answer, or the same classification of the same facts when the worker is
 // too old to publish one.
 func (s *RelayOperationalState) ActivityState() ActivityState {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayOperationalState::activity_state")
+	if s.Activity.Kind != "" {
+		return s.Activity
+	}
+	facts := s.Facts()
+	return Classify(&facts)
 }
 
 // IsQuiet reports whether nothing the worker owns would be destroyed by
@@ -690,24 +944,41 @@ func (s *RelayOperationalState) ActivityState() ActivityState {
 // it, for a caller that holds the barrier and is asking whether anything else
 // is running.
 func (s *RelayOperationalState) IsQuiet() bool {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayOperationalState::is_quiet")
+	facts := s.Facts()
+	return IsQuiet(&facts)
 }
 
 // HasWorkInFlight reports whether the session still owns foreground or
 // background work.
 func (s *RelayOperationalState) HasWorkInFlight() bool {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayOperationalState::has_work_in_flight")
+	facts := s.Facts()
+	return HasWorkInFlight(&facts)
 }
 
 // SafeToReplace reports whether a controller may replace this worker without
 // losing work.
 func (s *RelayOperationalState) SafeToReplace(harness HarnessKind) bool {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayOperationalState::safe_to_replace")
+	if s.HarnessPreparationFailed() {
+		// This process can never start its harness. Accepted commands stay
+		// in the journal; independently running processes must still settle.
+		return s.CheckpointBarrier == nil &&
+			len(s.ActiveUserShells) == 0 &&
+			len(s.ActiveAgentTerminals) == 0 &&
+			len(s.BackgroundCommands) == 0 &&
+			s.NativeAgentCount == 0 &&
+			len(s.ToolsInFlight) == 0
+	}
+	facts := s.Facts()
+	return SafeToReplace(&facts, harness)
 }
 
 // SafeToMove is Move's purpose-specific interruption decision.
 func (s *RelayOperationalState) SafeToMove(harness HarnessKind, purpose MovePurpose) bool {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayOperationalState::safe_to_move")
+	if purpose == MovePurposeManual {
+		return s.SafeToReplace(harness)
+	}
+	facts := s.Facts()
+	return SafeToMove(&facts, harness, purpose)
 }
 
 // HarnessPreparationFailed: terminal startup failure; this worker cannot
@@ -719,7 +990,8 @@ func (s *RelayOperationalState) HarnessPreparationFailed() bool {
 
 // Quiet is why the session is or is not quiet right now, for a log line.
 func (s *RelayOperationalState) Quiet() Quiet {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayOperationalState::quiet")
+	facts := s.Facts()
+	return QuietAt(&facts, EpochMillis())
 }
 
 // SafeForCheckpoint reports whether a routine checkpoint may admit a barrier
@@ -733,14 +1005,16 @@ func (s *RelayOperationalState) SafeForCheckpoint(harness HarnessKind) bool {
 // CheckpointBackgroundBlocker is the same provider-owned work prerequisite
 // used by checkpoint admission.
 func (s *RelayOperationalState) CheckpointBackgroundBlocker(harness HarnessKind) (string, bool) {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayOperationalState::checkpoint_background_blocker")
+	facts := s.Facts()
+	return CheckpointBlocker(&facts, harness)
 }
 
 // RoutineCheckpointWait is whether a routine checkpoint may start now
 // (nil), or why it has to wait. See the activity module's
 // RoutineCheckpointWait.
-func (s *RelayOperationalState) RoutineCheckpointWait(harness HarnessKind) *CheckpointWait {
-	panic("unported: mj-core/src/relay/snapshot.rs RelayOperationalState::routine_checkpoint_wait")
+func (s *RelayOperationalState) RoutineCheckpointWait(harness HarnessKind) CheckpointWait {
+	facts := s.Facts()
+	return RoutineCheckpointWait(&facts, harness)
 }
 
 // On-disk record format for a relay event.
@@ -1051,7 +1325,44 @@ type TerminalRelayCommandIdentity struct {
 // MatchesCommand: mailbox keys preserve event identity across
 // plain-text/structured retries.
 func (h *HandledRelayCommand) MatchesCommand(command RelayCommand) (bool, error) {
-	panic("unported: mj-core/src/relay/snapshot.rs HandledRelayCommand::matches_command")
+	if h.Command != nil {
+		if relayCommandsEqual(h.Command, command) {
+			return true, nil
+		}
+		original, isDelivery := h.Command.(RelayCommandDeliverMailboxEvent)
+		retry, retryIsDelivery := command.(RelayCommandDeliverMailboxEvent)
+		return isDelivery && retryIsDelivery && original.Event.Key == retry.Event.Key, nil
+	}
+	if h.TerminalIdentity == nil {
+		return false, nil
+	}
+	if delivery, ok := command.(RelayCommandDeliverMailboxEvent); ok &&
+		h.TerminalIdentity.MailboxEventKey != nil && *h.TerminalIdentity.MailboxEventKey == delivery.Event.Key {
+		return true, nil
+	}
+	digest, err := relayCommandDigest(command)
+	if err != nil {
+		return false, err
+	}
+	return h.TerminalIdentity.Digest == digest, nil
+}
+
+// relayCommandsEqual is Rust's derived PartialEq on RelayCommand: the same
+// variant with the same values. Values that differ only in Go's nil versus
+// empty slices are equal, as they serialize alike.
+func relayCommandsEqual(a, b RelayCommand) bool {
+	if reflect.DeepEqual(a, b) {
+		return true
+	}
+	if reflect.TypeOf(a) != reflect.TypeOf(b) {
+		return false
+	}
+	left, err := relayMarshalJSON(a)
+	if err != nil {
+		return false
+	}
+	right, err := relayMarshalJSON(b)
+	return err == nil && bytes.Equal(left, right)
 }
 
 func relayCommandDigest(command RelayCommand) (string, error) {
@@ -1265,6 +1576,39 @@ func (s *RelaySnapshot) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*plain)(s))
 }
 
+// MarshalJSON writes the always-present collections as [] or {} when empty,
+// as serde writes them, never null.
+func (s RelaySnapshot) MarshalJSON() ([]byte, error) {
+	type plain RelaySnapshot
+	s.AssessmentQuestions = relayNonNil(s.AssessmentQuestions)
+	s.HandbackChecks.Checked = relayNonNil(s.HandbackChecks.Checked)
+	s.ConfigOptions = relayNonNil(s.ConfigOptions)
+	s.AvailableCommands = relayNonNil(s.AvailableCommands)
+	s.QueuedPrompts = relayNonNil(s.QueuedPrompts)
+	s.Config = relayNonNilMap(s.Config)
+	s.HandledCommands = relayNonNilMap(s.HandledCommands)
+	s.Dispatches = relayNonNilMap(s.Dispatches)
+	return relayMarshalJSON(plain(s))
+}
+
+// MarshalJSON writes the always-present collections as [] or {} when empty,
+// as serde writes them, never null.
+func (s RelayOperationalState) MarshalJSON() ([]byte, error) {
+	type plain RelayOperationalState
+	s.ConfigOptions = relayNonNil(s.ConfigOptions)
+	s.AvailableCommands = relayNonNil(s.AvailableCommands)
+	s.QueuedPrompts = relayNonNil(s.QueuedPrompts)
+	s.Config = relayNonNilMap(s.Config)
+	return relayMarshalJSON(plain(s))
+}
+
+func relayNonNilMap[K comparable, V any](entries map[K]V) map[K]V {
+	if entries == nil {
+		return map[K]V{}
+	}
+	return entries
+}
+
 type SettledHarnessTurn struct {
 	StartOrdinal uint64 `json:"start_ordinal"`
 	StopReason   string `json:"stop_reason"`
@@ -1289,7 +1633,11 @@ type HarnessTurnWork struct {
 // history is stored as written so journal digests stay valid; every reader
 // that hands it to Jev or the question locator goes through here.
 func (s *RelaySnapshot) AuthorizationContext() *ContextHistory {
-	panic("unported: mj-core/src/relay/snapshot.rs RelaySnapshot::authorization_context")
+	if s.AssessmentContext == nil {
+		return nil
+	}
+	view := s.AssessmentContext.ReaderView()
+	return &view
 }
 
 // AutonomousHarnessTurn is the open turn that began without a prompt.
@@ -1302,7 +1650,24 @@ func (s *RelaySnapshot) AutonomousHarnessTurn() *StoredHarnessTurn {
 }
 
 func NewRelaySnapshot(sessionID string) RelaySnapshot {
-	panic("unported: mj-core/src/relay/snapshot.rs RelaySnapshot::new")
+	context := DefaultContextHistory()
+	return RelaySnapshot{
+		HandbackChecks:      HandbackChecks{Checked: []string{}},
+		AssessmentQuestions: []string{},
+		AssessmentContext:   &context,
+		FormatVersion:       RelayStateVersion,
+		SessionID:           sessionID,
+		Execution:           RelayExecutionStateIdle,
+		LatestDigest:        RelayEventGenesisDigest,
+		AcknowledgedDigest:  RelayEventGenesisDigest,
+		RecoveryFloorDigest: RelayEventGenesisDigest,
+		ConfigOptions:       []acpschema.SessionConfigOption{},
+		AvailableCommands:   []acpschema.AvailableCommand{},
+		Config:              map[string]string{},
+		QueuedPrompts:       []StoredQueuedRelayCommand{},
+		HandledCommands:     map[string]HandledRelayCommand{},
+		Dispatches:          map[string]RelayDispatchRecord{},
+	}
 }
 
 // ClearContextInProgress reports whether a /clear is still waiting or
@@ -1333,24 +1698,168 @@ func (s *RelaySnapshot) ClearContextStartedAtMs() *int64 {
 // OpenRequest: semantic input is derived from the request and the person's
 // durable frontier.
 func (s *RelaySnapshot) OpenRequest() *OpenRequest {
-	panic("unported: mj-core/src/relay/snapshot.rs RelaySnapshot::open_request")
+	if s.Request == nil || s.ManagedSubagent || s.Request.Question.CompletedOrdinal <= s.PersonInputThrough {
+		return nil
+	}
+	return s.Request
 }
 
 // ValidateNotificationCommand is used at command admission and during
 // journal replay. The error text is the refusal shown to the person.
 func (s *RelaySnapshot) ValidateNotificationCommand(command RelayCommand) error {
-	panic("unported: mj-core/src/relay/snapshot.rs RelaySnapshot::validate_notification_command")
+	switch command := command.(type) {
+	case RelayCommandClearNotifications:
+		if s.CheckpointBarrier != nil {
+			return errors.New("The session is checkpointing")
+		}
+		if s.NotificationStack.Revision != command.Revision || len(s.NotificationStack.Entries) == 0 {
+			return errors.New("The notification stack changed")
+		}
+	case RelayCommandNotificationsRead:
+		if s.CheckpointBarrier != nil {
+			return errors.New("The session is checkpointing")
+		}
+		if command.Through > s.LatestOrdinal {
+			return errors.New("The read cursor is ahead of the relay")
+		}
+	}
+	return nil
 }
 
 // RestartContinuationID chooses recovery identity from this ledger so
 // occupied generations cannot reject a restart transfer. Replay sees the same
 // ledger and choice.
 func (s *RelaySnapshot) RestartContinuationID(commandID string) string {
-	panic("unported: mj-core/src/relay/snapshot.rs RelaySnapshot::restart_continuation_id")
+	id := RestartContinuationID(commandID)
+	for {
+		if _, occupied := s.HandledCommands[id]; !occupied {
+			return id
+		}
+		id = RestartContinuationID(id)
+	}
 }
 
 func (s *RelaySnapshot) OperationalState() RelayOperationalState {
-	panic("unported: mj-core/src/relay/snapshot.rs RelaySnapshot::operational_state")
+	undelivered := []string{}
+	for _, event := range s.PendingMailboxEvents {
+		undelivered = append(undelivered, event.Key)
+	}
+	if s.MailboxHookLease != nil {
+		for _, event := range s.MailboxHookLease.Events {
+			undelivered = append(undelivered, event.Key)
+		}
+	}
+	nativeAgents := []NativeAgent{}
+	nativeAgentCount := 0
+	for _, key := range slices.Sorted(maps.Keys(s.NativeAgents)) {
+		agent := s.NativeAgents[key]
+		nativeAgents = append(nativeAgents, agent)
+		if agent.State == NativeAgentStateRunning {
+			nativeAgentCount++
+		}
+	}
+	var capacityRetry *CapacityRetry
+	if s.CapacityRetry != nil && !s.CapacityRetry.Submitted {
+		retry := *s.CapacityRetry
+		capacityRetry = &retry
+	}
+	var activePrompt *ActiveRelayPrompt
+	if s.ActivePrompt != nil {
+		activePrompt = &ActiveRelayPrompt{
+			CommandID:   s.ActivePrompt.CommandID,
+			CreatedAtMs: s.ActivePrompt.CreatedAtMs,
+			StartedAtMs: s.ActivePrompt.StartedAtMs,
+		}
+	}
+	queuedPrompts := make([]QueuedRelayPrompt, 0, len(s.QueuedPrompts))
+	for _, prompt := range s.QueuedPrompts {
+		queuedPrompts = append(queuedPrompts, QueuedRelayPrompt{CommandID: prompt.CommandID, CreatedAtMs: prompt.CreatedAtMs})
+	}
+	activeUserShells := []ActiveUserShell{}
+	for _, key := range slices.Sorted(maps.Keys(s.ActiveUserShells)) {
+		activeUserShells = append(activeUserShells, s.ActiveUserShells[key])
+	}
+	var checkpointReady *RelayCursor
+	if s.CheckpointReadyThrough != nil && s.CheckpointReadyDigest != nil {
+		checkpointReady = &RelayCursor{Ordinal: *s.CheckpointReadyThrough, Digest: *s.CheckpointReadyDigest}
+	}
+	var harnessTurn *HarnessTurn
+	if s.HarnessTurn != nil {
+		harnessTurn = &HarnessTurn{StartedAtMs: s.HarnessTurn.StartedAtMs}
+	}
+	var openRequest *OpenRequest
+	if request := s.OpenRequest(); request != nil {
+		copied := *request
+		openRequest = &copied
+	}
+	config := maps.Clone(s.Config)
+	if config == nil {
+		config = map[string]string{}
+	}
+	return RelayOperationalState{
+		Assessment:                    s.Assessment,
+		OpenRequest:                   openRequest,
+		NotificationStack:             s.NotificationStack,
+		NotificationsReadThrough:      s.NotificationsReadThrough,
+		PersonInputThrough:            s.PersonInputThrough,
+		WorkLiveness:                  s.WorkLiveness,
+		UndeliveredMailboxEventKeys:   undelivered,
+		AssessmentContext:             s.AssessmentContext,
+		TurnCompletion:                s.TurnCompletion,
+		Continuation:                  s.Continuation,
+		NativeAgents:                  nativeAgents,
+		Steering:                      s.Steering,
+		CancellingPromptID:            s.CancellingPromptID,
+		ClearContextStartedAtMs:       s.ClearContextStartedAtMs(),
+		NativeAgentCount:              nativeAgentCount,
+		Goal:                          s.Goal,
+		CapacityRetry:                 capacityRetry,
+		RetryAssessmentPending:        (s.Assessment != nil && (s.Assessment.Status == StatusPending || s.Assessment.Status == StatusFailed)) || s.RetryAssessment != nil,
+		ActivityTurnStartedAtMs:       s.ActivityTurnStartedAtMs,
+		StoreID:                       s.StoreID,
+		SessionID:                     s.SessionID,
+		IdleSinceMs:                   s.IdleSinceMs,
+		Execution:                     s.Execution,
+		LatestOrdinal:                 s.LatestOrdinal,
+		LatestDigest:                  s.LatestDigest,
+		AcknowledgedThrough:           s.AcknowledgedThrough,
+		AcknowledgedDigest:            s.AcknowledgedDigest,
+		RecoveryFloorOrdinal:          s.RecoveryFloorOrdinal,
+		RecoveryFloorDigest:           s.RecoveryFloorDigest,
+		NativeSessionID:               s.NativeSessionID,
+		NativeContinuityLost:          s.NativeContinuityLost,
+		ReplacedUnusedNativeSessionID: s.ReplacedUnusedNativeSessionID,
+		// Readiness belongs to the current worker process, so durable
+		// snapshots must never carry it across a restart.
+		AgentCapabilities: s.AgentCapabilities,
+		AgentInfo:         s.AgentInfo,
+		Runtime:           s.Runtime,
+		// Steering support belongs to the connected harness, like readiness.
+		ConfigOptions:     relayNonNil(s.ConfigOptions),
+		Modes:             s.Modes,
+		AvailableCommands: relayNonNil(s.AvailableCommands),
+		Config:            config,
+		ActivePrompt:      activePrompt,
+		QueuedPrompts:     queuedPrompts,
+		ActiveUserShells:  activeUserShells,
+		CheckpointBarrier: s.CheckpointBarrier,
+		CheckpointReady:   checkpointReady,
+		// Live process facts (tool calls in flight, background commands,
+		// provider task knowledge) are filled in by the worker's durable
+		// relay, the only place that can see live processes; a tool call a
+		// dead harness had open is not inherited by its replacement.
+		HarnessTurn:                   harnessTurn,
+		LastHarnessTurnStartedOrdinal: s.LastHarnessTurnStartedOrdinal,
+	}
+}
+
+// relayNonNil is items, or an empty slice for nil, so a present empty list
+// encodes as [] as serde writes a Vec.
+func relayNonNil[T any](items []T) []T {
+	if items == nil {
+		return []T{}
+	}
+	return items
 }
 
 func (s *RelaySnapshot) RetainedThrough() uint64 {

@@ -113,13 +113,70 @@ func (s ProfileCapabilitiesSnapshot) MarshalJSON() ([]byte, error) {
 // Options: completed profiles contribute choices while pending profiles
 // remain unknown. Nil means no profile has completed discovery yet.
 func (s *ProfileCapabilitiesSnapshot) Options(config *Config, model *string) *SubagentOptions {
-	panic("unported: mj-core/src/profile_capabilities.rs ProfileCapabilitiesSnapshot::options")
+	var identity *string
+	if model != nil {
+		id := s.ModelID(config, *model)
+		identity = &id
+	}
+	options := SubagentOptions{Models: []SessionConfigChoice{}, Efforts: []SessionConfigChoice{}, Unavailable: []string{}}
+	completed := false
+	for id, profile := range config.EnabledProfiles() {
+		entry, ok := s.Profiles[profile.CapabilitiesKey(id)]
+		if !ok {
+			options.Unavailable = append(options.Unavailable, id+": discovery pending")
+			continue
+		}
+		switch entry.Choices.Kind {
+		case CapabilityStatePending:
+			options.Unavailable = append(options.Unavailable, id+": discovery pending")
+		case CapabilityStateFailed:
+			completed = true
+			options.Unavailable = append(options.Unavailable, id+": "+entry.Choices.Error)
+		case CapabilityStateReady:
+			completed = true
+			choices := entry.Choices.Value
+			options.Models = append(options.Models, choices.Models...)
+			if identity == nil {
+				continue
+			}
+			preferred := *identity
+			if model != nil {
+				preferred = *model
+			}
+			offer, ok := Offer(choices.Models, *identity, preferred)
+			if !ok {
+				continue
+			}
+			efforts, ok := entry.Efforts[offer.Value]
+			switch {
+			case !ok || efforts.Kind == CapabilityStatePending:
+				options.Unavailable = append(options.Unavailable, id+": effort discovery pending")
+			case efforts.Kind == CapabilityStateReady:
+				mergeEfforts(&options.Efforts, efforts.Value)
+			case efforts.Kind == CapabilityStateFailed:
+				options.Unavailable = append(options.Unavailable, id+": "+efforts.Error)
+			}
+		}
+	}
+	options.Models = MergedChoices(options.Models)
+	if !completed {
+		return nil
+	}
+	return &options
 }
 
 // ModelOffers is the models completed enabled profiles offer, one offer per
 // value, with usagePriced saying which profiles are billed per use.
 func (s *ProfileCapabilitiesSnapshot) ModelOffers(config *Config, usagePriced func(string) bool) []AutoconfigureModelOffer {
-	panic("unported: mj-core/src/profile_capabilities.rs ProfileCapabilitiesSnapshot::model_offers")
+	ready := []AutoconfigureProfileModels{}
+	for id, profile := range config.EnabledProfiles() {
+		entry, ok := s.Profiles[profile.CapabilitiesKey(id)]
+		if !ok || entry.Choices.Kind != CapabilityStateReady {
+			continue
+		}
+		ready = append(ready, AutoconfigureProfileModels{Models: entry.Choices.Value.Models, UsagePriced: usagePriced(id)})
+	}
+	return ModelOffers(ready)
 }
 
 // EffortBlockers is why model's efforts are not fully known: a profile that
@@ -127,25 +184,80 @@ func (s *ProfileCapabilitiesSnapshot) ModelOffers(config *Config, usagePriced fu
 // model whose effort discovery is pending or failed. A profile whose own
 // discovery failed is not listed: nothing shows that it offers the model.
 func (s *ProfileCapabilitiesSnapshot) EffortBlockers(config *Config, model string) []string {
-	panic("unported: mj-core/src/profile_capabilities.rs ProfileCapabilitiesSnapshot::effort_blockers")
+	identity := s.ModelID(config, model)
+	blockers := []string{}
+	for id, profile := range config.EnabledProfiles() {
+		entry, ok := s.Profiles[profile.CapabilitiesKey(id)]
+		if !ok {
+			blockers = append(blockers, id+": discovery pending")
+			continue
+		}
+		switch entry.Choices.Kind {
+		case CapabilityStatePending:
+			blockers = append(blockers, id+": discovery pending")
+		case CapabilityStateFailed:
+		case CapabilityStateReady:
+			offer, ok := Offer(entry.Choices.Value.Models, identity, model)
+			if !ok {
+				continue
+			}
+			efforts, ok := entry.Efforts[offer.Value]
+			switch {
+			case !ok || efforts.Kind == CapabilityStatePending:
+				blockers = append(blockers, id+": effort discovery pending")
+			case efforts.Kind == CapabilityStateFailed:
+				blockers = append(blockers, id+": "+efforts.Error)
+			}
+		}
+	}
+	return blockers
 }
 
 // ModelID resolves once over the ready enabled profiles in this publication.
 func (s *ProfileCapabilitiesSnapshot) ModelID(config *Config, wanted string) string {
-	panic("unported: mj-core/src/profile_capabilities.rs ProfileCapabilitiesSnapshot::model_id")
+	models := []SessionConfigChoice{}
+	for id, profile := range config.EnabledProfiles() {
+		entry, ok := s.Profiles[profile.CapabilitiesKey(id)]
+		if ok && entry.Choices.Kind == CapabilityStateReady {
+			models = append(models, entry.Choices.Value.Models...)
+		}
+	}
+	return ModelID(models, wanted)
 }
 
 // ForConfig limits a public projection to saved enabled profiles. Draft
 // identities are controller-private; environment sources are never
 // published.
 func (s *ProfileCapabilitiesSnapshot) ForConfig(config *Config) ProfileCapabilitiesSnapshot {
-	panic("unported: mj-core/src/profile_capabilities.rs ProfileCapabilitiesSnapshot::for_config")
+	profiles := map[string]ProfileCapabilities{}
+	for id, profile := range config.EnabledProfiles() {
+		key := profile.CapabilitiesKey(id)
+		if entry, ok := s.Profiles[key]; ok {
+			profiles[key] = entry
+		}
+	}
+	return ProfileCapabilitiesSnapshot{Profiles: profiles}
 }
 
 // Covers reports whether every enabled profile in config has ready model
 // choices and every model config selects on it has ready effort choices.
 func (s *ProfileCapabilitiesSnapshot) Covers(config *Config) bool {
-	panic("unported: mj-core/src/profile_capabilities.rs ProfileCapabilitiesSnapshot::covers")
+	for id, profile := range config.EnabledProfiles() {
+		entry, ok := s.Profiles[profile.CapabilitiesKey(id)]
+		if !ok || entry.Choices.Kind != CapabilityStateReady {
+			return false
+		}
+		for _, wanted := range config.SelectedModels(id) {
+			offer, ok := ModelCatalogResolve(entry.Choices.Value.Models, wanted)
+			if !ok {
+				continue
+			}
+			if efforts, ok := entry.Efforts[offer.Value]; !ok || efforts.Kind != CapabilityStateReady {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func mergeEfforts(into *[]SessionConfigChoice, choices []SessionConfigChoice) {

@@ -5769,6 +5769,7 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
     };
     let sealed_preparation = |sealed: mj_core::state::MoveSelection, sized_by_default: bool| {
         mj_core::state::MovePreparation {
+            container_upgrade: None,
             destination_checks: Default::default(),
             workspace: None,
             in_place: false,

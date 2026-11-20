@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 )
 
 type TargetRuntimeSettings struct {
@@ -125,7 +127,21 @@ func ContainerSettingsUpgradeSupported(session *SessionRecord) bool {
 }
 
 func ContainerSettingsRequested(session *SessionRecord) ContainerSettings {
-	panic("unported: mj-core/src/state/target_runtime.rs ContainerSettings::requested")
+	settings := ContainerSettings{
+		AdditionalMounts:   slices.Clone(session.AdditionalMounts),
+		ResourceAllocation: session.ResourceAllocation,
+	}
+	// A container on the default image follows the default to the one this
+	// Mjolnir names; a configured image stays as it was.
+	if applied := containerSettingsAppliedTo(session); applied != nil && applied.DefaultImage != nil {
+		var image *string
+		if *applied.DefaultImage != nil {
+			family := defaultFamilyImage(**applied.DefaultImage)
+			image = &family
+		}
+		settings.DefaultImage = &image
+	}
+	return settings
 }
 
 // ContainerSettingsApplied is the snapshot to record for a container just
@@ -254,13 +270,88 @@ func unmarshalTargetConnection(data []byte) (TargetConnection, error) {
 // machine's current configuration, as a resume does since J-21. Settings of
 // another kind, or that reach another place, are not taken.
 func (s *TargetRuntimeSettings) WithCurrentSSHOptions(current *TargetRuntimeSettings) *TargetRuntimeSettings {
-	panic("unported: mj-core/src/state/target_runtime.rs TargetRuntimeSettings::with_current_ssh_options")
+	recordedConnection, ok := s.Connection.(TargetConnectionSsh)
+	if !ok {
+		return nil
+	}
+	nowConnection, ok := current.Connection.(TargetConnectionSsh)
+	if !ok {
+		return nil
+	}
+	recorded, now := recordedConnection.SSH, nowConnection.SSH
+	if s.Kind != current.Kind || sshConnectionEqual(recorded, now) {
+		return nil
+	}
+	location := func(ssh *SshConnection) ManagedWorktreeTargetSsh {
+		destination := ssh.Host
+		if ssh.User != nil {
+			destination = *ssh.User + "@" + ssh.Host
+		}
+		return ManagedWorktreeTargetSsh{Destination: destination, SSHArgs: slices.Clone(ssh.ExtraArgs)}
+	}
+	if !location(&recorded).SameLocation(location(&now)) {
+		return nil
+	}
+	refreshed := *s
+	refreshed.Environment = maps.Clone(s.Environment)
+	connection := recorded
+	connection.IdentityFile = now.IdentityFile
+	connection.ExtraArgs = slices.Clone(now.ExtraArgs)
+	refreshed.Connection = TargetConnectionSsh{SSH: connection}
+	return &refreshed
 }
 
 // TargetRuntimeSettingsFromTemplate is From<&TargetTemplate> for
 // TargetRuntimeSettings (and, through its address, for the Arc form).
 func TargetRuntimeSettingsFromTemplate(template TargetTemplate) TargetRuntimeSettings {
-	panic("unported: mj-core/src/state/target_runtime.rs From<&TargetTemplate> for TargetRuntimeSettings")
+	var connection TargetConnection = TargetConnectionLocal{}
+	switch t := template.(type) {
+	case TargetTemplateSshBare:
+		connection = TargetConnectionSsh{SSH: t.SSH}
+	case TargetTemplateSshPodman:
+		connection = TargetConnectionSsh{SSH: t.SSH}
+	case TargetTemplateSshDocker:
+		connection = TargetConnectionSsh{SSH: t.SSH}
+	case TargetTemplateSshAppleContainer:
+		connection = TargetConnectionSsh{SSH: t.SSH}
+	case TargetTemplateSshNitro:
+		connection = TargetConnectionSsh{SSH: t.SSH}
+	case TargetTemplateAwsEc2:
+		profile := "default"
+		if t.AWSProfile != nil {
+			profile = *t.AWSProfile
+		}
+		connection = TargetConnectionAws{
+			Profile:      profile,
+			Region:       t.Region,
+			SSHUser:      t.SSHUser,
+			IdentityFile: t.IdentityFile,
+			SSHArgs:      slices.Clone(t.SSHArgs),
+		}
+	}
+	environment := map[string]string{}
+	if container := template.Container(); container != nil {
+		environment = maps.Clone(container.Environment.Resolved())
+		if environment == nil {
+			environment = map[string]string{}
+		}
+	}
+	return TargetRuntimeSettings{
+		Kind:            template.KindName(),
+		Connection:      connection,
+		ExecutionPolicy: template.ExecutionPolicy(),
+		Environment:     environment,
+	}
+}
+
+// MarshalJSON writes an absent environment as an empty map, as serde
+// writes a BTreeMap.
+func (s TargetRuntimeSettings) MarshalJSON() ([]byte, error) {
+	type plain TargetRuntimeSettings
+	if s.Environment == nil {
+		s.Environment = map[string]string{}
+	}
+	return json.Marshal(plain(s))
 }
 
 // defaultFamilyImage is which of today's defaults a recorded default image

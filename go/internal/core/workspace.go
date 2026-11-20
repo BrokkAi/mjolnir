@@ -5,10 +5,20 @@
 package core
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
 )
 
 // DefaultWorkspaceID is the stable identity assigned to the workspace that
@@ -194,7 +204,19 @@ func (l ConversationLayout) MarshalJSON() ([]byte, error) {
 	if l.Pins == nil {
 		l.Pins = map[string]uint32{}
 	}
-	return json.Marshal(plain(l))
+	// encoding/json orders integer keys as text ("10" before "9"); the Rust
+	// BTreeMap<u32, _> writes them in numeric order.
+	sessions := make(jsonvalue.Object, 0, len(l.Sessions))
+	for _, pane := range slices.Sorted(maps.Keys(l.Sessions)) {
+		sessions = append(sessions, jsonvalue.Member{Key: strconv.FormatUint(uint64(pane), 10), Value: l.Sessions[pane]})
+	}
+	return json.Marshal(struct {
+		Root     LayoutNode        `json:"root"`
+		Focus    uint32            `json:"focus"`
+		Sessions jsonvalue.Object  `json:"sessions"`
+		Browse   *uint32           `json:"browse"`
+		Pins     map[string]uint32 `json:"pins"`
+	}{l.Root, l.Focus, sessions, l.Browse, l.Pins})
 }
 
 func (l *ConversationLayout) UnmarshalJSON(data []byte) error {
@@ -230,7 +252,43 @@ func NewConversationLayout() ConversationLayout {
 
 // Validate validates a layout before applying or storing it.
 func (l *ConversationLayout) Validate() error {
-	panic("unported: mj-core/src/workspace.rs ConversationLayout::validate")
+	var ids []uint32
+	if err := l.Root.collectPaneIDs(&ids); err != nil {
+		return err
+	}
+	if !slices.Contains(ids, l.Focus) {
+		return fmt.Errorf("focused pane %d is not in the layout", l.Focus)
+	}
+	if l.Browse != nil {
+		browse := *l.Browse
+		if !slices.Contains(ids, browse) {
+			return fmt.Errorf("Browse pane %d is not in the layout", browse)
+		}
+		badges := map[uint32]bool{}
+		for _, session := range slices.Sorted(maps.Keys(l.Pins)) {
+			badge := l.Pins[session]
+			pinned := false
+			for pane, shown := range l.Sessions {
+				if pane != browse && shown == session {
+					pinned = true
+					break
+				}
+			}
+			if !pinned {
+				return fmt.Errorf("pin %s is not in a pinned pane", session)
+			}
+			if badges[badge] {
+				return fmt.Errorf("duplicate pin badge %d", badge)
+			}
+			badges[badge] = true
+		}
+	}
+	for _, pane := range slices.Sorted(maps.Keys(l.Sessions)) {
+		if !slices.Contains(ids, pane) {
+			return fmt.Errorf("session is recorded for pane %d, which is not in the layout", pane)
+		}
+	}
+	return nil
 }
 
 type WorkspaceRecord struct {
@@ -267,9 +325,24 @@ func (d *DetachedDraft) UnmarshalJSON(data []byte) error {
 // NormalizeWorkspaceName normalizes a display name and returns the
 // case-insensitive uniqueness key.
 func NormalizeWorkspaceName(name string) (string, string, error) {
-	panic("unported: mj-core/src/workspace.rs normalize_workspace_name")
+	name = strings.TrimFunc(name, unicode.IsSpace)
+	length := utf8.RuneCountInString(name)
+	if length == 0 {
+		return "", "", errors.New("workspace name is empty")
+	}
+	if length > 64 {
+		return "", "", errors.New("workspace name is longer than 64 characters")
+	}
+	if strings.ContainsFunc(name, unicode.IsControl) {
+		return "", "", errors.New("workspace name contains a control character")
+	}
+	return name, strings.ToLower(name), nil
 }
 
 func NewWorkspaceID() (string, error) {
-	panic("unported: mj-core/src/workspace.rs new_workspace_id")
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate workspace id: %w", err)
+	}
+	return hex.EncodeToString(random[:]), nil
 }

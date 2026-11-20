@@ -110,6 +110,34 @@ type ActivityFacts struct {
 	BackgroundNeeded *bool `json:"background_needed,omitempty"`
 }
 
+// MarshalJSON writes a nil ToolsInFlight as an empty list, as serde writes a
+// Vec.
+func (f ActivityFacts) MarshalJSON() ([]byte, error) {
+	type plain ActivityFacts
+	if f.ToolsInFlight == nil {
+		f.ToolsInFlight = []InFlightToolCall{}
+	}
+	return agentMarshalJSON(plain(f))
+}
+
+// UnmarshalJSON requires the fields serde requires: every one that is not an
+// Option.
+func (f *ActivityFacts) UnmarshalJSON(data []byte) error {
+	if err := agentRequireFields(data, "execution", "queued_commands", "tools_in_flight",
+		"background_commands", "active_user_shells", "active_agent_terminals", "goal_active",
+		"goal_running", "goal_pending_resume", "goal_decision", "goal_synchronized",
+		"checkpoint_only", "checkpoint_barrier", "capacity_retry_armed"); err != nil {
+		return err
+	}
+	type plain ActivityFacts
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*f = ActivityFacts(decoded)
+	return nil
+}
+
 // DefaultActivityFacts is a session with nothing happening. The only place
 // the Idle execution default is chosen, for tests and for building facts
 // field by field.
@@ -476,7 +504,69 @@ func SilenceNote(state *ActivityState, nowMs int64) (string, bool) {
 // Pure: the same facts always give the same state, with no clock and no I/O,
 // so the transitions can be driven directly from a test.
 func Classify(facts *ActivityFacts) ActivityState {
-	panic("unported: mj-core/src/activity.rs classify")
+	switch facts.Execution {
+	case RelayExecutionStateClosed:
+		return ActivityState{Kind: ActivityStateClosed}
+	case RelayExecutionStateClosing:
+		return ActivityState{Kind: ActivityStateClosing}
+	}
+	turnStartedAtMs := facts.PromptStartedAtMs
+	if turnStartedAtMs == nil {
+		turnStartedAtMs = facts.HarnessTurnStartedAtMs
+	}
+	if turnStartedAtMs == nil {
+		turnStartedAtMs = facts.TurnStartedAtMs
+	}
+	// A bare `Running` flag is not on its own evidence of a turn: the durable
+	// projection can lag behind a turn that has already ended, and presenting
+	// a stale flag as live work is how a finished session came to look busy.
+	// Something live has to corroborate it — a prompt, a turn the harness
+	// opened, a step in flight, or a native goal actually running.
+	runningIsCorroborated := facts.Execution == RelayExecutionStateRunning &&
+		(facts.CurrentStepStartedAtMs != nil || facts.GoalRunning)
+	if facts.PromptStartedAtMs != nil || facts.HarnessTurnStartedAtMs != nil {
+		return ActivityState{Kind: ActivityStateTurn, StartedAtMs: turnStartedAtMs, LastActivityAtMs: facts.LastAcpActivityAtMs}
+	}
+	// A harness that marks no turn of their own is visible only through the
+	// tool calls it has open, so those are a state in their own right, and a
+	// named tool is a better answer than an unnamed turn.
+	if len(facts.ToolsInFlight) > 0 {
+		tool := facts.ToolsInFlight[0]
+		startedAtMs := tool.StartedAtMs
+		return ActivityState{
+			Kind:             ActivityStateTool,
+			ToolCallID:       tool.ToolCallID,
+			StartedAtMs:      &startedAtMs,
+			LastActivityAtMs: facts.LastAcpActivityAtMs,
+		}
+	}
+	if facts.GoalRunning || runningIsCorroborated {
+		return ActivityState{Kind: ActivityStateTurn, StartedAtMs: turnStartedAtMs, LastActivityAtMs: facts.LastAcpActivityAtMs}
+	}
+	if facts.InferredIdleSinceMs != nil &&
+		facts.ActiveUserShells == 0 &&
+		facts.QueuedCommands == 0 &&
+		!facts.GoalActive &&
+		!facts.GoalRunning &&
+		!facts.CapacityRetryArmed {
+		sinceMs := *facts.InferredIdleSinceMs
+		return ActivityState{Kind: ActivityStateIdle, SinceMs: &sinceMs}
+	}
+	backgroundUnneeded := facts.BackgroundNeeded != nil && !*facts.BackgroundNeeded
+	if (facts.BackgroundCommands > 0 && !backgroundUnneeded) || facts.ActiveUserShells > 0 {
+		return ActivityState{Kind: ActivityStateBackground, StartedAtMs: facts.BackgroundStartedAtMs}
+	}
+	if facts.ExpectedContinuation != nil {
+		sinceMs := *facts.ExpectedContinuation
+		return ActivityState{Kind: ActivityStateExpecting, SinceMs: &sinceMs}
+	}
+	if facts.GoalActive {
+		return ActivityState{Kind: ActivityStateGoal}
+	}
+	if facts.CapacityRetryArmed {
+		return ActivityState{Kind: ActivityStateRetry}
+	}
+	return ActivityState{Kind: ActivityStateIdle, SinceMs: facts.IdleSinceMs}
 }
 
 // HasWorkInFlight reports whether anything the worker owns would be
@@ -543,7 +633,53 @@ func (q Quiet) Reason() string {
 }
 
 func QuietAt(facts *ActivityFacts, nowMs int64) Quiet {
-	panic("unported: mj-core/src/activity.rs quiet_at")
+	no := func(reason string) Quiet { return Quiet{Kind: QuietNo, NoReason: reason} }
+	if facts.Execution == RelayExecutionStateClosed {
+		return Quiet{Kind: QuietYes}
+	}
+	// Layer 1: observed turn facts. Jev never overrides these.
+	state := Classify(facts)
+	if state.Kind == ActivityStateTurn {
+		return no("turn in flight")
+	}
+	if state.Kind == ActivityStateTool {
+		return no("tool call in flight")
+	}
+	if TurnImminent(facts, nowMs) {
+		return no("background task settled; its notification turn is about to start")
+	}
+	if facts.Execution != RelayExecutionStateIdle {
+		return no("execution flag is not idle")
+	}
+	if facts.QueuedCommands > 0 {
+		return no("queued command")
+	}
+	if facts.GoalRunning || facts.GoalPendingResume || facts.GoalDecision {
+		return no("goal owns the session")
+	}
+	if facts.AcpReady != nil && !*facts.AcpReady {
+		return no("harness session still opening")
+	}
+	if facts.BackgroundWorkKnown != nil && !*facts.BackgroundWorkKnown {
+		return no("provider background state unknown")
+	}
+	if facts.CapacityRetryArmed || state.Kind == ActivityStateRetry {
+		return no("provider retry armed")
+	}
+	if facts.ActiveUserShells > 0 {
+		return no("user shell open")
+	}
+	// Layers 2 and 3: leftover processes, unless Jev judged them unneeded.
+	if leftoverProcessesCount(facts) {
+		return no("background work")
+	}
+	if state.HasWorkInFlight() {
+		return no("session state is not idle")
+	}
+	if facts.CheckpointBarrier {
+		return Quiet{Kind: QuietBarrier}
+	}
+	return Quiet{Kind: QuietYes}
 }
 
 // CanSubmit reports whether a prompt could start now: no turn, tool, queued
@@ -559,7 +695,29 @@ func CanSubmit(facts *ActivityFacts) bool {
 // set, so a caller that declines to submit can say why. Empty exactly when a
 // prompt could start.
 func SubmitBlockers(facts *ActivityFacts) []string {
-	panic("unported: mj-core/src/activity.rs submit_blockers")
+	checks := []struct {
+		blocked bool
+		name    string
+	}{
+		{facts.Execution != RelayExecutionStateIdle, "execution is not idle"},
+		{facts.PromptStartedAtMs != nil, "a prompt is running"},
+		{facts.HarnessTurnStartedAtMs != nil, "a turn the harness started is open"},
+		{len(facts.ToolsInFlight) > 0, "a tool call is in flight"},
+		{facts.QueuedCommands != 0, "commands are queued"},
+		{facts.ActiveUserShells != 0, "a user shell is running"},
+		{facts.CheckpointBarrier, "a checkpoint barrier is held"},
+		{facts.CheckpointOnly, "the session is held for a checkpoint"},
+		{facts.AcpReady != nil && !*facts.AcpReady, "the agent connection is not ready"},
+		{facts.GoalPendingResume, "a goal resume is pending"},
+		{facts.GoalDecision, "a goal decision is pending"},
+	}
+	blockers := []string{}
+	for _, check := range checks {
+		if check.blocked {
+			blockers = append(blockers, check.name)
+		}
+	}
+	return blockers
 }
 
 // DriverPresent reports whether something other than Mjolnir will move the
@@ -614,7 +772,33 @@ func SafeToMove(facts *ActivityFacts, harness HarnessKind, _ MovePurpose) bool {
 // cause, so a caller that declines to replace a worker can say why. Empty
 // exactly when SafeToReplace is true.
 func ReplacementBlockers(facts *ActivityFacts, harness HarnessKind) []string {
-	panic("unported: mj-core/src/activity.rs replacement_blockers")
+	blockers := []string{}
+	if facts.CheckpointBarrier {
+		blockers = append(blockers, "a checkpoint barrier is held")
+	}
+	if HasWorkInFlight(facts) {
+		before := len(blockers)
+		blockers = append(blockers, SubmitBlockers(facts)...)
+		if facts.BackgroundCommands > 0 {
+			blockers = append(blockers, "background commands are running")
+		}
+		if facts.ActiveAgentTerminals > 0 {
+			blockers = append(blockers, "an agent terminal is open")
+		}
+		if facts.BackgroundWorkKnown != nil && !*facts.BackgroundWorkKnown {
+			blockers = append(blockers, "background work is not known to be settled")
+		}
+		if len(blockers) == before {
+			blockers = append(blockers, "work is in flight")
+		}
+	}
+	if harness == HarnessKindCodex && !facts.GoalSynchronized {
+		blockers = append(blockers, "the Codex adapter has not reported goal and execution state since the worker or adapter last restarted")
+	}
+	if harness == HarnessKindKimi && (facts.BackgroundWorkKnown == nil || !*facts.BackgroundWorkKnown) {
+		blockers = append(blockers, "Kimi background-agent state is not synchronized")
+	}
+	return blockers
 }
 
 // CheckpointBlocker says why provider-owned work rules out a routine
@@ -631,7 +815,23 @@ func ReplacementBlockers(facts *ActivityFacts, harness HarnessKind) []string {
 // barrier: the barrier accepts and queues new work, so work in flight no
 // longer says anything about the cut, but provider-owned work still does.
 func CheckpointBlocker(facts *ActivityFacts, harness HarnessKind) (string, bool) {
-	panic("unported: mj-core/src/activity.rs checkpoint_blocker")
+	switch {
+	case facts.CheckpointOnly || facts.Execution == RelayExecutionStateClosed:
+		return "", false
+	case harness == HarnessKindCodex && !facts.GoalSynchronized:
+		return "Codex goal and execution state is not synchronized; checkpoint deferred", true
+	case facts.GoalRunning || facts.GoalPendingResume || facts.GoalDecision:
+		return "goal work is pending or running; checkpoint deferred", true
+	case harness != HarnessKindKimi:
+		return "", false
+	case facts.BackgroundWorkKnown == nil:
+		return "Kimi worker has not reported background-agent synchronization support; checkpoint requires a worker reporting synchronized task state", true
+	case !*facts.BackgroundWorkKnown:
+		return "Kimi background-agent state is not synchronized; checkpoint requires a synchronized empty task list", true
+	case facts.BackgroundCommands > 0:
+		return "Kimi background agents are still active; checkpoint requires their completion and a synchronized empty task list", true
+	}
+	return "", false
 }
 
 // CheckpointWait is why a routine checkpoint has to wait.
@@ -703,7 +903,25 @@ func ChatPhase(facts *ActivityFacts) RelayExecutionState {
 // which is what a default value used to produce and what made automation
 // treat a running turn as finished.
 func WhileDisconnected(durable MaterializedExecutionState, sinceMs *int64) ActivityState {
-	panic("unported: mj-core/src/activity.rs while_disconnected")
+	var lastKnown ActivityState
+	switch durable := durable.(type) {
+	case MaterializedExecutionStateRunning:
+		startedAtMs := durable.StartedAtMs
+		// Nobody can see the worker, so there is no ACP clock to read. The
+		// silence age is genuinely unknown, and reporting the projection's
+		// own timestamp here would present a disconnection as harness
+		// silence.
+		lastKnown = ActivityState{Kind: ActivityStateTurn, StartedAtMs: &startedAtMs}
+	case MaterializedExecutionStateClosing:
+		lastKnown = ActivityState{Kind: ActivityStateClosing}
+	case MaterializedExecutionStateClosed:
+		// A worker that is gone is gone: saying "unknown" about a closed
+		// session would block the recovery that is supposed to clean it up.
+		return ActivityState{Kind: ActivityStateClosed}
+	default:
+		lastKnown = ActivityState{Kind: ActivityStateIdle}
+	}
+	return ActivityState{Kind: ActivityStateUnknown, LastKnown: &lastKnown, SinceMs: sinceMs}
 }
 
 // StallPolicy is how long a turn may go without a sign of life before the
@@ -743,7 +961,24 @@ func (p StallPolicy) Enabled() bool {
 // costs nothing and is the only way the answer stays true to what is
 // happening.
 func (p StallPolicy) NextCheck(facts *ActivityFacts, nowMs int64) time.Duration {
-	panic("unported: mj-core/src/activity.rs StallPolicy::next_check")
+	var remaining *time.Duration
+	if len(facts.ToolsInFlight) > 0 {
+		if p.ToolCall != nil {
+			left := activitySaturatingDurationSub(*p.ToolCall, elapsed(facts.ToolsInFlight[0].StartedAtMs, nowMs))
+			remaining = &left
+		}
+	} else if p.Silence != nil {
+		left := *p.Silence
+		if facts.LastAcpActivityAtMs != nil {
+			left = activitySaturatingDurationSub(*p.Silence, elapsed(*facts.LastAcpActivityAtMs, nowMs))
+		}
+		remaining = &left
+	}
+	wait := StallPolicyCheckCeiling
+	if remaining != nil {
+		wait = *remaining
+	}
+	return min(max(wait, StallPolicyCheckFloor), StallPolicyCheckCeiling)
 }
 
 // StallVerdict is whether a turn has stopped responding, and why.
@@ -780,11 +1015,46 @@ func (StallVerdictToolCall) isStallVerdict() {}
 // and used to be failed for it, even though Mjolnir could see the tool call
 // it was blocked in the whole time.
 func StallVerdictOf(facts *ActivityFacts, policy StallPolicy, nowMs int64) StallVerdict {
-	panic("unported: mj-core/src/activity.rs stall_verdict")
+	var silence *time.Duration
+	if facts.LastAcpActivityAtMs != nil {
+		quiet := elapsed(*facts.LastAcpActivityAtMs, nowMs)
+		silence = &quiet
+	}
+	var silentMs uint64
+	if silence != nil {
+		silentMs = uint64(silence.Milliseconds())
+	}
+	if len(facts.ToolsInFlight) > 0 {
+		oldest := facts.ToolsInFlight[0]
+		running := elapsed(oldest.StartedAtMs, nowMs)
+		if policy.ToolCall != nil && running >= *policy.ToolCall {
+			return StallVerdictToolCall{
+				ToolCallID: oldest.ToolCallID,
+				RunningMs:  uint64(running.Milliseconds()),
+				SilentMs:   silentMs,
+			}
+		}
+		return StallVerdictLive{}
+	}
+	// No evidence of activity at all is not evidence of silence: a turn is
+	// marked active when its prompt is sent, so an empty clock means this
+	// session has not started one.
+	if policy.Silence != nil && silence != nil && *silence >= *policy.Silence {
+		return StallVerdictSilent{SilentMs: silentMs}
+	}
+	return StallVerdictLive{}
 }
 
 func elapsed(sinceMs, nowMs int64) time.Duration {
 	return time.Duration(max(activitySaturatingSub(nowMs, sinceMs), 0)) * time.Millisecond
+}
+
+// activitySaturatingDurationSub is Rust's Duration::saturating_sub.
+func activitySaturatingDurationSub(a, b time.Duration) time.Duration {
+	if b >= a {
+		return 0
+	}
+	return a - b
 }
 
 // activitySaturatingSub is Rust's i64::saturating_sub.

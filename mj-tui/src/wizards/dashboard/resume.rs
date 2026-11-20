@@ -362,6 +362,10 @@ impl DashboardState {
         {
             return false;
         }
+        if let Some(preview) = preparation.container_upgrade {
+            self.show_container_upgrade_preview(*preview, true);
+            return true;
+        }
         if (preparation.selection.clear_resource_allocation
             || preparation.selection.resource_allocation.is_some())
             && wizard.resource_allocation != preparation.selection.resource_allocation
