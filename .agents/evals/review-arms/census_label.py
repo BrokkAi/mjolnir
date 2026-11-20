@@ -907,24 +907,6 @@ def suspend_session(sid):
         return str(error)
 
 
-def reconcile_unsuspended(labels_dir):
-    """Check every session recorded in unsuspended.jsonl against mj. A session that is now
-    suspended releases its checkout; the others, including any mj can't report, are returned."""
-    outstanding, path = {}, labels_dir / "unsuspended.jsonl"
-    # No file means no suspension has failed.
-    for entry in rows(path) if path.exists() else ():
-        try:
-            suspended = driver.session(entry["session"])["lifecycle"] == "suspended"
-        except (RuntimeError, OSError, subprocess.TimeoutExpired):
-            suspended = False
-        if suspended:
-            shutil.rmtree(Path(entry["unit"]) / "repo", ignore_errors=True)
-            outstanding.pop(entry["session"], None)
-        else:
-            outstanding[entry["session"]] = entry
-    return list(outstanding)
-
-
 def run_batch(args, split, role, repo, batch, revision, allowed, documents):
     _, model, _ = ROLES[role]
     ids = [item["id"] for item in batch]
@@ -982,7 +964,6 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         raise
     # A session with inaccessible output stays available for manual fetch.
     recover_output = False
-    unsuspended = None
     try:
         log(args.labels_dir, "launched", title=title, session=sid)
         driver.wait_idle(sid)
@@ -1059,14 +1040,12 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
                 # A session left for fetch recovery keeps its checkout.
                 shutil.rmtree(unit / "repo")
             else:
-                # The batch's labels are already saved. Leave the session and its checkout for the
-                # operator to suspend, and let later batches run.
-                unsuspended = {"session": sid, "title": title, "unit": str(unit), "error": problem}
-                append(args.labels_dir / "unsuspended.jsonl",
-                       {"time": datetime.now(timezone.utc).isoformat(), **unsuspended})
-                log(args.labels_dir, "suspend-failed", **unsuspended)
-                print(f"suspension of {sid} ({title}) did not finish; suspend it by hand: {problem}",
-                      file=sys.stderr, flush=True)
+                # The batch's labels are already saved. The operator owns this session from here:
+                # suspend it by hand, then remove the checkout. Later batches still run.
+                log(args.labels_dir, "suspend-failed", title=title, session=sid, unit=str(unit), error=problem)
+                print(f"suspension of {sid} ({title}) did not finish: {problem}. Suspend it by hand, "
+                      f"then remove {unit / 'repo'}.", file=sys.stderr, flush=True)
+                args.suspend_failures.append(sid)
     log(args.labels_dir, "batch-complete", title=title, invalid=list(errors))
 
 
@@ -1092,6 +1071,7 @@ def main():
     parser.add_argument("--mjolnir-clone", type=Path, default=Path.home() / "Projects/mjolnir")
     parser.add_argument("--bifrost-clone", type=Path, default=RUST / "bifrost-src")
     args = parser.parse_args()
+    args.suspend_failures = []
     # Git runs these clones from other working directories, so make every clone path absolute.
     for name in ("check_clones", "mjolnir_clone", "bifrost_clone", "work_dir"):
         if getattr(args, name, None) is not None:
@@ -1170,13 +1150,11 @@ def main():
         if unresolved:
             print(f"{len(unresolved)} selected items have no valid label: {', '.join(unresolved[:20])}",
                   file=sys.stderr)
-        # Every session a run failed to suspend, this run or an earlier one, is in unsuspended.jsonl.
-        # The run isn't clean while any of them is still not suspended.
-        outstanding = reconcile_unsuspended(args.labels_dir)
-        if outstanding:
-            print(f"{len(outstanding)} sessions still need suspending: {', '.join(outstanding)}",
-                  file=sys.stderr)
-        return 1 if unresolved or outstanding else 0
+        # Each failed suspension was reported when it happened; the run's status reflects them too.
+        if args.suspend_failures:
+            print(f"{len(args.suspend_failures)} sessions need suspending by hand: "
+                  f"{', '.join(args.suspend_failures)}", file=sys.stderr)
+        return 1 if unresolved or args.suspend_failures else 0
 
 
 if __name__ == "__main__":
