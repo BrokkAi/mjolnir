@@ -132,7 +132,18 @@ To see it working: in a test instance, start a session in a workspace with two w
 
 ## Outcomes & Retrospective
 
-Nothing yet.
+Milestone 1 shipped on 2026-11-20 (pushed through commit `502f78703`). The agent's `request_review` takes `paths` and defaults to the working directory's repository; a person's `/review`, `mj review start` and `POST /review` keep reviewing every workspace repository through `ReviewScope::Workspace`. Reviews still run one per session. `override_review(path)` was deferred to Milestone 3.
+
+Follow-ups that review raised and that were declined for Milestone 1, to fix with or before Milestone 3:
+
+- The parent-report sweep decides "handback pending" and releases a transcript-fallback finish from two separate observations (`reconcile_parent_reports` in `mj-daemon/src/server_runtime/api.rs`). The race predates this work; the fix is to decide handback versus fallback in the store transaction that records the report.
+- A verdict's retry text says "call request_review again" without the review's scope (`mj-core/src/mailbox.rs`, mirrored in `go/internal/core/mailbox.go` and both `mailbox-events.txt` goldens). After a multi-repository `/review`, a bare retry covers only the working directory's repository. It fails visibly at the pre-push hook. Coordinate the wording change with the Go port.
+- A no-argument `request_review` queued before the upgrade replays with the new default scope. Transitional and visible at the pre-push hook.
+- A sub-agent upgraded while waiting for a review it requested before sub-agents lost the review tools receives a verdict that names tools it no longer has. Transitional; it can still hand back.
+
+Milestone 2 is a breaking store migration and waits for the user's explicit authorization, which a feature request does not give (`AGENTS.md`, Testing Guidelines).
+
+Lessons: most review findings in this work had one shape, a fact decided in two places or read twice. Each fix moved the decision to one owner and passed its answer down. Merging upstream costs a full review round because the push gate reviews the merged tree, so push checkpoints early.
 
 
 ## Context and Orientation
