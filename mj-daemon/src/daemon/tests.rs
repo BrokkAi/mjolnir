@@ -11528,8 +11528,20 @@ async fn a_session_without_a_relay_actor_has_no_runtime_view() {
     state
         .owner()
         .install_relay_sessions(["session-1".to_owned()].into());
+    let mut live = ready_startup_view();
+    let materialized = &mut live.snapshot.as_mut().unwrap().materialized;
+    materialized.last_activity_at_ms = Some(7_777);
+    materialized
+        .queued_prompts
+        .push(mj_core::state::MaterializedQueuedPrompt {
+            command_id: "queued".into(),
+            kind: Default::default(),
+            content: vec![serde_json::json!({"type": "text", "text": "queued prompt"})],
+            queued_at_ms: 7_777,
+            accepted_ordinal: None,
+        });
     state
-        .publish_session("session-1".into(), ready_startup_view())
+        .publish_session("session-1".into(), live)
         .await
         .unwrap();
     let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
@@ -11551,13 +11563,13 @@ async fn a_session_without_a_relay_actor_has_no_runtime_view() {
         .publish_session("session-1".into(), ready_startup_view())
         .await
         .unwrap();
-    assert!(
-        state
-            .owner()
-            .sessions
-            .get("session-1")
-            .is_none_or(|view| view.materialized_only)
-    );
+    let capture = state.runtime_publication().unwrap();
+    let retained = &capture.sessions["session-1"];
+    assert!(retained.materialized_only);
+    assert!(retained.operational.is_none());
+    let retained = retained.materialized.as_ref().unwrap();
+    assert_eq!(retained.last_activity_at_ms, Some(7_777));
+    assert_eq!(retained.queued_prompts[0].text, "queued prompt");
 }
 
 #[tokio::test]

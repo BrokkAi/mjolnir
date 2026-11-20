@@ -733,6 +733,41 @@ impl mj_controller::worker_client::CredentialSyncRuntime for RuntimeState {
     }
 }
 
+fn materialized_only(
+    session_id: &str,
+    materialized: mj_core::snapshot_map::SharedSnapshot<
+        mj_client::daemon::RuntimeMaterializedSession,
+    >,
+) -> RuntimeSessionView {
+    let mut view =
+        RuntimeSessionView::from_managed(session_id.to_owned(), ManagedSessionView::default());
+    view.materialized = Some(materialized);
+    view.materialized_only = true;
+    view
+}
+
+pub(super) fn load_materialized_seed()
+-> Result<BTreeMap<String, mj_client::daemon::RuntimeMaterializedSession>> {
+    use mj_client::daemon::RuntimeMaterializedSession;
+    let mut seed: BTreeMap<_, _> = mj_controller::database::load_materialized_activity()?
+        .into_iter()
+        .map(|(id, (last_activity_at_ms, execution))| {
+            (
+                id,
+                RuntimeMaterializedSession {
+                    last_activity_at_ms,
+                    execution,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    for (id, queue) in mj_controller::database::load_materialized_queued_prompts()? {
+        seed.entry(id).or_default().queued_prompts = crate::pollers::queued_prompt_entries(&queue);
+    }
+    Ok(seed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::tests::runtime_test_session;
@@ -1068,39 +1103,4 @@ mod tests {
             "an ended session stays reported once"
         );
     }
-}
-
-fn materialized_only(
-    session_id: &str,
-    materialized: mj_core::snapshot_map::SharedSnapshot<
-        mj_client::daemon::RuntimeMaterializedSession,
-    >,
-) -> RuntimeSessionView {
-    let mut view =
-        RuntimeSessionView::from_managed(session_id.to_owned(), ManagedSessionView::default());
-    view.materialized = Some(materialized);
-    view.materialized_only = true;
-    view
-}
-
-pub(super) fn load_materialized_seed()
--> Result<BTreeMap<String, mj_client::daemon::RuntimeMaterializedSession>> {
-    use mj_client::daemon::RuntimeMaterializedSession;
-    let mut seed: BTreeMap<_, _> = mj_controller::database::load_materialized_activity()?
-        .into_iter()
-        .map(|(id, (last_activity_at_ms, execution))| {
-            (
-                id,
-                RuntimeMaterializedSession {
-                    last_activity_at_ms,
-                    execution,
-                    ..Default::default()
-                },
-            )
-        })
-        .collect();
-    for (id, queue) in mj_controller::database::load_materialized_queued_prompts()? {
-        seed.entry(id).or_default().queued_prompts = crate::pollers::queued_prompt_entries(&queue);
-    }
-    Ok(seed)
 }

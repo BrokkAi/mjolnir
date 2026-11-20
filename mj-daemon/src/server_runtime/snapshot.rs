@@ -938,6 +938,33 @@ fn question_message(
     live?.question_message().map(str::to_owned)
 }
 
+pub(super) fn viewer_activity_details(
+    details: &mj_client::usage_format::SessionActivityDetails,
+) -> ViewerActivityDetails {
+    ViewerActivityDetails {
+        kind: match details.kind {
+            mj_client::usage_format::SessionActivityKind::Turn => ViewerActivityKind::Turn,
+            mj_client::usage_format::SessionActivityKind::Step => ViewerActivityKind::Step,
+            mj_client::usage_format::SessionActivityKind::Background => {
+                ViewerActivityKind::Background
+            }
+            mj_client::usage_format::SessionActivityKind::Idle => ViewerActivityKind::Idle,
+            mj_client::usage_format::SessionActivityKind::Lifecycle
+            | mj_client::usage_format::SessionActivityKind::Goal
+            | mj_client::usage_format::SessionActivityKind::Expecting
+            | mj_client::usage_format::SessionActivityKind::CheckingQuota => {
+                ViewerActivityKind::Lifecycle
+            }
+        },
+        turn_started_at_ms: details.turn_started_at_ms,
+        step_started_at_ms: details.step_started_at_ms,
+        background_started_at_ms: details.background_started_at_ms,
+        idle_since_ms: details.idle_since_ms,
+        last_activity_at_ms: details.last_activity_at_ms,
+        label: details.label.clone(),
+    }
+}
+
 #[cfg(test)]
 mod question_message_tests {
     use super::question_message;
@@ -983,32 +1010,5 @@ mod question_message_tests {
             question_message(Some(&live), SessionAttention::Working),
             None
         );
-    }
-}
-
-pub(super) fn viewer_activity_details(
-    details: &mj_client::usage_format::SessionActivityDetails,
-) -> ViewerActivityDetails {
-    ViewerActivityDetails {
-        kind: match details.kind {
-            mj_client::usage_format::SessionActivityKind::Turn => ViewerActivityKind::Turn,
-            mj_client::usage_format::SessionActivityKind::Step => ViewerActivityKind::Step,
-            mj_client::usage_format::SessionActivityKind::Background => {
-                ViewerActivityKind::Background
-            }
-            mj_client::usage_format::SessionActivityKind::Idle => ViewerActivityKind::Idle,
-            mj_client::usage_format::SessionActivityKind::Lifecycle
-            | mj_client::usage_format::SessionActivityKind::Goal
-            | mj_client::usage_format::SessionActivityKind::Expecting
-            | mj_client::usage_format::SessionActivityKind::CheckingQuota => {
-                ViewerActivityKind::Lifecycle
-            }
-        },
-        turn_started_at_ms: details.turn_started_at_ms,
-        step_started_at_ms: details.step_started_at_ms,
-        background_started_at_ms: details.background_started_at_ms,
-        idle_since_ms: details.idle_since_ms,
-        last_activity_at_ms: details.last_activity_at_ms,
-        label: details.label.clone(),
     }
 }

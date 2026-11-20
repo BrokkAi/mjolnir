@@ -1448,6 +1448,9 @@ fn golden_phone_session_snapshot() {
     );
 
     let session_id = "0123456789abcdef0123456789abcdef";
+    let mut active_actions = std::collections::BTreeSet::new();
+    let mut action_sessions = BTreeMap::new();
+    track_started_phone_session(&mut active_actions, &mut action_sessions, 7, session_id).unwrap();
     let mut controller = controller_with_profiles(&[]);
     controller
         .state
