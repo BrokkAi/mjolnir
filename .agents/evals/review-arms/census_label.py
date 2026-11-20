@@ -21,9 +21,11 @@ from label_facts import HERE, batches, indexed, save
 CENSUS = HERE / "brief/rql-census"
 LABELS = CENSUS / "labels"
 RUST = Path("/mnt/optane/tmp/rust10")
-# HEAD of the Mjolnir development batches launched by census runner 95af720f8,
-# verified in census-label-work/development-primary-6cq5biub/repo and the following batch.
-MJOLNIR_REVISION = "fb0a4c0ac5cfe0396e1bce2740b6a1148c47fdb9"
+# The Mjolnir checkout's HEAD: the parent of 03838e0d2c, which added .agents/evals/review-arms.
+# Later trees hold this study's own earlier answers for the Mjolnir bugs (their missing facts,
+# briefs and labels), so a labeller could read them. This tree mentions no census bug, and every
+# Mjolnir bug's base, introducing and fix commit is reachable from it (latest fix 2026-11-06).
+MJOLNIR_REVISION = "259fada3e1c39f022a47c3640c37359e9f3848d0"
 # Missing-step kinds from label-SPEC.md; the menu ranks these.
 MISSING_KINDS = ("value_flow", "field_writes", "call_arguments", "guarded_path", "state_lifecycle",
                  "keyed_matching", "contract", "other")
@@ -1069,7 +1071,8 @@ def main():
     if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
         parser.error("batch size and limit must be positive")
     if args.labeller == "replication":
-        profiles = [profile.strip() for profile in args.profiles.split(",")]
+        # Deduplicated, so "every allotted profile is unusable" counts distinct profiles.
+        profiles = list(dict.fromkeys(profile.strip() for profile in args.profiles.split(",")))
         if not profiles or any(not profile for profile in profiles):
             parser.error("--profiles must be a comma-separated list of profile names")
         excluded = EXCLUDED_PROFILES.intersection(profiles)
