@@ -93,6 +93,8 @@ import "embed"
 //go:embed mj-worker-staging/src/worker_binary/profile_receiver.pl
 //go:embed mj-worker-staging/tests/fixtures/container-attachment-mounts.json
 //go:embed mj-worker/assets/opencode-mailbox.js
+//go:embed mj-worker/src/acp/guardian/policy.md
+//go:embed mj-worker/src/acp/guardian/policy_template.md
 //go:embed mj-worker/src/acp/testdata/antigravity_project_grants.json
 //go:embed mj-worker/src/acp/testdata/grok_1_0_89_initialize.json
 //go:embed mj-worker/src/acp/testdata/kimi_bash_permission.jsonl
