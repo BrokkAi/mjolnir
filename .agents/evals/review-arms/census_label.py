@@ -795,9 +795,10 @@ def fetch_output(sid, path):
     raise RuntimeError(problem)
 
 
-def suspend_session(sid):
-    delay = 1
+def suspend_session(sid, report=lambda **fields: None):
+    delay, attempt, previous_error = 1, 0, None
     while True:
+        attempt += 1
         driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
         # Keep the old confirmation window for each accepted suspension.
         deadline = time.monotonic() + 900
@@ -807,7 +808,15 @@ def suspend_session(sid):
             if error is not None:
                 if not (error.startswith("the suspension did not finish:") and ". Retry suspension" in error):
                     raise RuntimeError(error)
-                # Retry only when mj itself tells us to retry suspension.
+                # Retry only when mj itself tells us to retry suspension, and only while the
+                # retries make progress. mj says "retry" for persistent causes too (a full disk,
+                # an unwritable archive); the same error twice in a row means another attempt
+                # needs a change outside the runner, so surface it and stop.
+                print(f"suspension of {sid} failed (attempt {attempt}): {error}", file=sys.stderr, flush=True)
+                report(session=sid, attempt=attempt, error=error)
+                if error == previous_error:
+                    raise RuntimeError(f"suspension keeps failing with the same error: {error}")
+                previous_error = error
                 time.sleep(delay)
                 delay = min(2 * delay, 30)
                 break
@@ -944,7 +953,7 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         if not recover_output:
             # The host unit retains the input and output evidence after suspension.
             try:
-                suspend_session(sid)
+                suspend_session(sid, report=lambda **fields: log(args.labels_dir, "suspend-retry", title=title, **fields))
             except Exception as error:
                 log(args.labels_dir, "suspend-failed", title=title, session=sid, error=str(error))
                 raise
