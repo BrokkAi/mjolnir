@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use super::*;
-use mj_core::config::TargetTemplate;
+use mj_core::config::HarnessKind;
 
 fn homes(directory: &Path, kinds: &[HarnessKind]) -> Vec<DiscoveredHome> {
     kinds
@@ -19,11 +19,8 @@ fn homes(directory: &Path, kinds: &[HarnessKind]) -> Vec<DiscoveredHome> {
         .collect()
 }
 
-fn repository() -> GithubRepository {
-    GithubRepository {
-        owner: "BrokkAi".into(),
-        repository: "mjolnir".into(),
-    }
+fn repository() -> String {
+    "BrokkAi/mjolnir".to_owned()
 }
 
 #[test]
@@ -39,7 +36,6 @@ fn first_run_adds_codex_claude_or_both_even_before_login() {
         let report = run_setup_with_discovery(
             &path,
             directory.path(),
-            false,
             &|| false,
             || {},
             || Ok((profiles.clone(), Some(repository()))),
@@ -74,7 +70,6 @@ fn first_run_adds_codex_claude_or_both_even_before_login() {
             run_setup_with_discovery(
                 &path,
                 directory.path(),
-                false,
                 &|| false,
                 || panic!("welcome repeated"),
                 || panic!("discovery repeated")
@@ -87,53 +82,6 @@ fn first_run_adds_codex_claude_or_both_even_before_login() {
 }
 
 #[test]
-fn forced_setup_adds_new_accounts_without_duplicates_or_overwriting_settings() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    let codex = homes(directory.path(), &[HarnessKind::Codex]);
-    run_setup_with_discovery(
-        &path,
-        directory.path(),
-        false,
-        &|| false,
-        || {},
-        || Ok((codex, None)),
-    )
-    .unwrap();
-    Config::update_to(&path, |config| {
-        config.phone.enabled = false;
-        config.profiles.get_mut("codex").unwrap().enabled = false;
-        config
-            .targets
-            .insert("custom".into(), TargetTemplate::LocalBare);
-        Ok(())
-    })
-    .unwrap();
-    for _ in 0..2 {
-        run_setup_with_discovery(
-            &path,
-            directory.path(),
-            true,
-            &|| false,
-            || {},
-            || {
-                Ok((
-                    homes(directory.path(), &[HarnessKind::Codex, HarnessKind::Claude]),
-                    Some(repository()),
-                ))
-            },
-        )
-        .unwrap();
-    }
-    let config = Config::load_from(&path).unwrap();
-    assert_eq!(config.profiles.len(), 2);
-    assert_eq!(config.bundles.len(), 1);
-    assert!(!config.profiles["codex"].enabled);
-    assert!(!config.phone.enabled);
-    assert!(config.targets.contains_key("custom"));
-}
-
-#[test]
 fn automatic_setup_leaves_existing_installations_and_comments_untouched() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
@@ -143,7 +91,6 @@ fn automatic_setup_leaves_existing_installations_and_comments_untouched() {
         run_setup_with_discovery(
             &path,
             directory.path(),
-            false,
             &|| false,
             || panic!("old installation welcomed"),
             || panic!("old installation discovered")
@@ -163,7 +110,6 @@ fn every_launch_adds_newly_installed_agents_and_keeps_disabled_profiles_off() {
     run_setup_with_discovery(
         &path,
         directory.path(),
-        false,
         &|| false,
         || {},
         || Ok((installed.clone(), None)),
@@ -225,7 +171,6 @@ fn automatic_detection_leaves_a_configured_harness_conventional_home_alone() {
     run_setup_with_discovery(
         &path,
         directory.path(),
-        false,
         &|| false,
         || {},
         || Ok((managed, None)),
@@ -280,7 +225,6 @@ fn a_detected_dsh_profile_takes_its_key_from_secrets_toml_when_it_is_there() {
         run_setup_with_discovery(
             &path,
             directory.path(),
-            false,
             &|| false,
             || {},
             || Ok((homes(directory.path(), &[HarnessKind::Dsh]), None)),
@@ -319,7 +263,6 @@ fn setup_without_an_agent_or_repository_still_completes_once() {
     let report = run_setup_with_discovery(
         &path,
         directory.path(),
-        false,
         &|| false,
         || {},
         || Ok((vec![], None)),
@@ -328,9 +271,7 @@ fn setup_without_an_agent_or_repository_still_completes_once() {
     .unwrap();
     assert_eq!(
         report.summary(),
-        vec![
-            "No installed coding agent was found. Mjolnir can install and sign in to one for you."
-        ]
+        vec!["No coding agent found yet. Mjolnir can install one and sign you in."]
     );
     assert!(Config::load_from(&path).unwrap().profiles.is_empty());
     assert!(directory.path().join("setup-state").exists());
@@ -341,14 +282,13 @@ fn interrupted_setup_recovers_after_configuration_was_already_saved() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     let discovered = homes(directory.path(), &[HarnessKind::Claude]);
-    build_config(&discovered, Some(&repository()))
+    build_config(&discovered, Some(repository().as_str()))
         .save_to(&path)
         .unwrap();
     atomic_write(&directory.path().join("setup-state"), b"pending\n").unwrap();
     run_setup_with_discovery(
         &path,
         directory.path(),
-        false,
         &|| false,
         || {},
         || Ok((discovered, Some(repository()))),
@@ -371,7 +311,6 @@ fn failed_discovery_is_retryable_and_never_marks_setup_complete() {
     let error = run_setup_with_discovery(
         &path,
         directory.path(),
-        false,
         &|| false,
         || {},
         || bail!("discovery failed"),
@@ -386,7 +325,6 @@ fn failed_discovery_is_retryable_and_never_marks_setup_complete() {
     run_setup_with_discovery(
         &path,
         directory.path(),
-        false,
         &|| false,
         || {},
         || Ok((vec![], None)),
@@ -410,7 +348,6 @@ fn concurrent_first_launches_have_one_setup_and_one_welcome() {
                 run_setup_with_discovery(
                     &dir.join("config.toml"),
                     &dir,
-                    false,
                     &|| false,
                     || {
                         started.fetch_add(1, Ordering::SeqCst);
@@ -448,7 +385,6 @@ fn discovery_merges_a_settings_edit_that_happened_while_it_ran() {
     run_setup_with_discovery(
         &path,
         directory.path(),
-        false,
         &|| false,
         || {},
         || {
@@ -479,7 +415,6 @@ fn cancelled_setup_does_not_wait_for_another_owner() {
     let result = run_setup_with_discovery(
         &directory.path().join("config.toml"),
         directory.path(),
-        true,
         &|| true,
         || panic!("cancelled setup accepted"),
         || panic!("cancelled setup discovered"),

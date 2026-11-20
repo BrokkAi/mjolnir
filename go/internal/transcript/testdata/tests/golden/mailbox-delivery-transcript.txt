@@ -1,0 +1,50 @@
+Session: session-mailbox
+2: Mailbox events:
+  - Comment on your PR #12 by alice: The first comment line.
+4: Message from your parent agent
+
+Please check this detail.
+The whole second line must survive delivery.
+20: Message from your parent agent
+
+Please verify the edge case.
+20: Message from Fix cache race
+
+The lock is fixed; please verify it.
+20: Message from the user
+
+Please check the final result.
+20: Mailbox events:
+  - New PR #4623 Model Rust built-in macro values for CQ07
+  - Comment on your PR #4623 by alice: Please check the ‹macro› case.
+  - New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
+  - Review on your PR #4623 by bob (changes requested): Could you revise the error path?
+  - Review comment on your PR #4623 by carol: This assertion needs a case.
+  - Your PR #4623 was merged by dana.
+  - Your PR #4623 was closed without merging.
+  - Your PR #4624 was merged.
+  - Your PR #4623 was reopened.
+  - External event: A plain event from the CLI.
+  - Child task Check parser finished: failed
+    State: failed
+    Failure: verification timed out
+    Report directory: /reports/child-1
+    Report truncated; see the report directory for details.
+    Fixed ‹parser›.
+    Tests passed: "parser".
+  - PR #4623 was merged by dana.
+21: Agent continued on its own
+22: Working on the delivered messages.
+23: Message from Review agent
+
+The first review item.
+支持 Unicode and **markdown**.
+23: Message from untitled-session
+
+The second item arrives in the same acknowledgment.
+23: Mailbox events:
+  - Review comment on your PR #4623 by gina: A late review note arrives mid-turn.
+25: Responding after delivery.
+27: Not shown because you were away: Claude Code requests permission: touch afk-created.txt
+28: Mailbox events:
+  - Told the agent you are back

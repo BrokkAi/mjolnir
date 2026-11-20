@@ -163,7 +163,7 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detac
 
 === pending tool call title (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
-│ • Tool · waiting                                                                                ▐│
+│ ● Tool · running                                                                                ▐│
 │ │ grep                                                                                          ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│

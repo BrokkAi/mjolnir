@@ -657,7 +657,7 @@ fn checks_waiting_for_a_config_say_how_to_get_one_without_json() {
         let remediation = check.remediation.unwrap_or_default();
         assert!(
             remediation.contains("Run `mj`")
-                && remediation.contains("`mj setup`")
+                && remediation.contains("add an agent profile")
                 && remediation.contains("rerun `mj doctor`"),
             "{id}: {remediation}"
         );
@@ -831,7 +831,7 @@ fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
     }
 }
 
-/// Launch finding R5-3: doctor and `mj setup` gave a missing Docker the raw
+/// Launch finding R5-3: doctor and first-run setup gave a missing Docker the raw
 /// error chain ("run docker for check Docker daemon: No such file or
 /// directory (os error 2)"). They now say it is not installed and how to
 /// fix that.

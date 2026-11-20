@@ -1413,7 +1413,8 @@ fn new_without_a_workspace_refuses_without_starting_a_daemon() {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("mj new needs --workspace NAME"), "{stderr}");
+    assert!(stderr.contains("--workspace NAME"), "{stderr}");
+    assert!(stderr.contains("--target ID"), "{stderr}");
     assert!(stderr.contains("this instance has none yet"), "{stderr}");
     assert!(stderr.contains("mj workspaces create NAME"), "{stderr}");
     assert!(

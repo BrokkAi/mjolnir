@@ -16,21 +16,18 @@ impl SessionConfiguration {
 }
 
 /// Only the coordinator accepts readiness or expiry. A ready bridge removes
-/// its timer; a restart arms a new one, and expiry exits event processing.
+/// its timer; a restart arms a new one, and expiry ends the worker with a
+/// typed startup failure.
 pub(super) struct HarnessStartup {
     deadline: Option<tokio::time::Instant>,
-    pub(super) status: watch::Sender<PreparationSnapshot>,
-    pub(super) idle_dispatch_wakes: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
 }
 
 impl HarnessStartup {
-    pub(super) fn new(status: watch::Sender<PreparationSnapshot>) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             deadline: Some(
                 tokio::time::Instant::now() + mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT,
             ),
-            status,
-            idle_dispatch_wakes: Default::default(),
         }
     }
 
@@ -42,17 +39,6 @@ impl HarnessStartup {
         if ready {
             self.deadline = None;
         }
-    }
-
-    fn fail(&mut self, error: String) {
-        self.status.send_replace(PreparationSnapshot {
-            state: Some(mj_core::relay::HarnessPreparation::Failed {
-                step: "session-open".to_owned(),
-                error,
-                at_ms: chrono::Utc::now().timestamp_millis(),
-            }),
-            services: None,
-        });
     }
 }
 
@@ -199,9 +185,13 @@ fn run_relay_coordinator(
             // answer, its assessment bookkeeping and the retry and stop timers all
             // wait. A barrier ends through a relay request or a disconnect, and
             // both wake this loop, so the branches below open again then.
-            let held = {
+            // The open deadline waits only for a held cut: a pending Close is
+            // claimed only once the session is configured, so waiting for it
+            // would wait forever on a harness that never opens.
+            let (held, cut_held) = {
                 let relay = relay.lock().expect("relay state lock poisoned");
-                relay.worker_writes_held() || relay.close_pending()
+                let cut_held = relay.worker_writes_held();
+                (cut_held || relay.close_pending(), cut_held)
             };
             if !held
                 && relay
@@ -311,7 +301,7 @@ fn run_relay_coordinator(
             let stop_at = stop_timer.map_or_else(tokio::time::Instant::now, |(_, wake)| wake);
             tokio::select! {
                 biased;
-                _ = tokio::time::sleep_until(startup_deadline.unwrap_or_else(tokio::time::Instant::now)), if startup_deadline.is_some() && !held => {
+                _ = tokio::time::sleep_until(startup_deadline.unwrap_or_else(tokio::time::Instant::now)), if startup_deadline.is_some() && !cut_held => {
                     {
                         // Already received readiness precedes an uncommitted
                         // expiry. Bound the prefix by the actual queue so fresh
@@ -335,27 +325,34 @@ fn run_relay_coordinator(
                         continue;
                     }
                     let cause = format!("the harness did not open its session within {}s; use Restart agent to retry in the existing environment", mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT.as_secs());
-                    let startup = startup.as_mut().expect("guarded startup deadline");
                     {
                         let mut state = relay.lock().expect("relay state lock poisoned");
-                        // A control request may have acquired a cut since `held`
-                        // was observed. Decide and journal under its owner's lock.
-                        if state.worker_writes_held() || state.close_pending() {
+                        // A control request may have acquired a cut since
+                        // `cut_held` was observed. Decide and journal under
+                        // its owner's lock.
+                        if state.worker_writes_held() {
                             continue;
                         }
                         state.set_acp_ready(false);
-                        interrupt_in_flight_locked(&mut state, &mut in_flight, &cause)?;
-                        // Requests that observed Started already handed accepted
-                        // lifecycle work to us. Drain it before advertising the
-                        // request handler as the new owner, under the same lock.
-                        state.dispatch_preparation_lifecycle()?;
-                        startup.fail(cause);
+                        // A Close sealed the relay at its cut: nothing is
+                        // journaled behind the seal, and the next worker
+                        // settles what is left, as after any worker death.
+                        if !state.close_pending() {
+                            interrupt_in_flight_locked(&mut state, &mut in_flight, &cause)?;
+                            // As when the bridge faults before opening, clear any
+                            // question it asked while opening, so no invisible
+                            // question outlives this harness. Accepted lifecycle
+                            // work stays queued for the next worker.
+                            state.record_observation(RelayObservation::ElicitationsCleared)?;
+                        }
                     }
-                    *startup.idle_dispatch_wakes.lock().expect("idle dispatch wake lock poisoned") = Some(dispatch_wakes);
-                    // No more runtime events can be accepted after failure. The
-                    // runtime owner stops ACP and retains the failed relay.
+                    // The worker ends here: the runtime owner stops ACP and the
+                    // exit record carries the typed failure, so the daemon stops
+                    // restarting this harness and reports why.
                     verdict_tasks.shutdown().await;
-                    return Ok(());
+                    return Err(anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+                        message: cause,
+                    }));
                 }
                 wake = dispatch_wakes.recv(), if wakes_open => {
                     if wake.is_none() {
@@ -1849,6 +1846,7 @@ mod startup_tests {
             BatchedRestart,
             CheckpointExpiry,
             CheckpointReady,
+            CloseAtReleasedCut,
         }
         let allowance = mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
         for arrival in [
@@ -1859,6 +1857,7 @@ mod startup_tests {
             Arrival::BatchedRestart,
             Arrival::CheckpointExpiry,
             Arrival::CheckpointReady,
+            Arrival::CloseAtReleasedCut,
         ] {
             let temp = tempfile::tempdir().unwrap();
             let relay = Arc::new(RelayCell::new(
@@ -1870,7 +1869,7 @@ mod startup_tests {
                 .set_turn_verdict_harness(HarnessKind::Codex);
             let checkpoint = if matches!(
                 arrival,
-                Arrival::CheckpointExpiry | Arrival::CheckpointReady
+                Arrival::CheckpointExpiry | Arrival::CheckpointReady | Arrival::CloseAtReleasedCut
             ) {
                 submit(
                     &relay,
@@ -1893,12 +1892,31 @@ mod startup_tests {
             } else {
                 None
             };
-            let (status, preparation) = watch::channel(PreparationSnapshot {
-                state: Some(mj_core::relay::HarnessPreparation::Started),
-                services: None,
-            });
-            let startup = HarnessStartup::new(status);
-            let idle_wakes = startup.idle_dispatch_wakes.clone();
+            if arrival == Arrival::CloseAtReleasedCut {
+                // A Close sealed at the cut, whose barrier the controller then
+                // released. The coordinator claims the Close only once the
+                // session is configured, so it stays pending.
+                // Hard-won: #1617: a pending Close kept the open deadline from ever firing.
+                submit(
+                    &relay,
+                    "close-at-cut",
+                    RelayCommand::Close {
+                        barrier_command_id: "startup-cut".into(),
+                        expected: checkpoint.clone().unwrap(),
+                    },
+                );
+                submit(
+                    &relay,
+                    "release-close-cut",
+                    RelayCommand::CompleteCheckpoint {
+                        barrier_command_id: "startup-cut".into(),
+                    },
+                );
+                let state = relay.lock().unwrap();
+                assert!(state.close_pending() && !state.worker_writes_held());
+            }
+            let sealed_frontier = relay.lock().unwrap().latest_ordinal();
+            let startup = HarnessStartup::new();
             let (events, received) = mpsc::channel(16);
             let (wake, wakes) = mpsc::channel(1);
             let (commands, mut requests) = mpsc::channel(1);
@@ -1988,10 +2006,6 @@ mod startup_tests {
                         // Hard-won: 8d32fbf09 review: expiry wrote faults through a held checkpoint cut.
                         assert!(state.worker_writes_held());
                         assert_eq!(state.latest_ordinal(), checkpoint.unwrap().ordinal);
-                        assert!(matches!(
-                            preparation.borrow().state,
-                            Some(mj_core::relay::HarnessPreparation::Started)
-                        ));
                         assert!(!coordinator.is_finished());
                     }
                     submit(
@@ -2006,10 +2020,6 @@ mod startup_tests {
                         "handoff-checkpoint",
                         RelayCommand::BeginCheckpoint { reason: None },
                     );
-                    assert!(matches!(
-                        preparation.borrow().state,
-                        Some(mj_core::relay::HarnessPreparation::Started)
-                    ));
                     wake.send(()).await.unwrap();
                 }
                 Arrival::BatchedRestart => {
@@ -2022,7 +2032,9 @@ mod startup_tests {
                     );
                     tokio::time::advance(std::time::Duration::from_secs(1)).await;
                 }
-                Arrival::ExpiryFirst => {}
+                // A pending Close does not hold the deadline: it would wait
+                // forever for a session that never opens.
+                Arrival::ExpiryFirst | Arrival::CloseAtReleasedCut => {}
                 _ => {
                     while !relay
                         .lock()
@@ -2043,14 +2055,7 @@ mod startup_tests {
                     tokio::time::advance(allowance * 2).await;
                     tokio::task::yield_now().await;
                     // Hard-won: a09de965f review: an overdue timer discarded readiness queued behind a cut.
-                    assert!(
-                        matches!(
-                            preparation.borrow().state,
-                            Some(mj_core::relay::HarnessPreparation::Started)
-                        ),
-                        "{arrival:?}"
-                    );
-                    assert!(!coordinator.is_finished());
+                    assert!(!coordinator.is_finished(), "{arrival:?}");
                     if matches!(
                         arrival,
                         Arrival::ReadyQueuedAtExpiry | Arrival::CheckpointReady
@@ -2081,12 +2086,15 @@ mod startup_tests {
                     tokio::time::advance(allowance).await;
                 }
             }
-            coordinator.await.unwrap().unwrap();
+            // Expiry ends the worker with the typed failure its exit record
+            // carries; no relay stays served without a harness.
+            let error = coordinator.await.unwrap().unwrap_err();
+            let failure = error
+                .downcast_ref::<mj_core::relay::WorkerHarnessStartupFailure>()
+                .unwrap_or_else(|| panic!("untyped startup expiry for {arrival:?}: {error:#}"));
             assert!(
-                matches!(&preparation.borrow().state,
-                Some(mj_core::relay::HarnessPreparation::Failed { error, .. })
-                if error.contains("300s") && error.contains("Restart agent")),
-                "{arrival:?}"
+                failure.message.contains("300s") && failure.message.contains("Restart agent"),
+                "{arrival:?}: {failure:?}"
             );
             assert!(
                 !relay
@@ -2103,15 +2111,12 @@ mod startup_tests {
                     .await
                     .is_err()
             );
-            assert!(idle_wakes.lock().unwrap().is_some());
-            if arrival == Arrival::CheckpointExpiry {
-                let state = relay.lock().unwrap().operational_state();
-                // Hard-won: a09de965f review: expiry stranded a checkpoint accepted under Started.
-                assert_eq!(
-                    state.checkpoint_barrier.as_deref(),
-                    Some("handoff-checkpoint")
-                );
-                assert!(state.checkpoint_ready.is_some());
+            if arrival == Arrival::CloseAtReleasedCut {
+                let state = relay.lock().unwrap();
+                // Nothing is journaled behind the seal; the next worker
+                // finishes the Close.
+                assert_eq!(state.latest_ordinal(), sealed_frontier);
+                assert!(state.close_pending());
             }
             if arrival == Arrival::ReadyThenClear {
                 drop(relay);

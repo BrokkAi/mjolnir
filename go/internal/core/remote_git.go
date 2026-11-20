@@ -770,6 +770,51 @@ func parseRustURL(input string) (*rustURL, bool) {
 	return url, err == nil
 }
 
+// URL is a URL as Rust's `url::Url::parse` reads it and `Url::to_string`
+// writes it. Crates above core that call the url crate directly (the
+// checkpoint archive's origin redaction) use it, so every port of url::Url
+// shares the one parser above.
+type URL struct{ parsed *rustURL }
+
+// ParseURL is `url::Url::parse`; ok is false for text the url crate rejects.
+func ParseURL(text string) (URL, bool) {
+	parsed, ok := parseRustURL(text)
+	if !ok {
+		return URL{}, false
+	}
+	return URL{parsed: parsed}, true
+}
+
+// Scheme is `Url::scheme`, lowercased as the standard does.
+func (u URL) Scheme() string { return u.parsed.scheme }
+
+// Username is `Url::username`, percent-encoded; empty when there is none.
+func (u URL) Username() string { return u.parsed.username }
+
+// Password is `Url::password`; an empty password is no password.
+func (u URL) Password() (string, bool) {
+	if u.parsed.password == nil {
+		return "", false
+	}
+	return *u.parsed.password, true
+}
+
+// WithoutCredentials is the URL after `set_username("")` and
+// `set_password(None)`. ok is false where the url crate refuses both: a URL
+// without a host, with an empty host, or with the file scheme.
+func (u URL) WithoutCredentials() (URL, bool) {
+	if !u.parsed.hasHost || u.parsed.host == "" || u.parsed.scheme == "file" {
+		return URL{}, false
+	}
+	redacted := *u.parsed
+	redacted.username = ""
+	redacted.password = nil
+	return URL{parsed: &redacted}, true
+}
+
+// String is `Url::to_string`.
+func (u URL) String() string { return u.parsed.String() }
+
 // rustURLDefaultPorts is the WHATWG special schemes and their default ports;
 // `file` is special and has none.
 var rustURLDefaultPorts = map[string]uint16{"http": 80, "https": 443, "ws": 80, "wss": 443, "ftp": 21}

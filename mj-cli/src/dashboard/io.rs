@@ -216,7 +216,10 @@ pub(crate) enum DashboardIoUpdate {
     },
     ContainerSettings {
         session_id: String,
-        result: std::result::Result<DashboardMetadata, String>,
+        result: std::result::Result<
+            std::result::Result<DashboardMetadata, mj_core::state::ContainerUpgradePreview>,
+            String,
+        >,
     },
     /// Whether a configured project's local directory exists; `None` when
     /// the check could not tell.
@@ -1177,7 +1180,8 @@ impl DashboardContext {
                 )),
             },
             DashboardIoUpdate::ContainerSettings { session_id, result } => match result {
-                Ok(controller) => {
+                Ok(Err(preview)) => self.dashboard.show_container_upgrade_preview(preview, true),
+                Ok(Ok(controller)) => {
                     self.apply_controller_metadata(controller);
                     self.dashboard.set_config(self.controller.config.clone());
                     self.dashboard.set_state(self.controller.state.clone());
@@ -1416,9 +1420,8 @@ impl DashboardContext {
                 .apply_availability_check(generation, result),
             DashboardIoUpdate::FirstRunStarted => self.dashboard.begin_welcome(),
             DashboardIoUpdate::FirstRunConfigured(report) => {
-                let no_agents = report.agents.is_empty();
-                self.dashboard.welcome_configured(report.summary());
-                self.dashboard.welcome_managed_setup_available(no_agents);
+                self.dashboard
+                    .welcome_configured(report.summary(), !report.agents.is_empty());
             }
             DashboardIoUpdate::FirstRunChecked(result) => {
                 self.dashboard.release_availability_check();
@@ -1426,7 +1429,7 @@ impl DashboardContext {
                 Ok(Some(errors)) => self.dashboard.welcome_checked(errors),
                 Ok(None) => self.dashboard.welcome_not_needed(),
                 Err(error) => self.dashboard.welcome_checked(vec![format!(
-                    "Setup could not finish: {error}. Run `mj setup` to retry."
+                    "Setup could not finish: {error}. Run `mj doctor` to check the installation, and restart `mj` to retry."
                 )]),
                 }
             }

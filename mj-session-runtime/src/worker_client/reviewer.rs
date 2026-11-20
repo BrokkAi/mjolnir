@@ -79,7 +79,7 @@ impl RelayClient {
             self.reviewer_request(role, ReviewerRequest::SetReviewBase { path, commit })?;
         anyhow::ensure!(
             request.supported_at(self.protocol_version),
-            "the session's worker predates set_review_baseline; restart the session"
+            "the session's worker predates set_baseline; restart the session"
         );
         match self
             .call_with_timeout(request, REVIEW_CAPTURE_TIMEOUT)

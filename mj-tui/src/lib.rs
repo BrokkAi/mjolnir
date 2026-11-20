@@ -135,7 +135,7 @@ pub use crate::ingest::{
 pub use crate::keybinds::KeyRoute;
 pub use crate::render::sessions::{NOTICE_NAME_CELLS, fit_session_name};
 pub use crate::resume::resume_profile_placeholders;
-pub use crate::setup::{DetectScope, RejectedRuntime, SetupDetection};
+pub use crate::setup::{DetectScope, RejectedRuntime, SetupDetection, SetupLoginOutcome};
 pub use crate::workspaces::{
     WorkspaceDraftEntry, WorkspaceManagementEntry, WorkspaceManagementOutcome,
 };

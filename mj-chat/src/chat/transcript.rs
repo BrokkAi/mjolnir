@@ -62,7 +62,7 @@ use super::rendering::{
 
 #[derive(Debug, Clone)]
 struct CachedEntry {
-    revision: u64,
+    fingerprint: u64,
     lines: Vec<Line<'static>>,
     mailbox: Option<RowTrack>,
 }
@@ -79,7 +79,7 @@ pub(super) struct TranscriptScrollbarState {
     metric_generation: u64,
     estimates: Vec<usize>,
     /// Text-based row estimates for entries not yet drawn, with the entry
-    /// revision each was made from. Cleared when the width, mode, or tool
+    /// render fingerprint each was made from. Cleared when the width, mode, or tool
     /// layout changes, or when entries move.
     text_estimates: Vec<Option<(u64, usize)>>,
     text_estimate_tools: Option<ToolDisplay>,
@@ -319,7 +319,7 @@ impl TranscriptSnapshot {
                 }
             })
             .collect::<Vec<_>>();
-        apply_entry_list_rules(&mut entries);
+        apply_entry_list_rules(&mut entries, &session.pending_elicitations);
         Self::from_entries_at(entries, session.applied_event_ordinal)
     }
 
@@ -600,10 +600,11 @@ fn cached_entry_lines<'cache>(
         }
         _ => false,
     };
+    let fingerprint = entry_render_fingerprint(entry);
     let stale = stale_summary_fingerprint
         || cache.entries[index]
             .as_ref()
-            .is_none_or(|cached| cached.revision != entry.revision);
+            .is_none_or(|cached| cached.fingerprint != fingerprint);
     if stale {
         let width = usize::from(cache.width);
         let mailbox = (cache.mode == TranscriptRenderMode::Rich)
@@ -636,7 +637,7 @@ fn cached_entry_lines<'cache>(
             };
         }
         cache.entries[index] = Some(CachedEntry {
-            revision: entry.revision,
+            fingerprint,
             lines,
             mailbox,
         });
@@ -883,12 +884,14 @@ impl ChatState {
                 .entries
                 .get(index)
                 .and_then(Option::as_ref)
-                .filter(|cached| cached.revision == entry.revision)
+                .filter(|cached| cached.fingerprint == entry_render_fingerprint(entry))
             {
                 cached.lines.len()
             } else {
                 match state.text_estimates[index] {
-                    Some((revision, rows)) if revision == entry.revision => rows,
+                    Some((fingerprint, rows)) if fingerprint == entry_render_fingerprint(entry) => {
+                        rows
+                    }
                     _ => {
                         let rows = estimated_entry_rows(
                             entry,
@@ -896,7 +899,7 @@ impl ChatState {
                             self.render_mode,
                             tool_view,
                         );
-                        state.text_estimates[index] = Some((entry.revision, rows));
+                        state.text_estimates[index] = Some((entry_render_fingerprint(entry), rows));
                         rows
                     }
                 }
@@ -1041,7 +1044,7 @@ impl ChatState {
         let shift = prefix.len();
         let tail = std::mem::replace(&mut self.entries, prefix);
         self.entries.extend(tail);
-        apply_entry_list_rules(&mut self.entries);
+        apply_entry_list_rules(&mut self.entries, &self.pending_elicitations);
         self.unconverted_prefix = 0;
         self.prefix_seam = None;
         if let TranscriptAnchor::Row { entry, row } = self.anchor {

@@ -715,6 +715,17 @@ impl StandaloneSession {
             .await
     }
 
+    /// The mail the worker holds at a ready checkpoint barrier's cut.
+    pub async fn read_checkpoint_mailbox(
+        &mut self,
+        barrier_command_id: String,
+        cut: RelayCursor,
+    ) -> Result<mj_core::archive::CanonicalMailbox> {
+        self.client
+            .read_checkpoint_mailbox(barrier_command_id, cut)
+            .await
+    }
+
     pub async fn submit(&mut self, command_id: String, command: RelayCommand) -> Result<u64> {
         let ordinal = self.submit_accepted(command_id, command).await?;
         self.sync_in_place().await?;

@@ -52,7 +52,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use mj_core::config::{Config, config_path};
+use mj_core::config::Config;
 use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -60,7 +60,6 @@ use std::io::{self, Write};
 use mj_controller::controller::update::StartupUpdateNotice;
 #[cfg(test)]
 use mj_controller::targets::ProcessExecutor;
-use mj_setup::setup::run_setup_command;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -120,7 +119,8 @@ enum Command {
     Doctor(DoctorArgs),
     /// Create, list, or destroy persistent EC2 hosts with rootless Podman.
     Ec2(ec2::Ec2Args),
-    /// Rerun agent and repository discovery, preserving existing configuration.
+    /// Former spelling of `mj doctor instructions`.
+    #[command(hide = true)]
     Setup(SetupArgs),
     /// Adopt a native coding-agent session as a stopped Mjolnir session.
     Import(ImportArgs),
@@ -526,6 +526,8 @@ enum RecoverCommand {
 
 #[derive(Debug, Args)]
 struct DoctorArgs {
+    #[command(subcommand)]
+    command: Option<DoctorCommand>,
     /// Emit a machine-readable array of prerequisite checks.
     #[arg(long)]
     json: bool,
@@ -537,11 +539,11 @@ struct DoctorArgs {
 #[derive(Debug, Args)]
 struct SetupArgs {
     #[command(subcommand)]
-    command: Option<SetupCommand>,
+    command: DoctorCommand,
 }
 
 #[derive(Debug, Subcommand)]
-enum SetupCommand {
+enum DoctorCommand {
     /// Print coding-agent instructions for preparing a host.
     Instructions {
         /// Platform to prepare.
@@ -1099,6 +1101,13 @@ async fn run_command(
             }
             ec2::run(args).await.map(|()| DashboardExit::Normal)
         }
+        Some(Command::Doctor(DoctorArgs {
+            command: Some(command),
+            ..
+        })) => {
+            print_setup_instructions(command);
+            Ok(DashboardExit::Normal)
+        }
         Some(Command::Doctor(args)) => {
             if daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await? {
                 return Ok(DashboardExit::Normal);
@@ -1106,10 +1115,8 @@ async fn run_command(
             doctor(args).await.map(|()| DashboardExit::Normal)
         }
         Some(Command::Setup(args)) => {
-            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), true).await? {
-                return Ok(DashboardExit::Normal);
-            }
-            setup(args).map(|()| DashboardExit::Normal)
+            print_setup_instructions(args.command);
+            Ok(DashboardExit::Normal)
         }
         Some(Command::Import(args)) => {
             let workspace_id =
@@ -1443,6 +1450,33 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&preparation)?);
         return Ok(());
     }
+    if let Some(preview) = preparation.container_upgrade.clone() {
+        anyhow::ensure!(
+            args.queue.is_none(),
+            "Container settings replacement waits for accepted work. Omit --queue or clear the queue before confirming."
+        );
+        if args.yes {
+            eprintln!("{}", preview.warning);
+        } else if !prompt_move_confirmation(&preparation, None).await? {
+            bail!("container settings replacement cancelled");
+        }
+        daemon
+            .upgrade_container(mj_core::state::ContainerUpgradeRequest {
+                selection: *preview,
+                acknowledge_writable_layer_loss: true,
+            })
+            .await?;
+        if args.json {
+            let mut outcome = move_error_outcome(&preparation, String::new());
+            outcome.outcome = "container-upgrade-pending".into();
+            outcome.error = None;
+            outcome.recovery = None;
+            print_move_json(&outcome)?;
+        } else {
+            eprintln!("Container settings replacement pending; accepted work will finish first.");
+        }
+        return Ok(());
+    }
     if !args.json
         && preparation.destination_checks == mj_core::state::DestinationChecks::AfterProvisioning
     {
@@ -1761,6 +1795,10 @@ async fn prompt_move_confirmation(
     preparation: &mj_core::state::MovePreparation,
     queue: Option<ResumeQueueDisposition>,
 ) -> Result<bool> {
+    let settings_warning = preparation
+        .container_upgrade
+        .as_ref()
+        .map(|preview| preview.warning.clone());
     let active = preparation.active;
     let source_profile = preparation.source_profile_id.clone();
     let source_target = preparation.source_target_template_id.clone();
@@ -1780,6 +1818,10 @@ async fn prompt_move_confirmation(
     let queued_commands = preparation.queued_commands.clone();
     let session_id = preparation.selection.session_id.clone();
     mj_core::runtime::spawn_blocking(move || {
+        if let Some(warning) = settings_warning {
+            eprintln!("Apply container settings and restart?\n{warning}");
+            return confirm_move_prompt();
+        }
         eprintln!(
             "Move session {} from {source_profile}/{source_target} to {profile}/{target}.",
             session_id
@@ -1840,15 +1882,19 @@ async fn prompt_move_confirmation(
                 }
             );
         }
-        eprint!("Continue? [y/N] ");
-        io::stderr().flush()?;
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        Ok::<_, io::Error>(line.trim().eq_ignore_ascii_case("y"))
+        confirm_move_prompt()
     })
     .await
     .context("move confirmation prompt task failed")?
     .map_err(Into::into)
+}
+
+fn confirm_move_prompt() -> io::Result<bool> {
+    eprint!("Continue? [y/N] ");
+    io::stderr().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    Ok(line.trim().eq_ignore_ascii_case("y"))
 }
 
 fn move_error_outcome(
@@ -2577,9 +2623,9 @@ fn resolve_login_profile(config: &Config, requested: Option<&str>) -> Result<Str
             "several profiles are configured; pass --profile with one of: {}",
             profile_ids(config)
         ),
-        (None, _) => bail!(
-            "no enabled agent profiles are configured; add one in Settings → Agent Profiles, or run `mj setup`"
-        ),
+        (None, _) => {
+            bail!("no enabled agent profiles are configured; add one in Settings → Agent Profiles")
+        }
     }
 }
 
@@ -2687,18 +2733,13 @@ async fn recover(args: RecoverArgs) -> Result<()> {
     }
 }
 
-fn setup(args: SetupArgs) -> Result<()> {
-    match args.command {
-        Some(SetupCommand::Instructions { platform }) => {
-            let platform = match platform {
-                SetupPlatform::Linux => mj_setup::doctor::InstructionsPlatform::Linux,
-                SetupPlatform::Macos => mj_setup::doctor::InstructionsPlatform::Macos,
-            };
-            print!("{}", mj_setup::doctor::setup_instructions(platform));
-            Ok(())
-        }
-        None => run_setup_command(&config_path()),
-    }
+fn print_setup_instructions(command: DoctorCommand) {
+    let DoctorCommand::Instructions { platform } = command;
+    let platform = match platform {
+        SetupPlatform::Linux => mj_setup::doctor::InstructionsPlatform::Linux,
+        SetupPlatform::Macos => mj_setup::doctor::InstructionsPlatform::Macos,
+    };
+    print!("{}", mj_setup::doctor::setup_instructions(platform));
 }
 
 /// How long doctor waits for the daemon to report one profile's catalogue.

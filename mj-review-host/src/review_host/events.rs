@@ -14,7 +14,7 @@ pub enum HostEvent {
     },
     StartPush {
         session_id: String,
-        path: Option<String>,
+        scope: super::reviewer::ReviewScope,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },
     OverridePush {

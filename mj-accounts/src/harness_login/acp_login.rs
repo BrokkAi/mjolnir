@@ -70,6 +70,7 @@ pub async fn login(profile: &HarnessProfile, requested_method: Option<&str>) -> 
             profile.kind.display_name()
         )));
     }
+    println!("Preparing {}…", profile.kind.display_name());
     let (located, entrypoint, launch_environment) = match located_login(profile).await {
         Ok((located, environment)) => match located.entrypoint.clone() {
             Some(entrypoint) => (located, entrypoint, environment),
@@ -196,6 +197,7 @@ async fn sign_in(
     environment: &BTreeMap<String, String>,
     requested_method: Option<&str>,
 ) -> Result<Outcome> {
+    println!("Starting sign-in…");
     let mut session = match AcpSession::start(kind, home, command, args, environment).await {
         Ok(session) => session,
         Err(error) => {
@@ -514,17 +516,21 @@ fn looks_interactive(id: &str) -> bool {
 
 /// Whether this login has a desktop session for a browser callback or opener.
 pub fn has_desktop_session(environment: &BTreeMap<String, String>) -> bool {
-    cfg!(any(target_os = "macos", target_os = "windows"))
-        || ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|name| {
-            environment
-                .get(*name)
-                .is_some_and(|value| !value.trim().is_empty())
-        })
+    let set = |name: &str| {
+        environment
+            .get(name)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        return !["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"]
+            .iter()
+            .any(|name| set(name));
+    }
+    ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|name| set(name))
 }
 
 /// agy refuses `authenticate` with a generic -32603 when it cannot reach a
-/// browser (for example over SSH, which `has_desktop_session` cannot see on
-/// macOS); its message is the only signal it gives (agy 1.5.8).
+/// browser; its message is the only signal it gives (agy 1.5.8).
 fn is_headless_browser_error(error: &anyhow::Error) -> bool {
     format!("{error:#}")
         .to_ascii_lowercase()

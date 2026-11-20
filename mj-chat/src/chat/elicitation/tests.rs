@@ -784,7 +784,10 @@ fn golden_elicitation_dialog() {
             }),
         )
         .unwrap();
-        request.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip });
+        request.tool_permission = Some(mj_core::elicitation::ToolPermissionForm {
+            skip,
+            tool_call_id: None,
+        });
         let dialog = ElicitationDialog::new(request);
         append_elicitation_golden_state(
             &mut output,

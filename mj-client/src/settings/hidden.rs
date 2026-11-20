@@ -39,9 +39,15 @@ fn environments(
     })
 }
 
-/// Replace every literal environment value in a configuration or draft value
+/// Replace literal credentials in a configuration or draft value
 /// with the marker.
 pub fn hide(value: &mut Value) {
+    if let Some(key) = value
+        .pointer_mut("/jev/fastino_key")
+        .filter(|key| key.is_string())
+    {
+        *key = json!({ MARKER_KEY: true });
+    }
     for (_, _, environment) in environments(value) {
         for entry in environment.values_mut() {
             if entry.is_string() {
@@ -54,6 +60,13 @@ pub fn hide(value: &mut Value) {
 /// Hide only literals that were markers in the browser's incoming draft.
 /// Values newly entered by the user must survive a server-side page action.
 pub fn rehide_restored(value: &mut Value, incoming: &Value) {
+    if is_marker(&incoming["jev"]["fastino_key"])
+        && let Some(key) = value
+            .pointer_mut("/jev/fastino_key")
+            .filter(|key| key.is_string())
+    {
+        *key = json!({ MARKER_KEY: true });
+    }
     for (section, id, environment) in environments(value) {
         let owner = if section == "profile" {
             "profiles"
@@ -97,6 +110,16 @@ pub fn restore(value: &mut Value, stored: &Value) -> Result<Vec<String>, String>
             }
         }
     }
+    if let Some(key) = value
+        .pointer_mut("/jev/fastino_key")
+        .filter(|key| is_marker(key))
+    {
+        let literal = stored["jev"]["fastino_key"].as_str().ok_or(
+            "The hidden Fastino key was changed or removed in another client. Reopen Settings, then enter it again.",
+        )?;
+        restored.push(literal.to_owned());
+        *key = literal.into();
+    }
     if contains_marker(value) {
         return Err("A hidden value is not where Settings left it. Reopen Settings.".into());
     }
@@ -126,6 +149,88 @@ fn contains_marker(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fastino_key_is_hidden_and_typed_references_survive_a_settings_round_trip() {
+        use crate::settings::{draft, save, view};
+        use mj_core::config::Config;
+
+        let config = serde_json::from_value::<Config>(json!({
+            "version": mj_core::config::CONFIG_VERSION, "jev": { "fastino_key": "personal-key" }
+        }))
+        .unwrap();
+        let (stored, mut shown) = draft::open(&config);
+        hide(&mut shown);
+        assert!(is_marker(&shown["jev"]["fastino_key"]));
+        let mut restored = shown.clone();
+        assert_eq!(restore(&mut restored, &stored).unwrap(), ["personal-key"]);
+        rehide_restored(&mut restored, &shown);
+        assert_eq!(restored, shown);
+
+        let path = vec!["jev".into(), "fastino_key".into()];
+        let mut cleared = shown.clone();
+        let result = view::apply(
+            &mut cleared,
+            &path,
+            view::SettingsEdit::Remove { path: path.clone() },
+        )
+        .unwrap();
+        assert_eq!(result.page, ["jev"]);
+        assert!(
+            draft::config_from_draft(cleared)
+                .unwrap()
+                .jev
+                .fastino_key
+                .is_none()
+        );
+        view::apply(
+            &mut shown,
+            &path,
+            view::SettingsEdit::Set {
+                path: path.clone(),
+                text: Some(r#"{ from_secret = "FASTINO" }"#.into()),
+                choice: None,
+            },
+        )
+        .unwrap();
+        let page = view::render_page(&shown, &path).unwrap();
+        assert!(matches!(
+            page.groups[0].rows[0].control,
+            view::SettingsControl::Text { .. }
+        ));
+        let updated = draft::config_from_draft(shown).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        config.save_to(&config_path).unwrap();
+        let original = stored.to_string();
+        let updated = serde_json::to_string(&updated).unwrap();
+        let state = mj_core::state::State::default();
+        let error = save::save_at(&config_path, &original, &updated, &state).unwrap_err();
+        assert!(error.to_string().contains("jev.fastino_key"));
+        let secrets_path = directory.path().join("secrets.toml");
+        std::fs::write(&secrets_path, "FASTINO = \"private-marker\" invalid").unwrap();
+        let error = save::save_at(&config_path, &original, &updated, &state).unwrap_err();
+        let chain = format!("{error:#}");
+        assert!(chain.contains("secrets.toml"));
+        assert!(chain.contains("at byte"));
+        assert!(!chain.contains("private-marker"));
+        std::fs::write(&secrets_path, "FASTINO = \"my-provider-key\"").unwrap();
+        let mut saved = save::save_at(&config_path, &original, &updated, &state).unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap()["jev"]["fastino_key"],
+            json!({ "from_secret": "FASTINO" })
+        );
+
+        saved.jev.fastino_key = Some(mj_core::config::EnvironmentValue::Literal(
+            "old-key ".into(),
+        ));
+        saved.save_to(&config_path).unwrap();
+        let before = serde_json::to_string(&saved).unwrap();
+        saved.jev.enabled = false;
+        let disabled = serde_json::to_string(&saved).unwrap();
+        let disabled = save::save_at(&config_path, &before, &disabled, &state).unwrap();
+        assert_eq!(disabled.jev, saved.jev);
+    }
 
     #[test]
     fn page_action_preserves_typed_environment_values_through_save() {

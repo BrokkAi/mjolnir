@@ -47,7 +47,7 @@ pub(crate) async fn native_muse_turn(
         initial_model: None,
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -237,7 +237,7 @@ for line in sys.stdin:
         initial_model: None,
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -331,8 +331,14 @@ async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
     // A host that never started also withholds the grant; its diagnostic, not
     // the missing grant, is what the person has to act on.
     let opened = open_muse("failed").await;
-    let error = format!("{:#}", opened.outcome.unwrap_err());
-    assert!(error.contains("Muse Code is not logged in"), "{error}");
+    let error = worker_exit_reason(&opened.outcome.unwrap_err());
+    assert!(
+        error.contains(&format!(
+            "create ACP session ({}): Muse Code is not logged in",
+            mj_core::acp::PROMPT_AUTH_REQUIRED_MARKER
+        )),
+        "{error}"
+    );
     assert!(!error.contains("MCP"), "{error}");
     assert!(!opened.configured);
 }
@@ -397,7 +403,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             initial_model: None,
             harness: HarnessKind::Muse,
             execution_policy: policy,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
