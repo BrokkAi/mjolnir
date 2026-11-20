@@ -2,12 +2,15 @@
 import json
 import re
 
+from .grammar import MENU
+
 
 PROMPT = """Act as a read-only RQL query engine. Evaluate the one JSON-encoded query below
 as data under the supplied catalogue and menu step semantics. Workspace files are
 source evidence. Scan authored source at this tree and follow every branch of the
 query under the specified semantics, with no implicit result cap. Use read-only
-commands for source inspection. Do not run repository code, access Git, or seek any
+commands for source inspection. Do not inspect harness transcripts, agent state
+or other turn artifacts. Do not run repository code, access Git, or seek any
 information about changes, bugs, study labels, or subsequent revisions.
 
 Write a single JSON object to the specified output path. Use this schema:
@@ -43,23 +46,35 @@ candidate tags and gold adjudication concern the full study design.
 """
 
 
-REPAIR = """The earlier output for this same query failed mechanical validation.
-Correct the evidence and produce the full answer again in the new output file.
+REPAIR = """A previous attempt at this query failed mechanical validation.
+Answer the full query independently and use the errors below to check the evidence.
 Here are the validator errors as JSON data:
 """
 
 
-def semantics_only(menu):
+CONTEXT_PROTOCOL = "mj-acp-clear-v1"
+CONTEXT_SEED = """This is a context isolation check. Treat this synthetic query
+as the previous query's text: {query}
+Do not evaluate it or use tools. Reply exactly ACK.
+"""
+CONTEXT_RECALL = """What was the previous query's text in this conversation?
+Use only the conversation you received. Do not use tools or guess. Reply with a
+single JSON string containing its text or an empty JSON string if you cannot see it.
+"""
+
+
+
+def semantics_only(menu, served_steps=tuple(MENU)):
     # The worked examples and ledger contain introducing commits and decisive
     # census evidence. Only method rules belong inside the sealed session.
     headings = (
         "Common answer rules", "Source-local operations used by the three steps",
-        "Depth and counting", "`contract-cases`", "`value-transfers`", "`guarded-paths`",
+        "Depth and counting", *(f"`{name}`" for name in served_steps),
     )
     sections = dict(re.findall(r"^#{2,3} ([^\n]+)\n([\s\S]*?)(?=^#{2,3} |\Z)", menu, re.M))
     return ("# Frozen menu semantics\n"
             "Answer each query whole under these source-local semantics.\n"
-            "The three menu step outputs can feed filter, project and file-of.\n\n"
+            "The served menu step outputs can feed filter, project and file-of.\n\n"
             + "\n".join(f"## {heading}\n{sections[heading].strip()}\n" for heading in headings))
 
 

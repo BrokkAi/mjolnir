@@ -156,19 +156,89 @@ def image_digest(image):
     return "sha256:" + image.removeprefix("sha256:")
 
 
-def suspend_pilot_session(d, sid):
-    """Wait for teardown before publishing outputs or replacing a rejected attempt."""
-    if (d / "suspend.json").exists():
-        return
-    state = session(sid).get("lifecycle")
-    result = mj("suspend", "--session", sid, "--acknowledge-unpublished-work",
-                timeout=900) if state != "suspended" else {"already_suspended": True}
-    end = time.monotonic() + 900
-    while (state := session(sid).get("lifecycle")) != "suspended":
-        if time.monotonic() >= end or state == "failed":
-            raise RuntimeError(f"pilot session {sid} is {state}, not suspended")
-        time.sleep(5)
-    save(d / "suspend.json", result)
+def retain_pilot_session(d, sid, reason, **evidence):
+    save(d / "failed.json", {"retained_session": sid, "reason": reason, **evidence})
+    return "retained-failure"
+
+
+def durable_pilot_files(root, d, paths):
+    directories = []
+    for ancestor in (d, *d.parents):
+        directories.append(ancestor)
+        if ancestor == root:
+            break
+    else:
+        raise ValueError("pilot evidence is outside the run root")
+    for path in (*paths, *directories):
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allow_rql=False):
+    """Validate and flush the recorded evidence before destroying its exact session."""
+    import audit
+
+    launch = json.loads((d / "launch.json").read_text())
+    if MJ_INSTANCE_ARGS != ("--instance", launch["instance"]) or launch["session_id"] != sid:
+        raise ValueError("pilot teardown requires the recorded launch in a named instance")
+    names = ("transcript.json", "usage.json", output, "cache-attestation.json", "mcp-reconnect-result.json",
+             "pre-inventory.json", "settings.json", "launch.json", "prompt-completion.json",
+             *(p.name for p in sorted(d.glob("fix-*-completion.json"))), *(("queries.jsonl",) if allow_rql else ()))
+    paths = [d / name for name in names]
+    record = {"session_id": sid, "instance": MJ_INSTANCE_ARGS[-1], "profile": profile, "model": model,
+              "effort": effort, "output": output,
+              "evidence_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}}
+    if json.loads((d / "cache-attestation.json").read_text())["passed"] is not True:
+        raise ValueError(f"pilot check failed: {d / 'cache-attestation.json'}")
+    reconnect = json.loads((d / "mcp-reconnect-result.json").read_text())
+    if reconnect["passed"] is not True or reconnect["session_id"] != sid or not (d / output).read_bytes().strip():
+        raise ValueError("pilot capture lacks output or reconnect evidence for this session")
+    pages = json.loads((d / "transcript.json").read_text())
+    if not pages or any(page["session_id"] != sid for page in pages):
+        raise ValueError("pilot transcript is missing or belongs to another session")
+    usage = json.loads((d / "usage.json").read_text())
+    commands = (d / "prompt-completion.json", *sorted(d.glob("fix-*-completion.json")))
+    if usage["session_id"] != sid or not valid_usage(d / "usage.json"):
+        raise ValueError("pilot usage is missing or belongs to another session")
+    selection = {"model": model, "effort": effort}
+    settings = json.loads((d / "settings.json").read_text())
+    if (any(settings.get(key) != value for key, value in selection.items())
+            or any(usage["turn_selections"].get(json.loads(p.read_text())["command_id"]) != selection for p in commands)):
+        raise ValueError(f"pilot usage does not identify every model prompt as {model}/{effort}")
+    receipt = d / "receipt.json"
+    if receipt.exists():
+        if json.loads(receipt.read_text()) != record:
+            raise ValueError(f"pilot capture changed since it was recorded: {receipt}")
+    else:
+        save(receipt, record)
+    durable_pilot_files(root, d, [*paths, receipt])
+    before = json.loads((d / "pre-inventory.json").read_text())
+    commits = [*before["commits"], before["head_tree"], before["base_tree"]]
+    report = audit.audit_pilot(d / "transcript.json", sid, commits=commits, allow_rql=allow_rql)
+    save(d / "audit.json", report)
+    if not report["passed"]:
+        return retain_pilot_session(d, sid, "stored transcript did not pass the audit", void_reason=report["hits"])
+    durable_pilot_files(root, d, [d / "audit.json"])
+
+    cleanup = d / "destroy.json"
+    if not cleanup.exists():
+        try:
+            live = mj("sessions", "--all")["sessions"]
+            if any(row["id"] == sid and row.get("lifecycle") for row in live):
+                result = mj("destroy", "--session", sid, timeout=900)
+                if result.get("session_id") != sid or result.get("accepted") is not True:
+                    raise RuntimeError("destroy did not acknowledge the recorded session")
+            else:
+                result = {"session_id": sid, "already_absent": True}
+            save(cleanup, result)
+            durable_pilot_files(root, d, [cleanup])
+        except (OSError, KeyError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            save(d / "teardown-error.json", {"session_id": sid, "error": str(error)})
+            return "needs-recovery: inspect teardown-error.json"
+    return "done"
 
 
 def quota_hold(scope=None, *, floor=None, weekly=False, strict=False):

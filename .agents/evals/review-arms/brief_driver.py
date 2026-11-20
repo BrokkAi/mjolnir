@@ -96,6 +96,10 @@ class WriterTurnFailed(RuntimeError):
     """The requested command reached a terminal failure."""
 
 
+class WriterBriefMissing(RuntimeError):
+    """The completed writer left no brief.md in its checkout."""
+
+
 def wait_command(sid, command, limit=1800):
     end = time.monotonic() + limit
     while time.monotonic() < end:
@@ -117,7 +121,11 @@ def fetch_brief(sid):
     r = subprocess.run(driver.mj_invocation("fetch", "--session", sid, "--path", "brief.md", "--stdout"),
                        capture_output=True, timeout=300)
     if r.returncode:
-        raise RuntimeError(f"writer {sid} left no brief.md: {r.stderr.decode()[-400:]}")
+        detail = r.stderr.decode(errors="replace")
+        failure = f"writer {sid} left no brief.md: {detail[-400:]}"
+        if "does not exist on the session's target" in detail:
+            raise WriterBriefMissing(failure)
+        raise RuntimeError(failure)
     return r.stdout.decode()
 
 
@@ -156,6 +164,59 @@ def configure_pilot_model(sid, model, effort):
     return settings
 
 
+def final_messages(pages, completion):
+    """Find the completed assistant messages belonging to just this turn."""
+    start = completion.get("turn_start_position")
+    if start is None:
+        return []
+    return [item["text"].strip() for page in pages for item in page["items"]
+            if item["position"] >= start and item["role"] == "agent"
+            and not item["body"]["streaming"] and item["text"].strip()]
+
+
+def live_rql_count(response):
+    """Codex ACP's local MCP command reports a count per connected server."""
+    connected = False
+    for line in response.splitlines():
+        if line.startswith("**"):
+            connected = line == "**Connected**"
+        if connected and (match := re.fullmatch(r"- `rql`: (\d+) tools?", line)):
+            return int(match[1])
+    return None
+
+
+def check_pilot_tool(pilot, sid):
+    """Prove the pinned Codex thread sees the endpoint's registered tools."""
+    d = pilot["path"]
+    proof = d / "mcp-reconnect-result.json"
+    if not proof.exists():
+        command = "pilot-mcp-" + hashlib.sha256(pilot["tag"].encode()).hexdigest()[:24]
+        error = None
+        completion = {}
+        messages = []
+        try:
+            send(d, sid, "mcp-reconnect", command, "/mcp reconnect\n")
+            completion = json.loads((d / "mcp-reconnect-completion.json").read_text())
+            messages = final_messages(driver.transcript(sid), completion)
+        except WriterTurnFailed as exc:
+            error = str(exc)
+        response = "\n".join(messages)
+        endpoint = json.loads((d / "tool-endpoint.json").read_text())
+        tools = pilot["inputs"]["rql_tools"]
+        count = live_rql_count(response)
+        passed = (not error and "Reloaded the MCP configuration of all open sessions." in response
+                  and count == len(tools) and endpoint == {"session_id": sid, "tools": tools})
+        save(proof, {"session_id": sid, "expected_tools": tools, "endpoint": endpoint,
+                     "live_count": count, "response": response, "usage": completion.get("usage"),
+                     "error": error, "passed": passed})
+    passed = json.loads(proof.read_text())["passed"]
+    if not passed:
+        save(d / "transcript.json", driver.transcript(sid))
+        save(d / "usage.json", mj("usage", "--session", sid))
+        driver.retain_pilot_session(d, sid, "Codex's live RQL catalog did not match the assignment")
+    return passed
+
+
 def run(bug_id, gate, *, pilot=None):
     bug = pilot["bug"] if pilot else driver.CORPUS[bug_id]
     d = pilot["path"] if pilot else ROOT / "briefs" / KIND / bug_id
@@ -170,11 +231,10 @@ def run(bug_id, gate, *, pilot=None):
         sid = json.loads((d / "launch.json").read_text())["session_id"]
         if pilot:
             profile = json.loads((d / "launch-intent.json").read_text())["profile"]
-            if (d / "accepted.json").exists():
-                return finish_pilot_writer(d, sid, bug_id, profile, pilot["inputs"])
             if (d / "failed.json").exists():
-                driver.suspend_pilot_session(d, sid)
-                return "void" if "void_reason" in json.loads((d / "failed.json").read_text()) else "rejected"
+                return "retained-failure"
+            if (d / "accepted.json").exists():
+                return finish_pilot_writer(pilot, sid, bug_id, profile)
     elif (d / "launch-intent.json").exists():
         return "needs-recovery"  # a session may exist without a record; find it before rerunning
     else:
@@ -190,7 +250,7 @@ def run(bug_id, gate, *, pilot=None):
             if pilot:
                 sid = sealed_launch(driver.BUNDLE, bug["intro_commit"], profile, title,
                                     base=bug["base_commit"], effort=effort)
-                launch = {"session_id": sid}
+                launch = {"session_id": sid, "instance": driver.MJ_INSTANCE_ARGS[-1]}
             else:
                 launch = mj("new", "--workspace-id", workspace, "--target", "podman", "--bundle", driver.BUNDLE,
                             "--at", bug["intro_commit"], "--base", bug["base_commit"], "--no-later-history",
@@ -203,8 +263,8 @@ def run(bug_id, gate, *, pilot=None):
             sid = launch["session_id"]
             if not pilot:
                 driver.wait_idle(sid)
-    if pilot and pilot["prepare_tool"]:
-        pilot["prepare_tool"](sid)
+    if pilot:
+        pilot["publish_tool_assignment"](sid)
     if not (d / "settings.json").exists():
         s = driver.wait_idle(sid) if pilot else session(sid)
         assert s["no_later_history"] and s["at"] == bug["intro_commit"] and s["base"] == bug["base_commit"], s
@@ -216,10 +276,8 @@ def run(bug_id, gate, *, pilot=None):
         place = driver.container(sid)
         save(d / "placement.json", place)
         if pilot and driver.image_digest(place["image"]) != pilot["inputs"]["image_digest"]:
-            save(d / "failed.json", {"session_id": sid, "image": place["image"],
-                                     "pinned": pilot["inputs"]["image_digest"]})
-            driver.suspend_pilot_session(d, sid)
-            return "rejected"
+            return driver.retain_pilot_session(d, sid, "writer image differs from the pinned image",
+                                               image=place["image"], pinned=pilot["inputs"]["image_digest"])
         before = driver.inventory(place, "audit", bug["base_commit"])
         assert not before["remotes"] and not before["alternates"] and not before["status"], before
         if pilot and pilot["attest_cache"]:
@@ -228,22 +286,20 @@ def run(bug_id, gate, *, pilot=None):
         if pilot:
             save(d / "settings.json", settings)
 
+    if pilot and not check_pilot_tool(pilot, sid):
+        return "retained-failure"
     prompt = pilot["prompt"] if pilot else ((SCRIPTS / "brief/WRITER.md").read_text()
               .replace("{base}", bug["base_commit"]).replace("{message}", driver.commit_message(bug)))
     try:
         text, problems, rounds = write_brief(d, sid, tag, prompt, bug)
-    except WriterTurnFailed as error:
+    except (WriterTurnFailed, WriterBriefMissing) as error:
         if not pilot:
             raise
         save(d / "transcript.json", driver.transcript(sid))
         save(d / "usage.json", mj("usage", "--session", sid))
-        verdict = pilot_audit(d, sid, bool(pilot["prepare_tool"]))
-        failure = {"session_id": sid, "error": str(error)}
-        if not verdict["passed"]:
-            failure["void_reason"] = verdict["hits"]
-        save(d / "failed.json", failure)
-        driver.suspend_pilot_session(d, sid)
-        return "rejected" if verdict["passed"] else "void"
+        verdict = pilot_audit(d, sid, bool(pilot["inputs"]["rql_tools"]))
+        return driver.retain_pilot_session(d, sid, str(error),
+                                           **({"void_reason": verdict["hits"]} if not verdict["passed"] else {}))
     # brief.md is where the oracle builder and the blind arms read; it is written only on success.
     (d / "brief-candidate.md").write_text(text)
     if not (d / "inventory-check.json").exists():
@@ -260,31 +316,24 @@ def run(bug_id, gate, *, pilot=None):
     save(cd / "transcript.json", driver.transcript(sid))
     save(cd / "usage.json", mj("usage", "--session", sid))
     if pilot:
-        verdict = pilot_audit(d, sid, bool(pilot["prepare_tool"]))
-        if not verdict["passed"]:
-            save(d / "failed.json", {"session_id": sid, "void_reason": verdict["hits"]})
-            driver.suspend_pilot_session(d, sid)
-            return "void"
         actual_profile = session(sid).get("profile_id")
         if actual_profile != profile:
-            raise RuntimeError(f"writer profile changed from {profile} to {actual_profile}")
-        if not driver.valid_usage(cd / "usage.json"):
-            raise RuntimeError("writer usage is missing total_tokens.tokens")
+            return driver.retain_pilot_session(d, sid, f"writer profile changed from {profile} to {actual_profile}")
     inv = json.loads((d / "inventory-check.json").read_text())["problems"]
     if inv or problems:
         # No done.json: a rerun fails the same way instead of passing an invalid brief on.
         # The session stays live for inspection.
         (d / "brief-rejected.md").write_text(text)
+        if pilot:
+            return driver.retain_pilot_session(d, sid, "writer failed inventory or lint checks",
+                                               fix_rounds=rounds, lint_problems=problems, inventory_problems=inv)
         save(d / "failed.json", {"bug": bug_id, "session_id": sid, "fix_rounds": rounds, "lint_problems": problems,
                                  "inventory_problems": inv, "time_ns": time.time_ns()})
-        if pilot:
-            driver.suspend_pilot_session(d, sid)
-            return "rejected"
         raise RuntimeError(f"brief not accepted: inventory problems {inv}; "
                            f"{len(problems)} rule violations after {rounds} fix rounds (lint-{rounds}.json)")
     if pilot:
         save(d / "accepted.json", {"fix_rounds": rounds, "brief_sha256": hashlib.sha256(text.encode()).hexdigest()})
-        return finish_pilot_writer(d, sid, bug_id, profile, pilot["inputs"])
+        return finish_pilot_writer(pilot, sid, bug_id, profile)
     save(d / "suspend.json", mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
     (d / "brief.md").write_text(text)
     save(d / "done.json", {"bug": bug_id, "session_id": sid, "fix_rounds": rounds, "finished_ns": time.time_ns()})
@@ -316,15 +365,24 @@ def write_brief(d, sid, tag, prompt, bug):
         send(d, sid, f"fix-{repair}", f"brief-fix{repair}-" + tag[:28], fix)
 
 
-def finish_pilot_writer(d, sid, bug_id, profile, inputs):
+def finish_pilot_writer(pilot, sid, bug_id, profile):
+    d, inputs = pilot["path"], pilot["inputs"]
     accepted = json.loads((d / "accepted.json").read_text())
     text = (d / "brief-candidate.md").read_bytes()
     if hashlib.sha256(text).hexdigest() != accepted["brief_sha256"]:
         raise RuntimeError(f"accepted brief changed under {d}")
-    driver.suspend_pilot_session(d, sid)
-    (d / "brief.md").write_bytes(text)
+    output = d / "brief.md"
+    if output.exists() and output.read_bytes() != text:
+        raise RuntimeError(f"stored brief changed under {d}")
+    if not output.exists():
+        output.write_bytes(text)
+    state = driver.destroy_captured_pilot(pilot["run_root"], d, sid, profile, *pilot["model"], output.name,
+                                          allow_rql=bool(inputs["rql_tools"]))
+    if state != "done":
+        return state
     save(d / "done.json", dict(accepted, bug=bug_id, session_id=sid,
-                               profile=profile, inputs=inputs, finished_ns=time.time_ns()))
+                               profile=profile, inputs=inputs, finished_ns=time.time_ns(),
+                               mcp_reconnect_sha256=hashlib.sha256((d / "mcp-reconnect-result.json").read_bytes()).hexdigest()))
     return "done"
 
 

@@ -53,9 +53,13 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
         for item in page["items"]:
             if item["role"] not in ("tool", "terminal"):
                 continue
+            call = (item.get("body") or {}).get("call") or {}
+            if commits is not None and not call:
+                # Standalone terminal_output rows contain output only. The
+                # originating command is recorded as its own tool call.
+                continue
             calls += 1
             inp, out = call_parts(item)
-            call = (item.get("body") or {}).get("call") or {}
             if allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query") and call.get("kind") != "execute":
                 continue
             for name, pattern in INPUT_PATTERNS.items():
@@ -64,16 +68,18 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                     hits.append({"seq": item["seq"], "kind": name, "where": "input",
                                  "snippet": inp[start:m.end() + 160]})
                     break
-            for name, pattern in OUTPUT_PATTERNS.items():
-                m = re.search(pattern, out, re.I)
-                if m:
-                    start = max(0, m.start() - 160)
-                    hits.append({"seq": item["seq"], "kind": name, "where": "output",
-                                 "snippet": out[start:m.end() + 160]})
-            other = re.findall(r"/workspace/([0-9a-f]{32})", inp + out)
+            if commits is None:  # Keep the legacy screen, where output hits were reviewed by hand.
+                for name, pattern in OUTPUT_PATTERNS.items():
+                    m = re.search(pattern, out, re.I)
+                    if m:
+                        start = max(0, m.start() - 160)
+                        hits.append({"seq": item["seq"], "kind": name, "where": "output",
+                                     "snippet": out[start:m.end() + 160]})
+            other = re.findall(r"/workspace/([0-9a-f]{32})", inp + out if commits is None else inp)
             foreign = sorted(set(other) - {own_workspace})
             if foreign:
-                hits.append({"seq": item["seq"], "kind": "other-workspace", "where": "input/output",
+                hits.append({"seq": item["seq"], "kind": "other-workspace",
+                             "where": "input/output" if commits is None else "input",
                              "snippet": ", ".join(foreign)})
             if commits is not None:
                 for name, snippet in pilot_hits(inp, commits, single_commit):

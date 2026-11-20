@@ -3,22 +3,25 @@
 Set the SSH server's `engine` to `rql_mock.engine:answer`. Keep the engine
 configuration, source Git repositories, manifest, cache and audit files on the
 host. The engine keeps one Fable/high session per introducing commit across
-queries, writer arms and replicates. It serializes turns for that session,
-replays validated results for repeat queries, and checks reported locations and
-copied byte slices against the pinned host Git tree before publishing an answer.
+queries, writer arms and replicates. It serializes turns for that session, clears
+the native conversation before each query or repair, and drops the previous
+turn's workspace artifacts. It replays validated results for repeat queries and
+checks locations and copied byte slices against the pinned host Git tree.
 
 ## Private study instance
 
 The host entry point reads `/mnt/optane/review-arms-pilot/engine.json`. Fill in
-the study's actual named instance, profile, source clones, manifest and resolved
-Fable version. The sample port is shared with the bundle configuration.
+the study's actual named instance, profile, source clones and manifest. Keep
+the manifest's relative paths intact. The engine verifies the catalogue, menu
+semantics, menu and eligible-label sidecar against the manifest's SHA-256 pins
+before serving any answer. Only the menu steps in `served_steps` are available.
+The sample port is shared with the bundle configuration.
 
 ```json
 {
   "instance": "rql-pilot",
   "profile": "<allotted Claude profile>",
-  "model_version": "claude-fable-5-1",
-  "manifest": "/mnt/optane/review-arms-pilot/manifest.json",
+  "manifest": "/absolute/path/to/review-arms/brief/rql-census/pilot/manifest.json",
   "repos": {
     "mjolnir": "/absolute/path/to/mjolnir",
     "bifrost-dev": "/absolute/path/to/bifrost-dev"
@@ -59,15 +62,18 @@ where loopback Git is reachable.
 ## Snapshots and run lifecycle
 
 From the review-arms directory, prepare the Git repository before starting
-the listener. Preparation packs only each introducing commit's tree and blobs,
-creates a parentless commit and records the mapping in `engine-trees.json`.
-Verification checks the manifest refs, tree equality and every commit object,
-including unreachable objects.
+the listener. Preparation packs the tree and blobs for each introducing commit
+in the frozen eligible-label sidecar. It creates a parentless commit and records
+the mapping in `engine-trees.json`. Verification checks refs, tree equality
+and every commit object, including unreachable ones. The SSH transport still
+restricts each writer to its assigned pilot snapshot. Other eligible snapshots
+are available through the host fidelity path.
 
 ```sh
 python3 -B -m rql_mock.engine prepare
 rql_mock/engine/start-git-daemon.sh
 # Run the pilot while the read-only, loopback Git listener is available.
+python3 -B -m rql_mock.engine teardown
 rql_mock/engine/stop-git-daemon.sh
 ```
 
@@ -91,12 +97,35 @@ mjx --instance "$instance" new --workspace-id "$workspace_id" --target podman \
 
 The launcher sends no prompt. Before the first turn the engine sets and
 verifies `model=fable` and `effort=high`, then checks the concrete Fable model
-in the provider's reported usage. The agent receives the catalogue, the menu's
-semantic sections and one query at a time. The worked examples, coverage ledger,
+in the provider's reported usage against `model_versions.fable_provider_id`.
+A synthetic prior-query recall probe runs on first use and is recorded under
+`context_probe`. A failed probe prevents serving answers from the session. Each
+query and repair then waits for the command-specific `context-cleared` boundary
+and records its own context ID. The agent receives the catalogue, the served
+menu's semantic sections and the query. The worked examples, coverage ledger,
 manifest and census labels stay on the host.
 
 The per-commit cache and session records live under
 `/mnt/optane/review-arms-pilot/engine-cache/`. A session with an uncertain launch
 record needs reconciliation with the private instance before another launch.
-The same session serves cache misses while it remains live. Isolated cutoff
-sessions cannot be resumed. Keep them live while their diffs are in progress.
+The same session serves cache misses while it remains live. An isolation audit
+failure moves that session's evidence to `retired/<session>/`. The engine
+captures the whole audit transcript, usage with reported provider model IDs,
+and all answer attempts, including rejected output. It audits the saved
+transcript and records SHA-256 for each captured file in `capture.json` before
+requesting destruction of the recorded session and retrying once in a new
+sealed session. If capture fails, the container remains available for
+recovery.
+
+After writer and fidelity requests have finished, use `teardown` to apply the
+same process to the remaining engine sessions in the named study instance.
+It reports capture failures and exits nonzero, leaving those sessions intact.
+The receipt records Mjolnir's acceptance of destruction. An interrupted
+destroy request with no receipt requires reconciling the recorded request
+with the study instance before trying to destroy that session again.
+
+For the host fidelity stability check, call
+`rql_mock.engine.answer(commit, query, fresh=True)`. A successful re-ask records
+`fresh: true` and its independently confirmed context ID, and stores the result
+under `stability/<query-cache-key>/<context-id>.json`. Writer requests cannot
+select a fresh re-ask or change the shared cached answer.

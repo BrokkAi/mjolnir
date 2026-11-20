@@ -36,14 +36,15 @@ MENU = {
 MENU_ALIASES = {name.replace("-", "_"): name for name in MENU}
 
 
-def registry(catalogue):
+def registry(catalogue, served_steps=tuple(MENU)):
     allowed = vocabulary(catalogue)
-    for name, spec in MENU.items():
+    for name in served_steps:
+        spec = MENU[name]
         signature = ("step", spec.inputs, f"`{spec.output}`", (), ())
         allowed[name] = allowed[name.replace("-", "_")] = signature
-    menu_kinds = ", ".join(f"`{step.output}`" for step in MENU.values())
+    menu_kinds = ", ".join(f"`{MENU[name].output}`" for name in served_steps)
     for name in ("file-of", "file_of"):
-        if name in allowed:
+        if name in allowed and menu_kinds:
             use, inputs, output, required, selectors = allowed[name]
             allowed[name] = use, f"{inputs}, {menu_kinds}", output, required, selectors
     return allowed
@@ -101,7 +102,7 @@ SOURCE_OPTIONS = {
     "dependency-evidence": None, "configuration-facts": None,
 }
 SOURCE_ALIASES = {"occurrence": "occurrences", "scope": "scopes", "binding": "bindings",
-                  "path": "paths"}
+                  "path": "paths", "export": "exports"}
 
 
 def validate_forms(form, allowed, catalogue_options, normalized_kinds):
@@ -234,8 +235,8 @@ def validate_row_operand(name, options, domain):
                     raise ValueError(f"{name}: unknown {domain} field {field!r}")
 
 
-def parse(query, catalogue):
-    allowed = registry(catalogue)
+def parse(query, catalogue, served_steps=tuple(MENU)):
+    allowed = registry(catalogue, served_steps)
     steps = set()
     errors, _ = check_query(query, allowed, query_heads=steps)
     if errors:

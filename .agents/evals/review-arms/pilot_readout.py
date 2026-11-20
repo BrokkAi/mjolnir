@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 import json
 from pathlib import Path
 import re
-from statistics import mean
+from statistics import mean, median
 
 from pilot_judge import (DEFAULT_MANIFEST, DEFAULT_ROOT, JUDGMENT_FIELDS, KEY_PATH, artifact,
                          group_jobs, load, load_snapshot, records, save, sha)
@@ -127,23 +127,39 @@ def query_summary(entries, scored, ids, deliveries, facts):
 
     covered = []
     queried_containment = defaultdict(list)
-    query_counts = Counter()
+    writers = Counter()
+    calls = Counter()
+    latencies = defaultdict(list)
     for key, oid in brief_by_key.items():
         entry, verdict = entries[oid], scored[oid]
         events = deliveries.get(entry["job"])
         if events is None:
-            query_counts["log_missing"] += 1
+            writers["log_missing"] += 1
             continue
-        query_counts["queried" if events else "no_query"] += 1
-        if events:
+        ok = False
+        for event in events:
+            status = event["status"]
+            calls[status] += 1
+            latencies[status].append(event["latency_ms"])
+            latencies["all"].append(event["latency_ms"])
+            ok |= status == "ok"
+        writers["queried" if events else "no_query"] += 1
+        if ok:
+            writers["exposed"] += 1
             queried_containment[key[0]].append(verdict["contains_decisive"])
         outside_sites = {fact["id"]: fact["sites"] for fact in facts[key[0]] if not fact["in_diff"]}
         for fact, coverage in delivered_sites(events, outside_sites).items():
             covered.append({"diff": key[0], "replicate": key[1], "fact": fact, "site_coverage": coverage,
                             "contained": fact in verdict["contained_facts"],
                             "reviewer_recovery_rate": average(recovery[key, fact])})
-    return {**{name: query_counts[name] for name in ("queried", "no_query", "log_missing")},
-            "queried_only_contains_decisive": average(mean(values) for values in queried_containment.values()),
+    return {**{name: writers[name] for name in ("queried", "exposed", "no_query", "log_missing")},
+            "queries": sum(calls.values()), "ok_answers": calls["ok"],
+            "parse_error": calls["parse_error"], "engine_error": calls["engine_error"],
+            "other_errors": sum(count for status, count in calls.items()
+                                if status not in {"ok", "parse_error", "engine_error"}),
+            "latency_ms": {status: {"count": len(values), "mean": mean(values), "median": median(values)}
+                           for status, values in latencies.items()},
+            "exposed_only_contains_decisive": average(mean(values) for values in queried_containment.values()),
             "site_coverage_counts": dict(Counter(row["site_coverage"] for row in covered)),
             "by_brief_and_fact": covered}
 
@@ -280,7 +296,7 @@ def readout(manifest, judgments, deliveries, snapshot):
         "methods": {
             "catch": "Equal-weight diff means of the arm's reviewer catches, pooling both briefs where repeated.",
             "per_fact": "Arm means within each diff and fact, with equal weight per diff-fact in overall rates.",
-            "containment": "Contrasts use full paired samples. The queried-only statistic describes R separately.",
+            "containment": "Contrasts use full paired samples. The exposed-only statistic includes writers that received an ok answer.",
             "site_coverage": "Coverage uses spans in the pages returned to the writer. A row can state a fact "
                              "without spanning its census sites. Stated-in-row judging is deferred to test.",
             "analysis_cohort": "Both passes cover every job for each included diff. The hand check supplies "

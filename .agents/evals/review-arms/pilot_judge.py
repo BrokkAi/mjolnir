@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import secrets
 import subprocess
 import sys
@@ -126,14 +127,85 @@ def write_task(path, payload):
     )
 
 
+def run_artifacts(root, jobs, manifest_sha256):
+    """Return only current completed job artifacts and their checked receipts."""
+    current = {}
+    for job in jobs:
+        path = artifact(job)
+        directory = root / path.parent
+        if not all(p.is_file() for p in (root / path, directory / "done.json", directory / "usage.json")):
+            continue
+        done = load(directory / "done.json")
+        data = (root / path).read_bytes()
+        kind = job["kind"]
+        digest_field = "brief_sha256" if kind == "writer" else "output_sha256"
+        if done[digest_field] != sha(data) or not done["session_id"]:
+            raise ValueError(f"{job['job']}: published artifact lacks a matching receipt")
+        if manifest_sha256 is not None and done["inputs"]["manifest_sha256"] != manifest_sha256:
+            raise ValueError(f"{job['job']}: published artifact uses a different manifest")
+        entry = {**job, "artifact": str(path), "text_sha256": done[digest_field],
+                 "session_id": done["session_id"]}
+        if kind == "writer" and job["arm"] in {"R", "R-loc"}:
+            log = directory / "queries.jsonl"
+            if not log.is_file():
+                continue
+            entry["query_sha256"] = sha(log.read_bytes())
+        if kind == "reviewer" and job["arm"] != "N":
+            supplied = done.get("inputs", {})
+            entry["brief"] = {"session_id": supplied.get("writer_session_id"), "sha256": supplied.get("brief_sha256")}
+        current[job["job"]] = entry, data
+
+    for job, (entry, _) in list(current.items()):
+        if "brief" not in entry:
+            continue
+        writer_job = job.rsplit("/", 1)[0] + "/writer"
+        writer = current.get(writer_job)
+        if writer and entry["brief"] == {"session_id": writer[0]["session_id"], "sha256": writer[0]["text_sha256"]}:
+            continue
+        print(json.dumps({"job": job, "state": "stale-review", "reviewed_brief": entry["brief"],
+                          "current_writer": writer[0]["session_id"] if writer else None}), file=sys.stderr)
+        del current[job]
+    return current
+
+
+def retire_batch(root, key, batch):
+    """Keep old batches, verdicts and evidence outside the active collection."""
+    destination = root / KEY_PATH.parent / "retired" / batch
+    members = {oid: entry for oid, entry in key["outputs"].items() if entry["batch"] == batch}
+    if not (destination / "key.json").is_file():
+        save(destination / "key.json", members)
+    paths = []
+    for inputs, judgments in ((INPUT_PATH, "judge"), (HAND_PATH, "hand-check")):
+        paths.extend(inputs / part for part in (
+            Path(batch), Path("out") / f"task-{batch}.json", Path("out") / f"invalid-{batch}.json",
+            Path("sessions") / batch, Path("sessions") / f"batch-{batch}.json",
+            Path("sessions") / f"usage-{batch}.json", Path("sessions") / f"unit-{batch}.lock",
+            Path("prompts") / f"prompt-{batch}.txt",
+        ))
+        paths.extend(Path(judgments) / f"{oid}.json" for oid in members)
+    for path in paths:
+        source, target = root / path, destination / path
+        if source.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(target)
+    for oid in members:
+        del key["outputs"][oid]
+    save(root / KEY_PATH, key)
+
+
 def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256=None):
     key_file = root / KEY_PATH
     key = load(key_file) if key_file.exists() else {"version": 1, "manifest": manifest, "outputs": {}}
     if key["manifest"] != manifest:
         raise ValueError("manifest differs from the private judge key")
     outputs = key["outputs"]
-    by_job = {entry["job"]: oid for oid, entry in outputs.items()}
+    retired = root / KEY_PATH.parent / "retired"
+    for batch in {entry["batch"] for entry in outputs.values()}:
+        if (retired / batch / "key.json").is_file():
+            retire_batch(root, key, batch)
     occupied_batches = {entry["batch"] for entry in outputs.values()}
+    if retired.is_dir():
+        occupied_batches.update(path.name for path in retired.iterdir())
     by_diff = group_jobs(manifest)
     diffs = sorted(by_diff)
     random.Random(manifest["seed"]).shuffle(diffs)
@@ -141,17 +213,21 @@ def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256
         if selected is not None and diff not in selected:
             continue
         jobs = by_diff[diff]
-        paths = [artifact(job) for job in jobs]
-        if not all((root / path).is_file() and (root / path.parent / "done.json").is_file()
-                   and (root / path.parent / "usage.json").is_file() for path in paths):
-            continue
-        if any(job["kind"] == "writer" and job["arm"] in {"R", "R-loc"}
-               and not (root / path.parent / "queries.jsonl").is_file() for job, path in zip(jobs, paths)):
+        current = run_artifacts(root, jobs, manifest_sha256)
+        defect_ids = [d["id"] for d in defects[diff]]
+        for entry, _ in current.values():
+            entry["defect_ids"] = defect_ids
+        for batch in {entry["batch"] for entry in outputs.values()
+                      if entry["diff"] == diff and (entry["job"] not in current
+                          or entry != {**current[entry["job"]][0], "batch": entry["batch"]})}:
+            retire_batch(root, key, batch)
+        if len(current) != len(jobs):
             continue
         sets = snapshot[diff]
         facts = [fact for group in sets for fact in group]
         outside = [fact for fact in facts if not fact["in_diff"]]
         minimal_sets = [[fact["id"] for fact in group] for group in sets]
+        by_job = {entry["job"]: oid for oid, entry in outputs.items() if entry["diff"] == diff}
         for kind in JUDGMENT_FIELDS:
             group = sorted((j for j in jobs if j["kind"] == kind), key=lambda j: j["job"])
             if not group:
@@ -162,26 +238,12 @@ def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256
             occupied_batches.add(batch)
             texts = []
             for job in group:
-                path = artifact(job)
-                data = (root / path).read_bytes()
-                digest = sha(data)
-                done = load(root / path.parent / "done.json")
-                digest_field = "brief_sha256" if kind == "writer" else "output_sha256"
-                if done.get(digest_field) != digest:
-                    raise ValueError(f"{job['job']}: published artifact hash differs")
-                if manifest_sha256 is not None and done["inputs"]["manifest_sha256"] != manifest_sha256:
-                    raise ValueError(f"{job['job']}: published artifact uses a different manifest")
-                entry = {**job, "batch": batch, "artifact": str(path), "text_sha256": digest,
-                         "defect_ids": [d["id"] for d in defects[diff]]}
-                if kind == "writer" and job["arm"] in {"R", "R-loc"}:
-                    log = root / path.parent / "queries.jsonl"
-                    entry["query_sha256"] = sha(log.read_bytes())
-                oid = by_job.get(job["job"])
+                name = job["job"]
+                entry, data = current[name]
+                oid = by_job.get(name)
                 if oid is None:
                     oid = opaque(outputs)
-                    outputs[oid] = entry
-                elif outputs[oid] != entry:
-                    raise ValueError(f"{job['job']}: input or provenance changed since queueing")
+                    outputs[oid] = {**entry, "batch": batch}
                 texts.append({"output_id": oid, "text": data.decode("utf-8")})
             payload = {"kind": "review" if kind == "reviewer" else "brief", "defects": defects[diff],
                        "facts": outside if kind == "reviewer" else facts, "items": texts}
@@ -196,6 +258,46 @@ def prepare(root, manifest, snapshot, defects, selected=None, *, manifest_sha256
     if not key_file.exists():
         save(key_file, key)
     return key
+
+
+def expected_provider_model(manifest):
+    version = manifest["model_versions"]["fable"]
+    if not re.fullmatch(r"Fable [0-9]+(?:\.[0-9]+)*", version):
+        raise ValueError(f"unrecognized frozen Fable version {version!r}")
+    return "claude-fable-" + version.removeprefix("Fable ").replace(".", "-")
+
+
+def provider_model(usage, command, turn, expected):
+    turns = usage["turns"]
+    if len(turns) != 1 or (turns[0]["command_id"], turns[0]["accepted_ordinal"]) != (command, turn):
+        raise ValueError("provider usage does not identify exactly the judge's turn")
+    if usage["turn_selections"].get(command) != {"model": "fable", "effort": "high"}:
+        raise ValueError("provider usage does not attribute the judge turn to Fable/high")
+    models = turns[0]["usage"]["provider_details"]["model_usage"]
+    fable = {model.split("[", 1)[0] for model in models if model.startswith("claude-fable-")}
+    if fable != {expected}:
+        raise ValueError(f"expected provider usage for {expected}, found {sorted(fable)}")
+    return expected
+
+
+EVIDENCE_FILES = ("transcript.json", "usage.json", "audit.json", "verdicts.jsonl")
+
+
+def verify_capture(attempt, receipt, expected):
+    """Recheck the host evidence before publishing a judgment or retiring its session."""
+    producer = receipt["producer"]
+    launch = load(attempt / "launch.json")
+    if not producer.get("sealed") or producer["session_id"] != launch["session_id"]:
+        raise ValueError(f"{attempt}: receipt does not match the sealed launch")
+    for name in EVIDENCE_FILES:
+        if sha((attempt / name).read_bytes()) != receipt["evidence_sha256"][name]:
+            raise ValueError(f"{attempt / name}: evidence differs from its receipt")
+    if load(attempt / "audit.json")["passed"] is not True:
+        raise ValueError(f"{attempt}: transcript audit did not pass")
+    model = provider_model(load(attempt / "usage.json"), producer["command"], producer["turn"], expected)
+    if producer["provider_model"] != model:
+        raise ValueError(f"{attempt}: receipt's provider model differs from usage")
+    return producer
 
 
 def normalize(record, entry):
@@ -264,7 +366,9 @@ def collect(root, key, *, hand=False, profile=None):
         proof = batch.parent / "out" / f"task-{batch.name}.json"
         if not proof.is_file():
             continue
-        producer = load(proof)["producer"]
+        receipt = load(proof)
+        producer = verify_capture(batch.parent / "sessions" / batch.name / "attempt",
+                                  receipt, expected_provider_model(key["manifest"]))
         if ((profile is not None and producer["profile"] != profile)
                 or producer["config"].get("model") != "fable"
                 or producer["config"].get("effort") != "high"
@@ -304,11 +408,17 @@ def main():
     parser.add_argument("--diff", action="append", help="prepare only these full diff keys")
     parser.add_argument("--profile", help="pinned Claude profile for run or hand-check")
     parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--instance", help="dedicated named Mjolnir instance")
+    parser.add_argument("--bundle", help="bundle with a single empty parentless Git commit")
+    parser.add_argument("--repo-commit", help="the empty bundle's pinned commit")
+    parser.add_argument("--seal-probe", type=Path, help="trusted host isolation probe; receives the container ID")
     args = parser.parse_args()
     runs_sessions = args.action in {"run", "hand-check"}
     hand = args.action in {"hand-check", "collect-hand-check"}
     if runs_sessions and (not args.profile or "," in args.profile):
         parser.error("run and hand-check require one pinned Claude --profile")
+    if runs_sessions and not all((args.instance, args.bundle, args.repo_commit, args.seal_probe)):
+        parser.error("run and hand-check require --instance, --bundle, --repo-commit and --seal-probe")
     raw_manifest = args.manifest.read_bytes()
     manifest = json.loads(raw_manifest)
     snapshot = load_snapshot(args.manifest, manifest)
@@ -328,15 +438,26 @@ def main():
         key = load(key_path)
         if key["manifest"] != manifest:
             raise ValueError("manifest differs from the private judge key")
+        selected = {entry["diff"] for entry in key["outputs"].values()}
+        if not selected:
+            return
+        defects = load_defects(manifest)
+        key = prepare(root, manifest, snapshot, defects, selected, manifest_sha256=sha(raw_manifest))
         if runs_sessions:
             tasks = root / (HAND_PATH if hand else INPUT_PATH)
+            if not tasks.is_dir():
+                return
             result = subprocess.run(
                 [sys.executable, str(HERE / "verify_driver.py"), str(tasks),
                  "--kind", "task", "--text-only", "--output", "verdicts.jsonl",
                  "--model", "fable", "--profiles", args.profile, "--quota-scope", "fable",
-                 "--concurrency", str(args.concurrency)],
+                 "--concurrency", str(args.concurrency), "--instance", args.instance,
+                 "--bundle", args.bundle, "--repo-commit", args.repo_commit,
+                 "--seal-probe", str(args.seal_probe.resolve()),
+                 "--provider-model", expected_provider_model(manifest)],
                 env={**os.environ, "REVIEW_ARMS_DIR": str(root)},
             )
+            key = prepare(root, manifest, snapshot, defects, selected, manifest_sha256=sha(raw_manifest))
             collect(root, key, hand=hand, profile=args.profile)
             if result.returncode:
                 raise SystemExit(result.returncode)

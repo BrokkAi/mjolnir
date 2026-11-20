@@ -838,13 +838,22 @@
     }
   ],
   "eligible_pool_sha256": "d0fd469a4d0d5a22e7ac8833c0607ed4901e7432e81c0586187a2a457dbafc0d",
+  "input_paths": {
+    "cases": "../menu-steps-cases.md",
+    "catalogue": "../rql-documented-steps.md",
+    "eligible_labels": "eligible-labels.jsonl",
+    "labels_snapshot": "labels-snapshot.jsonl",
+    "menu": "../menu.json",
+    "plan": "../../PLAN-rql-census.md",
+    "steps": "../menu-steps.md"
+  },
   "inputs": {
     "cases_sha256": "e34d365da47188f735fbc3367474895db18012079cf0741d310c2ea64f71743b",
     "catalogue_sha256": "0ceb62a3c5b5e465fe7df216d191b2133b081ac2cc01ff54544df238d84a8551",
     "eligible_labels_sha256": "17a6a495c4bab449296c2037c8be4f2bff391aade1ba6d6f017270bed4624072",
     "labels_snapshot_sha256": "c1c143eeb5b8e107f9785300b839bbf3f8f9d7ca99c9a563eb6fb2e6c868ea02",
     "menu_sha256": "2059cb17f85cc02e6362bc205ca850f21c26064abde21bdb0449cf24cef828d3",
-    "plan_sha256": "e987a754d3a4c1d1dce5092b84a5bd7234b8572664cece440900c1c8acc8059f",
+    "plan_sha256": "a075ab2d059cf3d3375bf9682755643f0d32c4845b4dde5e3cdc383960c1108d",
     "steps_sha256": "55733330171fa5ee7ba9956ea8679992758f867dd221879b5ef4cca909fdd377"
   },
   "jobs": [
@@ -4410,7 +4419,8 @@
     }
   ],
   "model_versions": {
-    "fable": "Fable 5.2"
+    "fable": "Fable 5.2",
+    "fable_provider_id": "claude-fable-5-2"
   },
   "models": {
     "engine": "fable/high",
@@ -4419,7 +4429,12 @@
     "writer": "gpt-6.1-sol/high"
   },
   "page_rows": 50,
-  "plan_commit": "d9213fedcfa4b468fbf71b82fdc864fe53c767c4",
+  "plan_commit": "ce86d0cbbac8201c90764dd03dd3def02ed43da5",
   "seed": 20261120,
+  "served_steps": [
+    "contract-cases",
+    "value-transfers",
+    "guarded-paths"
+  ],
   "version": 1
 }

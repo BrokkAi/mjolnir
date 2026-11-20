@@ -1,8 +1,10 @@
-"""Prepare or verify the host-only snapshot repository without invoking mj."""
+"""Prepare or verify snapshots, or capture and tear down the engine sessions."""
 import argparse
 from pathlib import Path
+import sys
 
-from . import CONFIG, load, save
+from . import CACHE_ROOT, CONFIG, frozen_inputs, load, save, teardown
+from .runner import SealedRunner
 from .snapshot import git_output, manifest_sources, orphan_ref, parentless_snapshot, prepared_snapshot
 
 
@@ -26,14 +28,24 @@ def audit(destination, sources):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=["prepare", "verify"])
+    parser.add_argument("operation", choices=["prepare", "verify", "teardown"])
     parser.add_argument("--config", type=Path, default=CONFIG)
     args = parser.parse_args()
     config = load(args.config)
+    if args.operation == "teardown":
+        # Old active records may predate the per-session provider pin.
+        manifest = load(Path(config["manifest"]))
+        version = manifest["model_versions"]["fable_provider_id"]
+        accepted, failures = teardown(CACHE_ROOT, SealedRunner({**config, "model_version": version}))
+        print(f"Engine session destroy requests accepted: {accepted}")
+        for message in failures:
+            print(message, file=sys.stderr)
+        return int(bool(failures))
     destination = Path(config["snapshot_repo"]).resolve()
     if destination.name != "engine-trees.git":
         parser.error("snapshot_repo must end in engine-trees.git")
-    sources = manifest_sources(load(Path(config["manifest"])), config["repos"])
+    manifest, _, _ = frozen_inputs(Path(config["manifest"]))
+    sources = manifest_sources(manifest, config["repos"])
     if not sources:
         parser.error("no introducing commits in the manifest")
     if args.operation == "prepare":
@@ -53,4 +65,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

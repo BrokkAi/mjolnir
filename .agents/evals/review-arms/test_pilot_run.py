@@ -12,6 +12,7 @@ import unittest
 
 import pilot_run as pilot
 import audit
+import brief_driver
 import pilot_cache_probe
 import pilot_review
 
@@ -117,6 +118,243 @@ class PilotTest(unittest.TestCase):
             self.run_fake({first: self.groups[first]}, sessions, FakeQuota("90"))
         self.assertEqual(sessions.calls, [sessions.interrupt])
 
+    def test_failed_attempt_relaunches_before_any_other_job(self):
+        groups = {"mjolnir/first": self.groups["mjolnir/first"]}
+        for cause in ("rql-preflight-failed", "missing-brief"):
+            with self.subTest(cause=cause):
+                sessions = FakeSessions()
+                failed_writer = f"mjolnir/first/G/r1/writer"
+
+                def execute(job):
+                    if not sessions.calls:
+                        sessions.calls.append(job["job"])
+                        return "retained-failure"
+                    return sessions.execute(job)
+
+                quota = FakeQuota("90")
+                with redirect_stdout(StringIO()):
+                    self.assertEqual(pilot.run_matrix(self.root, groups, "chosen", sessions.complete, execute, quota), 0)
+                self.assertEqual(sessions.calls[:2], [failed_writer, failed_writer])
+                self.assertEqual(quota.checks, [("chosen", "26.23", True, True)] * 2)
+
+    def test_second_capture_failure_reports_both_sessions_and_stops_before_next_diff(self):
+        calls = []
+        receipts = []
+
+        def execute(job):
+            path = pilot.job_path(self.root, job)
+            if calls:
+                pilot.archive(path)
+            calls.append(job["job"])
+            sid = f"retained-{len(calls)}"
+            receipts.append(sid)
+            return pilot.driver.retain_pilot_session(path, sid, f"capture failure {len(calls)}")
+
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(pilot.run_matrix(self.root, self.groups, "chosen", lambda job: False,
+                                             execute, FakeQuota("90")), 1)
+        self.assertEqual(calls, ["mjolnir/first/G/r1/writer"] * 2)
+        self.assertEqual(pilot.read_json(self.root / "active-diff.json")["diff"], "mjolnir/first")
+        report = json.loads(out.getvalue().splitlines()[-1])["retained_attempts"]
+        self.assertEqual([record["retained_session"] for record in report], receipts)
+        self.assertTrue(all(Path(record["receipt"]).is_file() for record in report))
+
+    def captured_job(self, name, sid, model, output, *, forbidden=False):
+        path = self.root / name
+        path.mkdir()
+        selection = {"model": model, "effort": "high"}
+        artifacts = {
+            "launch.json": {"session_id": sid, "instance": "test-pilot"},
+            "launch-intent.json": {"profile": "pinned"},
+            "pre-inventory.json": {"commits": ["a" * 40], "head_tree": "b" * 40, "base_tree": "c" * 40},
+            "settings.json": selection,
+            "prompt-completion.json": {"command_id": "prompt"},
+            "cache-attestation.json": {"passed": True},
+            "mcp-reconnect-result.json": {"session_id": sid, "passed": True},
+            "usage.json": {"session_id": sid, "totals": {"total_tokens": {"tokens": 21}},
+                           "turn_selections": {"prompt": selection}},
+        }
+        call = ({"seq": 1, "role": "tool", "body": {"call": {"title": "ls /run/hel/git-cache"}}}
+                if forbidden else {"seq": 1, "role": "agent", "body": {"text": "Captured"}})
+        artifacts["transcript.json"] = [{"session_id": sid, "items": [call]}]
+        for filename, artifact in artifacts.items():
+            pilot.driver.save(path / filename, artifact)
+        (path / output).write_bytes(b"Captured")
+        return path
+
+    def test_writer_and_reviewer_argv_destroy_only_after_capture_with_no_ack_flag(self):
+        driver = pilot.driver
+        original_args, original_run = driver.MJ_INSTANCE_ARGS, driver.subprocess.run
+        self.addCleanup(setattr, driver, "MJ_INSTANCE_ARGS", original_args)
+        self.addCleanup(setattr, driver.subprocess, "run", original_run)
+        driver.MJ_INSTANCE_ARGS = ("--instance", "test-pilot")
+        seen = []
+        paths = {}
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            if "sessions" in argv:
+                answer = {"sessions": [{"id": sid, "lifecycle": "live", "title": "same title"} for sid in paths]}
+            else:
+                sid = argv[argv.index("--session") + 1]
+                path = paths[sid]
+                receipt = pilot.read_json(path / "receipt.json")
+                self.assertEqual(receipt["session_id"], sid)
+                self.assertTrue(pilot.read_json(path / "audit.json")["passed"])
+                for name, sha in receipt["evidence_sha256"].items():
+                    self.assertEqual(pilot.digest((path / name).read_bytes()), sha)
+                answer = {"session_id": sid, "accepted": True}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(answer).encode())
+
+        driver.subprocess.run = run
+        for kind, model, output in (("writer", "gpt-6.1-sol", "brief.md"),
+                                    ("reviewer", "gpt-6.1-terra", "output.md")):
+            sid = f"{kind}-id"
+            path = self.captured_job(kind, sid, model, output)
+            paths[sid] = path
+            params = {"run_root": self.root, "path": path, "inputs": {"rql_tools": []}, "model": (model, "high")}
+            sha = pilot.digest((path / output).read_bytes())
+            if kind == "writer":
+                (path / "brief-candidate.md").write_bytes(b"Captured")
+                pilot.driver.save(path / "accepted.json", {"brief_sha256": sha, "fix_rounds": 0})
+                state = brief_driver.finish_pilot_writer(params, sid, "bug", "pinned")
+            else:
+                params.update(bug={}, profile="pinned", tag="reviewer")
+                pilot.driver.save(path / "captured.json", {"output_sha256": sha, "session_id": sid})
+                state = pilot_review.run(params)
+            self.assertEqual(state, "done")
+            self.assertEqual(pilot.read_json(path / "receipt.json")["model"], model)
+            self.assertTrue((path / "destroy.json").exists())
+        self.assertNotIn("--acknowledge-unpublished-work", [word for argv in seen for word in argv])
+        self.assertEqual([argv[1:] for argv in seen if "destroy" in argv],
+                         [["--instance", "test-pilot", "destroy", "--session", sid, "--json"] for sid in paths])
+
+    def test_failed_capture_or_audit_never_reaches_mj_destroy(self):
+        driver = pilot.driver
+        original_args, original_mj = driver.MJ_INSTANCE_ARGS, driver.mj
+        self.addCleanup(setattr, driver, "MJ_INSTANCE_ARGS", original_args)
+        self.addCleanup(setattr, driver, "mj", original_mj)
+        driver.MJ_INSTANCE_ARGS = ("--instance", "test-pilot")
+
+        def unexpected(*args, **kwargs):
+            self.fail(f"failed capture reached mj: {args}")
+
+        driver.mj = unexpected
+        model = "gpt-6.1-terra"
+        path = self.captured_job("forbidden", "forbidden-id", model, "output.md", forbidden=True)
+        args = (self.root, path, "forbidden-id", "pinned", model, "high", "output.md")
+        self.assertEqual(driver.destroy_captured_pilot(*args), "retained-failure")
+        self.assertEqual(pilot.read_json(path / "failed.json")["retained_session"], "forbidden-id")
+        with (path / "transcript.json").open("a") as transcript:
+            transcript.write("\n")
+        with self.assertRaisesRegex(ValueError, "capture changed"):
+            driver.destroy_captured_pilot(*args)
+        (path / "output.md").unlink()
+        with self.assertRaises(FileNotFoundError):
+            driver.destroy_captured_pilot(*args)
+
+    def test_missing_brief_fetch_is_terminal_but_transport_failure_is_resumable(self):
+        original = brief_driver.driver.mj_invocation
+        self.addCleanup(setattr, brief_driver.driver, "mj_invocation", original)
+        for error in ("brief.md does not exist on the session's target", "daemon connection refused"):
+            with self.subTest(error=error):
+                def fetch(*args):
+                    return ["python3", "-c", f"import sys; sys.exit({error!r})"]
+
+                brief_driver.driver.mj_invocation = fetch
+                if error.startswith("brief.md"):
+                    with self.assertRaises(brief_driver.WriterBriefMissing):
+                        brief_driver.fetch_brief("writer")
+                else:
+                    with self.assertRaises(RuntimeError) as raised:
+                        brief_driver.fetch_brief("writer")
+                    self.assertNotIsInstance(raised.exception, brief_driver.WriterBriefMissing)
+
+    def test_fidelity_gate_requires_exact_manifest_and_every_served_step(self):
+        manifest = {**self.manifest, "served_steps": ["contract-cases", "value-transfers"]}
+        raw = json.dumps(manifest).encode()
+        rql = pilot.select_jobs(manifest, arms=["R", "R-loc"])
+        gate = self.root / "fidelity/gate-report.json"
+        pilot.require_fidelity(self.root, raw, manifest, self.groups)  # N/G can run before a report exists.
+        with self.assertRaisesRegex(ValueError, "require a passing fidelity gate"):
+            pilot.require_fidelity(self.root, raw, manifest, rql)
+        outcomes = {"contract-cases": {"pass": True}, "value-transfers": {"pass": False}}
+        report = {"manifest_sha256": pilot.digest(raw), "served_steps": manifest["served_steps"], "steps": outcomes}
+        pilot.driver.save(gate, report)
+        with self.assertRaisesRegex(ValueError, "no passing result for value-transfers"):
+            pilot.require_fidelity(self.root, raw, manifest, rql)
+        outcomes["value-transfers"]["pass"] = True
+        pilot.driver.save(gate, report)
+        pilot.require_fidelity(self.root, raw, manifest, rql)
+        with self.assertRaisesRegex(ValueError, "another manifest"):
+            pilot.require_fidelity(self.root, raw + b"\n", manifest, rql)
+        pilot.driver.save(gate, {**report, "served_steps": ["value-transfers", "contract-cases"]})
+        with self.assertRaisesRegex(ValueError, "another manifest or step list"):
+            pilot.require_fidelity(self.root, raw, manifest, rql)
+
+    def test_writer_menu_lists_only_the_frozen_two_steps(self):
+        refdir = pilot.driver.SCRIPTS / "brief/rql-census"
+        semantics = (refdir / "menu-steps.md").read_bytes()
+        raw = json.dumps({**self.manifest, "served_steps": ["contract-cases", "guarded-paths"]}).encode()
+        runner = pilot.Pilot(SimpleNamespace(), {}, pilot.load_manifest(raw), raw, "image", b"Documented catalogue",
+                             semantics)
+        prompts = runner.prompts
+        self.assertEqual(prompts["R"], prompts["R-loc"])
+        self.assertIn("(contract-cases ", prompts["R"])
+        self.assertIn("(guarded-paths ", prompts["R"])
+        self.assertNotIn("value-transfers", prompts["R"])
+        self.assertNotIn("rql_query", prompts["G"])
+
+    def test_single_profile_rejects_duplicate_codex_homes_even_when_alias_disabled(self):
+        (self.root / "study.config.toml").write_text('[mcp_servers.rql]\ncommand = "test"\n')
+        spec = {"kind": "codex", "home": str(self.root), "codex_profile": "study"}
+        targets = {"podman": {"image": "a" * 64, "pull_policy": "never"}}
+        config = {"profiles": {"codex3": spec}, "targets": targets}
+        self.assertEqual(pilot.preflight(config, "codex3"), "sha256:" + "a" * 64)
+        config["profiles"]["alias"] = {**spec, "enabled": False}
+        with self.assertRaisesRegex(ValueError, "exactly one Codex profile"):
+            pilot.preflight(config, "codex3")
+
+    def test_assignments_only_expose_rql_to_tool_arm_writers(self):
+        hook = self.root / "hook"
+        hook.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "with open(sys.argv[1]) as f: assignment = json.load(f)\n"
+            "tools = [] if assignment['arm'] == 'none' else ['rql_query']\n"
+            "print(json.dumps({'session_id': assignment['session_id'], 'tools': tools}))\n"
+        )
+        hook.chmod(0o700)
+        args = SimpleNamespace(rql_hook=hook, manifest=self.root / "manifest.json")
+        diff = self.manifest["diffs"][0]
+        jobs = pilot.select_jobs(self.manifest, diff=diff["key"])[diff["key"]]
+        for index, job in enumerate(jobs):
+            path = pilot.job_path(self.root, job)
+            sid = f"{index:032x}"
+            pilot.publish_tool_assignment(path, args, job, diff, sid)
+            assignment = pilot.read_json(path / "tool-assignment.json")
+            endpoint = pilot.read_json(path / "tool-endpoint.json")
+            if job["kind"] == "writer" and job["arm"] in ("R", "R-loc"):
+                self.assertEqual(assignment["arm"], job["arm"])
+                self.assertEqual(assignment["intro"], diff["intro"])
+                self.assertEqual(endpoint, {"session_id": sid, "tools": ["rql_query"]})
+                self.assertTrue((path / "queries.jsonl").exists())
+            else:
+                self.assertEqual(assignment, {"session_id": sid, "arm": "none", "manifest": str(args.manifest)})
+                self.assertEqual(endpoint, {"session_id": sid, "tools": []})
+                self.assertFalse((path / "queries.jsonl").exists())
+
+    def test_reconnect_only_reads_the_live_connected_server_and_separates_turns(self):
+        response = "**Failed**\n- `rql`: 1 tool\n\n**Connected**\n- `another`: 1 tool"
+        self.assertIsNone(brief_driver.live_rql_count(response))
+        for expected in (0, 1):
+            label = "tool" if expected == 1 else "tools"
+            text = f"**Connected**\n- `rql`: {expected} {label}"
+            self.assertEqual(brief_driver.live_rql_count(text), expected)
+        pages = [{"items": [{"position": 2, "role": "agent", "body": {"streaming": False}, "text": response},
+                            {"position": 4, "role": "agent", "body": {"streaming": True}, "text": "partial"}]}]
+        self.assertEqual(brief_driver.final_messages(pages, {"turn_start_position": 3}), [])
     def test_replicates_and_slots_have_distinct_paths(self):
         jobs = self.manifest["jobs"]
         paths = {job["job"]: pilot.job_path(self.root, job).relative_to(self.root) for job in jobs}
@@ -156,7 +394,10 @@ class PilotTest(unittest.TestCase):
             (path / prompt).write_bytes(b"prompt")
             pilot.driver.save(path / "usage.json", {"totals": {"total_tokens": {"tokens": 12}}})
             pilot.driver.save(path / "audit.json", {"passed": True})
+            proof = path / "mcp-reconnect-result.json"
+            pilot.driver.save(proof, {"passed": True, "session_id": session, "expected_tools": []})
             pilot.driver.save(path / "done.json", {"session_id": session, field: pilot.digest(b"output"),
+                                                   "mcp_reconnect_sha256": pilot.digest(proof.read_bytes()),
                                                    "inputs": runner.render(job)["inputs"]})
             return path
 
@@ -220,6 +461,19 @@ class PilotTest(unittest.TestCase):
         self.assertEqual({hit["kind"] for hit in report["hits"]},
                          {"git-revision-outside-pin", "git-history-escape", "network-command"})
         self.assertFalse(audit.audit_pilot(self.root / "missing.json", "sandbox")["passed"])
+
+    def test_pilot_audit_ignores_real_checkout_text_returned_by_git_diff(self):
+        checkout = pilot.driver.SCRIPTS.parents[2]
+        intro = "435b4ed941720b8dfa04fdb454ffa3ae3645f625"  # frozen child-model-wrong-efforts diff
+        patch = subprocess.check_output(["git", "-C", checkout, "show", "--format=", intro]).decode()
+        line = next(line for line in patch.splitlines() if line.startswith("+") and "/home/jonathan" in line)
+        transcript = self.root / "transcript.json"
+        call = {"seq": 1, "role": "tool", "body": {"call": {"title": "git diff HEAD^ HEAD",
+                                                          "kind": "execute", "rawOutput": line}}}
+        terminal = {"seq": 2, "role": "terminal", "body": {"kind": "terminal_output", "output": line}}
+        pilot.driver.save(transcript, [{"items": [call, terminal]}])
+        self.assertTrue(audit.audit_pilot(transcript, "sandbox", commits=[intro])["passed"])
+        self.assertIn("output-outside-path", {hit["kind"] for hit in audit.audit_reviewer(transcript, "sandbox")["hits"]})
 
     def test_cache_attestation_enumerates_bundle_objects_not_just_workspace_refs(self):
         source = self.root / "source"

@@ -18,6 +18,8 @@ sys.path.insert(0, str(REVIEW_ARMS))
 import census_label as census  # noqa: E402
 
 SEED = 20261120
+# The three added steps frozen in menu-steps.md, in its order.
+MENU_STEPS = ("contract-cases", "value-transfers", "guarded-paths")
 REPO_COUNTS = (("mjolnir", 17), ("bifrost-dev", 18))
 
 
@@ -79,10 +81,18 @@ def main():
     parser.add_argument("--frozen-at", help="Optional explicit timestamp recorded in the manifest")
     parser.add_argument("--refresh-eligible", action="store_true",
                         help="regenerate eligible-labels.jsonl from the live label file (once, before freezing)")
+    parser.add_argument("--served-steps", default=",".join(MENU_STEPS),
+                        help="the added menu steps the engine and writers serve; a step that fails the "
+                             "fidelity gate is removed by re-freezing with a shorter list")
     parser.add_argument("--plan-commit", required=True,
                         help="the commit whose PLAN-rql-census.md this selection was frozen under; the "
                              "working copy of the plan must match it, so later commits don't change the output")
     args = parser.parse_args()
+    served_steps = [step for step in args.served_steps.split(",") if step]
+    unknown = [step for step in served_steps if step not in MENU_STEPS]
+    if unknown or len(set(served_steps)) != len(served_steps):
+        raise SystemExit(f"--served-steps must be distinct names from {MENU_STEPS}; got {served_steps}")
+    served_steps = [step for step in MENU_STEPS if step in served_steps]
 
     # Validate the plan revision before anything is computed or written, so a failed re-freeze
     # can't leave new inputs beside an old manifest.
@@ -158,7 +168,13 @@ def main():
                            "plan_sha256": hashlib.sha256(frozen_plan).hexdigest()},
                 "models": {"writer": "gpt-6.1-sol/high", "reviewer": "gpt-6.1-terra/high",
                            "engine": "fable/high", "judge": "fable/high"},
-                "model_versions": {"fable": "Fable 5.2"}, "page_rows": 50,
+                "model_versions": {"fable": "Fable 5.2", "fable_provider_id": "claude-fable-5-2"},
+                "page_rows": 50, "served_steps": served_steps,
+                # Paths relative to this manifest; each file's sha256 is in "inputs".
+                "input_paths": {"catalogue": "../rql-documented-steps.md", "steps": "../menu-steps.md",
+                                "menu": "../menu.json", "cases": "../menu-steps-cases.md",
+                                "eligible_labels": "eligible-labels.jsonl", "labels_snapshot": "labels-snapshot.jsonl",
+                                "plan": "../../PLAN-rql-census.md"},
                 "eligible_pool": pool, "eligible_pool_sha256": hashlib.sha256(pool_bytes).hexdigest(),
                 "duplicates": duplicates, "diffs": diffs, "jobs": jobs}
     if args.frozen_at:

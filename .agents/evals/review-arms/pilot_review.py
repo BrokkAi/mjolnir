@@ -3,7 +3,6 @@ import hashlib
 import json
 import subprocess
 
-import audit
 import brief_driver
 import driver
 
@@ -103,16 +102,18 @@ def run(params):
         driver.save(intent, {"profile": profile, "model": model, "effort": effort})
         sid = brief_driver.sealed_launch(driver.BUNDLE, bug["intro_commit"], profile, "review " + tag[:8],
                                         base=bug["base_commit"], effort=effort)
-        driver.save(launch, {"session_id": sid})
+        driver.save(launch, {"session_id": sid, "instance": driver.MJ_INSTANCE_ARGS[-1]})
     if not cached.exists():
+        if (d / "failed.json").exists():
+            return "retained-failure"
+        params["publish_tool_assignment"](sid)
         if not (d / "settings.json").exists():
             state = driver.wait_idle(sid)
             assert state["no_later_history"] and state["at"] == bug["intro_commit"] and state["base"] == bug["base_commit"]
             assert state["profile_id"] == profile, state["profile_id"]
             place = driver.container(sid)
             if driver.image_digest(place["image"]) != params["inputs"]["image_digest"]:
-                driver.save(cached, {"error": "reviewer image differs from pinned image", "placement": place})
-                return finish(d, sid, json.loads(cached.read_text()))
+                return driver.retain_pilot_session(d, sid, "reviewer image differs from pinned image", placement=place)
             settings = brief_driver.configure_pilot_model(sid, model, effort)
             before = driver.inventory(place, "audit", bug["base_commit"])
             assert not before["remotes"] and not before["alternates"] and not before["status"], before
@@ -121,6 +122,8 @@ def run(params):
             driver.save(d / "placement.json", place)
             driver.save(d / "pre-inventory.json", before)
             driver.save(d / "settings.json", settings)
+        if not brief_driver.check_pilot_tool(params, sid):
+            return "retained-failure"
         error = None
         try:
             brief_driver.send(d, sid, "prompt", "review-" + tag, params["prompt"])
@@ -135,30 +138,22 @@ def run(params):
         problems, refs = driver.compare_inventories(before, after)
         driver.save(d / "post-inventory.json", after)
         driver.save(d / "inventory-check.json", {"problems": problems, "new_refs": refs})
-        verdict = audit.audit_pilot(d / "transcript.json", sid, commits=[*before["commits"], before["head_tree"],
-                                                                       before["base_tree"]])
-        driver.save(d / "audit.json", verdict)
-        messages = [item["text"].strip() for page in transcript for item in page["items"]
-                    if item["role"] == "agent" and not item["body"]["streaming"] and item["text"].strip()]
-        record = {"session_id": sid, "profile": profile, "inputs": params["inputs"]}
-        if not verdict["passed"]:
-            record["void_reason"] = verdict["hits"]
-        elif error or problems or not messages or driver.session(sid)["profile_id"] != profile:
-            record.update(error=error or "reviewer failed output, inventory, or profile validation", problems=problems)
-        elif not driver.valid_usage(d / "usage.json"):
-            raise RuntimeError("reviewer usage is missing total_tokens.tokens")
-        else:
-            data = (messages[-1] + "\n").encode()
-            (d / "output.md").write_bytes(data)
-            record["output_sha256"] = hashlib.sha256(data).hexdigest()
+        completion_file = d / "prompt-completion.json"
+        messages = brief_driver.final_messages(transcript, json.loads(completion_file.read_text())) if not error else []
+        reconnect = hashlib.sha256((d / "mcp-reconnect-result.json").read_bytes()).hexdigest()
+        record = {"session_id": sid, "profile": profile, "inputs": params["inputs"], "mcp_reconnect_sha256": reconnect}
+        if error or problems or not messages or driver.session(sid)["profile_id"] != profile:
+            return driver.retain_pilot_session(d, sid, error or "reviewer failed output, inventory, or profile validation",
+                                               inventory_problems=problems)
+        data = (messages[-1] + "\n").encode()
+        (d / "output.md").write_bytes(data)
+        record["output_sha256"] = hashlib.sha256(data).hexdigest()
         driver.save(cached, record)
-    return finish(d, sid, json.loads(cached.read_text()))
-
-
-def finish(d, sid, record):
-    driver.suspend_pilot_session(d, sid)
-    if "void_reason" in record or "error" in record:
-        driver.save(d / "failed.json", record)
-        return "void" if "void_reason" in record else "rejected"
+    record = json.loads(cached.read_text())
+    if hashlib.sha256((d / "output.md").read_bytes()).hexdigest() != record["output_sha256"]:
+        raise RuntimeError(f"reviewer output changed under {d}")
+    state = driver.destroy_captured_pilot(params["run_root"], d, sid, profile, model, effort, "output.md")
+    if state != "done":
+        return state
     driver.save(d / "done.json", record)
     return "done"

@@ -19,6 +19,7 @@ import pilot_readout as r
 def fixture(n_diffs=1, replicate_first=True):
     manifest = {"version": 1, "seed": 20261120, "plan_commit": "fixture",
                 "inputs": {"labels_sha256": "fixture"}, "models": {"judge": "fable/high"},
+                "model_versions": {"fable": "Fable 5.2"},
                 "page_rows": 50, "diffs": [], "jobs": []}
     labels, defects = [], {}
     for index in range(n_diffs):
@@ -60,10 +61,14 @@ def setup(root, manifest, snapshot_bytes, defects):
         text = f"review text {n}\n" if kind == "reviewer" else f"brief text {n}\r\n"
         path.write_bytes(text.encode())
         field = "brief_sha256" if kind == "writer" else "output_sha256"
-        j.save(path.parent / "done.json", {field: j.sha(text.encode())})
+        inputs = {"manifest_sha256": j.sha(manifest_path.read_bytes())}
+        if kind == "reviewer" and job["arm"] != "N":
+            writer = j.load(path.parents[2] / "writer/done.json")
+            inputs.update(writer_session_id=writer["session_id"], brief_sha256=writer["brief_sha256"])
+        j.save(path.parent / "done.json", {field: j.sha(text.encode()), "session_id": f"job-{n}", "inputs": inputs})
         j.save(path.parent / "usage.json", {})
         if kind == "writer" and job["arm"] in {"R", "R-loc"}:
-            event = {"status": "ok", "page": 2, "payload": {"rows": [
+            event = {"status": "ok", "page": 2, "latency_ms": 3, "payload": {"rows": [
                 {"sites": [{"path": "out.rs", "start_line": 2, "end_line": 2}]},
                 {"sites": [{"path": "out.rs", "start_line": 3, "end_line": 3}]},
             ]}}
@@ -94,6 +99,29 @@ def raw_verdict(payload, item):
     if payload["kind"] == "review":
         return {**record, "recovered_facts": [], "finding_count": 0}
     return {**record, "contained_facts": ["1/2"]}
+
+
+def usage_record(command, model="claude-fable-5-2"):
+    return {"turns": [{"command_id": command, "accepted_ordinal": 1,
+                       "usage": {"provider_details": {"model_usage": {model: {}}}}}],
+            "turn_selections": {command: {"model": "fable", "effort": "high"}}}
+
+
+def captured_receipt(batch, data, model="claude-fable-5-2"):
+    attempt = batch.parent / "sessions" / batch.name / "attempt"
+    producer = {"sealed": True, "profile": "claude-pinned", "launch_profile": "claude-pinned",
+                "config": {"model": "fable", "effort": "high"}, "output_sha256": j.sha(data),
+                "session_id": "first-pass", "provider_model": model, "command": "cmd", "turn": 1}
+    j.save(attempt / "launch.json", {"session_id": "first-pass"})
+    j.save(attempt / "usage.json", usage_record("cmd", model))
+    j.save(attempt / "audit.json", {"passed": True})
+    j.save(attempt / "transcript.json", [{"items": [{"role": "message", "text": "done"}]}])
+    (attempt / "verdicts.jsonl").write_bytes(data)
+    receipt = {"producer": producer,
+               "evidence_sha256": {name: j.sha((attempt / name).read_bytes()) for name in j.EVIDENCE_FILES}}
+    j.save(batch.parent / "out" / f"task-{batch.name}.json", receipt)
+    (batch / "verdicts.jsonl").write_bytes(data)
+    return attempt, receipt
 
 
 class PilotFixture(unittest.TestCase):
@@ -133,12 +161,13 @@ class PilotFixture(unittest.TestCase):
         batch = next(iter((self.root / j.INPUT_PATH).iterdir()))
         payload = j.load(batch / "items.json")
         data = "".join(json.dumps(raw_verdict(payload, item)) + "\n" for item in payload["items"]).encode()
-        proof = batch.parent / "out" / f"task-{batch.name}.json"
-        result = {"producer": {"profile": "claude-pinned", "launch_profile": "claude-pinned",
-                               "config": {"model": "fable", "effort": "high"}, "output_sha256": j.sha(data),
-                               "session_id": "first-pass"}}
-        j.save(proof, result)
-        (batch / "verdicts.jsonl").write_bytes(data)
+        attempt, _ = captured_receipt(batch, data)
+        transcript = attempt / "transcript.json"
+        original = transcript.read_bytes()
+        transcript.write_bytes(original + b"\n")
+        with self.assertRaisesRegex(ValueError, "transcript.json: evidence differs"):
+            j.collect(self.root, key, profile="claude-pinned")
+        transcript.write_bytes(original)
         with self.assertRaisesRegex(ValueError, "pinned Fable/high"):
             j.collect(self.root, key, profile="other-profile")
         j.collect(self.root, key, profile="claude-pinned")
@@ -238,85 +267,223 @@ class PilotFixture(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, r"labels-snapshot\.jsonl: SHA-256 mismatch"):
                     module.main()
 
-    def test_verifier_launch_and_resume_use_pinned_profile_without_ack(self):
+    def test_replaced_writer_stales_previous_reviews_and_archives_both_batches(self):
+        manifest, labels, defects = fixture()
+        initial = setup(self.root, manifest, labels, defects)
+        arguments = (self.root, manifest, j.load_snapshot(self.root / "pilot/manifest.json", manifest), defects)
+        original = initial["outputs"]
+        writer = next(job for job in manifest["jobs"] if job["job"] == "repo/d0/R/r1/writer")
+        path = self.root / j.artifact(writer)
+        done = j.load(path.parent / "done.json")
+        done["session_id"] = "new-writer-same-bytes"
+        j.save(path.parent / "done.json", done)
+        # Same text still makes the earlier reviewer receipt stale.
+        old_id, old_entry = next((oid, job) for oid, job in original.items() if job["kind"] == "reviewer")
+        j.save(self.root / "judge" / f"{old_id}.json", blank_judgments(initial)[old_id])
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            stale = j.prepare(*arguments)
+        self.assertFalse(stale["outputs"])
+        self.assertIn('"state": "stale-review"', errors.getvalue())
+        retired = self.root / j.KEY_PATH.parent / "retired"
+        self.assertTrue((retired / old_entry["batch"] / "judge" / f"{old_id}.json").is_file())
+        for slot in (1, 2):
+            receipt = path.parents[1] / f"reviewers/{slot}/done.json"
+            record = j.load(receipt)
+            record["inputs"]["writer_session_id"] = done["session_id"]
+            record["session_id"] += "-replacement"
+            j.save(receipt, record)
+        fresh = j.prepare(*arguments)
+        self.assertEqual(len(fresh["outputs"]), len(original))
+        self.assertTrue(set(fresh["outputs"]).isdisjoint(original))
+        self.assertEqual(len(list(retired.iterdir())), 2)
+
+    def test_replaced_review_preserves_unaffected_brief_batch(self):
+        manifest, labels, defects = fixture()
+        initial = setup(self.root, manifest, labels, defects)
+        reviewer = next(job for job in manifest["jobs"] if job["kind"] == "reviewer")
+        path = self.root / j.artifact(reviewer)
+        done = j.load(path.parent / "done.json")
+        done["session_id"] = "new-reviewer"
+        j.save(path.parent / "done.json", done)
+        fresh = j.prepare(self.root, manifest, j.load_snapshot(self.root / "pilot/manifest.json", manifest), defects)
+        self.assertEqual({oid for oid, job in initial["outputs"].items() if job["kind"] == "writer"},
+                         set(initial["outputs"]) & set(fresh["outputs"]))
+
+    def test_collect_rejects_a_different_provider_model(self):
         key = setup(self.root, *fixture())
-        calls = []
-        states = {}
-        pending_uploads = set()
-        profile = "claude-pinned"
-        manifest_tasks = self.root / j.INPUT_PATH
-        task_by_session = {}
-        next_session = 0
+        batch = next(iter((self.root / j.INPUT_PATH).iterdir()))
+        payload = j.load(batch / "items.json")
+        data = "".join(json.dumps(raw_verdict(payload, item)) + "\n" for item in payload["items"]).encode()
+        captured_receipt(batch, data, "claude-fable-5-1")
+        with self.assertRaisesRegex(ValueError, "expected provider usage for claude-fable-5-2"):
+            j.collect(self.root, key)
+        self.assertFalse(j.records(self.root, key, "judge"))
+
+    def test_query_outages_do_not_count_as_exposure(self):
+        key = setup(self.root, *fixture())
+        judged = blank_judgments(key)
+        deliveries = r.load_deliveries(self.root / "runs", key)
+        for oid, entry in key["outputs"].items():
+            if entry["kind"] == "writer" and entry["arm"] == "R" and entry["replicate"] == 2:
+                judged[oid].update(contains_decisive=True, contained_facts=["1/1", "1/2", "1/3"])
+                deliveries[entry["job"]] = [{"status": "parse_error", "latency_ms": 2},
+                                            {"status": "engine_error", "latency_ms": 100}]
+        manifest = key["manifest"]
+        result = r.readout(manifest, {"key": key, "judge": judged, "hand_check": judged},
+                           deliveries, j.load_snapshot(self.root / "pilot/manifest.json", manifest))
+        stats = result["hand_checked"]["arms"]["R"]["querying"]
+        self.assertEqual((stats["queried"], stats["exposed"], stats["queries"], stats["ok_answers"]),
+                         (2, 1, 3, 1))
+        self.assertEqual((stats["parse_error"], stats["engine_error"]), (1, 1))
+        self.assertEqual(stats["latency_ms"]["engine_error"]["mean"], 100)
+        self.assertEqual(stats["exposed_only_contains_decisive"], 0)
+        self.assertEqual(stats["site_coverage_counts"]["none"], 2)
+
+    def run_fake_judges(self, key, *, failure=None):
+        profile, pin = "claude-pinned", "a" * 40
+        instance = self.root / "instance"
+        instance.mkdir()
+        (instance / "config.toml").write_text(
+            '[bundles.empty]\nprimary_repo = "empty"\n'
+            '[[bundles.empty.repositories]]\nid = "empty"\ndestination = "empty"\n')
+        probe = self.root / "probe"
+        probe.touch(mode=0o700)
+        tasks = self.root / j.INPUT_PATH
+        sessions, stages, destroyed = {}, {}, []
+        bad_audit_sid = None if failure else "session-0"
+        model = "claude-fable-5-1" if failure == "version" else "claude-fable-5-2"
+
+        def launch(bundle, commit, selected_profile, title, *, base, effort):
+            self.assertEqual((bundle, commit, selected_profile, base, effort), ("empty", pin, profile, pin, "high"))
+            sid = f"session-{len(sessions)}"
+            sessions[sid] = {"tag": title.split()[-1], "phase": tasks}
+            stages[sid] = []
+            return sid
+
+        def state(sid):
+            return {"at": pin, "base": pin, "no_later_history": True, "profile_id": profile,
+                    "last_turn_outcome": {"outcome": {"kind": "completed"}}}
+
+        def transcript(sid):
+            stages[sid].append("transcript")
+            if failure == "transcript":
+                return [{"items": []}]
+            if sid == bad_audit_sid:
+                return [{"items": [{"role": "tool", "seq": 1, "body": {"call": {
+                    "title": "Bash", "rawInput": "curl https://example.invalid"}}}]}]
+            return [{"items": [{"role": "message", "seq": 1, "body": {"text": "done"}}]}]
+
+        def command(verb, *args, **kwargs):
+            self.assertNotIn("--acknowledge-unpublished-work", args)
+            if verb == "sessions":
+                return {"sessions": [{"id": sid} for sid in sessions if sid not in destroyed]}
+            sid = args[args.index("--session") + 1]
+            stages[sid].append(verb)
+            if verb == "message":
+                sessions[sid]["command"] = args[args.index("--command-id") + 1]
+                self.assertEqual(stages[sid].count("put-file"), 4)
+                self.assertLess(stages[sid].index("seal"), stages[sid].index("put-file"))
+                return {"turn_id": 1}
+            if verb == "wait":
+                return {"turn_id": 1, "outcome": "finished"}
+            if verb == "usage":
+                return usage_record(sessions[sid]["command"], model)
+            if verb == "destroy":
+                info = sessions[sid]
+                attempt = info["phase"] / "sessions" / info["tag"] / "attempt"
+                receipt = j.load(attempt / "receipt.json")
+                j.verify_capture(attempt, receipt, "claude-fable-5-2")
+                self.assertEqual(receipt["producer"]["session_id"], sid)
+                destroyed.append(sid)
+                return {"accepted": True}
+            self.fail(f"unexpected command {verb}")
 
         def fake_process(args, **_kw):
-            nonlocal next_session
             if args[0] == "git":
                 return subprocess.CompletedProcess(args, 0, stdout=str(j.HERE))
-            calls.append(args)
-            verb = args[1]
-            sid = args[args.index("--session") + 1] if "--session" in args else None
-            tag = task_by_session.get(sid)
-            value = {}
-            if verb == "workspaces":
-                value = {"workspace": {"id": "fixture-workspace"}}
-            elif verb == "new":
-                self.assertEqual(args[args.index("--profile") + 1], profile)
-                self.assertEqual(args[args.index("--effort") + 1], "high")
-                self.assertNotIn("--model", args)
-                tag = args[args.index("--title") + 1].split()[-1]
-                next_session += 1
-                new_id = f"s-{next_session}"
-                task_by_session[new_id] = tag
-                value = {"session_id": new_id}
-                states[tag] = {"lifecycle": "live", "is_idle": True, "profile_id": profile,
-                               "config_options": []}
-            elif verb == "sessions":
-                value = states[tag]
-            elif verb == "set-config":
-                states[tag]["config_options"].append({"key": args[args.index("--key") + 1],
-                                                     "current": args[args.index("--value") + 1]})
-            elif verb == "put-file":
-                self.assertTrue(Path(args[-1]).is_relative_to(manifest_tasks / tag))
-                pending_uploads.add((tag, Path(args[-1]).name))
-            elif verb == "message":
-                self.assertIn((tag, "items.json"), pending_uploads)
-                self.assertIn({"key": "model", "current": "fable"}, states[tag]["config_options"])
-                states[tag]["last_turn_outcome"] = {"outcome": {"stop_reason": "EndTurn"}}
-            elif verb == "fetch":
-                payload = j.load(manifest_tasks / tag / "items.json")
-                data = "".join(json.dumps(raw_verdict(payload, item)) + "\n" for item in payload["items"])
-                return subprocess.CompletedProcess(args, 0, stdout=data.encode())
-            elif verb == "suspend":
-                self.assertNotIn("--acknowledge-unpublished-work", args)
-                states[tag]["lifecycle"] = "suspended"
-            else:
-                self.assertEqual(verb, "usage")
-            result = json.dumps(value).encode()
-            return subprocess.CompletedProcess(args, 0, stdout=result, stderr=b"")
+            if args[0] == str(probe):
+                stages[args[1]].append("seal")
+                return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
+            self.assertEqual(args[:3], ["mj", "--instance", "fixture-instance"])
+            self.assertNotIn("--acknowledge-unpublished-work", args)
+            verb = args[3]
+            sid = args[args.index("--session") + 1]
+            info = sessions[sid]
+            stages[sid].append(verb)
+            if verb == "put-file":
+                src = Path(args[-1])
+                self.assertEqual(src.parent, info["phase"] / info["tag"])
+                self.assertIn(src.name, {"INSTRUCTIONS.md", "PILOT.md", "SPEC.md", "items.json"})
+                return subprocess.CompletedProcess(args, 0, stdout=b"")
+            self.assertEqual(verb, "fetch")
+            self.assertLess(stages[sid].index("transcript"), stages[sid].index("fetch"))
+            payload = j.load(info["phase"] / info["tag"] / "items.json")
+            data = "".join(json.dumps(raw_verdict(payload, item)) + "\n" for item in payload["items"])
+            return subprocess.CompletedProcess(args, 0, stdout=data.encode())
 
-        args = [str(j.HERE / "verify_driver.py"), str(manifest_tasks), "--kind", "task", "--text-only",
-                "--output", "verdicts.jsonl", "--profiles", profile, "--model", "fable",
-                "--quota-scope", "fable", "--concurrency", "1"]
+        fake_driver = SimpleNamespace(use_named_instance=lambda name: instance, workspace_id=lambda: "workspace",
+                                      mj_invocation=lambda *args: ["mj", "--instance", "fixture-instance", *args],
+                                      mj=command, quota_hold=lambda *a, **k: None, wait_idle=state, session=state,
+                                      container=lambda sid: {"container": sid},
+                                      inventory=lambda *args: {"head": pin, "head_tree":
+                                          "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                                          "commits": [pin], "object_count": 2, "remotes": [], "alternates": False,
+                                          "status": "", "ignored": ""},
+                                      attest_pilot_cache=lambda *a: {"snapshots": {"only": {"commits": [pin]}}},
+                                      transcript=transcript)
+        fake_brief = SimpleNamespace(sealed_launch=launch,
+                                     configure_pilot_model=lambda *a: {"model": "fable", "effort": "high"})
+        args = [str(j.HERE / "verify_driver.py"), str(tasks), "--kind", "task", "--text-only",
+                "--output", "verdicts.jsonl", "--profiles", profile, "--model", "fable", "--instance",
+                "fixture-instance", "--bundle", "empty", "--repo-commit", pin, "--seal-probe", str(probe),
+                "--provider-model", "claude-fable-5-2", "--concurrency", "1"]
         with (patch.object(sys, "argv", args), patch.dict(os.environ, {"REVIEW_ARMS_DIR": str(self.root),
-                "REVIEW_ARMS_INSTANCE": "default"}), patch.dict(sys.modules,
-                {"driver": SimpleNamespace(quota_hold=lambda *a, **k: None)}),
-              patch("subprocess.run", side_effect=fake_process), patch("time.sleep"),
-              contextlib.redirect_stdout(io.StringIO()) as output):
-            for _ in range(2):
+                "REVIEW_ARMS_INSTANCE": "default"}), patch.dict(sys.modules, {"driver": fake_driver,
+                "brief_driver": fake_brief}), patch("subprocess.run", side_effect=fake_process),
+              contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors):
+            for phase in (j.INPUT_PATH,) if failure else (j.INPUT_PATH, j.INPUT_PATH, j.HAND_PATH):
+                tasks = self.root / phase
+                args[1] = str(tasks)
                 with self.assertRaises(SystemExit) as finished:
                     runpy.run_path(args[0], run_name="__main__")
-                self.assertEqual(finished.exception.code, 0, output.getvalue())
-            j.collect(self.root, key, profile=profile)
-            manifest_tasks = self.root / j.HAND_PATH
-            args[1] = str(manifest_tasks)
-            with self.assertRaises(SystemExit) as finished:
-                runpy.run_path(args[0], run_name="__main__")
-            self.assertEqual(finished.exception.code, 0, output.getvalue())
-            j.collect(self.root, key, hand=True, profile=profile)
-        self.assertEqual(sum(call[1] == "new" for call in calls), 4)
-        self.assertEqual(sum(call[1] == "message" for call in calls), 4)
+                self.assertEqual(finished.exception.code, int(bool(failure)), output.getvalue())
+            if failure:
+                expected = {"version": "expected provider usage", "transcript": "could not be audited"}
+                self.assertIn(expected[failure], output.getvalue())
+                self.assertIn("session retained", output.getvalue())
+            else:
+                self.assertIn('"state": "void"', errors.getvalue())
+                j.collect(self.root, key, profile=profile)
+                j.collect(self.root, key, hand=True, profile=profile)
+        return stages, destroyed
+
+    def test_sealed_judges_audit_and_retry_before_capture_and_destroy(self):
+        key = setup(self.root, *fixture())
+        stages, destroyed = self.run_fake_judges(key)
+        self.assertEqual(len(stages), 5)
+        self.assertEqual(len(destroyed), 4)
+        self.assertNotIn("fetch", stages["session-0"])
+        self.assertNotIn("session-0", destroyed)
+        self.assertEqual(len(list((self.root / j.INPUT_PATH).glob("sessions/*/void-session-0/audit.json"))), 1)
         self.assertEqual(j.records(self.root, key, "judge"), j.records(self.root, key, "hand-check"))
         self.assertEqual(len(j.records(self.root, key, "judge")), len(key["outputs"]))
+
+    def test_provider_mismatch_keeps_sealed_session_and_usage(self):
+        key = setup(self.root, *fixture())
+        stages, destroyed = self.run_fake_judges(key, failure="version")
+        self.assertEqual(len(stages), 2)
+        self.assertEqual(destroyed, [])
+        self.assertEqual(len(list((self.root / j.INPUT_PATH).glob("sessions/*/attempt/usage.json"))), 2)
+        self.assertFalse(list((self.root / j.INPUT_PATH).glob("out/task-*.json")))
+
+    def test_unreadable_transcript_keeps_sessions_and_stops_collection(self):
+        key = setup(self.root, *fixture())
+        stages, destroyed = self.run_fake_judges(key, failure="transcript")
+        self.assertEqual(len(stages), 2)
+        self.assertEqual(destroyed, [])
+        self.assertTrue(all("fetch" not in events for events in stages.values()))
+        self.assertFalse(list((self.root / j.INPUT_PATH).glob("out/task-*.json")))
+
 
 
 if __name__ == "__main__":

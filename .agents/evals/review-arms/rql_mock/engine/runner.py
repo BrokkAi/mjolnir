@@ -1,16 +1,23 @@
 """Host adapter for the writer's sealed Podman launcher and distinct engine turns."""
 import json
+from pathlib import PurePosixPath
 import re
 import subprocess
 import time
 from uuid import uuid4
 
-from .prompt import assert_blind, semantics_only, turn_prompt
+from .evidence import file_digests, save_bytes, save_json
+from .prompt import CONTEXT_PROTOCOL, CONTEXT_RECALL, CONTEXT_SEED, assert_blind, semantics_only, turn_prompt
 from .snapshot import PRIVATE_PATHS
 
 
 MODEL = "fable"
 EFFORT = "high"
+CONTEXT_BOUNDARY = "context-cleared:"
+SESSION_ID = re.compile(r"[a-f0-9]{32}")
+# Use the same readiness window as the shared driver's wait_idle.
+CONTEXT_TIMEOUT = 1200
+RUN_ERRORS = (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError)
 
 # Runs via Podman admin before the first prompt, outside the model's transcript.
 PROBE = """
@@ -41,10 +48,40 @@ for host in ("127.0.0.1", "host.containers.internal", "host.docker.internal"):
 """
 
 
+# The only workspace writes the host owns are under a reserved scratch path.
+# Clear it while the worker is idle, then check for unexpected tree changes.
+CHECKOUT_CLEAN = """
+from pathlib import Path
+import shutil, subprocess, sys
+
+scratch = Path(sys.argv[1])
+
+def git(*args):
+    return subprocess.check_output(["git", "-c", "safe.directory=*", *args])
+
+if git("ls-files", "--", str(scratch)):
+    raise SystemExit("engine scratch path overlaps tracked source")
+if git("status", "--porcelain", "--untracked-files=all", "--ignored=matching",
+       "--", ".", f":(exclude){scratch}"):
+    raise SystemExit("engine workspace has unexpected changes outside its scratch path")
+if scratch.is_symlink():
+    scratch.unlink()
+elif scratch.is_dir():
+    shutil.rmtree(scratch)
+elif scratch.exists():
+    raise SystemExit("engine scratch path is occupied by an unexpected file")
+"""
+
+
 class TurnFailure(RuntimeError):
     def __init__(self, message, record):
         super().__init__(message)
         self.record = record
+
+
+def reported_model_usage(turn):
+    usage = turn.get("usage") or {}
+    return (usage.get("provider_details") or {}).get("model_usage", {})
 
 
 def usage_delta(before, after, command, turn, model_version):
@@ -53,9 +90,8 @@ def usage_delta(before, after, command, turn, model_version):
         raise RuntimeError("mj usage did not identify exactly the expected engine turn")
     if after["turn_selections"].get(command) != {"model": MODEL, "effort": EFFORT}:
         raise RuntimeError("mj usage did not attribute the engine turn to Fable/high")
-    usage = turns[0].get("usage") or {}
-    models = (usage.get("provider_details") or {}).get("model_usage", {})
-    fable_models = {model.split("[", 1)[0] for model in models if model.startswith("claude-fable-")}
+    models = reported_model_usage(turns[0])
+    fable_models = {model for model in models if model.startswith("claude-fable-")}
     if fable_models != {model_version}:
         raise RuntimeError(f"expected provider usage for {model_version}, got {sorted(fable_models)}")
     old, new = before["totals"], after["totals"]
@@ -67,19 +103,30 @@ def usage_delta(before, after, command, turn, model_version):
     return result
 
 
+class IsolationFailure(TurnFailure):
+    """The evidence on disk belongs to a session that must be retired."""
+
+
 class SealedRunner:
-    def __init__(self, config, manifest):
+    def __init__(self, config, manifest=None):
         import driver
         import brief_driver
 
         self.driver = driver
         self.launch = brief_driver.sealed_launch
         self.config = config
-        self.manifest = manifest
-        self.driver.use_named_instance(config["instance"])
+        self.manifest = {"diffs": manifest["eligible_diffs"]} if manifest is not None else None
+        self.served_steps = manifest["served_steps"] if manifest is not None else None
+        self.instance = config["instance"]
+        self.driver.use_named_instance(self.instance)
 
     def command(self, *args, data=None, timeout=300):
-        proc = subprocess.run(self.driver.mj_invocation(*args), input=data, capture_output=True, timeout=timeout)
+        argv = self.driver.mj_invocation(*args)
+        if any(part.split("=", 1)[0] == "--acknowledge-unpublished-work" for part in argv):
+            raise ValueError("the engine cannot acknowledge unpublished work")
+        if args[0] == "destroy" and argv[-len(args) - 2:] != ["--instance", self.config["instance"], *args]:
+            raise RuntimeError("engine destruction must address its named study instance")
+        proc = subprocess.run(argv, input=data, capture_output=True, timeout=timeout)
         if proc.returncode:
             detail = proc.stderr.decode(errors="replace").strip()[-1200:]
             raise RuntimeError(f"mj {args[0]} failed: {detail}")
@@ -94,7 +141,8 @@ class SealedRunner:
             raise RuntimeError(f"engine session {sid} is on the wrong Claude profile")
         return s
 
-    def prepare(self, sid, snapshot, directory):
+    def attest(self, sid, snapshot, directory):
+        """Verify the sealed checkout, mounted cutoff and target egress."""
         s = self.driver.wait_idle(sid)
         if (s.get("no_later_history") is not True or s.get("at") != snapshot["orphan"]
                 or s.get("base") != snapshot["orphan"]):
@@ -122,6 +170,10 @@ class SealedRunner:
         if check.returncode:
             raise RuntimeError(f"engine isolation probe failed: {check.stderr.decode(errors='replace').strip()}")
 
+        return s
+
+    def prepare(self, sid, snapshot, directory):
+        s = self.attest(sid, snapshot, directory)
         web_tools = {"web_fetch", "web_search"}
         options = {row["key"] for row in s.get("config_options", [])}
         settings = [("model", MODEL), ("effort", EFFORT)]
@@ -142,32 +194,98 @@ class SealedRunner:
     def start(self, snapshot, record_id):
         sid = self.launch(self.config["bundle"], snapshot["orphan"], self.config["profile"],
                           f"RQL pilot engine {record_id[:12]}", base=snapshot["orphan"], effort=EFFORT)
-        if not re.fullmatch(r"[a-f0-9]{32}", sid):
+        if not SESSION_ID.fullmatch(sid):
             raise RuntimeError("unexpected engine session id")
         return sid
 
-    def turn(self, sid, query, catalogue, menu, errors, directory_on_host):
-        self.verify(sid)
-        directory = f".rql-mock-{uuid4().hex}"
-        catalogue_path = f"{directory}/catalogue.md"
-        menu_path = f"{directory}/menu.md"
-        output_path = f"{directory}/answer.json"
-        menu_doc = semantics_only(menu)
-        prompt = turn_prompt(query, output_path, catalogue_path, menu_path, errors)
-        assert_blind((prompt, catalogue, menu_doc), self.manifest)
-        for path, contents in ((catalogue_path, catalogue), (menu_path, menu_doc)):
-            self.command("put-file", "--session", sid, "--path", path, "--source", "-",
-                         data=contents.encode("utf-8"))
-        before = self.driver.mj("usage", "--session", sid)
-        command = f"engine-{uuid4().hex}"
+    def message(self, sid, text, command):
         accepted = json.loads(self.command(
             "message", "--session", sid, "--command-id", command, "--prompt-file", "-", "--json",
-            data=prompt.encode("utf-8"),
+            data=text.encode("utf-8"),
         ))
-        turn = accepted["turn_id"]
+        if accepted.get("session_id") != sid or accepted.get("via") != "turn":
+            raise RuntimeError("engine request did not reach the user prompt path")
+        turn = accepted.get("turn_id")
         if type(turn) is not int:
             raise RuntimeError("engine request did not receive an accepted turn id")
-        record = {"session": sid, "turn": turn, "command_id": command, "tokens": None}
+        return turn
+
+    def clear_context(self, sid, timeout=CONTEXT_TIMEOUT):
+        self.verify(sid)
+        page = self.driver.mj("transcript", "--session", sid, "--role", "system", "--limit", 1)
+        cursor = page["latest_seq"]
+        command = f"engine-clear-{uuid4().hex}"
+        self.message(sid, "/clear", command)
+        deadline = time.monotonic() + timeout
+        while True:
+            page = self.driver.mj("transcript", "--session", sid, "--role", "system",
+                                  "--after-seq", cursor)
+            if any(item["stable_id"] == CONTEXT_BOUNDARY + command for item in page["items"]):
+                # Completion can replace the native ACP session and restore
+                # the selectors. Recheck both settings before the next prompt.
+                self.verify(sid)
+                return command
+            cursor = max(cursor, page["next_after_seq"])
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"engine did not confirm /clear ({command})")
+            time.sleep(1)
+
+    def context_probe(self, sid, directory):
+        path = directory / "context-probe.json"
+        identity = {"session": sid, "protocol": CONTEXT_PROTOCOL,
+                    "model_version": self.config["model_version"]}
+        if path.is_file():
+            old = json.loads(path.read_text(encoding="utf-8"))
+            if all(old.get(key) == value for key, value in identity.items()) and old["status"] != "error":
+                return old
+        result = {**identity, "status": "error", "context_id": None,
+                  "primer": None, "recall": None}
+        try:
+            self.verify(sid)
+            self.capture_pending(sid, directory)
+            self.clean_checkout(sid)
+            query = f'(function :name "context_probe_{uuid4().hex}")'
+            primer = CONTEXT_SEED.format(query=query)
+            assert_blind((primer, CONTEXT_RECALL), self.manifest)
+            response, result["primer"] = self.prompt(sid, primer)
+            if response != "ACK":
+                raise RuntimeError("engine did not acknowledge the synthetic context primer")
+            result["context_id"] = self.clear_context(sid)
+            response, result["recall"] = self.prompt(sid, CONTEXT_RECALL, result["context_id"])
+            try:
+                empty = json.loads(response or "null") == ""
+            except ValueError:
+                empty = False
+            result["status"] = "passed" if empty else "failed"
+            if not empty:
+                result["message"] = "engine recalled prior query text or failed to report empty context after /clear"
+        except TurnFailure as error:
+            key = "recall" if result["context_id"] else "primer"
+            result[key] = error.record
+            result["message"] = str(error)
+        except RUN_ERRORS as error:
+            result["message"] = str(error)
+        self.driver.save(path, result)
+        return result
+
+    def clean_checkout(self, sid):
+        scratch = f".rql-engine-{sid}"
+        place = self.driver.container(sid)
+        cwd = f"/workspace/{sid}/{self.config['destination']}"
+        proc = subprocess.run(
+            ["podman", "exec", "--workdir", cwd, place["container"], "python3", "-c",
+             CHECKOUT_CLEAN, scratch], capture_output=True, timeout=300,
+        )
+        if proc.returncode:
+            raise RuntimeError(f"engine workspace check failed: {proc.stderr.decode(errors='replace').strip()}")
+        return scratch
+
+    def prompt(self, sid, text, context_id=None):
+        before = self.driver.mj("usage", "--session", sid)
+        command = f"engine-{uuid4().hex}"
+        turn = self.message(sid, text, command)
+        record = {"session": sid, "turn": turn, "command_id": command, "tokens": None,
+                  "context_id": context_id}
         try:
             waited = self.driver.mj("wait", "--session", sid, "--turn", turn,
                                     "--return-on-input", "--timeout", 1800, timeout=1830)
@@ -175,14 +293,141 @@ class SealedRunner:
                 raise RuntimeError(f"engine turn {turn} ended with {waited['outcome']}")
             after = self.driver.mj("usage", "--session", sid, "--after-seq", before["latest_seq"])
             record["tokens"] = usage_delta(before, after, command, turn, self.config["model_version"])
-            self.audit_turn(sid, turn, directory_on_host)
-        except (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+        except RUN_ERRORS as error:
             raise TurnFailure(str(error), record) from error
+        return (waited.get("final_message") or "").strip(), record
+
+    def capture_answer(self, sid, workspace_path, evidence):
+        """Record exact bytes or a verified absence before scratch can be removed."""
         try:
-            output = self.command("fetch", "--session", sid, "--path", output_path, "--stdout")
+            output = self.command("fetch", "--session", sid, "--path", workspace_path, "--stdout")
         except (RuntimeError, OSError, subprocess.SubprocessError) as error:
-            return None, record, [str(error)]
-        return output, record, []
+            path = PurePosixPath(workspace_path)
+            listed = json.loads(self.command(
+                "fetch", "--session", sid, "--path", str(path.parent), "--ls", "--json"))
+            if (PurePosixPath(listed["path"]).name != path.parent.name
+                    or any(entry["name"] == path.name for entry in listed["entries"])):
+                raise error
+            save_json(evidence / "absent.json", {"path": workspace_path, "listing": listed})
+            return None, [str(error)]
+        save_bytes(evidence / "answer.raw", output)
+        return output, []
+
+    def capture_pending(self, sid, directory):
+        pending = [path for path in (directory / "answers").glob("*/pending.json")
+                   if not ((path.parent / "answer.raw").is_file() or (path.parent / "absent.json").is_file())]
+        if len(pending) > 1:
+            raise RuntimeError("more than one engine answer is pending capture")
+        if pending:
+            path = pending[0]
+            record = json.loads(path.read_text(encoding="utf-8"))
+            expected = f".rql-engine-{sid}/answer.json"
+            if record["path"] != expected:
+                raise RuntimeError("pending engine answer path does not match its session")
+            self.capture_answer(sid, expected, path.parent)
+
+    def capture_usage(self, sid, expected_model):
+        pages, cursor = [], 0
+        while True:
+            page = self.driver.mj("usage", "--session", sid, "--after-seq", cursor)
+            if page["session_id"] != sid:
+                raise RuntimeError("usage response does not match the recorded engine session")
+            pages.append(page)
+            next_cursor = page["next_after_seq"]
+            if next_cursor == page["latest_seq"]:
+                break
+            if not cursor < next_cursor < page["latest_seq"] or not page["turns"]:
+                raise RuntimeError("incomplete engine usage capture")
+            cursor = next_cursor
+        models = sorted({model for page in pages for turn in page["turns"]
+                         for model in reported_model_usage(turn)})
+        return {"expected_provider_model": expected_model,
+                "reported_provider_models": models, "pages": pages}
+
+    def retire(self, directory, record):
+        from audit import audit_pilot
+
+        sid = record["session_id"]
+        if not SESSION_ID.fullmatch(sid):
+            raise RuntimeError("invalid session id in engine record")
+        if record.get("instance", self.config["instance"]) != self.config["instance"]:
+            raise RuntimeError("engine session was recorded for a different study instance")
+        sent = directory / "destroy-request.json"
+        receipt = directory / "destroy-receipt.json"
+        if receipt.exists():
+            return
+        if sent.exists():
+            raise RuntimeError(f"destroy status for {sid} is uncertain; inspect {sent}")
+
+        try:
+            expected_model = record.get("model_version") or self.config.get("model_version")
+            if not expected_model:
+                raise RuntimeError("the engine record has no pinned provider model")
+            s = self.driver.wait_idle(sid)
+            if (s.get("id") != sid or s.get("at") != record["orphan"] or s.get("base") != record["orphan"]
+                    or s.get("no_later_history") is not True):
+                raise RuntimeError("live engine session does not match the recorded identity")
+            self.capture_pending(sid, directory)
+            pages = self.driver.transcript(sid)
+            if not pages or any(page["session_id"] != sid for page in pages):
+                raise RuntimeError("transcript capture does not match the recorded engine session")
+            if pages[-1]["next_after_seq"] < pages[-1]["latest_seq"]:
+                raise RuntimeError("incomplete engine transcript capture")
+            transcript = directory / "transcript.json"
+            save_json(transcript, pages)
+            save_json(directory / "usage.json", self.capture_usage(sid, expected_model))
+            result = audit_pilot(transcript, sid, commits=(record["orphan"],), single_commit=True)
+            save_json(directory / "audit.json", result)
+            if any(hit["kind"] == "missing-or-unreadable-transcript" for hit in result["hits"]):
+                raise RuntimeError("the audit could not read the captured transcript")
+            hashes = file_digests(directory)
+            hashes.pop("capture.json", None)
+            save_json(directory / "capture.json", {
+                "session": sid, "instance": self.config["instance"], "commit": record["commit"],
+                "files_sha256": hashes, "audit_passed": result["passed"],
+            })
+        except (*RUN_ERRORS, TypeError) as error:
+            raise RuntimeError(f"could not capture engine {sid}; session preserved: {error}") from error
+
+        save_json(sent, {"session": sid, "instance": self.config["instance"]})
+        accepted = json.loads(self.command("destroy", "--session", sid, "--json"))
+        if accepted.get("session_id") != sid or accepted.get("accepted") is not True:
+            raise RuntimeError(f"destroy was not confirmed for {sid}; inspect {sent}")
+        save_json(receipt, accepted)
+
+    def turn(self, sid, query, catalogue, menu, errors, directory_on_host):
+        self.verify(sid)
+        self.capture_pending(sid, directory_on_host)
+        directory = self.clean_checkout(sid)
+        context_id = self.clear_context(sid)
+        catalogue_path = f"{directory}/catalogue.md"
+        menu_path = f"{directory}/menu.md"
+        output_path = f"{directory}/answer.json"
+        menu_doc = semantics_only(menu, self.served_steps)
+        prompt = turn_prompt(query, output_path, catalogue_path, menu_path, errors)
+        assert_blind((prompt, catalogue, menu_doc), self.manifest)
+        for path, contents in ((catalogue_path, catalogue), (menu_path, menu_doc)):
+            self.command("put-file", "--session", sid, "--path", path, "-",
+                         data=contents.encode("utf-8"))
+        evidence = directory_on_host / "answers" / context_id
+        save_json(evidence / "pending.json", {"path": output_path, "query": query,
+                                             "prior_validation_errors": errors})
+        _, record = self.prompt(sid, prompt, context_id)
+        try:
+            save_json(evidence / "turn.json", record)
+            try:
+                passed = self.audit_turn(sid, record["turn"], directory_on_host)
+            except RUN_ERRORS as error:
+                raise IsolationFailure(f"could not audit the engine session: {error}", record) from error
+            if not passed:
+                raise IsolationFailure("engine session failed transcript isolation audit", record)
+            output, errors = self.capture_answer(sid, output_path, evidence)
+            self.clean_checkout(sid)
+        except IsolationFailure:
+            raise
+        except RUN_ERRORS as error:
+            raise TurnFailure(str(error), record) from error
+        return output, record, errors
 
     def audit_turn(self, sid, turn, directory):
         from audit import audit_pilot
@@ -195,5 +440,4 @@ class SealedRunner:
         snapshot = s["at"]
         result = audit_pilot(path, sid, commits=(snapshot,), single_commit=True)
         self.driver.save(directory / f"turn-{turn}-audit.json", result)
-        if not result["passed"]:
-            raise RuntimeError(f"engine session {sid} failed transcript isolation audit")
+        return result["passed"]

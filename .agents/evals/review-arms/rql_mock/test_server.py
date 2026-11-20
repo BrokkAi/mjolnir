@@ -16,6 +16,7 @@ from stub_engine import answer
 HERE = Path(__file__).resolve().parent
 SESSION_R = "a" * 32
 SESSION_LOC = "b" * 32
+SESSION_NONE = "c" * 32
 COMMIT = "1" * 40
 DIFF = "mjolnir/123"
 
@@ -46,7 +47,7 @@ class TransportTest(unittest.TestCase):
         self.config.write_text(json.dumps({
             "manifest": str(self.manifest),
             "engine": "rql_mock.stub_engine:answer",
-            "sessions": {
+            "sessions": {SESSION_NONE: {"arm": "none"}} | {
                 session: {"diff": DIFF, "intro": COMMIT, "arm": arm, "log": str(self.logs[session])}
                 for session, arm in ((SESSION_R, "R"), (SESSION_LOC, "R-loc"))
             },
@@ -66,6 +67,71 @@ class TransportTest(unittest.TestCase):
         process = self.run_server(session, *requests)
         self.assertEqual(process.returncode, 0, process.stderr)
         return [json.loads(line) for line in process.stdout.splitlines()]
+
+    def run_client(self, session, arm, *requests, preflight=False):
+        if arm is not None:
+            assignment = self.root / f"{session}.json"
+            assignment.write_text(json.dumps({"session_id": session, "arm": arm}))
+        # The command runs through the actual forced-command script, with only
+        # SSH's argv and SSH_ORIGINAL_COMMAND supplied by this local stand-in.
+        ssh = self.root / "ssh"
+        ssh.write_text('#!/bin/sh\nfor session do :; done\n'
+                       'SSH_ORIGINAL_COMMAND="$session" exec "$TEST_FORCED" "$TEST_CONFIG" "$session"\n')
+        ssh.chmod(0o700)
+        environment = {**os.environ, "RQL_SESSION_ASSIGNMENT_DIR": str(self.root),
+                       "PATH": str(self.root) + os.pathsep + os.environ["PATH"],
+                       "RQL_SSH_CONFIG": str(HERE / "ssh_config"),
+                       "TEST_FORCED": str(HERE / "serve-rql.sh"), "TEST_CONFIG": str(self.config)}
+        for name in ("MJ_SESSION_ID", "RQL_SSH_KEY", "RQL_SSH_KNOWN_HOSTS", "RQL_SSH_TARGET"):
+            environment.pop(name, None)
+        if session is not None:
+            environment["MJ_SESSION_ID"] = session
+        if arm in {"R", "R-loc"}:
+            key = self.root / "key"
+            key.touch(mode=0o600)
+            environment.update(RQL_SSH_KEY=str(key), RQL_SSH_KNOWN_HOSTS="known_hosts",
+                               RQL_SSH_TARGET="writer@invalid")
+        overlay = tomllib.loads((HERE / "review_arms_rql.config.toml").read_text())["mcp_servers"]["rql"]
+        command = ([sys.executable, "-B", HERE / "client.py", "--preflight"] if preflight
+                   else [overlay["command"], *overlay["args"]])
+        process = subprocess.run(command, env=environment, input="\n".join(requests) + "\n",
+                                 text=True, capture_output=True, timeout=5)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        return [json.loads(line) for line in process.stdout.splitlines()]
+
+    def test_none_catalog_stays_connected_without_ssh(self):
+        initialize, tools, ping = self.run_client(
+            SESSION_NONE, "none", rpc("initialize", 1), rpc("tools/list", 2), rpc("ping", 3),
+        )
+        self.assertEqual(initialize["result"]["serverInfo"]["name"], "rql_mock")
+        self.assertEqual(tools["result"], {"tools": []})
+        self.assertEqual(ping["result"], {})
+        self.assertEqual(self.run_client(SESSION_NONE, "none", preflight=True),
+                         [{"session_id": SESSION_NONE, "tools": []}])
+        [host] = self.exchange(SESSION_NONE, rpc("tools/list", 1))
+        self.assertEqual(host["result"], {"tools": []})
+
+    def test_assigned_rql_arms_connect_and_list_exactly_one_tool(self):
+        for session, arm in ((SESSION_R, "R"), (SESSION_LOC, "R-loc")):
+            with self.subTest(arm=arm):
+                self.assertEqual(self.run_client(session, arm, preflight=True),
+                                 [{"session_id": session, "tools": ["rql_query"]}])
+
+    def test_missing_record_replies_empty_immediately_and_leaves_reconnect_possible(self):
+        initialize, tools = self.run_client(
+            SESSION_R, None, rpc("initialize", 1), rpc("tools/list", 2), rpc("ping", 3),
+        )
+        self.assertEqual(initialize["result"]["serverInfo"]["name"], "rql_mock")
+        self.assertEqual(tools["result"], {"tools": []})
+        self.assertEqual(self.run_client(SESSION_R, "R", preflight=True),
+                         [{"session_id": SESSION_R, "tools": ["rql_query"]}])
+
+    def test_profile_discovery_replies_empty_without_session_id(self):
+        _, tools, ping = self.run_client(
+            None, None, rpc("initialize", 1), rpc("tools/list", 2), rpc("ping", 3),
+        )
+        self.assertEqual(tools["result"], {"tools": []})
+        self.assertEqual(ping["result"], {})
 
     def test_mcp_overlay_lists_one_tool_and_negotiates_protocol(self):
         config = tomllib.loads((HERE / "review_arms_rql.config.toml").read_text())

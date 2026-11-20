@@ -82,6 +82,19 @@ def admission(profile, jobs, quota=driver.quota_hold):
                  weekly=True, strict=True)
 
 
+def retained_attempts(root, job):
+    path = job_path(root, job)
+    attempts = sorted(path.parent.glob(f"{path.name}.superseded-*")) + [path]
+    receipts = []
+    for attempt in attempts:
+        receipt = attempt / "failed.json"
+        if receipt.exists():
+            failure = read_json(receipt)
+            if "retained_session" in failure:
+                receipts.append({"receipt": str(receipt), **failure})
+    return receipts
+
+
 def run_matrix(root, diff_jobs, profile, complete, execute, quota=driver.quota_hold):
     """A persisted admission owns the next slot until all its selected jobs validate."""
     active = root / "active-diff.json"
@@ -105,6 +118,15 @@ def run_matrix(root, diff_jobs, profile, complete, execute, quota=driver.quota_h
                     continue
                 state = execute(job)
                 print(json.dumps({"job": job["job"], "state": state}), flush=True)
+                if state == "retained-failure":
+                    remaining = [member for member in jobs if not complete(member)]
+                    if hold := admission(profile, remaining, quota):
+                        print(json.dumps({"diff": key, "state": "held", "reason": hold,
+                                          "retained_attempts": retained_attempts(root, job)}), flush=True)
+                        return 1
+                    state = execute(job)
+                    print(json.dumps({"job": job["job"], "state": state}), flush=True)
+                    print(json.dumps({"job": job["job"], "retained_attempts": retained_attempts(root, job)}), flush=True)
                 if state != "done":
                     return 1
                 if not complete(job):
@@ -131,23 +153,12 @@ def rql_servers(config):
             and ("rql" in name.lower() or "rql_query" in json.dumps(entry))]
 
 
-def preflight(config, profile, rql_profile, writer_model):
-    enabled = {name: spec for name, spec in config["profiles"].items() if spec.get("enabled", True)}
-    allowed = {profile}
-    if rql_profile:
-        allowed.add(rql_profile)
-    if {name for name, spec in enabled.items() if spec["kind"] == "codex"} != allowed:
-        raise ValueError("enable the allotted Codex profile and only its Sol-only alias if selected")
-    if rql_servers(codex_config(enabled[profile])):
-        raise ValueError(f"{profile}: G writers and reviewers require a profile without an RQL MCP server")
-    if rql_profile:
-        alias, base = enabled[rql_profile], enabled[profile]
-        rql = codex_config(alias)
-        if (rql_profile == profile or alias["kind"] != "codex"
-                or Path(alias["home"]).expanduser().resolve() != Path(base["home"]).expanduser().resolve()
-                or alias.get("models") != [writer_model] or rql.get("model") != writer_model
-                or rql_servers(rql) != ["rql"]):
-            raise ValueError(f"{rql_profile}: configure a Sol-only alias of {profile} with exactly one RQL MCP server")
+def preflight(config, profile):
+    codex = {name: spec for name, spec in config["profiles"].items() if spec["kind"] == "codex"}
+    if set(codex) != {profile} or not codex[profile].get("enabled", True):
+        raise ValueError("the private instance needs exactly one Codex profile, the enabled allotted login")
+    if not codex[profile].get("codex_profile") or rql_servers(codex_config(codex[profile])) != ["rql"]:
+        raise ValueError(f"{profile}: configure the private instance profile with the rql MCP overlay")
     target = config["targets"]["podman"]
     image = target["image"]
     if not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", image) or target.get("pull_policy") != "never":
@@ -164,6 +175,27 @@ def select_jobs(manifest, diff=None, arms=None, replicate=None):
     return {key: jobs for key, jobs in groups.items() if jobs}
 
 
+def require_fidelity(root, raw, manifest, groups):
+    if not any(tool_arm(job) != "none" for jobs in groups.values() for job in jobs):
+        return
+    steps = manifest.get("served_steps")
+    if not isinstance(steps, list) or not all(isinstance(step, str) for step in steps):
+        raise ValueError("R and R-loc require a manifest with served_steps")
+    path = root / "fidelity/gate-report.json"
+    try:
+        report = read_json(path)
+        if report["manifest_sha256"] != digest(raw) or report["served_steps"] != steps:
+            raise ValueError("report is for another manifest or step list")
+        evidence = report["steps"]
+        if not isinstance(evidence, dict):
+            raise ValueError("report has no per-step evidence")
+        failed = [step for step in steps if evidence.get(step, {}).get("pass") is not True]
+        if failed:
+            raise ValueError(f"no passing result for {', '.join(failed)}")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        raise ValueError(f"R and R-loc require a passing fidelity gate at {path}: {error}") from error
+
+
 def repository(config, row, args):
     repo = row["repo"]
     bundle = BUNDLES[repo]
@@ -173,14 +205,28 @@ def repository(config, row, args):
     driver.REPO = args.mjolnir_clone if repo == "mjolnir" else args.bifrost_clone
 
 
-def prompt_set(reference, steps):
+def served_menu(semantics, served_steps):
+    if not served_steps:
+        return "The pilot serves the documented steps above."
+    header = "## Common answer rules"
+    parts = re.split(r"(?m)^## `([a-z][a-z0-9-]*)`\s*$", semantics)
+    sections = dict(zip(parts[1::2], parts[2::2], strict=True))
+    if header not in parts[0] or any(step not in sections for step in served_steps):
+        raise ValueError("frozen menu semantics do not cover the manifest's served steps")
+    common = parts[0][parts[0].index(header):].strip()
+    common = common.replace("used by the three steps", "used by the added steps")
+    return "\n\n".join([common] + [f"## `{step}`\n\n{sections[step].strip()}" for step in served_steps])
+
+
+def prompt_set(reference, steps, served_steps=()):
     base = (driver.SCRIPTS / "brief/WRITER.md").read_text()
     grep = base + "\n" + (PILOT / "writer-grep.md").read_text()
     prompts = {"G": grep}
     if steps is not None:
         # Put the tool exception inside the existing rule too, so the directions agree.
         with_tool = grep.replace("use the\n  network", "use the\n  network except through the `rql_query` tool")
-        tool = (PILOT / "writer-rql.md").read_text().format(reference=reference, menu_steps=steps)
+        tool = (PILOT / "writer-rql.md").read_text().format(reference=reference,
+                                                        menu_steps=served_menu(steps, served_steps))
         prompts.update(dict.fromkeys(TOOL_ARMS, with_tool + "\n" + tool))
     return prompts
 
@@ -207,20 +253,30 @@ def archive(path):
     path.rename(retired)
 
 
-def prepare_tool(path, args, job, diff, sid):
-    marker = path / "tool-ready.json"
-    log = path / "queries.jsonl"
+def tool_arm(job):
+    return job["arm"] if job["kind"] == "writer" and job["arm"] in TOOL_ARMS else "none"
+
+
+def expected_tools(arm):
+    return [] if arm == "none" else ["rql_query"]
+
+
+def publish_tool_assignment(path, args, job, diff, sid):
+    marker = path / "tool-endpoint.json"
+    arm = tool_arm(job)
     if not marker.exists():
         assignment = path / "tool-assignment.json"
-        driver.save(assignment, {"session_id": sid, "diff": job["diff"], "arm": job["arm"], "intro": diff["intro"],
-                                 "manifest": str(args.manifest), "log": str(log)})
+        record = {"session_id": sid, "arm": arm, "manifest": str(args.manifest)}
+        if arm != "none":
+            log = path / "queries.jsonl"
+            record.update(diff=job["diff"], intro=diff["intro"], log=str(log))
+        driver.save(assignment, record)
         # The installer binds the credential to this session and publishes it
         # only after the host assignment is ready. It must be idempotent.
         check = subprocess.run([str(args.rql_hook), str(assignment)], check=True, stdout=subprocess.PIPE)
         listed = json.loads(check.stdout)
-        if listed != {"session_id": sid, "tools": ["rql_query"]}:
-            raise RuntimeError(f"RQL handshake for {job['job']} did not expose exactly rql_query")
-        log.touch(exist_ok=True)
+        if arm != "none":
+            log.touch(exist_ok=True)
         driver.save(marker, listed)
 
 
@@ -233,7 +289,8 @@ class Pilot:
         self.common = {"manifest_sha256": digest(raw), "image_digest": image,
                        "rql_reference_sha256": digest(reference),
                        "menu_steps_sha256": digest(steps) if steps is not None else None}
-        self.prompts = prompt_set(reference.decode(), steps.decode() if steps is not None else None)
+        self.prompts = prompt_set(reference.decode(), steps.decode() if steps is not None else None,
+                                  manifest.get("served_steps", []))
         self.rubric = pilot_review.RUBRIC_PATH.read_bytes()
         self.gold = (driver.SCRIPTS / "brief/rql-census/menu-steps-cases.md").read_text().strip()
         self.bug_ids = {row["id"].casefold() for row in manifest["diffs"]}
@@ -246,9 +303,8 @@ class Pilot:
         row = self.diffs[job["diff"]]
         repository(self.config, row, self.args)
         bug = {"id": row["id"], "intro_commit": row["intro"], "base_commit": row["base"]}
-        profile = self.args.rql_profile if job["kind"] == "writer" and job["arm"] in TOOL_ARMS else self.args.profile
-        params = {"path": job_path(self.args.run_root, job), "bug": bug, "profile": profile}
-        inputs = dict(self.common)
+        params = {"path": job_path(self.args.run_root, job), "bug": bug, "profile": self.args.profile}
+        inputs = dict(self.common, rql_tools=expected_tools(tool_arm(job)))
         if job["kind"] == "writer":
             if row["key"] not in self.messages:
                 self.messages[row["key"]] = driver.commit_message(bug)
@@ -285,7 +341,16 @@ class Pilot:
             return None
         params = self.render(job)
         if params is not None and params["inputs"] == record.get("inputs"):
-            if job["kind"] == "writer" and job["arm"] in TOOL_ARMS and not (path / "queries.jsonl").is_file():
+            if tool_arm(job) != "none" and not (path / "queries.jsonl").is_file():
+                return None
+            try:
+                proof = (path / "mcp-reconnect-result.json").read_bytes()
+                data = json.loads(proof)
+                if (digest(proof) != record.get("mcp_reconnect_sha256") or data["passed"] is not True
+                        or data["session_id"] != record["session_id"]
+                        or data["expected_tools"] != expected_tools(tool_arm(job))):
+                    return None
+            except (OSError, ValueError, KeyError, TypeError):
                 return None
             return record
         return None
@@ -295,7 +360,7 @@ class Pilot:
         if params is None:
             raise RuntimeError(f"{job['job']} requires an accepted brief")
         path = params["path"]
-        if (path / "done.json").exists() or ((path / "failed.json").exists() and (path / "suspend.json").exists()):
+        if (path / "done.json").exists() or (path / "failed.json").exists():
             archive(path)
         receipt = path / "inputs.json"
         if receipt.exists() and read_json(receipt) != params["inputs"] and (path / "launch-intent.json").exists():
@@ -303,17 +368,24 @@ class Pilot:
         driver.save(receipt, params["inputs"])
         attempt = len(list(path.parent.glob(f"{path.name}.superseded-*")))
         params["tag"] = f"{job['job']}/{attempt}"
+        params["run_root"] = self.args.run_root
         # Every writer and reviewer is attested before its prompt: the transcript audit is only a
         # partial check, so the mounted cache cutoff is verified structurally in each session.
         params["attest_cache"] = True
-        if job["kind"] == "writer":
-            params["model"] = self.writer_model
-            params["prepare_tool"] = (lambda sid: prepare_tool(path, self.args, job, self.diffs[job["diff"]], sid)
-                                      ) if job["arm"] in TOOL_ARMS else None
-            state = brief_driver.run(params["bug"]["id"], self.gate, pilot=params)
-        else:
-            params["model"] = self.reviewer_model
-            state = pilot_review.run(params)
+        params["publish_tool_assignment"] = lambda sid: publish_tool_assignment(
+            path, self.args, job, self.diffs[job["diff"]], sid)
+        try:
+            if job["kind"] == "writer":
+                params["model"] = self.writer_model
+                state = brief_driver.run(params["bug"]["id"], self.gate, pilot=params)
+            else:
+                params["model"] = self.reviewer_model
+                state = pilot_review.run(params)
+        except (OSError, KeyError, TypeError, ValueError, RuntimeError, AssertionError, subprocess.SubprocessError) as error:
+            launch = path / "launch.json"
+            if not launch.exists():
+                return f"needs-recovery: launch has no recorded session ID ({error})"
+            state = driver.retain_pilot_session(path, read_json(launch)["session_id"], str(error) or type(error).__name__)
         if params["attest_cache"] and (path / "cache-attestation.json").exists():
             self.attested.add(job["kind"])
         return state
@@ -323,9 +395,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=PILOT / "manifest.json")
     parser.add_argument("--instance", required=True, help="dedicated named Mjolnir instance")
-    parser.add_argument("--profile", required=True, help="allotted Codex login for quota, G, and Terra reviewers")
-    parser.add_argument("--rql-profile", help="Sol-only Codex alias of --profile for R and R-loc")
-    parser.add_argument("--rql-hook", type=Path, help="executable that installs an RQL assignment before the writer turn")
+    parser.add_argument("--profile", required=True, help="allotted Codex login for quota, writers, and reviewers")
+    parser.add_argument("--rql-hook", type=Path, required=True,
+                        help="executable that publishes each sealed session's RQL assignment")
     parser.add_argument("--menu-steps", type=Path, help="frozen menu-step semantics, required for R or R-loc")
     parser.add_argument("--rql-reference", type=Path, default=driver.SCRIPTS / "brief/rql-census/rql-documented-steps.md")
     parser.add_argument("--run-root", type=Path, default=DEFAULT_ROOT)
@@ -349,21 +421,21 @@ def main():
         args.menu_steps = driver.SCRIPTS / "brief/rql-census/menu-steps.md"
     steps = args.menu_steps.read_bytes() if args.menu_steps else None
     uses_rql = any(job["arm"] in TOOL_ARMS for jobs in groups.values() for job in jobs)
-    if uses_rql:
-        if not (args.rql_profile and args.rql_hook and steps):
-            parser.error("R and R-loc require --rql-profile, --rql-hook and --menu-steps")
-        args.rql_hook = args.rql_hook.resolve()
-        if not os.access(args.rql_hook, os.X_OK):
-            parser.error("--rql-hook must be executable")
+    args.rql_hook = args.rql_hook.resolve()
+    if not args.rql_hook.is_file() or not os.access(args.rql_hook, os.X_OK):
+        parser.error("--rql-hook must be executable")
+    if uses_rql and not steps:
+        parser.error("R and R-loc require frozen --menu-steps")
     for data, key in ((reference, "catalogue_sha256"), (steps, "steps_sha256")):
         expected = manifest["inputs"].get(key)
         if expected is not None and (data is None or digest(data) != expected):
             parser.error(f"{key} differs from the frozen manifest")
     if uses_rql and manifest["inputs"].get("steps_sha256") is None:
         parser.error("freeze the menu semantics in the manifest before running R or R-loc")
+    require_fidelity(args.run_root, raw, manifest, groups)
     # mjx strips inherited MJ_* and XDG settings, then passes the explicit named instance.
     config = tomllib.loads((config_dir / "config.toml").read_text())
-    image = preflight(config, args.profile, args.rql_profile, manifest["models"]["writer"].rsplit("/", 1)[0])
+    image = preflight(config, args.profile)
     driver.workspace_id()  # discover a missing workspace before touching quota
     args.run_root.mkdir(parents=True, exist_ok=True)
     with (config_dir / "pilot.lock").open("a") as instance_lock, (args.run_root / "pilot.lock").open("a") as run_lock:

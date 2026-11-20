@@ -17,11 +17,12 @@ publishing the output.
 ## Private instance
 
 Use a dedicated `mj --instance rql-census-pilot` configuration at
-`~/.config/mjolnir/instances/rql-census-pilot/config.toml`. Enable the allotted
-Codex login and its Sol-only alias when running R or R-loc. The alias uses the
-same Codex home, selects Sol as the overlay's default model and adds the
-`rql` MCP server. Use an ordinary profile without RQL for G and all reviewers.
-Claude engine profiles can also be enabled. Configure the Podman target with
+`~/.config/mjolnir/instances/rql-census-pilot/config.toml`. Configure exactly
+one Codex profile, the allotted login, using its existing native home.
+Select the `review_arms_rql` overlay on that profile in the private
+instance only. The runner selects and verifies Sol/high for writers and
+Terra/high for reviewers after launch. Claude engine profiles can also
+be enabled. Configure the Podman target with
 a pinned image ID and `pull_policy = "never"`. The writer/reviewer bundles
 are `mjolnir` and `bifrost-history`. Set the primary repository's destination
 in each bundle. For the engine, configure the local Git daemon and bundle
@@ -46,7 +47,8 @@ hold. Workers needed to resume an interrupted attempt can remain active.
 ## N/G smoke after the codex3 reset
 
 From the review-arms directory with the private instance configured for
-codex3 and its pinned image, run:
+codex3 and its pinned image, set `RQL_HOOK` to the absolute path of the
+transport installer executable and run:
 
 ```sh
 unset REVIEW_ARMS_INSTANCE
@@ -55,33 +57,49 @@ pilot_config="$HOME/.config/mjolnir/instances/$pilot_instance"
 ./mjx --instance "$pilot_instance" workspaces create rql-census-pilot --json > "$pilot_config/workspace.json"
 ./mjx --instance "$pilot_instance" daemon stop
 python3 -B pilot_run.py --instance "$pilot_instance" --profile codex3 \
+  --rql-hook "${RQL_HOOK:?set the transport installer path}" \
   --manifest brief/rql-census/pilot/manifest.json \
   --menu-steps brief/rql-census/menu-steps.md \
   --diff mjolnir/activity-recorder-kills-api --arm N --arm G --replicate 1 --attest-cache
 ```
 
 This schedules one Sol writer and four Terra reviewers and requires more
-than 26.23% weekly quota at admission. The smoke saves a Git cache
-attestation from inside one writer and one reviewer before their first
-prompts. The engine's smoke does the equivalent with its orphan commit.
+than 26.23% weekly quota at admission. Every writer and reviewer attests
+its Git cache before its first model prompt. The engine's smoke does the
+equivalent with its orphan commit.
 
-## R and R-loc
+## Per-session RQL assignment
 
-Use `--rql-profile` with the configured Sol-only alias and `--rql-hook`
-with the transport installer executable. The installer receives one argument,
-the path to the writer's host-side `tool-assignment.json`. Its fields are
-`session_id`, `diff`, `intro`, `arm`, `manifest` and `log`. It must
-install the bound SSH assignment, publish the writer-specific key and run
-the transport client's `--preflight` from inside the writer. Return its
-JSON result on stdout, including the writer ID and exactly
-`{"tools":["rql_query"]}` as the tool list, and use stderr for diagnostics.
-An interrupted hook must be safe to repeat. The RQL transport setup
-describes the required profile environment.
+Preinstall the transport client in the pinned image as described in
+the RQL transport setup. The `--rql-hook` executable receives one argument,
+the path to the host-side `tool-assignment.json`, as soon as the session
+ID is available. Its fields are `session_id`, `arm` and `manifest`. For
+R and R-loc writers it additionally receives `diff`, `intro` and `log`.
+The hook publishes the container-local record with only `session_id` and
+`arm` at `$RQL_SESSION_ASSIGNMENT_DIR/<session-id>.json`. For R and R-loc
+it stages the bound SSH assignment and key before publishing the local
+record. G writers and every reviewer get `arm = "none"` and need no SSH
+credentials.
+
+After publishing the record, the hook runs the client with `--preflight`
+inside the container and prints its JSON response on stdout. Tools must
+be exactly `["rql_query"]` for R and R-loc writers and `[]` for all other
+sessions. Use stderr for diagnostics. Repeating an interrupted hook must
+be safe. The runner then uses the Codex bridge's local `/mcp reconnect`
+command to verify the live thread's tool count. It saves the response and
+any reported usage in `mcp-reconnect-result.json` and binds that evidence
+to `done.json` by hash. A catalog mismatch leaves the session available
+for inspection and triggers a fresh attempt if quota permits.
+
+## Fidelity gate
 
 G uses `writer-grep.md`, appended to the existing `brief/WRITER.md` prompt.
 R and R-loc get that same checklist plus `writer-rql.md`, the pinned
-catalogue and the frozen menu semantics. The private gold cases and pilot
-bug IDs are excluded from every prompt.
+catalogue and only the frozen semantics for the manifest's `served_steps`.
+Those writers require `fidelity/gate-report.json` in the run root to match
+the manifest and pass each served added step. N and G can run independently
+before that report exists. The private gold cases and pilot bug IDs are
+excluded from every prompt.
 
 ## Evidence and recovery
 
@@ -90,15 +108,22 @@ The default root is `/mnt/optane/review-arms-pilot`. Under
 and accepted `output.md` is in `reviewers/<slot>/`. Each job saves
 `usage.json`, the prompt, model settings, transcript, inventory,
 `audit.json` and provenance in `done.json`. The writer's RQL delivery
-log is `writer/queries.jsonl`. The audit screens the recorded tool calls
-and output and leaves network egress under the target's existing policy.
+log is `writer/queries.jsonl`. The audit screens the recorded commands
+and arguments. Network egress stays under the target's existing policy.
 It cannot establish unobserved activity.
 
+Before teardown, the runner hashes and flushes the stored transcript,
+usage with model attribution, output, cache attestation and reconnect
+evidence. It audits the stored transcript and destroys the recorded
+session ID only once those checks pass. A capture or check failure
+leaves the session in the private instance and records its ID and the
+reason in `failed.json`.
+
 Rerun the same selection after a quota hold or interruption. The active
-diff takes priority. A terminal rejected or void attempt, and a completed
-attempt whose inputs changed, are retained in a sibling
-`<job>.superseded-<n>` directory before the next attempt. Inspect
-`failed.json` and `audit.json` there for a void reason. A launch intent
-without a returned session ID is ambiguous. Recover or retire that session
-before starting a replacement. The title suffix is derived from the full
-job key and attempt number.
+diff takes priority. A failed attempt's evidence moves to a sibling
+`<job>.superseded-<n>` directory before one fresh attempt, subject to a
+quota recheck. If that attempt fails, the run stops before any later diff
+and reports the retained sessions and their receipt paths. Completed
+attempts whose inputs changed use the same archive layout. A launch intent
+without a returned session ID is ambiguous. Reconcile it before starting a
+replacement.

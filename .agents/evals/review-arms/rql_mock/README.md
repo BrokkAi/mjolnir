@@ -27,12 +27,14 @@ the config, and the config selects the engine callable and that writer's log.
       "intro": "1111111111111111111111111111111111111111",
       "arm": "R-loc",
       "log": "/mnt/optane/review-arms-pilot/runs/mjolnir/123/R-loc/r1/writer/queries.jsonl"
-    }
+    },
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {"arm": "none"}
   }
 }
 ```
 
-Use the actual frozen manifest path. The server reads `page_rows` from it on
+Register G writers and reviewers with arm `none` and issue keys only for the
+R and R-loc sessions. Use the actual frozen manifest path. The server reads `page_rows` from it on
 each connection and verifies the assigned diff and introduction commit against
 it. The `engine` is an importable Python `module:callable`; its callable receives
 `answer(intro, query_text)`. The forced command can import modules next to
@@ -57,48 +59,49 @@ then verifies the ID exists in the host config before loading the engine. Revoke
 the key when the writer is done. The writer cannot select a different commit,
 arm, engine, config, or log path.
 
-## Slice 5 writer setup
+## Slice 5 session setup
 
 Install `review_arms_rql.config.toml` as
 `<profile Codex home>/review_arms_rql.config.toml`. Use
-`codex_profile = "review_arms_rql"` on the R and R-loc writer profiles. G and
-reviewer profiles should have no overlay or pilot key.
+`codex_profile = "review_arms_rql"` on the single private pilot Codex profile.
+Install `client.py` and `protocol.py` alongside `ssh_config` before starting
+sessions. These files must also be available at the configured path when the
+profile discovery probe runs on the host.
 
-Provide these to the writer's environment before its first turn.
-
-| Variable | Value visible inside the writer |
+| Variable | Value visible inside the session |
 | --- | --- |
+| `RQL_SESSION_ASSIGNMENT_DIR` | Absolute path to the container-local directory of assignment files, named `<MJ_SESSION_ID>.json`. |
 | `RQL_SSH_CONFIG` | Absolute path of the supplied `ssh_config`. |
 | `RQL_SSH_KEY` | Absolute path to that writer's private key, readable only by its user (mode 0600 or 0400). |
 | `RQL_SSH_KNOWN_HOSTS` | Absolute path to a file with the trusted endpoint's pinned host public key. For a nondefault port the host token is `[host]:port`. |
 | `RQL_SSH_TARGET` | `user@host` or `ssh://user@host:port`. Use an address reachable from the writer. |
-| `MJ_SESSION_ID` | Mjolnir's full 32-character lowercase hex session ID. The overlay passes this alone as the remote command. |
+| `MJ_SESSION_ID` | Mjolnir's full 32-character lowercase hex session ID. The overlay passes this alone as the remote command for enabled writers. |
 
-Place the SSH config and host pin inside the writer. Install `client.py`
-alongside the SSH config and use a private directory for its key. Files can
-be staged in the writer's own container or provided through a writer-specific
-read-only directory mount. The key path must be absent on initial startup.
-Configure the sealed Podman environment so that its sole egress exception is
-the dedicated SSH endpoint.
-The client configuration verifies the host key and disables ambient SSH identity
-agents and forwarding. Container egress restrictions belong to the launcher.
-A writer with its own key can open another connection, but every connection
-executes the same forced command for the same session.
+Create the session without its first model prompt. Use the registered ID
+from `mj new` to publish the host assignment and then the minimal per-session
+file `<MJ_SESSION_ID>.json` in the container. The file contains, for example,
+`{"session_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","arm":"R"}`. Use `none`
+for G and reviewers. For R and R-loc, publish their key authorization, host pin
+and private key before atomically renaming the local assignment into place.
+Keep private keys isolated to their own writer containers. Configure the
+sealed Podman environment so that a writer's sole egress exception is the
+dedicated SSH endpoint.
 
-Create the writer without a prompt. Use the registered ID from `mj new` to
-register its host assignment and activate its key entry. Publish the private
-key last, with an atomic rename into the configured path, then wait for the
-writer to become ready before sending its first turn. Codex can launch the
-MCP command while the worker is still starting. The command waits for the
-key within Codex's 60-second MCP startup timeout. Before allowing the first
-turn, the Slice 5 hook must execute `python3 -B /writer/path/client.py --preflight`
-inside the writer with the same environment as the overlay. That command
-checks MCP initialization, tool discovery and ping through the authenticated
-SSH connection and emits `{"session_id":"<id>","tools":["rql_query"]}` on stdout
-on success. A nonzero exit fails the job before its prompt. Profile
-discovery may start a throwaway Codex thread without a Mjolnir session ID.
-The command exits immediately in that case. An allocation or resume that
-changes the session ID needs a new key binding and assignment before any turn.
+The client uses no SSH for an explicit `none` assignment or an absent record.
+Both return an empty catalog immediately. Profile discovery with no session ID
+also stays local and empty. For a real session whose record has yet to appear,
+the client closes after answering the first `tools/list` so Codex can start a
+fresh client after the launch hook publishes the assignment.
+
+After publishing and waiting for the session to be ready, run Codex's local
+`/mcp reconnect` before the first model prompt and verify the actual thread's
+RQL tool count. Require one for R and R-loc and zero for G and reviewers. The
+only supported nonempty catalog is `["rql_query"]`. The optional diagnostic
+`python3 -B /container/path/client.py --preflight` checks the exact names via
+initialize/list/ping in a new process using the same environment and prints
+`{"session_id":"<id>","tools":[...]}` on success. The launch check still needs
+the live thread's result, since the launcher may publish its assignment after
+Codex's first MCP connection.
 
 ## Results and logs
 
