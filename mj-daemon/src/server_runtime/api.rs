@@ -2169,16 +2169,15 @@ impl ApiBackend {
                         failures.push(failed_delivery_notice(&inputs, &child, &failed)?);
                     }
                 }
-                // A queued handback holds only the finish: child completion
-                // waits for the same request, while failed messages to the
-                // child are reported as usual.
+                // A queued handback holds only the finish, and only as "not
+                // finished yet": its report is still to come, so completion
+                // retries the park rather than settling the child, while failed
+                // messages to the child are reported as usual.
                 let handback_pending = child.identity.is_some()
                     && child.relation.reported_finish.as_ref() != child.identity.as_ref()
                     && self.child_handback_pending(&id).await?;
                 match &child.identity {
-                    _ if handback_pending => {
-                        ChildDisposition::NotNews("the child's handback is still queued")
-                    }
+                    _ if handback_pending => ChildDisposition::NotFinished,
                     None => ChildDisposition::NotFinished,
                     Some(identity) if child.relation.reported_finish.as_ref() == Some(identity) => {
                         ChildDisposition::Reported
