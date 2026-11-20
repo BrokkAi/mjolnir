@@ -236,6 +236,8 @@ impl RuntimeState {
                         config: owner.config_snapshot.clone(),
                         default_targets: controller.config.default_targets.clone(),
                         container_sizes: controller.state.container_sizes.clone(),
+                        last_oracle_choices: controller.state.last_oracle_choices.clone(),
+                        mount_history: controller.state.mount_history.clone(),
                         last_subagent_policies: controller.state.last_subagent_policies.clone(),
                         lifecycles,
                         container_capacities: history

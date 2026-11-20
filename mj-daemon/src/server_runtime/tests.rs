@@ -2989,6 +2989,31 @@ fn metadata_only_workspace_and_storage_changes_refresh_existing_rows() {
                 .is_some_and(|issue| issue.contains("fixture exhausted storage"))
     }));
 
+    crate::server::take_viewer_row_visits();
+    let mut refreshed_storage = runtime.metadata.storage[0].clone();
+    refreshed_storage.sampled_at_epoch_seconds = Some(30);
+    runtime.metadata.storage = vec![refreshed_storage].into();
+    runtime.revision += 1;
+    let refreshed = publish_fixture(&mut publisher, &controller, &runtime);
+    assert_eq!(crate::server::take_viewer_row_visits(), 0);
+    assert_eq!(full.sessions, refreshed.sessions);
+
+    runtime.metadata.storage = vec![
+        runtime.metadata.storage[0].clone(),
+        TargetStorageView {
+            host: "other-host".into(),
+            home: None,
+            filesystems: Vec::new(),
+            sampled_at_epoch_seconds: Some(30),
+            unattributed_no_space: Some("other host is full".into()),
+        },
+    ]
+    .into();
+    runtime.revision += 1;
+    let unrelated = publish_fixture(&mut publisher, &controller, &runtime);
+    assert_eq!(crate::server::take_viewer_row_visits(), 0);
+    assert_eq!(full.sessions, unrelated.sessions);
+
     runtime.revision += 1;
     runtime.metadata.storage = Default::default();
     let freed = publish_fixture(&mut publisher, &controller, &runtime);

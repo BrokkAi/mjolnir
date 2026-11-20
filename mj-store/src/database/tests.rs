@@ -1721,6 +1721,44 @@ fn display_updates_cannot_restore_a_stale_checkpoint() {
 }
 
 #[test]
+fn a_delayed_relay_title_cannot_replace_the_title_of_a_newer_projection() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay-title.sqlite3");
+    save_session_to(&path, &session("session-1", "project")).unwrap();
+    let previous_digest = "a".repeat(64);
+    let current_digest = "b".repeat(64);
+    let mut materialized = mj_core::state::MaterializedSession::empty("session-1");
+    materialized.applied_event_ordinal = 2;
+    materialized.applied_event_digest = current_digest.clone();
+    save_materialized_session_to(&path, &materialized).unwrap();
+
+    let connection = open(&path).unwrap();
+    set_session_acp_title_at_projection_with(
+        &connection,
+        "session-1",
+        2,
+        &current_digest,
+        Some("New title"),
+    )
+    .unwrap();
+    set_session_acp_title_at_projection_with(
+        &connection,
+        "session-1",
+        1,
+        &previous_digest,
+        Some("Old title"),
+    )
+    .unwrap();
+    set_session_acp_title_at_projection_with(&connection, "session-1", 2, &previous_digest, None)
+        .unwrap();
+    let stored = load_state_from(&path).unwrap();
+    assert_eq!(
+        stored.sessions["session-1"].acp_session_title.as_deref(),
+        Some("New title")
+    );
+}
+
+#[test]
 fn harness_title_write_caps_large_titles_in_storage() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("title-write.sqlite3");

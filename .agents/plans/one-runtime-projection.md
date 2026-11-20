@@ -28,6 +28,7 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-20) Verify Milestone 2 in `feeds-m2` with an isolated mbx config.
 - [x] (2026-11-20) Milestone 3: built viewer rows from the runtime capture and verified a real parent/child session pair on the browser stream in `feeds-m3`.
 - [x] (2026-11-20 18:37Z) Milestone 3: revalidated after merging `origin/master`. The phone golden, owner and viewer regressions, runtime feed tests, API wait and turn tests, Clippy, and a live browser Interrupt All action passed.
+- [x] (2026-11-20 18:50Z) Milestone 3: verified the review fixes for persisted titles, launch preferences, and storage invalidation. The browser published all three restored values in `feeds-m3`, and the named daemon and workers stopped.
 - [ ] Milestone 4: one verdict per action and per session state.
 - [ ] Milestone 5: one history for both feeds.
 
@@ -61,6 +62,10 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 - Observation: retired relay actors still need to leave queue and activity behind for the web viewer. Bootstrap loads the last durable facts, and the runtime owner keeps those facts when a relay actor retires. Family-scoped terminal feeds continue to omit the retired actor's view.
   Evidence: `mj-daemon/src/daemon/owner.rs`, `mj-client/src/runtime_feed.rs`, and the existing regression for retiring a relay actor.
+
+
+- Observation: the former viewer relay consumer persisted harness and provisional titles from worker views. This now runs when the runtime owner accepts a worker view. The database commits the title only if the observation still names its materialized frontier. The captured controller state also includes the saved Oracle choice and the recent directories used by the browser launch wizard.
+  Evidence: `mj-daemon/src/daemon/snapshot.rs`, `mj-store/src/database/sessions.rs`, and `mj-daemon/src/daemon/feed.rs`.
 
 
 ## Decision Log
@@ -112,7 +117,7 @@ This plan does not add a new public API. A later plan will publish this projecti
   Date/Author: 2026-11-20, Milestone 2 implementation.
 
 
-- Decision: rebuild rows by dependency. Compare captured per-session entries and invalidate their parents when child entries change. Invalidate descendants for changes to an ancestor record or relationship they use for checkout and project identity. Rebuild every row when config, workspace count or storage changes.
+- Decision: rebuild rows by dependency. Compare captured per-session entries and invalidate their parents when child entries change. Invalidate descendants for changes to an ancestor record or relationship they use for checkout and project identity. Rebuild every row when config or workspace count changes. A storage refresh invalidates only rows whose warning changes, so sampling timestamps and a full filesystem on an unused host do not rebuild any rows.
   Rationale: a synthetic store of 1,200 records (200 active views, 1,000 stopped sessions, two profiles and one configured target) took 12.78 ms median and 13.19 ms p95 to rebuild all rows, versus 0.20 ms median and 0.22 ms p95 to publish one changed active view. This was 30 warm dev-profile samples on hel timed around row publication, excluding capture and HTTP serialization. Keep dependency-based selection because worker revisions can arrive many times a second and the existing test covers 100,000 retained sessions.
   Date/Author: 2026-11-20, Milestone 3 implementation.
 

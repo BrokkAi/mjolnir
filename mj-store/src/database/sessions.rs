@@ -1700,16 +1700,46 @@ pub(super) fn set_session_title_override_to(
     Ok(())
 }
 
-/// Persist the latest ACP-provided title without replacing unrelated session
-/// fields that may have changed in another supervised controller task.
-pub fn set_session_acp_title(session_id: &str, title: Option<&str>) -> Result<()> {
-    let session_id = session_id.to_owned();
-    let title = title.map(str::to_owned);
-    submit_database_write("set_session_acp_title", move |_| {
-        set_session_acp_title_to(&database_path(), &session_id, title.as_deref())
+/// Persist a title resolved from a materialized relay view. The writer
+/// checks the projection frontier in the same statement as the update, so
+/// a delayed observation cannot overwrite a title from a newer view.
+pub fn set_session_acp_title_at_projection(
+    session_id: String,
+    applied_ordinal: u64,
+    applied_digest: String,
+    title: Option<String>,
+) -> Result<()> {
+    submit_database_write("set_session_acp_title_at_projection", move |connection| {
+        set_session_acp_title_at_projection_with(
+            connection,
+            &session_id,
+            applied_ordinal,
+            &applied_digest,
+            title.as_deref(),
+        )
     })
 }
 
+pub(super) fn set_session_acp_title_at_projection_with(
+    connection: &Connection,
+    session_id: &str,
+    applied_ordinal: u64,
+    applied_digest: &str,
+    title: Option<&str>,
+) -> Result<()> {
+    let title = title.and_then(mj_core::state::normalize_session_title);
+    connection.execute(
+        "UPDATE sessions SET acp_session_title = ?2
+         WHERE session_id = ?1 AND acp_session_title IS NOT ?2 AND EXISTS (
+             SELECT 1 FROM materialized_sessions
+             WHERE session_id = ?1 AND applied_event_ordinal = ?3 AND applied_event_digest = ?4
+         )",
+        params![session_id, title, applied_ordinal, applied_digest],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
 pub(super) fn set_session_acp_title_to(
     path: &Path,
     session_id: &str,

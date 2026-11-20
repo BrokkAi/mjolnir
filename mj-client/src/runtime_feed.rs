@@ -543,6 +543,10 @@ pub struct RuntimeMetadata {
     pub workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub container_sizes: SnapshotMap<String, mj_core::state::HostContainerSize>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_oracle_choices: BTreeMap<String, bool>,
+    #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
+    pub mount_history: SnapshotMap<String, Vec<std::path::PathBuf>>,
     pub lifecycles: Vec<RuntimeLifecycleView>,
     pub reviews: Vec<RuntimeReviewView>,
     pub notices: Vec<RuntimeNotice>,

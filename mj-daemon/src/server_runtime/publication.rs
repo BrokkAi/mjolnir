@@ -2,6 +2,7 @@
 use super::*;
 use mj_client::runtime_feed::RuntimeProjection;
 use mj_core::snapshot_map::SnapshotMap;
+use mj_core::targets::storage::{StorageCondition, TargetStorageView};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
@@ -38,8 +39,21 @@ impl ViewerPublication {
         self.capabilities_dirty |= self.runtime.metadata.profile_capabilities
             != next.metadata.profile_capabilities
             || self.runtime.metadata.config != next.metadata.config;
-        if self.runtime.metadata.storage != next.metadata.storage {
-            self.dirty.extend(next.records.keys().cloned());
+        let previous_storage = &self.runtime.metadata.storage;
+        let storage = &next.metadata.storage;
+        if !previous_storage.ptr_eq(storage)
+            && storage_problem_inputs(previous_storage).ne(storage_problem_inputs(storage))
+        {
+            use mj_controller::target_storage::session_problem_in;
+            self.dirty.extend(
+                next.records
+                    .iter()
+                    .filter(|(_, record)| {
+                        session_problem_in(previous_storage, record)
+                            != session_problem_in(storage, record)
+                    })
+                    .map(|(id, _)| id.clone()),
+            );
         }
         self.dirty.extend(
             self.runtime
@@ -267,4 +281,21 @@ impl ViewerPublication {
         self.dirty.clear();
         snapshot
     }
+}
+
+// A healthy host has no session warning. Sample time is target metadata
+// even for full hosts; path routing and warning text use the other fields.
+fn storage_problem_inputs(views: &[TargetStorageView]) -> impl Iterator<Item = impl PartialEq> {
+    views.iter().filter_map(|view| {
+        (view.unattributed_no_space.is_some()
+            || view
+                .worst()
+                .is_some_and(|fs| fs.condition == StorageCondition::Full))
+        .then_some((
+            &view.host,
+            &view.home,
+            &view.filesystems,
+            &view.unattributed_no_space,
+        ))
+    })
 }
