@@ -186,6 +186,7 @@ impl TurnContext {
                 outcome: RelayCommandOutcome::Prompt { .. },
                 ..
             }
+            | RelayObservation::SessionRestarted
             | RelayObservation::HarnessTurnSettled {
                 prompt_in_flight: false,
                 ..

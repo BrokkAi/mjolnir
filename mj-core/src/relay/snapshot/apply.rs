@@ -2458,7 +2458,8 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 Arc::make_mut(context).open_assistant_id = None;
             }
         }
-        RelayObservation::HarnessTurnSettled {
+        RelayObservation::SessionRestarted
+        | RelayObservation::HarnessTurnSettled {
             prompt_in_flight: false,
             ..
         } => {

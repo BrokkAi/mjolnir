@@ -10904,3 +10904,64 @@ fn prompted_reply_survives_native_start_and_settle_markers() {
     let relay = DurableRelay::open(temp.path(), SESSION, "prompted-native-reopen").unwrap();
     check(&relay);
 }
+
+// Hard-won: e06c07a69: restarted autonomous turns lost their start proofs and merged on replay.
+#[test]
+fn bridge_restarts_keep_interrupted_autonomous_replies_separate_on_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "autonomous-restarts").unwrap();
+    relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"first-autonomous-reply",
+                "content":{"type":"text","text":"first reply"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"second reply"}
+    })).unwrap()).unwrap();
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    assert!(relay.snapshot.harness_turn.is_none());
+    assert!(
+        !observations(&relay)
+            .iter()
+            .any(|observation| matches!(observation, RelayObservation::HarnessTurnSettled { .. }))
+    );
+    let check = |relay: &DurableRelay| {
+        assert_eq!(
+            relay
+                .turn_context()
+                .evidence(
+                    mj_core::config::HarnessKind::Claude,
+                    mj_core::activity::verdict::TurnPhase::Replied,
+                    &Default::default(),
+                    0,
+                )
+                .assistant_text_tail,
+            "second reply"
+        )
+    };
+    check(&relay);
+    let history = relay.snapshot.authorization_context().unwrap();
+    assert_eq!(history.messages.last().unwrap().text, "second reply");
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .find(|message| message.id == "first-autonomous-reply")
+            .unwrap()
+            .text,
+        "first reply"
+    );
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "autonomous-restarts-reopen").unwrap();
+    check(&relay);
+}

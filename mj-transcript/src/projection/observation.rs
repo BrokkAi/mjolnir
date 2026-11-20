@@ -551,7 +551,12 @@ pub(super) fn project_observation(
                     .config_results
                     .push((command_id.clone(), Some(message.clone())));
             }
-            let prompt_was_started = index.get(&format!("user:{command_id}")).is_some();
+            let active = current
+                .active_turn
+                .as_ref()
+                .filter(|turn| turn.belongs_to(command_id));
+            let prompt_was_started =
+                active.is_some() || index.get(&format!("user:{command_id}")).is_some();
             let queued_entry = current
                 .queued_prompts
                 .iter()
@@ -559,16 +564,11 @@ pub(super) fn project_observation(
                 .cloned();
             let mut queue = current.queued_prompts.clone();
             queue.retain(|queued| queued.command_id != *command_id);
-            let accepted_ordinal = current
-                .active_turn
-                .as_ref()
-                .filter(|turn| turn.belongs_to(command_id))
-                .and_then(|turn| turn.accepted_ordinal)
-                .or_else(|| {
-                    queued_entry
-                        .as_ref()
-                        .and_then(|entry| entry.accepted_ordinal)
-                });
+            let accepted_ordinal = active.and_then(|turn| turn.accepted_ordinal).or_else(|| {
+                queued_entry
+                    .as_ref()
+                    .and_then(|entry| entry.accepted_ordinal)
+            });
             if let RelayObservation::CommandInterrupted {
                 continuation_id: Some(recovery_id),
                 ..
@@ -630,10 +630,6 @@ pub(super) fn project_observation(
             if *command == RelayCommandKind::Prompt {
                 // A prompt that never started has its acceptance ordinal on the
                 // queue entry; one that started carries it on the active turn.
-                let active = current
-                    .active_turn
-                    .as_ref()
-                    .filter(|turn| turn.belongs_to(command_id));
                 let outcome_text = message.clone();
                 mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
                     work_facts: None,

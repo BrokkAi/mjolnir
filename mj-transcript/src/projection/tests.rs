@@ -3988,3 +3988,77 @@ fn live_recovery_prefers_a_selectable_provider_model_over_the_previous_selection
         assert_eq!(restored.configuration.values["model"], json!(expected));
     }
 }
+
+// Hard-won: e06c07a69: mailbox wakes have an active owner but no user row to mark their interruption.
+#[test]
+fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
+    for restart_first in [false, true] {
+        for native_running in [false, true] {
+            let mut session = MaterializedSession::empty("session");
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandQueued {
+                    command_id: "mailbox-wake".into(),
+                    command: RelayCommand::MailboxWake {
+                        events: vec![mj_core::mailbox::MailboxEvent {
+                            key: "parent-message".into(),
+                            source: "parent".into(),
+                            wake: true,
+                            created_at_ms: 1,
+                            body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                                text: "continue".into(),
+                            },
+                        }],
+                    },
+                    created_at_ms: 10,
+                },
+            );
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandStarted {
+                    command_id: "mailbox-wake".into(),
+                    started_at_ms: 20,
+                },
+            );
+            assert!(
+                session
+                    .active_turn
+                    .as_ref()
+                    .unwrap()
+                    .belongs_to("mailbox-wake")
+            );
+            assert!(
+                !session
+                    .transcript
+                    .iter()
+                    .any(|item| item.stable_id == "user:mailbox-wake")
+            );
+            if native_running {
+                apply_observation(&mut session, RelayObservation::SessionUpdate {
+                    update: Box::new(serde_json::from_value(serde_json::json!({
+                        "sessionUpdate":"session_info_update", "_meta":{"execution":{"version":1,"status":"running","turnId":"wake"}}
+                    })).unwrap())
+                });
+            }
+            if restart_first {
+                apply_observation(&mut session, RelayObservation::SessionRestarted);
+            }
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandInterrupted {
+                    continuation_id: Some(mj_core::continuation::restart_continuation_id(
+                        "mailbox-wake",
+                    )),
+                    reason: Some(mj_core::event_outcome::OutcomeReason::WorkerRestarted),
+                    command_id: "mailbox-wake".into(),
+                    command: RelayCommandKind::Prompt,
+                    message: "bridge restarted".into(),
+                },
+            );
+            let interrupted_at = session.applied_event_ordinal;
+            assert_eq!(session.execution, MaterializedExecutionState::Idle);
+            apply_observation(&mut session, RelayObservation::SessionRestarted);
+            assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
+        }
+    }
+}
