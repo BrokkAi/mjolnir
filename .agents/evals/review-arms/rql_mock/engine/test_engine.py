@@ -273,6 +273,22 @@ class ValidationTests(unittest.TestCase):
                 operand["verbatim"][0]["text"] = text
                 self.assertIn(message, "\n".join(validate(payload(rows), SOURCE.get)[2]))
 
+    # Hard-won: b9ceb96: exact nested citations were rejected unless copied to the row's site list.
+    def test_row_sites_include_nested_citations_for_location_only_delivery(self):
+        rows = deepcopy(ROWS)
+        enclosing_span = {**span(line=1), "end_line": 3}
+        rows[0]["sites"] = [enclosing_span]
+        rows[0]["fields"]["nested"] = [{"context": {"site": span(line=3)}}]
+        rows[0]["fields"]["duplicate"] = deepcopy(rows[0]["fields"]["operand"])
+
+        result, _, errors = validate(payload(rows), SOURCE.get)
+        self.assertFalse(errors)
+        self.assertEqual(result[0]["sites"], [enclosing_span, span(), span(line=3)])
+
+        rows[0]["fields"]["operand"]["verbatim"][0]["text"] = "0016"
+        self.assertIn("not the exact source slice",
+                      "\n".join(validate(payload(rows), SOURCE.get)[2]))
+
     def test_open_coverage_and_false_complete(self):
         rows = deepcopy(ROWS)
         rows[0]["fields"]["proof"] = "open"
@@ -503,6 +519,8 @@ class FakeAcpRunner(SealedRunner):
         self.conversation = []
         self.turns = []
         self.artifact = None
+        self.tmp_entries = set()
+        self.tool_calls = []
 
     def start(self, snapshot, commit):
         return "test-session"
@@ -524,7 +542,16 @@ class FakeAcpRunner(SealedRunner):
         return f".rql-engine-{sid}"
 
     def audit_turn(self, sid, turn, directory):
+        self.save(directory / f"turn-{turn}-transcript.json", self.transcript(sid))
         return True
+
+    def tmp_admin(self, sid, remove=None):
+        if remove is None:
+            return sorted(self.tmp_entries)
+        self.tmp_entries.difference_update(remove)
+
+    def transcript(self, sid):
+        return [{"session_id": sid, "items": self.tool_calls}]
 
     @staticmethod
     def save(path, value):
@@ -582,6 +609,46 @@ class FakeAcpRunner(SealedRunner):
 
 
 class ContextTests(unittest.TestCase):
+    # Hard-won: b9ceb96: engine scratch persisted across /clear
+    def test_query_resets_mentioned_temporary_artifacts_and_records_reuse(self):
+        runner = FakeAcpRunner()
+        runner.tmp_entries.add("baseline")
+        original_message = runner.message
+
+        def answer_turn(sid, text, command):
+            if text == "/clear":
+                return original_message(sid, text, command)
+            first = not runner.tool_calls
+            if first:
+                runner.tmp_entries.update(("x", "x_other", "hidden"))
+                call = "mkdir /tmp/x; ls /tmp/baseline"
+            else:
+                self.assertNotIn("x", runner.tmp_entries)
+                self.assertEqual(runner.tmp_entries, {"baseline", "hidden", "x_other"})
+                runner.tmp_entries.add("x")
+                call = "cat /tmp/hidden/script.py"
+            turn = original_message(sid, text, command)
+            runner.tool_calls.append({"seq": turn, "role": "tool", "body": {"call": {"rawInput": call}}})
+            return turn
+
+        runner.message = answer_turn
+        with TemporaryDirectory() as directory:
+            path = Path(directory)
+            _, first, _ = runner.turn("test-session", '(function :name "first")', CATALOGUE, MENU, [], path)
+            self.assertEqual(json.loads((path / "tmp-baseline.json").read_text()), ["baseline"])
+            self.assertEqual(runner.tmp_entries, {"baseline", "hidden", "x_other"})
+            self.assertEqual(first["cross_query_reuse"], [])
+            _, second, _ = runner.turn("test-session", '(function :name "second")', CATALOGUE, MENU, [], path)
+            self.assertEqual(runner.tmp_entries, {"baseline", "x", "x_other"})
+            expected = [{"path": "/tmp/hidden", "prior_context_id": first["context_id"]}]
+            self.assertEqual(second["cross_query_reuse"], expected)
+            record = json.loads((path / "answers" / second["context_id"] / "turn.json").read_text())
+            self.assertEqual(record["cross_query_reuse"], expected)
+            history = json.loads((path / "residual-artifacts.json").read_text())
+            self.assertEqual([(row["remove"], row["kept"]) for row in history],
+                             [(["x"], ["hidden", "x_other"]), (["hidden"], ["x", "x_other"])])
+            self.assertTrue(all(row["cleanup_complete"] for row in history))
+
     # Hard-won: dfb55808: the wait exit code hid the structured quota refusal.
     def test_nonzero_wait_with_provider_quota_outcome_is_a_quota_hold(self):
         runner = FakeAcpRunner()

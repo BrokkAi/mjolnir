@@ -13,12 +13,15 @@ The study plan says *what* is measured and *why*. This ExecPlan says how the har
 - [x] Slices 1 to 6 built and integrated (2026-11-20): selection and freeze (`brief/rql-census/pilot/select_pilot.py`), menu-step semantics (`menu-steps.md`, with worked cases kept apart in `menu-steps-cases.md`), the mock engine (`rql_mock/engine/`), the transport (`rql_mock/server.py`, `client.py`), the launch harness (`pilot_run.py`, `pilot_review.py`) and judging and readout (`pilot_judge.py`, `pilot_readout.py`), plus the fidelity gate (`rql_mock/fidelity*.py`).
 - [x] Re-freeze the manifest under the plan commit that adds pooled prescience (ce86d0cbb; committed in a19cfbfb0, same draw).
 - [x] Deploy the private instance `rql-census-pilot` (claude5, codex3, pinned Podman image, engine bundle on a loopback git daemon).
-- [ ] Engine-only smoke on Fable: launch, attestation, `/clear` acknowledgements, egress record and provider attribution verified on 2026-11-20. Coverage and paging, the R-loc reduction, cache hits, fresh re-asks and the cost of an accepted answer are still unverified; claude5's 5-hour window ran out.
+- [x] Engine-only smoke on Fable (2026-11-20, harness b9ceb9627, mj-13c4fc559). Verified: attestation, `/clear` acknowledgements, provider attribution (claude-fable-5-2), the egress record, complete coverage, page fields, out-of-range page rejection, the sites-only R-loc reduction, exact cache hits (0 tokens) and a fresh re-ask (same primary anchors and coverage, different extra sites). Not seen live: a second nonempty page or an open frontier.
+- [ ] Engine answer rejections: 5 of 13 smoke turns failed validation, and all but one accepted answer needed a repair. Cost per query, repairs included: about 200 s, 789K tokens and about 1 Fable-week point. Root cause under investigation before the gate.
+- [ ] Per-query reset of engine scratch: files under `/tmp` survived `/clear` (no reuse seen). In progress: prompt rule, host-side removal of entries the query's commands name, and `cross_query_reuse` reported per step.
+- [ ] Audit: awk, sed and perl filters move to allowlists after review of 343e9f095 (Perl `use` and other denylist gaps). In progress.
 - [ ] Run the live fidelity gate and commit `fidelity/gate-report.json`'s summary; re-freeze with `--served-steps` if a step fails.
 - [ ] Smoke: one diff end to end, on codex3 just after its reset. codex2 (22%) is below the study's 25% floor.
 - [ ] Launch on the coordinator's schedule (Decision Log): Codex work from codex3's reset (about 11-22 14Z); Fable work from claude4's reset (about 11-23 05Z); judging through about 11-27.
-- [ ] Before the first judge run (about 11-23): judge preparation snapshots isolation evidence under `pilot.lock` (review override on 7088aaa4a). In progress.
-- [ ] Before the readout (about 11-27): keep the frozen egress source across judge commands, and have live readouts compute isolation from the selected runs directory (review overrides on 7088aaa4a). In progress.
+- [x] Judge preparation builds the batch and isolation evidence from one snapshot under `pilot.lock` (7865b551f, b9ceb9627).
+- [x] The egress source stays frozen across judge commands, missing evidence reports as missing, and live readouts compute isolation from the selected runs directory (7f53e1e5c, b9ceb9627).
 - [ ] Re-freeze the pilot binaries at the last reviewed mj commit before launch (currently `mj-13c4fc559`).
 - [ ] Tracked, no deadline: the recovery wedge when frozen inputs change while a writer waits for input (override on 546ebd478). Two mj host-only edge cases, also overridden: a Move with sub-agents is refused only after its children stop, and a `--base` outside branches and tags is lost on dissociation (overrides on dfb55808a/2ac06cfcc).
 

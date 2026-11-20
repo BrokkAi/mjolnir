@@ -1,4 +1,5 @@
 """Host-side evidence that must survive destruction of the engine workspace."""
+from collections import defaultdict
 import hashlib
 import json
 import os
@@ -25,6 +26,23 @@ def save_bytes(path, data):
 
 def save_json(path, value):
     save_bytes(path, (json.dumps(value, sort_keys=True, allow_nan=False) + "\n").encode("utf-8"))
+
+
+def cross_query_reuse_summary(provenances):
+    measured, reused = defaultdict(set), defaultdict(set)
+    for provenance in provenances:
+        for turn in provenance.get("turns", ()):
+            if "cross_query_reuse" not in turn:
+                continue
+            identity = (turn["session"], turn["turn"])
+            for step in provenance.get("steps") or ("documented",):
+                measured[step].add(identity)
+                if turn["cross_query_reuse"]:
+                    reused[step].add(identity)
+    return {"enforced": False, "by_step": {
+        step: {"measured_turns": len(measured[step]), "reuse_turns": len(reused[step])}
+        for step in sorted(measured)
+    }}
 
 
 def file_digests(directory):

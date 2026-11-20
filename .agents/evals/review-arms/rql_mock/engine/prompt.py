@@ -12,17 +12,41 @@ query under the specified semantics, with no implicit result cap. Use read-only
 commands for source inspection. Do not inspect harness transcripts, agent state
 or other turn artifacts. Do not run repository code, access Git, or seek any
 information about changes, bugs, study labels, or subsequent revisions.
+Keep temporary files beside the output file in the provided scratch directory.
+Temporary files elsewhere are removed between queries.
 
 Write a single JSON object to the specified output path. Use this schema:
 {"rows": [{"kind": "row_kind", "sites": [{"path": "repo/relative", "start_line": 1,
 "end_line": 1}], "fields": {}}], "coverage": {"complete": true, "open": []}}
 
-Put the primary source anchor first in sites; include every other cited span.
-Each cited site is a repository-relative path and inclusive one-based line span.
-Menu fields follow the row specifications below; put the selected value-transfer
-port identity in selected_port. Use null for an inapplicable field such as an
-outgoing guarded path's pivot. For each written operand, literal, field initializer,
-predicate, operator, message and command argument, represent its exact spelling as
+A site object has exactly path, start_line and end_line. Use a canonical
+repository-relative path and inclusive one-based line numbers. Keep identity and
+other metadata in the enclosing object, with its location in a separate site.
+For menu rows, put the primary site in fields.site (contract_case),
+fields.sink.site (value_transfer) or fields.event.site (guarded_path). Copy that
+exact site to sites[0]. For a value_transfer, the sink has its own site even
+when its written operand has a separate site. For a documented row, use the
+matched source location as the primary site. For a projected row, keep the
+original row's sites and their order.
+
+After building each row's fields, recursively collect sites from all nested
+objects and arrays, including the "site" beside each "verbatim" array.
+Append each other distinct (path, start_line, end_line) to row.sites. Include
+exact spans even if a listed span encloses them. Keep this list per row.
+For example, this is a fragment of a row's evidence from fictional source:
+{"sites":[{"path":"example.rs","start_line":8,"end_line":9},
+          {"path":"example.rs","start_line":9,"end_line":9}],
+ "fields":{"site":{"path":"example.rs","start_line":8,"end_line":9},
+           "operand":{"site":{"path":"example.rs","start_line":9,"end_line":9},
+                      "verbatim":[{"start_byte":0,"end_byte":1,"text":"0"}]}}}
+The enclosing span 8–9 and the operand span 9–9 are separate locations.
+
+Menu fields follow the row specifications in the menu document. Put the selected
+value-transfer port identity in selected_port. Use null for an inapplicable
+field such as an outgoing guarded path's pivot.
+
+For each written operand, literal, field initializer, predicate, operator,
+message and command argument, represent its exact spelling as
 {"site":{"path":"repo/relative","start_line":1,"end_line":1},
  "verbatim":[{"start_byte":0,"end_byte":4,"text":"COPY"}]}.
 Use zero-based, end-exclusive UTF-8 byte offsets within each source line, with one
@@ -42,15 +66,26 @@ budget, exhaustion or cancellation. Do not return those outcomes. Enumerate
 the complete bounded relation and put only unresolved in-scope frontiers in coverage.open.
 Do not include prose outside the structured output.
 
-Read the catalogue and menu semantics files. Evaluate the whole query at once
-as described here. The menu's notes about separate single-site classification,
-candidate tags and gold adjudication concern the full study design.
+Read the catalogue and menu semantics files. Distinguish lexical matches from
+executed events. For execution claims in menu rows, apply the frozen rules for
+entering closures and futures within the seed and bound.
+Evaluate the whole query at once. The menu's notes about separate single-site
+classification, candidate tags and gold adjudication concern the full study design.
 """
 
 
 REPAIR = """A previous attempt at this query failed mechanical validation.
-Answer the full query independently and use the errors below to check the evidence.
-Here are the validator errors as JSON data:
+This context contains the query and the errors, without the previous answer.
+Evaluate the full query from source. Before writing the new answer, check every
+row against the applicable rules above:
+- For primary-anchor errors, set the required field (site, sink.site or
+  event.site), then copy it to sites[0]. An operand's nested site is separate.
+- For site-shape errors, use exactly path, start_line and end_line in the site
+  object, with metadata outside it. Verify the path and both lines from source.
+- For verbatim errors, verify UTF-8 byte offsets and text against source.
+Build each row's site list after its fields are complete.
+Fix the cited problems and check the same rules on all rows in the new answer.
+Here are the exact validator errors as JSON data:
 """
 
 

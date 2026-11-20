@@ -72,6 +72,39 @@ elif scratch.exists():
     raise SystemExit("engine scratch path is occupied by an unexpected file")
 """
 
+TMP_ARTIFACTS = """
+import json, shutil, sys
+from pathlib import Path
+
+root = Path("/tmp")
+if len(sys.argv) > 1:
+    for name in json.loads(sys.argv[1]):
+        if not name or "/" in name or name in {".", ".."}:
+            raise ValueError("expected a top-level temporary entry")
+        path = root / name
+        if not path.is_symlink() and path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+else:
+    print(json.dumps(sorted(path.name for path in root.iterdir())))
+"""
+
+
+def mentioned_tmp_entries(pages, after_seq, names):
+    from audit import call_parts
+
+    calls = [call_parts(item)[0] for page in pages for item in page["items"]
+             if item["seq"] > after_seq and item["role"] in {"tool", "terminal"}
+             and (item.get("body") or {}).get("call")]
+    mentioned = set()
+    for name in names:
+        literal = json.dumps(f"/tmp/{name}")[1:-1]
+        pattern = re.compile(r"(?<![\w./-])" + re.escape(literal) + r"""(?=$|[/\s'"\`;&|()<>{},\\])""")
+        if any(pattern.search(call) for call in calls):
+            mentioned.add(name)
+    return mentioned
+
 
 class TurnFailure(RuntimeError):
     def __init__(self, message, record):
@@ -353,18 +386,77 @@ class SealedRunner:
         save_bytes(evidence / "answer.raw", output)
         return output, []
 
+    def tmp_admin(self, sid, remove=None):
+        container = self.driver.container(sid)["container"]
+        args = [] if remove is None else [json.dumps(remove)]
+        proc = subprocess.run(["podman", "exec", "--user", "0", container,
+                               "python3", "-c", TMP_ARTIFACTS, *args], capture_output=True, timeout=300)
+        if proc.returncode:
+            raise RuntimeError(f"engine temporary file reset failed: {proc.stderr.decode(errors='replace').strip()}")
+        return json.loads(proc.stdout) if remove is None else None
+
+    def tmp_query_start(self, sid, directory):
+        before = self.tmp_admin(sid)
+        baseline = directory / "tmp-baseline.json"
+        if not baseline.exists():
+            save_json(baseline, before)
+        cursor = self.driver.mj("transcript", "--session", sid, "--limit", 1)["latest_seq"]
+        return {"before": before, "after_seq": cursor}
+
+    def reset_query_tmp(self, sid, directory, evidence, scope, transcript_path=None):
+        reset = evidence / "tmp-reset.json"
+        if reset.exists():
+            return json.loads(reset.read_bytes())["cross_query_reuse"]
+        history_path = directory / "residual-artifacts.json"
+        history = json.loads(history_path.read_bytes()) if history_path.exists() else []
+        event = next((row for row in history if row["context_id"] == evidence.name), None)
+        if event is None:
+            if transcript_path is None:
+                transcript_path = evidence / "reset-transcript.json"
+                if not transcript_path.exists():
+                    save_json(transcript_path, self.driver.transcript(sid))
+            pages = json.loads(transcript_path.read_bytes())
+            before, after = set(scope["before"]), set(self.tmp_admin(sid))
+            baseline = set(json.loads((directory / "tmp-baseline.json").read_bytes()))
+            prior = history[-1]["survivors"] if history else {}
+            candidates = after - baseline
+            mentions = mentioned_tmp_entries(pages, scope["after_seq"], candidates | (before & prior.keys()))
+            kept = candidates - mentions
+            survivors = {name: prior[name] for name in kept & before & prior.keys()}
+            survivors.update({name: evidence.name for name in kept - before})
+            event = {"context_id": evidence.name, "remove": sorted(candidates & mentions), "kept": sorted(kept),
+                     "survivors": survivors, "cleanup_complete": False,
+                     "cross_query_reuse": [{"path": f"/tmp/{name}", "prior_context_id": prior[name]}
+                                           for name in sorted(before & prior.keys() & mentions)]}
+            history.append(event)
+            save_json(history_path, history)
+        if not event["cleanup_complete"]:
+            if event["remove"]:
+                self.tmp_admin(sid, event["remove"])
+            event["cleanup_complete"] = True
+            save_json(history_path, history)
+        save_json(reset, event)
+        return event["cross_query_reuse"]
+
     def capture_pending(self, sid, directory):
-        pending = [path for path in (directory / "answers").glob("*/pending.json")
-                   if not ((path.parent / "answer.raw").is_file() or (path.parent / "absent.json").is_file())]
+        pending = []
+        for path in (directory / "answers").glob("*/pending.json"):
+            record = json.loads(path.read_bytes())
+            captured = (path.parent / "answer.raw").is_file() or (path.parent / "absent.json").is_file()
+            reset_due = "tmp_scope" in record and not (path.parent / "tmp-reset.json").is_file()
+            if not captured or reset_due:
+                pending.append((path, record, captured))
         if len(pending) > 1:
             raise RuntimeError("more than one engine answer is pending capture")
         if pending:
-            path = pending[0]
-            record = json.loads(path.read_text(encoding="utf-8"))
+            path, record, captured = pending[0]
             expected = f".rql-engine-{sid}/answer.json"
             if record["path"] != expected:
                 raise RuntimeError("pending engine answer path does not match its session")
-            self.capture_answer(sid, expected, path.parent)
+            if not captured:
+                self.capture_answer(sid, expected, path.parent)
+            if "tmp_scope" in record:
+                self.reset_query_tmp(sid, directory, path.parent, record["tmp_scope"])
 
     def capture_usage(self, sid, expected_model):
         pages, cursor = [], 0
@@ -455,7 +547,8 @@ class SealedRunner:
 
         def record_pending():
             save_json(evidence / "pending.json", {"path": output_path, "query": query,
-                                                 "prior_validation_errors": errors})
+                                                 "prior_validation_errors": errors,
+                                                 "tmp_scope": self.tmp_query_start(sid, directory_on_host)})
 
         _, record = self.prompt(sid, prompt, context_id, before_send=record_pending)
         try:
@@ -467,6 +560,10 @@ class SealedRunner:
             if not passed:
                 raise IsolationFailure("engine session failed transcript isolation audit", record)
             output, errors = self.capture_answer(sid, output_path, evidence)
+            scope = json.loads((evidence / "pending.json").read_bytes())["tmp_scope"]
+            record["cross_query_reuse"] = self.reset_query_tmp(
+                sid, directory_on_host, evidence, scope, directory_on_host / f"turn-{record['turn']}-transcript.json")
+            save_json(evidence / "turn.json", record)
             self.clean_checkout(sid)
         except IsolationFailure:
             raise
