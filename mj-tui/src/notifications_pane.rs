@@ -824,7 +824,6 @@ impl DashboardState {
                                 | CommandId::NotificationClear
                                 | CommandId::NotificationSkip
                                 | CommandId::NotificationIgnoreSession
-                                | CommandId::NotificationClearImportant
                                 | CommandId::NotificationPreviousMessage
                                 | CommandId::NotificationNextMessage
                         )
@@ -1217,23 +1216,6 @@ impl DashboardState {
             .map_or(DashboardAction::None, |gesture| {
                 self.activate_notification(gesture)
             })
-    }
-
-    pub(crate) fn notification_clear_important(&mut self) -> DashboardAction {
-        let dismissals = self
-            .notification_entries()
-            .into_iter()
-            .filter(|entry| entry.level == AttentionLevel::Important)
-            .filter_map(|entry| {
-                let target = entry.target?;
-                if self.notification_dismissal_pending(&entry.session_id) {
-                    return None;
-                }
-                self.submit_notification_target(&entry.session_id, target.clone());
-                Some((entry.session_id, target))
-            })
-            .collect();
-        DashboardAction::DismissNotifications { dismissals }
     }
 
     pub fn notification_has_recoverable_reply(&self) -> bool {
@@ -1636,14 +1618,6 @@ pub(crate) fn render(
             send_area,
         );
     }
-    let important = entries
-        .iter()
-        .filter(|entry| {
-            entry.level == AttentionLevel::Important
-                && entry.target.is_some()
-                && !dashboard.notification_dismissal_pending(&entry.session_id)
-        })
-        .count();
     let mut x = inner.x;
     let mut form = dashboard.surface_form.borrow_mut();
     for (id, label, enabled) in [
@@ -1663,23 +1637,18 @@ pub(crate) fn render(
             "Ignore Session".to_owned(),
             true,
         ),
-        (
-            CommandId::NotificationClearImportant,
-            format!("Clear all ! ({important})"),
-            important > 0,
-        ),
     ] {
         let width = Line::raw(&label).width() as u16 + 2;
         if x + width > inner.right() {
             break;
         }
         let rect = Rect::new(x, inner.bottom() - 1, width, 1);
-        let control = if id == CommandId::NotificationClearImportant {
-            SurfaceControl::Command(id)
-        } else {
-            SurfaceControl::Notification(id)
-        };
-        form.register(control, ControlKind::Button, rect, enabled);
+        form.register(
+            SurfaceControl::Notification(id),
+            ControlKind::Button,
+            rect,
+            enabled,
+        );
         let style = if enabled {
             theme::actionable().patch(theme::raised())
         } else {
@@ -1713,13 +1682,17 @@ fn render_message_navigation(
     } else {
         [" Next ", " Previous "]
     };
-    for (command, label) in [
-        CommandId::NotificationNextMessage,
-        CommandId::NotificationPreviousMessage,
-    ]
-    .into_iter()
-    .zip(labels)
-    {
+    // One message has nowhere to go, so the buttons would only be noise.
+    let buttons = if entry.item_count() > 1 {
+        [
+            CommandId::NotificationNextMessage,
+            CommandId::NotificationPreviousMessage,
+        ]
+        .as_slice()
+    } else {
+        &[]
+    };
+    for (&command, label) in buttons.iter().zip(labels) {
         let width = label.len() as u16;
         if right.saturating_sub(inner.x) < width + position.len() as u16 + 1 {
             continue;
@@ -2940,23 +2913,30 @@ pub(crate) mod tests {
         );
         assert!(dashboard.wanted_notification_message().is_none());
 
+        while dashboard.notification_entries()[0].session_id != "i1" {
+            dashboard.handle_key(alt(KeyCode::Char('s')));
+        }
         assert_eq!(
-            dashboard.handle_key(alt(KeyCode::Char('c'))),
-            DashboardAction::DismissNotifications {
-                dismissals: vec![("i1".into(), NotificationDismissal::ReadThrough(8))],
+            dashboard.handle_key(alt(KeyCode::Char('n'))),
+            DashboardAction::DismissNotification {
+                session_id: "i1".into(),
+                target: NotificationDismissal::ReadThrough(8),
             }
         );
         assert!(dashboard.notification_dismissal_pending("i1"));
-        dashboard.notifications_dismissed(vec![(
-            "i1".into(),
+        dashboard.notification_dismissal_finished(
+            "i1",
             NotificationDismissal::ReadThrough(8),
             Ok(8),
-        )]);
+        );
         assert!(!dashboard.notification_dismissal_pending("i1"));
         assert_eq!(
             dashboard.state.sessions["i1"].viewed_through_event_ordinal,
             8
         );
+        while dashboard.notification_entries()[0].session_id != "q1" {
+            dashboard.handle_key(alt(KeyCode::Char('s')));
+        }
         assert_eq!(
             dashboard.handle_key(alt(KeyCode::Char('n'))),
             DashboardAction::DismissNotification {
@@ -3122,14 +3102,15 @@ pub(crate) mod tests {
         );
         assert_eq!(dashboard.notifications.errors["q1"], "Worker disconnected");
         assert_eq!(dashboard.attention_level("q1"), AttentionLevel::Waiting);
-        let DashboardAction::DismissNotifications { dismissals } =
-            dashboard.handle_key(alt(KeyCode::Char('c')))
-        else {
-            panic!("batch dismissal");
-        };
+        while dashboard.notification_entries()[0].session_id != "i1" {
+            dashboard.handle_key(alt(KeyCode::Char('s')));
+        }
         assert_eq!(
-            dismissals,
-            vec![("i1".into(), NotificationDismissal::ReadThrough(5))]
+            dashboard.handle_key(alt(KeyCode::Char('n'))),
+            DashboardAction::DismissNotification {
+                session_id: "i1".into(),
+                target: NotificationDismissal::ReadThrough(5),
+            }
         );
         assert_eq!(dashboard.notification_entries().len(), 2);
         assert!(
