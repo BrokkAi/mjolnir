@@ -1488,9 +1488,16 @@ pub(super) fn execute_concurrent_lanes<A: Send, B: Send>(
 ) -> Result<(A, B)> {
     std::thread::scope(|scope| {
         let owner = crate::worker_lifecycle::capture();
-        let second = scope.spawn(move || match owner {
-            Some(owner) => owner.scope_blocking(second),
-            None => second(),
+        // The second lane runs on its own thread, which starts outside the
+        // runtime the first lane runs in; enter it so runtime-backed waits
+        // (mj_core::runtime::block_on, downloads) work in both lanes.
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        let second = scope.spawn(move || {
+            let _entered = runtime.as_ref().map(tokio::runtime::Handle::enter);
+            match owner {
+                Some(owner) => owner.scope_blocking(second),
+                None => second(),
+            }
         });
         let first = first();
         let second = second.join().unwrap_or_else(|panic| {

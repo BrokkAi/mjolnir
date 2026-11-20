@@ -1089,6 +1089,30 @@ fn independent_target_lanes_run_at_the_same_time() {
     seen.sort();
     assert_eq!(seen, ["install the worker", "upload the checkpoint"]);
 }
+// Hard-won: #1495: the second lane's thread had no runtime context, so a runtime-backed wait there panicked.
+#[test]
+fn both_lanes_can_wait_on_the_runtime() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    // Lifecycle work runs synchronously on a blocking-pool thread.
+    let (first, second) = runtime
+        .block_on(async {
+            tokio::task::spawn_blocking(|| {
+                execute_concurrent_lanes(
+                    || mj_core::runtime::block_on(async { 1 }),
+                    || mj_core::runtime::block_on(async { 2 }),
+                )
+            })
+            .await
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!((first, second), (1, 2));
+}
+
 #[test]
 fn a_lane_failure_is_reported_in_lane_order_and_never_abandons_the_other_lane() {
     let reached = Mutex::new(Vec::new());
