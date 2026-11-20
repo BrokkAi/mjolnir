@@ -21,7 +21,7 @@ To see it working: in a test instance, start a session in a workspace with two w
 - [x] (2026-11-20) Fifth and sixth reviews: interrupted markers keep their own recovery path in Milestone 2 (see Milestone 2); one relay constant in Milestone 3 gates both ResolveRepositories and concurrency, and Milestone 1 no longer adds a relay version.
 - [x] (2026-11-20) Fourth review of the plan: the base generation counts every review close, because a failed review can have moved some bases.
 - [x] (2026-11-20) Third review of the plan: review-off joins root ownership, clean verdicts retire findings, pathless override selects by count, old override schemas stay at one outstanding verdict, legacy overrides bump the base generation; new action fields are deliberately not version-gated.
-- [x] (2026-11-20) Milestone 1: tool API and default scope, still one review per session. `paths` and `override_review(path)` run from the tool through the durable action (which still decodes an older worker's `path`), daemon dispatch and the review host; `capture_scope` in `reviewer.rs` decides the scope once for preparation and the review-off path; the worker's refusal lists the workspace repositories; instructions and docs updated. No relay version is added (see the Decision Log).
+- [x] (2026-11-20) Milestone 1: tool API and default scope, still one review per session. `paths` runs from the tool through the durable action (which still decodes an older worker's `path`), daemon dispatch and the review host as a `ReviewScope` (`WorkingDirectory`, `Paths`, or `Workspace` for a person's `/review`, `mj review start` and `POST /review`); `override_review(path)` was moved to Milestone 3 (see the Decision Log); `capture_scope` in `reviewer.rs` decides the scope once for preparation and the review-off path; the worker's refusal lists the workspace repositories; instructions and docs updated. No relay version is added (see the Decision Log).
 - [ ] Milestone 2: store one row per open review (breaking migration).
 - [ ] Milestone 3: review host keyed by review, with the overlap decision at the open step.
 - [ ] Milestone 4: surfaces show several reviews per session.
@@ -79,6 +79,14 @@ To see it working: in a test instance, start a session in a workspace with two w
 
 - Decision: `override_review` and `set_baseline` reserve their roots in the actor before the worker changes any ref, and release them when the operation ends.
   Rationale: found by review of the plan. The worker's `SetReviewBase` and `RecordOverridden` actions move refs before they answer, so a check after the answer would come too late. An override selected through `a` also writes refs for every root of the selected verdict, for example `b` of a verdict for `a, b`, so it must reserve all of them, not just the root it was named by.
+  Date/Author: 2026-11-20.
+
+- Decision: Milestone 1 does not add `override_review(path)`; Milestone 3 adds it together with `ResolveRepositories`.
+  Rationale: found by review of Milestone 1. Selecting a verdict by path needs the path resolved to a root, and the only way to do that before Milestone 3 is a review capture, which can record a session-start ref in an unrelated repository before the call is refused. With one review per session there is only one verdict to select, so the argument adds nothing until Milestone 3.
+  Date/Author: 2026-11-20.
+
+- Decision: a person's review (`/review`, `mj review start`, `POST /review`) covers every workspace repository, as before; only the agent's `request_review` without `paths` defaults to the working directory's repository.
+  Rationale: found by review of Milestone 1. Those entry points name no repository, so narrowing them would review only the primary checkout and miss commits in a secondary one. The Milestone 3 overlap check compares the roots a capture returned, so a whole-workspace review needs no special case there; it simply overlaps whatever it covers.
   Date/Author: 2026-11-20.
 
 - Decision: the new `paths` and `override_review.path` fields of the durable actions are not gated on the daemon's relay version.
@@ -148,7 +156,7 @@ The standing instructions that teach the agent to use the review tools are `REVI
 
 At the end of this milestone the tools have their final shape, while the host still allows one review per session. It can ship alone.
 
-In `mj-worker/src/subagent_mcp.rs`, change the `request_review` schema to `{"paths": {"type": "array", "items": {"type": "string"}, "minItems": 1}}` with no required fields, and describe the default ("the repository that contains your working directory"). Give `override_review` an optional `path` with the same description as `set_baseline`'s. In `review_action`, refuse an empty list and empty strings with messages in the style of the existing ones.
+In `mj-worker/src/subagent_mcp.rs`, change the `request_review` schema to `{"paths": {"type": "array", "items": {"type": "string"}, "minItems": 1}}` with no required fields, and describe the default ("the repository that contains your working directory"). (`override_review` keeps its arguments in this milestone; Milestone 3 adds `path`.) In `review_action`, refuse an empty list and empty strings with messages in the style of the existing ones.
 
 In `mj-core/src/subagent.rs`, change `SubagentToolAction::RequestReview` to carry `paths: Vec<String>` (empty means the default) and `OverrideReview` to carry `path: Option<String>`. In `SubagentToolActionWire`, keep reading the old `path: Option<String>` field of `RequestReview` and fold it into `paths`, the way `OverrideReview` already folds the legacy `reason`. Extend the existing test `request_review_path_preserves_legacy_encoding` rather than adding a new one.
 
@@ -158,7 +166,7 @@ A worker older than `RELAY_WORKTREE_REVIEW_PROTOCOL` (relay protocol 49) cannot 
 
 In `scoped_repositories`, when a path is not inside a Git repository and it is the default `"."`, return an error that lists the discovered repositories so the agent can pass them. Keep the existing message for an explicit path.
 
-In `override_push.rs`, accept the optional path. With one review per session there is only one findings record, so in this milestone the path only has to resolve to a root that the record covers; otherwise refuse with the record's roots.
+The `/review`, `mj review start` and `POST /review` entry points call `TurnReviewHost::start`, which passes `ReviewScope::Workspace`: a person names no repository, so their review keeps covering every workspace repository.
 
 Update `REVIEW_SERVER_INSTRUCTIONS` and regenerate the goldens. Update `docs/src/content/docs/turn-review.md`.
 
@@ -265,3 +273,5 @@ Revision note (2026-11-20, fourth): review found that `RecordReviewed` can move 
 Revision note (2026-11-20, fifth and sixth): Milestone 2 keeps interrupted markers out of group recovery; the relay gate for concurrency moves to the single Milestone 3 constant, because a worker with the new tool schema but no `ResolveRepositories` would still leave a verdict that cannot be selected.
 
 Revision note (2026-11-20, seventh): the compatibility rule for workers below the concurrency gate had made an outstanding findings record block every new review, including a re-review after fixes. It now keeps today's behavior: one open review at a time, and a new verdict replaces the record.
+
+Revision note (2026-11-20, Milestone 1 review): `override_review(path)` moves to Milestone 3, and a person's review keeps its whole-workspace scope through `ReviewScope::Workspace`.

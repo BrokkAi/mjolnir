@@ -14,12 +14,11 @@ pub enum HostEvent {
     },
     StartPush {
         session_id: String,
-        paths: Vec<std::path::PathBuf>,
+        scope: super::reviewer::ReviewScope,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },
     OverridePush {
         session_id: String,
-        path: Option<std::path::PathBuf>,
         overrides: Vec<ReviewOverride>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },

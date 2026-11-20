@@ -43,7 +43,6 @@ impl HostState {
     pub fn override_push(
         &mut self,
         session_id: String,
-        path: Option<std::path::PathBuf>,
         overrides: Vec<ReviewOverride>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     ) {
@@ -63,7 +62,7 @@ impl HostState {
             reply,
             "override",
             |control, persistence, _events, owner| {
-                run_override(control, persistence, owner, path, overrides)
+                run_override(control, persistence, owner, overrides)
             },
         );
     }
@@ -159,51 +158,10 @@ impl HostState {
     }
 }
 
-/// Checks that the verdict waiting for an answer covers the repository of
-/// `path`, which the worker resolves the way a review capture does.
-async fn covered_root(
-    control: &SessionManagerControl,
-    session_id: &str,
-    findings: &mj_core::storage::PushFindingsRecord,
-    path: std::path::PathBuf,
-    protocol: u32,
-) -> Result<(), StartRefusal> {
-    let repositories = super::reviewer::capture_scope(vec![path.clone()], protocol)?;
-    let outcome = resolve::push_action(
-        control,
-        session_id,
-        ReviewerAction::CaptureDelta { repositories },
-    )
-    .await
-    .map_err(|error| StartRefusal(format!("{error:#}")))?;
-    let ReviewerOutcome::Delta { repositories } = outcome else {
-        return Err(StartRefusal(
-            "the worker did not return a push review capture".into(),
-        ));
-    };
-    if repositories
-        .iter()
-        .all(|delta| findings.trees.contains_key(&delta.root))
-    {
-        return Ok(());
-    }
-    let covered = findings
-        .trees
-        .keys()
-        .map(|root| root.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(StartRefusal(format!(
-        "the verdict waiting for an answer covers {covered}, not {}; pass one of those paths or omit path",
-        path.display()
-    )))
-}
-
 async fn run_override(
     control: SessionManagerControl,
     persistence: mpsc::UnboundedSender<PersistenceRequest>,
     session_id: String,
-    path: Option<std::path::PathBuf>,
     overrides: Vec<ReviewOverride>,
 ) -> Result<serde_json::Value, StartRefusal> {
     let (mut state, findings, deltas, protocol) = async {
@@ -229,9 +187,6 @@ async fn run_override(
             .snapshot
             .and_then(|snapshot| snapshot.operational.relay_protocol_version)
             .unwrap_or(0);
-        if let Some(path) = path {
-            covered_root(&control, &session_id, &findings, path, protocol).await?;
-        }
         let repositories = (protocol >= mj_core::relay::RELAY_WORKTREE_REVIEW_PROTOCOL)
             .then(|| findings.trees.keys().cloned().collect());
         let outcome = resolve::push_action(

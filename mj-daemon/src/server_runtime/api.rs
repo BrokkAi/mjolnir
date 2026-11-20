@@ -73,7 +73,6 @@ pub trait ExportRuntime: Send + Sync {
         &self,
         _session_id: String,
         _overrides: Vec<mj_core::subagent::ReviewOverride>,
-        _path: Option<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async { bail!("push review is unavailable") })
     }
@@ -309,7 +308,16 @@ impl ExportRuntime for RuntimeState {
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .begin_push(&session_id, paths.into_iter().map(PathBuf::from).collect())
+                .begin_push(
+                    &session_id,
+                    if paths.is_empty() {
+                        crate::review_host::ReviewScope::WorkingDirectory
+                    } else {
+                        crate::review_host::ReviewScope::Paths(
+                            paths.into_iter().map(PathBuf::from).collect(),
+                        )
+                    },
+                )
                 .await
                 .map_err(|error| anyhow!("request_review refused: {}", error.0))
         })
@@ -319,11 +327,10 @@ impl ExportRuntime for RuntimeState {
         &self,
         session_id: String,
         overrides: Vec<mj_core::subagent::ReviewOverride>,
-        path: Option<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .override_push(&session_id, path.map(PathBuf::from), overrides)
+                .override_push(&session_id, overrides)
                 .await
                 .map_err(|error| anyhow!("override_review refused: {}", error.0))
         })
@@ -1190,13 +1197,9 @@ impl ApiBackend {
                 self.ask_oracle(parent_session_id, request, prepared, message)
                     .await
             }
-            SubagentToolAction::OverrideReview { overrides, path } => {
+            SubagentToolAction::OverrideReview { overrides } => {
                 self.exports
-                    .override_review(
-                        parent_session_id.to_owned(),
-                        overrides.clone(),
-                        path.clone(),
-                    )
+                    .override_review(parent_session_id.to_owned(), overrides.clone())
                     .await
             }
             SubagentToolAction::SetReviewBaseline { commit, path } => {
@@ -2160,16 +2163,22 @@ impl ApiBackend {
                 // A child whose review is open is still pending: it may end
                 // turns while it waits, and handback refuses until the verdict.
                 ChildDisposition::NotNews("the child awaits its review's verdict")
-            } else if self.child_handback_pending(&id).await? {
-                // Child completion waits for the same queued handback.
-                ChildDisposition::NotNews("the child's handback is still queued")
             } else {
                 if inputs.queue_known() {
                     for failed in inputs.failed_deliveries(&id) {
                         failures.push(failed_delivery_notice(&inputs, &child, &failed)?);
                     }
                 }
+                // A queued handback holds only the finish: child completion
+                // waits for the same request, while failed messages to the
+                // child are reported as usual.
+                let handback_pending = child.identity.is_some()
+                    && child.relation.reported_finish.as_ref() != child.identity.as_ref()
+                    && self.child_handback_pending(&id).await?;
                 match &child.identity {
+                    _ if handback_pending => {
+                        ChildDisposition::NotNews("the child's handback is still queued")
+                    }
                     None => ChildDisposition::NotFinished,
                     Some(identity) if child.relation.reported_finish.as_ref() == Some(identity) => {
                         ChildDisposition::Reported

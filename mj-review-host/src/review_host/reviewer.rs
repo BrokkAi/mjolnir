@@ -121,26 +121,37 @@ impl Drop for PreparationStage<'_> {
     }
 }
 
-/// The repositories a review captures. No `paths` means the repository that
-/// contains the session's working directory; the worker resolves `.` against
-/// it. A worker older than worktree review cannot take a scope: it keeps its
-/// own unscoped capture for a request without `paths` and refuses any other.
+/// Which repositories a review covers, as its requester asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewScope {
+    /// The repository that contains the session's working directory: the
+    /// agent's `request_review` without `paths`.
+    WorkingDirectory,
+    /// The worktrees an agent named, reviewed together.
+    Paths(Vec<std::path::PathBuf>),
+    /// Every workspace repository: a person's `/review`, `mj review start`
+    /// or `POST /review`, which name no repository.
+    Workspace,
+}
+
+/// The repositories a review captures, for the worker's `CaptureDelta`.
+/// `None` asks the worker for every workspace repository. The worker
+/// resolves `.` against the working directory. A worker older than worktree
+/// review cannot take a scope: it captures every repository for a request
+/// that names none, and refuses explicit paths.
 pub fn capture_scope(
-    paths: Vec<std::path::PathBuf>,
+    scope: ReviewScope,
     protocol: u32,
 ) -> Result<Option<Vec<std::path::PathBuf>>, StartRefusal> {
-    if protocol >= mj_core::relay::RELAY_WORKTREE_REVIEW_PROTOCOL {
-        Ok(Some(if paths.is_empty() {
-            vec![std::path::PathBuf::from(".")]
-        } else {
-            paths
-        }))
-    } else if paths.is_empty() {
-        Ok(None)
-    } else {
-        Err(StartRefusal(
+    let scoped = protocol >= mj_core::relay::RELAY_WORKTREE_REVIEW_PROTOCOL;
+    match scope {
+        ReviewScope::Workspace => Ok(None),
+        ReviewScope::WorkingDirectory if scoped => Ok(Some(vec![std::path::PathBuf::from(".")])),
+        ReviewScope::WorkingDirectory => Ok(None),
+        ReviewScope::Paths(paths) if scoped => Ok(Some(paths)),
+        ReviewScope::Paths(_) => Err(StartRefusal(
             "the session's worker predates worktree review; restart the session".into(),
-        ))
+        )),
     }
 }
 
@@ -153,7 +164,7 @@ pub async fn prepare(
     session_id: &str,
     config: ReviewConfig,
     stages: &PreparationStages,
-    paths: Vec<std::path::PathBuf>,
+    scope: ReviewScope,
 ) -> Result<Prepared, StartRefusal> {
     let review_refusal = {
         let _stage = stages.enter(session_id, "checking the session's project source");
@@ -195,7 +206,7 @@ pub async fn prepare(
         ));
     }
     let repositories = capture_scope(
-        paths,
+        scope,
         snapshot.operational.relay_protocol_version.unwrap_or(0),
     )?;
     let state = {

@@ -914,7 +914,7 @@ fn review_tool_definitions() -> Vec<Value> {
             "Record before-push review findings you will not fix. Pass one entry per finding: the finding in your words and why you will not fix it. Call it as soon as the verdict arrives, before committing any change; it applies only to the exact reviewed commits and is refused once they change. Later reviews are told not to report these findings again. It allows pushing the reviewed commits, but does not move the review baseline.",
             json!({
                 "type":"object",
-                "properties":{"path":{"type":"string","description":"A worktree the findings verdict covers (default: the only verdict waiting for an answer)."},"overrides":{
+                "properties":{"overrides":{
                     "type":"array",
                     "minItems":1,
                     "items":{
@@ -957,7 +957,6 @@ struct RequestReviewArgs {
 #[serde(deny_unknown_fields)]
 struct OverrideReviewArgs {
     overrides: Vec<OverrideEntry>,
-    path: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1019,15 +1018,7 @@ fn review_action(name: &str, arguments: Value) -> Result<SubagentToolAction> {
                     reason: reason.to_owned(),
                 });
             }
-            let path = match args.path {
-                Some(path) if path.trim().is_empty() => {
-                    bail!(
-                        "override_review path cannot be empty; omit it when only one verdict waits for an answer"
-                    )
-                }
-                other => other,
-            };
-            SubagentToolAction::OverrideReview { overrides, path }
+            SubagentToolAction::OverrideReview { overrides }
         }
         "set_baseline" => {
             let args: SetReviewBaselineArgs = serde_json::from_value(arguments)?;
@@ -1315,7 +1306,7 @@ mod tests {
                 SubagentToolAction::RequestReview { paths: Vec::new() },
             ),
             (
-                json!({"name":"override_review","arguments":{"path":"/workspace","overrides":[
+                json!({"name":"override_review","arguments":{"overrides":[
                     {"finding":"  the parser accepts a bare tab ","reason":" it is a documented extension "},
                     {"finding":"error text names the wrong file","reason":"the file is generated"}
                 ]}}),
@@ -1330,7 +1321,6 @@ mod tests {
                             reason: "the file is generated".into(),
                         },
                     ],
-                    path: Some("/workspace".into()),
                 },
             ),
             (
@@ -1535,11 +1525,6 @@ mod tests {
         let request = &by_name("request_review")["inputSchema"]["properties"];
         assert_eq!(request["paths"]["type"], "array");
         assert!(request.get("path").is_none());
-        assert!(
-            override_review["inputSchema"]["properties"]
-                .get("path")
-                .is_some()
-        );
     }
 
     #[test]

@@ -452,12 +452,8 @@ pub enum SubagentToolAction {
     AskOracle {
         message: String,
     },
-    /// Decline findings of the verdict that covers `path`. `None` means the
-    /// only verdict waiting for an answer.
     OverrideReview {
         overrides: Vec<ReviewOverride>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
     },
     /// Mark commits through `commit` as reviewed, so later reviews start there.
     SetReviewBaseline {
@@ -544,8 +540,6 @@ enum SubagentToolActionWire {
     OverrideReview {
         #[serde(default)]
         overrides: Vec<ReviewOverride>,
-        #[serde(default)]
-        path: Option<String>,
         /// A queued request from an older worker, which overrode the whole
         /// verdict with one reason.
         #[serde(default)]
@@ -673,7 +667,6 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             SubagentToolActionWire::AskOracle { message } => Self::AskOracle { message },
             SubagentToolActionWire::OverrideReview {
                 mut overrides,
-                path,
                 reason,
             } => {
                 if let Some(reason) = reason {
@@ -682,7 +675,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                         reason,
                     });
                 }
-                Self::OverrideReview { overrides, path }
+                Self::OverrideReview { overrides }
             }
             SubagentToolActionWire::SetReviewBaseline { commit, path } => {
                 Self::SetReviewBaseline { commit, path }
@@ -2058,7 +2051,6 @@ mod tests {
                     finding: LEGACY_WHOLE_VERDICT_FINDING.into(),
                     reason: "wrong premise".into(),
                 }],
-                path: None,
             }
         );
         let pairs =
@@ -2103,7 +2095,6 @@ mod tests {
                     finding: "finding".into(),
                     reason: "reason".into(),
                 }],
-                path: None,
             },
             SubagentToolAction::SetReviewBaseline {
                 commit: "abc123".into(),

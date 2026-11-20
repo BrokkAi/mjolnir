@@ -45,7 +45,7 @@ impl HostState {
     pub fn begin_push(
         &mut self,
         session_id: String,
-        paths: Vec<std::path::PathBuf>,
+        scope: super::reviewer::ReviewScope,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     ) {
         let refusal = if mj_session_runtime::session_manager::move_ownership::move_owns_session(
@@ -73,7 +73,7 @@ impl HostState {
                 session_id,
                 reply,
                 "review-off",
-                move |control, _persistence, _events, owner| run_review_off(control, owner, paths),
+                move |control, _persistence, _events, owner| run_review_off(control, owner, scope),
             );
             return;
         }
@@ -104,7 +104,7 @@ impl HostState {
                     &session_id,
                     config,
                     &stages,
-                    paths,
+                    scope,
                 ) => prepared,
             };
             tracing::info!(
@@ -148,7 +148,7 @@ impl HostState {
 async fn run_review_off(
     control: SessionManagerControl,
     session_id: String,
-    paths: Vec<std::path::PathBuf>,
+    scope: super::reviewer::ReviewScope,
 ) -> Result<serde_json::Value, StartRefusal> {
     let protocol = control
         .session(session_id.clone())
@@ -162,7 +162,7 @@ async fn run_review_off(
         .snapshot
         .and_then(|snapshot| snapshot.operational.relay_protocol_version)
         .unwrap_or(0);
-    let repositories = super::reviewer::capture_scope(paths, protocol)?;
+    let repositories = super::reviewer::capture_scope(scope, protocol)?;
     let outcome = resolve::push_action(
         &control,
         &session_id,
