@@ -13,7 +13,7 @@ use std::io::{self, Write};
 pub(crate) enum PlacementChoice {
     /// A placement is settled; start the dashboard.
     Continue,
-    /// The user ended input (Ctrl-D) without choosing.
+    /// The user ended input (Ctrl-D or Ctrl-C) without choosing.
     Cancelled,
 }
 
@@ -50,10 +50,9 @@ pub(crate) async fn ask_where_daemon_runs() -> Result<PlacementChoice> {
         println!("No Mjolnir daemon has run on this computer. Where should it run?");
         println!("  1) Start a daemon on this computer");
         println!("  2) Connect to a daemon on another computer over SSH");
-        // Ctrl-C ends mj here, as it does anywhere else in a plain terminal:
-        // taking the default would start a daemon and a store, which ends this
-        // prompt for good.
-        let Some(answer) = ask("Choose 1 or 2 [1]: ").await? else {
+        // Leaving, not the default: the default would start a daemon and a
+        // store, which ends this prompt for good.
+        let Answer::Text(answer) = ask("Choose 1 or 2 [1]: ").await? else {
             return Ok(PlacementChoice::Cancelled);
         };
         match answer.as_str() {
@@ -68,28 +67,53 @@ pub(crate) async fn ask_where_daemon_runs() -> Result<PlacementChoice> {
     }
 }
 
+enum Answer {
+    Text(String),
+    /// End of input (Ctrl-D).
+    Eof,
+    /// Ctrl-C. The terminal read cannot be cancelled and would take the next
+    /// line typed, so this ends the first launch rather than asking again.
+    Interrupted,
+}
+
 /// One line from the terminal. The terminal's own line editing is enough for
 /// a choice and a host name, and plain reading needs nothing from the
 /// terminal (no cursor-position reply) and writes to stdout like the
-/// dashboard, so redirecting stderr does not hide the question. `None` is end
-/// of input.
-async fn ask(label: &'static str) -> Result<Option<String>> {
-    mj_core::runtime::spawn_blocking(move || {
-        print!("{label}");
-        io::stdout().flush()?;
+/// dashboard, so redirecting stderr does not hide the question.
+///
+/// Ctrl-C is listened for here, not left to the default action: once an SSH
+/// attempt has installed tokio's handler, the default no longer applies, and a
+/// prompt that ignored the signal would leave the user without a way out.
+async fn ask(label: &'static str) -> Result<Answer> {
+    print!("{label}");
+    io::stdout().flush()?;
+    let read = mj_core::runtime::spawn_blocking(|| {
         let mut line = String::new();
         let read = io::stdin()
             .read_line(&mut line)
             .context("read terminal response")?;
         Ok::<_, anyhow::Error>((read > 0).then(|| line.trim().to_owned()))
-    })
-    .await
-    .context("prompt task failed")?
+    });
+    tokio::select! {
+        line = read => Ok(match line.context("prompt task failed")?? {
+            Some(line) => Answer::Text(line),
+            None => Answer::Eof,
+        }),
+        () = interrupted() => Ok(Answer::Interrupted),
+    }
+}
+
+/// Resolves on Ctrl-C. A handler that cannot be registered never resolves:
+/// that must not read as an interrupt.
+async fn interrupted() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 
 async fn connect_remote() -> Result<Remote> {
     loop {
-        let Some(host) =
+        let Answer::Text(host) =
             ask("SSH destination (user@host, or a Host from your SSH config; empty to go back): ")
                 .await?
         else {
@@ -141,17 +165,11 @@ async fn connect_remote() -> Result<Remote> {
 /// so a server that accepts the connection and then stalls can be left.
 async fn try_connect(placement: &DaemonConfig) -> Result<()> {
     let instance = placement.remote_instance();
-    let cancel = async {
-        // A failed handler registration must not read as a cancellation.
-        if tokio::signal::ctrl_c().await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    };
     let mut lease = ssh::open(
         placement,
         instance.as_deref(),
         DiscoveryIntent::Start,
-        cancel,
+        interrupted(),
     )
     .await?;
     lease.terminate().await

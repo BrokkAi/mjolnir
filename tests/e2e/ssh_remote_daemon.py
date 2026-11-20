@@ -263,6 +263,33 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     assert_no_local_daemon(fresh_data)
                     assert not (fresh_config / "config.toml").exists()
 
+                # A usage error comes before a question whose answer is saved.
+                terminal = launch("--workspace", "nope", "go", "--path", str(p))
+                try:
+                    assert terminal.wait_exit(), terminal.screen()[-1500:]
+                    assert "omit --workspace" in terminal.screen(), terminal.screen()
+                    assert "Choose 1 or 2" not in terminal.screen(), terminal.screen()
+                finally:
+                    terminal.kill()
+                assert_no_local_daemon(fresh_data)
+                assert not (fresh_config / "config.toml").exists()
+
+                # Hard-won: round 4 review: after a failed attempt tokio's handler
+                # stays installed, and Ctrl-C at the next prompt did nothing.
+                terminal = launch()
+                try:
+                    terminal.expect("Choose 1 or 2")
+                    terminal.send("2\r")
+                    terminal.expect("SSH destination")
+                    terminal.send("no-such-host.invalid\r")
+                    terminal.expect("Could not use the daemon on no-such-host.invalid")
+                    terminal.expect("SSH destination")
+                    terminal.send("\x03")
+                    assert terminal.wait_exit(), terminal.screen()[-1500:]
+                finally:
+                    terminal.kill()
+                assert_no_local_daemon(fresh_data)
+
                 # Neither is a configuration copied from another computer, nor a
                 # standalone `mj setup`, which writes its marker without one.
                 (fresh_data / "setup-state").write_text("complete\n")
