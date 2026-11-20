@@ -6783,6 +6783,7 @@ async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
         [
             "CODEX_API_KEY".to_owned(),
             "OPENAI_API_KEY".to_owned(),
+            mj_core::jev::FASTINO_KEY_ENVIRONMENT.to_owned(),
             "MJ_REVIEW_GATE".to_owned()
         ]
     );
