@@ -71,6 +71,10 @@ fn dead_worker_startup_failure(
                 .timestamp()
                 .unwrap_or_else(|| chrono::Utc::now().timestamp().max(0) as u64),
         );
+        // A harness that failed to open for lack of space is a disk-full
+        // exit: the storage owner restarts it once space returns. The same
+        // record still holds the marker then, so it must not end recovery.
+        return Ok(None);
     }
     Ok(record.harness_startup_failure)
 }
