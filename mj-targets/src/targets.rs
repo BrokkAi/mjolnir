@@ -4,7 +4,7 @@
 //! shell is used only at the SSH boundary, where OpenSSH necessarily sends a
 //! command string; every remotely supplied argument is POSIX-quoted there.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -72,8 +72,8 @@ pub use container_upgrade::{
 };
 use nitro::*;
 pub use nitro::{
-    NitroEngineInfo, NitroEngineUnavailable, NitroPreflight, nitro_info_command, parse_nitro_info,
-    verify_ssh_nitro,
+    NitroEngineInfo, NitroEngineUnavailable, NitroMbxRemote, NitroPreflight, nitro_info_command,
+    parse_nitro_info, verify_ssh_nitro,
 };
 mod process_limit;
 pub use process_limit::*;
@@ -100,48 +100,87 @@ pub fn target_join(root: &str, relative: &Path) -> String {
     path
 }
 
-/// Every container image the daemon downloads in the background, once per
-/// (host, image, platform).
-///
-/// Every container target is covered, including Apple's `container` engine.
-/// A `never` policy is the one opt-out. The rest differ only in when they
-/// download: `always` and `newer` pull on every refresh, while the others
-/// pull only when the host has no copy of the image.
-///
-/// Several targets often share one image on one host, and that needs one
-/// download. When two such targets disagree about when to pull, the merged
-/// entry takes the more eager of the two.
-pub fn image_refresh_plan(config: &mj_core::config::Config) -> Vec<mj_core::targets::ImageRefresh> {
-    let mut plan: Vec<mj_core::targets::ImageRefresh> = Vec::new();
-    for (target_id, target) in &config.targets {
-        let Some((host, container)) = target.image_host() else {
-            continue;
-        };
-        let mut images = vec![container.image.as_str()];
-        if let Some(platform) = container.platform.as_deref() {
-            for bundle_id in config.bundles.keys() {
-                if let Some(image) = config.session_image(Some(bundle_id), target_id, platform) {
-                    images.push(image);
-                }
+/// The target's base image followed by its distinct bundle images for this
+/// platform. An unknown platform can only resolve the base image.
+pub fn effective_target_images<'a>(
+    config: &'a mj_core::config::Config,
+    target_id: &str,
+    platform: Option<&str>,
+) -> Vec<&'a str> {
+    let Some(container) = config
+        .targets
+        .get(target_id)
+        .and_then(|target| target.container())
+    else {
+        return Vec::new();
+    };
+    let mut images = vec![container.image.as_str()];
+    if let Some(platform) = platform {
+        for bundle_id in config.bundles.keys() {
+            if let Some(image) = config.session_image(Some(bundle_id), target_id, platform)
+                && !images.contains(&image)
+            {
+                images.push(image);
             }
         }
-        for image in images {
+    }
+    images
+}
+
+#[derive(Debug, Default)]
+pub struct ImageRefreshPlan {
+    pub pulls: Vec<ImageRefresh>,
+    /// Includes images whose pull policy is Never. The host may already have
+    /// those images, and their targets still need them.
+    pub keep_images: BTreeSet<String>,
+    /// The machine's `build_cache.max_total_size`, which also bounds a Nitro
+    /// host's proxy cache. Unset means mbx's automatic budget.
+    pub mbx_cache_budget: Option<String>,
+}
+
+/// Plan downloads, once per (host, image, platform). Targets that share an
+/// image take the more eager policy. Supply one host's targets when using
+/// the keep set to reconcile its image store.
+pub fn image_refresh_plan<'a>(
+    config: &mj_core::config::Config,
+    target_ids: impl IntoIterator<Item = &'a str>,
+    native_platform: Option<&str>,
+) -> ImageRefreshPlan {
+    let mut plan = ImageRefreshPlan::default();
+    for target_id in target_ids {
+        let Some((host, container)) = config
+            .targets
+            .get(target_id)
+            .and_then(|target| target.image_host())
+        else {
+            continue;
+        };
+        let platform = container.platform.as_deref().or(native_platform);
+        if let Some(budget) = container
+            .build_cache
+            .as_ref()
+            .and_then(|cache| cache.max_total_size.clone())
+        {
+            plan.mbx_cache_budget = Some(budget);
+        }
+        for image in effective_target_images(config, target_id, platform) {
+            plan.keep_images.insert(image.to_owned());
             let Some(refresh) = mj_core::targets::image_refresh(
                 host.clone(),
                 image,
-                container.platform.as_deref(),
+                platform,
                 container.pull_policy,
             ) else {
                 continue;
             };
-            if let Some(existing) = plan.iter_mut().find(|entry| {
+            if let Some(existing) = plan.pulls.iter_mut().find(|entry| {
                 entry.host == refresh.host
                     && entry.image == refresh.image
                     && entry.platform == refresh.platform
             }) {
                 existing.when = existing.when.max(refresh.when);
             } else {
-                plan.push(refresh);
+                plan.pulls.push(refresh);
             }
         }
     }

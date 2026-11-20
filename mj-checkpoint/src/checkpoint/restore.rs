@@ -1,13 +1,38 @@
 use super::*;
 
-/// Whether the destination worker owns dispatch immediately, drops the queue,
-/// or waits for its controller to admit the archived commands after readiness.
+/// Who dispatches the archived queue and the archived worker's pending mail.
+///
+/// Pending mail joins the same dispatch decision as the queue: a restored
+/// worker given a waking event starts a turn on its own, so mail the
+/// controller must hold back (behind a Move's ownership commit, or behind a
+/// fresh native session's handoff) is admitted by the controller with the
+/// queue. Mail already claimed by a queued prompt travels with that prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueRestorePolicy {
+    /// The destination worker owns its queue and pending mail at once.
     Restore,
+    /// Drop the queue and the mail its prompts claimed; the destination worker
+    /// owns pending mail at once.
     Discard,
+    /// The controller admits the queue and pending mail after readiness. The
+    /// mail a queued prompt claimed is bound to its command ID now, so it is
+    /// there before that prompt can start.
     Defer,
+    /// Drop the queue and the mail its prompts claimed; the controller admits
+    /// pending mail after readiness.
+    DiscardDeferringMail,
+}
+
+impl QueueRestorePolicy {
+    /// Whether the controller, not the restored worker, admits pending mail.
+    pub fn defers_mail(self) -> bool {
+        matches!(self, Self::Defer | Self::DiscardDeferringMail)
+    }
+
+    fn keeps_queue(self) -> bool {
+        matches!(self, Self::Restore | Self::Defer)
+    }
 }
 
 /// The relay metadata needed to continue a verified canonical session. An
@@ -41,6 +66,22 @@ pub fn relay_seed_for_restore(
         },
         native_session_unused: native_continuity
             && !current_native_session_received_prompt(canonical),
+        mailbox: canonical.mailbox.as_ref().and_then(|mailbox| {
+            let mailbox = mj_core::archive::CanonicalMailbox {
+                pending_events: if queue_policy.defers_mail() {
+                    Vec::new()
+                } else {
+                    mailbox.pending_events.clone()
+                },
+                delivered_event_keys: mailbox.delivered_event_keys.clone(),
+                prompt_contexts: if queue_policy.keeps_queue() {
+                    mailbox.prompt_contexts.clone()
+                } else {
+                    Default::default()
+                },
+            };
+            (!mailbox.is_empty()).then_some(mailbox)
+        }),
     };
     seed.validate()?;
     Ok(seed)

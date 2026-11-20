@@ -536,6 +536,30 @@ const NO_NETWORK_REMOTE: &str = "the project's Git repository has no remote; SSH
 /// target cannot reach.
 const LOCAL_REMOTE_URL: &str = "the project's Git remote is not a network URL (it is a local path or an unsupported transport); SSH and container targets need an https://, ssh://, git://, or user@host:path remote";
 
+/// Read the fetch URL for a project discovered from a checkout. Ordinary
+/// local-backed projects keep their independent branch and push routing.
+pub fn discover_project_source(
+    path: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<(String, bool)> {
+    let url = match remote_url(path, "origin", false, executor) {
+        Ok(url) => url,
+        Err(origin_error) => {
+            let listed = git_output(path, ["remote"], executor, "list Git remotes")?;
+            let remotes = parse_lines(&listed.stdout, "Git remote names")?;
+            match remotes.as_slice() {
+                [] => bail!(NO_NETWORK_REMOTE),
+                _ if remotes.iter().any(|remote| remote == "origin") => return Err(origin_error),
+                [remote] => remote_url(path, remote, false, executor)?,
+                _ => bail!("multiple Git remotes and no origin; select a project by URL"),
+            }
+        }
+    };
+    let source = crate::remote_git::project_source(&url, crate::remote_git::Shorthand::Rejected)?;
+    let stripped = matches!(source, std::borrow::Cow::Owned(_));
+    Ok((source.into_owned(), stripped))
+}
+
 fn default_fetch_remote(remotes: &[String]) -> Result<String> {
     match remotes {
         [] => Err(crate::refusal::Refusal::unusable(NO_NETWORK_REMOTE).into()),
@@ -1053,6 +1077,7 @@ mod tests {
                 github: None,
                 destination: "repo".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         }
     }

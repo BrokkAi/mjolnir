@@ -557,6 +557,7 @@ fn golden_phone_new_session_preflight() {
                 local: Some(PathBuf::from("/definitely/not/a/repository")),
                 destination: "hel".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -812,6 +813,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         capacity_retry: None,
         retry_assessment_pending: false,
         authentication_retry_waiting: None,
+        jev_rate_limit: None,
         held_login_fingerprint: None,
         authentication_retry_intent: None,
         activity_turn_started_at_ms: None,
@@ -1711,13 +1713,12 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
     }
 }
 
-/// The web pickers read a target's status from the snapshot, so it carries
-/// the same availability and reason `/api/v1/options` gives: a host that did
-/// not answer is unavailable with a sentence, a host that did is ready, and a
-/// target no reading covers is unknown.
 // Hard-won: 97bf5586: A silent target must carry its unavailable status into the web picker snapshot.
 #[test]
-fn snapshot_targets_carry_the_availability_the_options_report() {
+fn snapshot_publishes_launch_availability_from_the_runtime_capture() {
+    use mj_client::availability::{
+        AvailabilityNote, AvailabilityVerdict, BrowserAvailabilityReasons, RuntimeAvailability,
+    };
     let mut controller = controller_with_profiles(&["codex"]);
     for id in ["answering", "silent", "unread"] {
         controller
@@ -1742,9 +1743,52 @@ fn snapshot_targets_carry_the_availability_the_options_report() {
         has_error,
         storage: Vec::new(),
     };
-    let capacity = [reading("answering", false), reading("silent", true)];
+    let capacity = [reading("answering", true), reading("silent", false)];
     let sources = PhoneProjectSources::default();
-    let snapshot = viewer_snapshot(
+    let mut publication = super::publication::ViewerPublication::default();
+    let missing = AvailabilityVerdict::Missing {
+        reason: "SSH to silent failed.".into(),
+    };
+    let private = "private-credential-excerpt";
+    let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
+    runtime.metadata.availability = RuntimeAvailability {
+        profiles: [(
+            "codex".into(),
+            AvailabilityVerdict::Missing {
+                reason: private.into(),
+            },
+        )]
+        .into(),
+        target_notes: vec![AvailabilityNote {
+            full: private.into(),
+            text: private.into(),
+            routine: false,
+        }],
+        browser: BrowserAvailabilityReasons {
+            profiles: [("codex".into(), "Verify the profile.".into())].into(),
+            targets: [("silent".into(), "SSH to silent failed.".into())].into(),
+            target_notes: vec![AvailabilityNote {
+                full: "SSH to silent failed.".into(),
+                text: "SSH to silent failed.".into(),
+                routine: false,
+            }],
+        },
+        targets: [
+            ("answering".into(), AvailabilityVerdict::Available),
+            (
+                "silent".into(),
+                AvailabilityVerdict::Missing {
+                    reason: private.into(),
+                },
+            ),
+            ("unread".into(), AvailabilityVerdict::Unknown),
+        ]
+        .into(),
+        ..Default::default()
+    }
+    .into();
+    publication.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
+    let snapshot = publication.snapshot(
         &controller,
         &[],
         &Default::default(),
@@ -1766,18 +1810,27 @@ fn snapshot_targets_carry_the_availability_the_options_report() {
         },
         1,
     );
-    use crate::server::api::LaunchAvailability::{Ready, Unavailable, Unknown};
-    let target = |id: &str| snapshot.targets.iter().find(|t| t.id == id).unwrap();
-    assert_eq!(target("answering").availability, Ready);
-    assert_eq!(target("answering").unavailable_reason, None);
-    assert_eq!(target("silent").availability, Unavailable);
+    assert!(!serde_json::to_string(&snapshot).unwrap().contains(private));
     assert_eq!(
-        target("silent").unavailable_reason.as_deref(),
-        Some("the host \"silent\" did not answer its last check")
+        snapshot.profiles[0].availability.missing_reason(),
+        Some("Verify the profile.")
     );
-    assert_eq!(target("unread").availability, Unknown);
+    assert_eq!(
+        snapshot.target_availability_notes[0].text,
+        "SSH to silent failed."
+    );
+    let target = |id: &str| snapshot.targets.iter().find(|t| t.id == id).unwrap();
+    assert_eq!(
+        target("answering").availability,
+        AvailabilityVerdict::Available
+    );
+    assert_eq!(target("silent").availability, missing);
+    assert_eq!(target("unread").availability, AvailabilityVerdict::Unknown);
     let json = serde_json::to_value(target("silent")).unwrap();
-    assert_eq!(json["availability"], "unavailable");
+    assert_eq!(
+        json["availability"],
+        serde_json::json!({"status": "missing", "reason": "SSH to silent failed."})
+    );
 }
 
 fn snapshot_with_project_sources(

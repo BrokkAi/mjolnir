@@ -1355,45 +1355,6 @@ fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() 
 }
 
 #[test]
-fn blank_claude_auth_environment_values_do_not_count_as_logins() {
-    use mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV;
-
-    let mut profile = mj_core::config::HarnessProfile {
-        ..mj_core::config::HarnessProfile::new(
-            HarnessKind::Claude,
-            std::path::PathBuf::from("claude"),
-        )
-    };
-    let mut environment = BTreeMap::from([
-        (CLAUDE_OAUTH_TOKEN_ENV.to_owned(), " \n ".to_owned()),
-        ("ANTHROPIC_API_KEY".to_owned(), " ".to_owned()),
-        ("ANTHROPIC_AUTH_TOKEN".to_owned(), "\t".to_owned()),
-    ]);
-    assert!(!claude_environment_login_present(&profile, &environment));
-
-    // Container target values are merged into the final launch environment
-    // after the profile, so each must be recognized there as well.
-    for name in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
-        let mut target_environment = environment.clone();
-        target_environment.insert(name.into(), "target-key".into());
-        assert!(claude_environment_login_present(
-            &profile,
-            &target_environment
-        ));
-    }
-
-    environment.insert("ANTHROPIC_API_KEY".into(), "key".into());
-    assert!(claude_environment_login_present(&profile, &environment));
-
-    environment.insert("ANTHROPIC_API_KEY".into(), " ".into());
-    environment.insert(CLAUDE_OAUTH_TOKEN_ENV.into(), "token".into());
-    assert!(claude_environment_login_present(&profile, &environment));
-
-    profile.kind = HarnessKind::Codex;
-    assert!(!claude_environment_login_present(&profile, &environment));
-}
-
-#[test]
 fn macs_claude_keychain_login_is_the_only_staged_login_and_has_no_refresh_token() {
     use mj_accounts::claude_login::fake::FakeKeychain;
     use mj_core::config::HarnessHost;
@@ -1415,21 +1376,43 @@ fn macs_claude_keychain_login_is_the_only_staged_login_and_has_no_refresh_token(
     let keychain = FakeKeychain::holding(KEYCHAIN_LOGIN);
 
     // The Keychain holds the login on a Mac only: nothing else asks it.
-    stage_claude_keychain_login(&profile, HarnessHost::Other, &staged, false, &keychain).unwrap();
+    stage_claude_keychain_login(
+        &profile,
+        HarnessHost::Other,
+        &staged,
+        &BTreeMap::new(),
+        &keychain,
+    )
+    .unwrap();
     assert!(keychain.calls().is_empty());
 
-    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, true, &keychain).unwrap();
+    let token = BTreeMap::from([("CLAUDE_CODE_OAUTH_TOKEN".into(), "token".into())]);
+    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, &token, &keychain).unwrap();
     assert!(keychain.calls().is_empty());
     assert!(!staged_login.exists());
 
-    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain).unwrap();
+    stage_claude_keychain_login(
+        &profile,
+        HarnessHost::MacOs,
+        &staged,
+        &BTreeMap::new(),
+        &keychain,
+    )
+    .unwrap();
     assert_eq!(std::fs::read(&staged_login).unwrap(), STAGED_LOGIN);
 
     // Freshness cannot distinguish a refreshed grant from another account.
     // The current Keychain login stays authoritative even when an earlier
     // staged copy has a later expiry.
     std::fs::write(&staged_login, LEFTOVER_LOGIN).unwrap();
-    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain).unwrap();
+    stage_claude_keychain_login(
+        &profile,
+        HarnessHost::MacOs,
+        &staged,
+        &BTreeMap::new(),
+        &keychain,
+    )
+    .unwrap();
     assert_eq!(std::fs::read(&staged_login).unwrap(), STAGED_LOGIN);
 
     // With no Keychain item, or a locked one, a leftover profile-home file is
@@ -1439,8 +1422,14 @@ fn macs_claude_keychain_login_is_the_only_staged_login_and_has_no_refresh_token(
         FakeKeychain::holding(KEYCHAIN_LOGIN).locked(),
     ] {
         std::fs::write(&staged_login, LEFTOVER_LOGIN).unwrap();
-        stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain)
-            .unwrap();
+        stage_claude_keychain_login(
+            &profile,
+            HarnessHost::MacOs,
+            &staged,
+            &BTreeMap::new(),
+            &keychain,
+        )
+        .unwrap();
         assert!(!staged_login.exists());
     }
 }
@@ -2356,6 +2345,36 @@ fn ssh_bare_and_ssh_container_installs_share_one_worker_cache() {
         executor.worker_uploads.take().is_empty(),
         "a container session on the same host reuses the cached worker, got {lines:#?}"
     );
+
+    let nitro = targets::TargetLocator::SshNitro {
+        borrowed_from: None,
+        ssh: SshTarget {
+            destination: "user@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        container_id: targets::resource_name(container).unwrap(),
+    };
+    let mbx = fixture.worker_binary.with_file_name("mbx");
+    let bytes = [b"#!/bin/sh\n".as_slice(), &vec![b'#'; 128 * 1024]].concat();
+    std::fs::write(&mbx, &bytes).unwrap();
+    let installed = install_session_executable(&executor, &nitro, container, &mbx, "mbx").unwrap();
+    assert_eq!(executor.worker_uploads.take(), [bytes]);
+
+    let guest_root = targets::worker_root(&nitro, container).unwrap();
+    assert_eq!(installed, Path::new(&guest_root).join("mbx"));
+    let commands = rendered(&executor.commands.take());
+    assert!(
+        commands.iter().any(|line| {
+            line.contains("microvm") && line.contains("'cp'") && line.contains(".transport-")
+        }),
+        "{commands:#?}"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|line| { line.contains(&format!("{guest_root}/mbx")) && line.contains("ln --") }),
+        "{commands:#?}"
+    );
 }
 
 #[test]
@@ -3031,6 +3050,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
                 kind,
@@ -3119,6 +3139,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
                 kind,
@@ -3215,6 +3236,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         legacy_muse_auto_review: None,
         load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
+        mjolnir_guardian: true,
         aws: None,
     }
 }
@@ -3522,6 +3544,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         legacy_muse_auto_review: None,
         load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
+        mjolnir_guardian: true,
         aws: None,
     }
 }
@@ -3882,6 +3905,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
@@ -4073,12 +4097,37 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
     .unwrap()
     .0;
     let mut on = launch.clone();
-    apply_jev_switch(&mut on, true);
+    apply_jev_settings(&mut on, &Default::default());
     assert_eq!(on.target_environment, launch.target_environment);
     assert_eq!(on.environment, launch.environment);
 
-    apply_jev_switch(&mut launch, false);
+    use mj_core::config::{EnvironmentValue, JevConfig, SecretResolver, with_secret_resolver};
+    let resolver = SecretResolver::fixed(
+        Default::default(),
+        [("FASTINO".into(), "personal-key".into())].into(),
+    );
+    let mut config = JevConfig {
+        enabled: true,
+        fastino_key: Some(EnvironmentValue::FromSecret("FASTINO".into())),
+    };
+    with_secret_resolver(resolver, || apply_jev_settings(&mut launch, &config));
+    assert_eq!(
+        launch
+            .target_environment
+            .get(mj_core::jev::FASTINO_KEY_ENVIRONMENT)
+            .map(String::as_str),
+        Some("personal-key")
+    );
+    assert!(
+        !launch
+            .environment
+            .contains_key(mj_core::jev::FASTINO_KEY_ENVIRONMENT)
+    );
+
+    config.enabled = false;
+    apply_jev_settings(&mut launch, &config);
     for environment in [&launch.target_environment, &launch.environment] {
+        assert!(!environment.contains_key(mj_core::jev::FASTINO_KEY_ENVIRONMENT));
         assert_eq!(
             environment.get(mj_core::jev::DISABLED_ENVIRONMENT),
             Some(&"1".to_owned())
@@ -4149,7 +4198,7 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
         &locator,
         "/home/hel/.hel/worker",
         Path::new("/mnt/fast/mbx-cache/.mjolnir/bin/mbx"),
-        Path::new("/cache/.mjolnir/config/mbx"),
+        Some(Path::new("/cache/.mjolnir/config/mbx")),
         &[],
     )
     .unwrap();
@@ -4271,6 +4320,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         legacy_muse_auto_review: None,
         load_balancing_may_consume_credits: false,
         claude_permission_mode: None,
+        mjolnir_guardian: true,
         aws: None,
     }
 }
@@ -4555,6 +4605,17 @@ fn a_chatgpt_codex_launch_carries_no_api_key_on_any_target() {
 #[test]
 fn an_api_key_codex_launch_keeps_its_key_on_every_target() {
     let home = tempfile::tempdir().unwrap();
+    let fresh = mj_core::config::HarnessProfile::new(HarnessKind::Codex, home.path().to_owned());
+    for (target, launch) in launches_on_every_target(&fresh) {
+        assert_eq!(
+            launch.environment.get("CODEX_API_KEY").map(String::as_str),
+            Some("sk-target"),
+            "{target}"
+        );
+        assert!(launch.excluded_environment.is_empty(), "{target}");
+    }
+
+    let home = tempfile::tempdir().unwrap();
     let profile = codex_login_profile(home.path(), "apikey");
     for (target, launch) in launches_on_every_target(&profile) {
         assert_eq!(
@@ -4574,6 +4635,54 @@ fn an_api_key_codex_launch_keeps_its_key_on_every_target() {
         );
         assert_eq!(launch.environment["CODEX_API_KEY"], "sk-target", "{target}");
         assert!(launch.excluded_environment.is_empty(), "{target}");
+    }
+}
+
+#[test]
+fn claude_provider_switches_control_keychain_staging_and_oauth() {
+    use mj_accounts::claude_login::fake::FakeKeychain;
+    use mj_core::config::HarnessHost;
+
+    let home = tempfile::tempdir().unwrap();
+    let profile =
+        mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().join("claude"));
+    let staged = home.path().join("staged");
+    std::fs::create_dir(&staged).unwrap();
+    for (name, value, uses_oauth) in [
+        ("ANTHROPIC_AUTH_TOKEN", "target-key", false),
+        ("ANTHROPIC_API_KEY", "target-key", false),
+        ("ANTHROPIC_API_KEY", " ", true),
+        (mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV, " 	 ", true),
+        ("CLAUDE_CODE_USE_VERTEX", "1", false),
+        ("CLAUDE_CODE_USE_FOUNDRY", "1", false),
+        ("CLAUDE_CODE_USE_BEDROCK", "false", true),
+    ] {
+        let environment = BTreeMap::from([
+            (
+                HarnessKind::Claude.home_env().to_owned(),
+                staged.display().to_string(),
+            ),
+            (name.to_owned(), value.to_owned()),
+        ]);
+        let keychain = FakeKeychain::holding(br#"{"claudeAiOauth":{"accessToken":"keychain","refreshToken":"keychain-refresh","expiresAt":100}}"#);
+        stage_claude_keychain_login(
+            &profile,
+            HarnessHost::MacOs,
+            &staged,
+            &environment,
+            &keychain,
+        )
+        .unwrap();
+        assert_eq!(
+            mj_core::credentials::claude_oauth_login_path(&environment).is_some(),
+            uses_oauth,
+            "{name}={value} runtime OAuth"
+        );
+        assert_eq!(
+            !keychain.calls().is_empty(),
+            uses_oauth,
+            "{name}={value} Keychain staging"
+        );
     }
 }
 
@@ -4637,7 +4746,7 @@ fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
         profile.environment = BTreeMap::from([
             ("AWS_PROFILE".into(), "bedrock".into()),
             ("AWS_REGION".into(), "us-east-1".into()),
-            ("CLAUDE_CODE_USE_BEDROCK".into(), "1".into()),
+            ("CLAUDE_CODE_USE_BEDROCK".into(), " On ".into()),
         ])
         .into();
         for (target, launch) in launches_on_every_target(&profile) {
@@ -5278,6 +5387,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
+        mjolnir_guardian: true,
         observe_policy: None,
     };
 
@@ -5449,6 +5559,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         claude_permission_mode: Default::default(),
+        mjolnir_guardian: true,
         observe_policy: None,
     };
     let locator = targets::TargetLocator::LocalBare {
@@ -5755,6 +5866,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
@@ -5836,6 +5948,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };

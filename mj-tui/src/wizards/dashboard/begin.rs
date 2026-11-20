@@ -61,10 +61,10 @@ impl DashboardState {
         }
         if self.offered_target_indices().is_empty() {
             self.begin_settings_section("targets", None);
-            let missing: Vec<String> = self
+            let missing: Vec<&str> = self
                 .missing_target_lines()
-                .into_iter()
-                .map(|line| line.full)
+                .iter()
+                .map(|line| line.full.as_str())
                 .collect();
             if !missing.is_empty() {
                 self.notices.set(format!(

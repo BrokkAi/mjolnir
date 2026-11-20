@@ -1,4 +1,5 @@
 use super::*;
+use mj_client::availability::{AvailabilityNote, AvailabilityVerdict};
 use std::collections::BTreeSet;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -62,6 +63,8 @@ pub struct ViewerSnapshot {
     #[serde(skip)]
     pub disabled_profile_ids: std::collections::BTreeSet<String>,
     pub targets: Vec<ViewerTarget>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_availability_notes: Vec<AvailabilityNote>,
     pub bundles: Vec<ViewerBundle>,
     /// The bounded part of `[review]` needed to report whether review is
     /// armed. Reviewer model and effort remain controller-private.
@@ -450,6 +453,7 @@ impl ViewerSnapshot {
         let profiles = config
             .enabled_profiles()
             .map(|(id, profile)| ViewerProfile {
+                availability: Default::default(),
                 id: id.to_owned(),
                 harness_kind: profile.kind.id().into(),
                 quota_pools: if profile.kind == mj_core::config::HarnessKind::Antigravity {
@@ -509,8 +513,7 @@ impl ViewerSnapshot {
                 },
                 runtime_missing: false,
                 default_candidate: config.is_default_target(id),
-                availability: crate::server::api::LaunchAvailability::Unknown,
-                unavailable_reason: None,
+                availability: Default::default(),
                 recent_project_directories: project_history_host(target)
                     .map(|host| {
                         state
@@ -556,6 +559,7 @@ impl ViewerSnapshot {
             profiles,
             disabled_profile_ids,
             targets,
+            target_availability_notes: Vec::new(),
             bundles,
             review_config: ViewerReviewConfig {
                 trigger: config.review.trigger(),
@@ -1040,6 +1044,8 @@ pub struct ViewerBackgroundTask {
 pub struct ViewerProfile {
     pub id: String,
     #[serde(default)]
+    pub availability: AvailabilityVerdict,
+    #[serde(default)]
     pub capabilities_key: String,
     pub harness_kind: String,
     /// Rows exist before the first reading and survive a failed quota probe.
@@ -1188,10 +1194,6 @@ impl ViewerTargetStorage {
     }
 }
 
-fn unknown_availability() -> crate::server::api::LaunchAvailability {
-    crate::server::api::LaunchAvailability::Unknown
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerTarget {
@@ -1232,25 +1234,14 @@ pub struct ViewerTarget {
     /// Shared default selected for this container target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_resource_allocation: Option<SessionResourceAllocation>,
-    /// Whether this target's runtime (Docker, Podman) is not installed on the
-    /// host running the daemon. That is permanent for the host, so pickers
-    /// leave the target out and a request that names it is refused. A host
-    /// that merely did not answer is not this; it stays listed.
+    /// The engine command is absent on the daemon host. HTTP admission
+    /// checks this installation fact independently of the last probe.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub runtime_missing: bool,
-    /// Whether this target is a default candidate that Mjolnir supplies
-    /// (`Config::with_local_targets`) and the user did not write in
-    /// `config.toml`. A default candidate whose runtime is missing is listed
-    /// nowhere; a configured one stays listed as unavailable.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default_candidate: bool,
-    /// Whether the host's last check answered, from the same classifier as
-    /// `/api/v1/options`. `Unknown` until the capacity poller has run.
-    #[serde(default = "unknown_availability")]
-    pub availability: crate::server::api::LaunchAvailability,
-    /// A short sentence for a person when `availability` is `Unavailable`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unavailable_reason: Option<String>,
+    #[serde(default)]
+    pub availability: AvailabilityVerdict,
     /// Recent raw project directories for this target's physical host. Managed
     /// targets intentionally publish an empty list because they select a
     /// configured bundle rather than a host checkout.

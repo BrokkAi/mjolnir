@@ -136,14 +136,14 @@ impl DaemonConnector {
                 return Ok(client);
             }
         }
-        let instance = self
-            .placement
-            .instance
-            .clone()
-            .or_else(mj_core::config::instance_name)
-            .unwrap_or_else(|| "default".into());
-        let replacement =
-            ssh::open(&self.placement, &instance, intent, std::future::pending()).await?;
+        let instance = self.placement.remote_instance();
+        let replacement = ssh::open(
+            &self.placement,
+            instance.as_deref(),
+            intent,
+            std::future::pending(),
+        )
+        .await?;
         let metadata = replacement.metadata();
         let replacement = Arc::new(replacement);
         *lease = Some(replacement.clone());

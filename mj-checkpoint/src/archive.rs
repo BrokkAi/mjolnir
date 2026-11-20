@@ -1166,6 +1166,8 @@ fn prepare_archive_view_with_part_size(
     let manifest = ArchiveManifest {
         schema_version: if carries_origin_delta(&repositories) {
             ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
+        } else if input.canonical_session.mailbox.is_some() {
+            ARCHIVE_SCHEMA_VERSION_MAILBOX
         } else if input.canonical_session.notification_stack.is_some() {
             ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
         } else if carries_linked_worktrees(&repositories) {
@@ -1832,6 +1834,12 @@ fn read_verified_zip_cancellable(
                 ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
             );
             ensure!(
+                manifest.schema_version >= ARCHIVE_SCHEMA_VERSION_MAILBOX
+                    || snapshot.mailbox.is_none(),
+                "archived mailbox requires archive schema {}",
+                ARCHIVE_SCHEMA_VERSION_MAILBOX
+            );
+            ensure!(
                 canonical_session.replace(snapshot).is_none(),
                 "archive contains duplicate canonical session payloads"
             );
@@ -2013,6 +2021,7 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_MAILBOX
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
@@ -2106,6 +2115,7 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         };
     ensure!(
         manifest.schema_version == expected_schema
+            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_MAILBOX
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
             || (manifest.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS

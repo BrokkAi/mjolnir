@@ -734,6 +734,9 @@ pub struct ChatEntry {
     /// completion is not the agent's finished work.
     #[serde(default, skip_serializing_if = "is_false")]
     pub ended_after_interrupt: bool,
+    /// Whether the session has an open permission request for this row.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub awaiting_approval: bool,
     /// The materialized transcript item this entry was derived from, when it
     /// came from the controller's projection. Provenance only, so it is
     /// neither serialized nor part of the entry's value.
@@ -831,6 +834,7 @@ impl ChatEntry {
             leading_omitted: false,
             raw_only: false,
             ended_after_interrupt: false,
+            awaiting_approval: false,
             source: TranscriptSource::default(),
         }
     }
@@ -920,6 +924,7 @@ impl ChatEntry {
             leading_omitted: false,
             raw_only: false,
             ended_after_interrupt: false,
+            awaiting_approval: false,
             source: TranscriptSource::default(),
         }
     }
@@ -953,6 +958,7 @@ impl ChatEntry {
             leading_omitted: false,
             raw_only: false,
             ended_after_interrupt: false,
+            awaiting_approval: false,
             source: TranscriptSource::default(),
         }
     }

@@ -106,6 +106,7 @@ fn documentation_dashboard() -> DashboardState {
                 local: None,
                 destination: PathBuf::from("mjolnir"),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     )]);

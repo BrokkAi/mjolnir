@@ -1,6 +1,6 @@
 {
   "live": {
-    "latest_seq": 10,
+    "latest_seq": 12,
     "presentation_key": "ace38fc96afe09945e0114da8cfe161a6feec9650be615c23d4b43021889d15a",
     "window_start_seq": 10,
     "reset": false,
@@ -32,6 +32,32 @@
         ],
         "glyph": "←",
         "tone": "message"
+      },
+      {
+        "id": 11,
+        "updated_seq": 12,
+        "role": "tool",
+        "label": "Tool · waiting for approval",
+        "recorded_at_ms": 1,
+        "lines": [
+          "cargo test"
+        ],
+        "glyph": "?",
+        "tone": "approval",
+        "tool_status": "waiting for approval"
+      },
+      {
+        "id": 12,
+        "updated_seq": 12,
+        "role": "tool",
+        "label": "Tool · running",
+        "recorded_at_ms": 1,
+        "lines": [
+          "cargo test"
+        ],
+        "glyph": "●",
+        "tone": "running",
+        "tool_status": "running"
       }
     ]
   },
@@ -51,6 +77,18 @@
       "text": "Build passed.\n支持 Unicode.",
       "label": "Message from Builder",
       "recorded_at_ms": 1000
+    },
+    {
+      "stable_id": "tool:tool-ask",
+      "position": 11,
+      "role": "tool",
+      "text": "cargo test"
+    },
+    {
+      "stable_id": "tool:tool-queued",
+      "position": 12,
+      "role": "tool",
+      "text": "cargo test"
     }
   ]
 }

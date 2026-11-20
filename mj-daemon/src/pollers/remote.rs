@@ -26,7 +26,7 @@ pub fn spawn_remote_dashboard_worker_poller(
     let (quotas_tx, quotas_rx) = tokio::sync::watch::channel(metadata.quotas.clone().into_inner());
     let (capabilities_tx, capabilities_rx) =
         tokio::sync::watch::channel(metadata.profile_capabilities.clone().into_inner());
-    let (config_tx, config_rx) = tokio::sync::watch::channel(metadata.installed_config());
+    let (config_tx, config_rx) = tokio::sync::watch::channel(RuntimeLaunchConfig::from(metadata));
     let initial_native_agents = bootstrap.projection.native_agents.clone();
     let (state_tx, state_rx) = tokio::sync::watch::channel(runtime_state_update(
         bootstrap.projection.clone(),
@@ -78,7 +78,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                         Some(RuntimeFeedUpdate::Snapshot(snapshot)) => {
                             let metadata = &snapshot.metadata;
                             if publish_alerts(&alerts_tx, &mut alert_sequence, metadata).is_err() { return; }
-                            send_if_changed(&config_tx, metadata.installed_config());
+                            send_if_changed(&config_tx, RuntimeLaunchConfig::from(metadata));
                             native.update_snapshot(snapshot.native_agents.clone());
                             health_tx.send_if_modified(|health| {
                                 let recovered = health.refresh_error.take().is_some();
@@ -194,6 +194,7 @@ fn runtime_state_update(
         recent_launch: metadata.recent_launch,
         container_upgrade_sessions: metadata.container_upgrade_sessions,
         failed_launch_retries: metadata.failed_launch_retries,
+        host_capacities: metadata.host_capacities.into_inner(),
         storage: metadata.storage.into_inner(),
         container_capacities: metadata.container_capacities.into_inner(),
     }

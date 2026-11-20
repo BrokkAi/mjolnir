@@ -500,22 +500,10 @@ for name in cargo mbx; do
 done
 "#;
 
-/// Install marked Cargo and mbx launchers that use the shared cache copy.
-pub fn install_mbx_shims(
-    executor: &impl CommandExecutor,
+fn mbx_container(
     locator: &targets::TargetLocator,
-    worker_root: &str,
-    mbx_binary: &Path,
-    configuration: &Path,
-    config_roots: &[PathBuf],
-) -> Result<()> {
-    ensure!(
-        mj_core::target_path::is_absolute_on_host_or_target(mbx_binary),
-        "shared cache mbx path is not absolute: {}",
-        mbx_binary.display()
-    );
-    let bin = format!("{worker_root}/bin");
-    let (engine, container_id, ssh) = match locator {
+) -> Result<(&'static str, &String, Option<&SshTarget>)> {
+    Ok(match locator {
         targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
         targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
         targets::TargetLocator::SshPodman {
@@ -524,18 +512,44 @@ pub fn install_mbx_shims(
         targets::TargetLocator::SshDocker {
             ssh, container_id, ..
         } => ("docker", container_id, Some(ssh)),
+        targets::TargetLocator::SshNitro {
+            ssh, container_id, ..
+        } => (targets::MICROVM_ENGINE, container_id, Some(ssh)),
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshAppleContainer { .. }
-        | targets::TargetLocator::SshNitro { .. }
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshBare { .. } => {
-            bail!("the build cache is only installed into Podman and Docker containers")
+            bail!("the build cache is only installed into Podman, Docker and Nitro sessions")
         }
-    };
+    })
+}
+
+/// Install marked Cargo and mbx launchers pointing at the staged binary.
+pub fn install_mbx_shims(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+    mbx_binary: &Path,
+    configuration: Option<&Path>,
+    config_roots: &[PathBuf],
+) -> Result<()> {
+    ensure!(
+        mj_core::target_path::is_absolute_on_host_or_target(mbx_binary),
+        "shared cache mbx path is not absolute: {}",
+        mbx_binary.display()
+    );
+    let bin = format!("{worker_root}/bin");
+    let (engine, container_id, ssh) = mbx_container(locator)?;
     let quoted_binary = targets::posix_quote(&mbx_binary.to_string_lossy());
+    // mbx refuses a mise shim as the real Cargo, and a mise project image
+    // (mj-dev and every `mj image build` image) has Cargo only behind mise's
+    // shims. Under mise, take mise's environment for the build's own
+    // directory first: it puts the real toolchain on PATH and pins
+    // RUSTUP_TOOLCHAIN the way the shim would, per repository, including
+    // tools that finished installing after the session started.
     let cargo_body = format!(
-        "MBX_CARGO_SHIM_MODE=1\nMBX_CARGO_SHIM_PATH=$(command -v \"$0\")\nexport MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH\nexec {quoted_binary} \"$@\""
+        "MBX_CARGO_SHIM_MODE=1\nMBX_CARGO_SHIM_PATH=$(command -v \"$0\")\nexport MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH\nif command -v mise >/dev/null 2>&1; then\n    eval \"$(mise env -s bash 2>/dev/null)\" || true\nfi\nexec {quoted_binary} \"$@\""
     );
     let mbx_body = format!("exec {quoted_binary} \"$@\"");
     let args = vec![
@@ -550,13 +564,16 @@ pub fn install_mbx_shims(
         cargo_body,
         mbx_body,
     ];
-    let steps = [
-        targets::CommandStep::new("install the shared-cache mbx shims", args),
+    let steps = std::iter::once(targets::CommandStep::new(
+        "install the build-cache mbx shims",
+        targets::with_engine_argv(args),
+    ))
+    .chain(configuration.map(|configuration| {
         targets::CommandStep::new(
             "link the shared machine mbx configuration",
             mbx_configuration_argv(engine, container_id, configuration, config_roots),
-        ),
-    ];
+        )
+    }));
     let args = targets::step_script(steps);
     let command = match ssh {
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
@@ -573,24 +590,7 @@ pub fn remove_generated_mbx_shims(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> Result<()> {
-    let (engine, container_id, ssh) = match locator {
-        targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
-        targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => ("podman", container_id, Some(ssh)),
-        targets::TargetLocator::SshDocker {
-            ssh, container_id, ..
-        } => ("docker", container_id, Some(ssh)),
-        targets::TargetLocator::LocalBare { .. }
-        | targets::TargetLocator::AppleContainer { .. }
-        | targets::TargetLocator::SshAppleContainer { .. }
-        | targets::TargetLocator::SshNitro { .. }
-        | targets::TargetLocator::AwsEc2 { .. }
-        | targets::TargetLocator::SshBare { .. } => {
-            bail!("the build cache is only installed into Podman and Docker containers")
-        }
-    };
+    let (engine, container_id, ssh) = mbx_container(locator)?;
     let args = vec![
         engine.to_owned(),
         "exec".to_owned(),
@@ -601,6 +601,7 @@ pub fn remove_generated_mbx_shims(
         "sh".to_owned(),
         format!("{worker_root}/bin"),
     ];
+    let args = targets::with_engine_argv(args);
     let container_command = match ssh {
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
         Some(ssh) => crate::targets::ssh_command(SshTrafficClass::Control, ssh, args),
@@ -622,24 +623,7 @@ pub fn verify_mbx_binary(
         "shared cache mbx path is not absolute: {}",
         mbx_binary.display()
     );
-    let (engine, container_id, ssh) = match locator {
-        targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
-        targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => ("podman", container_id, Some(ssh)),
-        targets::TargetLocator::SshDocker {
-            ssh, container_id, ..
-        } => ("docker", container_id, Some(ssh)),
-        targets::TargetLocator::LocalBare { .. }
-        | targets::TargetLocator::AppleContainer { .. }
-        | targets::TargetLocator::SshAppleContainer { .. }
-        | targets::TargetLocator::SshNitro { .. }
-        | targets::TargetLocator::AwsEc2 { .. }
-        | targets::TargetLocator::SshBare { .. } => {
-            bail!("the build cache is only installed into Podman and Docker containers")
-        }
-    };
+    let (engine, container_id, ssh) = mbx_container(locator)?;
     let args = vec![
         engine.to_owned(),
         "exec".to_owned(),
@@ -647,6 +631,7 @@ pub fn verify_mbx_binary(
         mbx_binary.to_string_lossy().into_owned(),
         "--version".to_owned(),
     ];
+    let args = targets::with_engine_argv(args);
     let command = match ssh {
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
         Some(ssh) => crate::targets::ssh_command(SshTrafficClass::Control, ssh, args),
@@ -657,7 +642,7 @@ pub fn verify_mbx_binary(
     let container_version = reported_mbx_version(output, &command)?;
     ensure!(
         expected_version == container_version,
-        "the container reports mbx {container_version}, but the synchronized host copy is mbx {expected_version}"
+        "the container reports mbx {container_version}, but the staged binary is mbx {expected_version}"
     );
     Ok(())
 }

@@ -37,6 +37,7 @@ use std::ops::{Deref, DerefMut};
 
 pub use mj_client::discovery::{DetectScope, SetupDetection};
 pub use mj_client::settings::RejectedRuntime;
+pub use results::SetupLoginOutcome;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetupControl {

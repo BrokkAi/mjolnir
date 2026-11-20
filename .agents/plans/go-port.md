@@ -40,9 +40,13 @@ User-visible output must match the Rust build. Prove it with golden files captur
 - [x] (2026-11-20) Milestone 1 slice: Go module, `go/internal/core/config` instance and directory resolution, ID validation and atomic writes (port of `mj-core/src/config/loading.rs`) with its Rust tests; `go/cmd/mj` root command tree with clap-identical top-level help, version and usage errors, proven by golden files.
 - [x] (2026-11-20) Owner confirmed the approach and chose the crate-by-crate fan-out.
 - [x] (2026-11-20) First slice moved into package `core`; `go/scripts/sync-assets.sh` copies mj-core/assets for `//go:embed`.
-- [ ] mj-core declarations phase (ten groups) merged and compiling.
-- [ ] mj-core bodies and tests phase merged; `go test ./internal/core/` passes.
+- [x] (2026-11-20) mj-core declarations phase (ten groups) merged and compiling (823be3abb).
+- [x] (2026-11-20) mj-core bodies and tests phase merged: no unported bodies left, 678 of mj-core's 683 Rust tests ported, `go test ./...` passes, `go vet` passes for linux, windows and darwin. The five not ported: four test the Rust build's `worker_build_inputs.py` worker identity (the Go build needs its own; port with mj-worker-bin), plus one missed state test now added.
 - [ ] Milestone 1 rest: all of `mj-core` (config, state, relay protocol, transcript, subprocess, targets, credentials, harness install/runtime, acp on acp-go).
+- [x] (2026-11-20) Layer 1: mj-transcript, mj-checkpoint, mj-review, mj-build-id ported (323 tests; 2 benchmark tests skip as in Rust), merged d98013ebf.
+- [x] (2026-11-20) Layer 2 declarations: mj-client (`go/internal/client`) and mj-worker (`go/internal/worker`) declared in 14 groups and merged (6a0035221); builds and vets, 971 bodies still `panic("unported: ...")`, no tests ported yet.
+- [ ] Layer 2 bodies and tests. Stopped 2026-11-20 at the owner's request (weekly usage nearly spent) while the 14 bodies agents were mid-way; none had committed, so their work is lost. Resume point is in "Resume here" below.
+- [ ] Sync pass: port the Rust changes made since each crate's base in `go/PORTED_FROM`.
 - [ ] Milestone 2: leaf crates `mj-transcript`, `mj-checkpoint`, `mj-review`, `mj-session-types`, `mj-targets`, `mj-client`.
 - [ ] Milestone 3: `mj-worker` and `mj-worker-bin` (the data plane: harness process, ACP connection, relay journal).
 - [ ] Milestone 4: `mj-store` and the crates on it (`mj-accounts`, `mj-import`, `mj-sessionwiki`, `mj-build-cache`, `mj-worker-staging`, `mj-worker-launch`, `mj-profile-catalog`, `mj-session-runtime`, `mj-review-host`, `mj-github-relevance`).
@@ -51,7 +55,21 @@ User-visible output must match the Rust build. Prove it with golden files captur
 - [ ] Milestone 7: end-to-end parity: the shell/expect suite in `tests/e2e/` passes against `go/bin/mj`.
 
 
+## Resume here
+
+State on 2026-11-20: mj-core and layer 1 are fully ported (all ported tests pass). Layer 2 (mj-client, mj-worker) has merged declarations only. Every phase so far ran as a Workflow script that fans out one agent per module group, each in a git worktree, then merges with cherry-picks: declarations, merge, bodies and tests, merge, then up to two fix rounds for failing tests. The script and the layer-2 group list (which Rust files each of the 14 groups owns) are in the session that ran it; to restart without it, rerun the bodies phase only: one agent per group with the prompt "BODIES phase" described in `.agents/docs/go-port/core-brief.md`, then a merge agent that cherry-picks, builds, runs `go test ./...` and reports failures by group. Layer 2's groups split mj-worker by area: acp (drive, features, tests.rs), relay (core, verdict and journal, tests.rs), worker_runtime (unix, core, relay_tests.rs), microvm, services (subagent_mcp, review, work_facts, stand_in_relay, move_workspace), misc (the rest); mj-client into daemon and the rest.
+
+Cost measured so far: about 100 subagent tokens per Rust line (mj-core 8.4M tokens for 93k lines; layer 1 4.8M for 40k). The remaining ~730k lines, layer 2 included, are on that basis roughly 70M tokens.
+
+After layer 2: the sync pass (`go/scripts/rust-changes.sh` per crate in `go/PORTED_FROM`), then the next layers in dependency order: mj-targets and mj-session-types; mj-store; mj-accounts, mj-import, mj-sessionwiki, mj-build-cache, mj-worker-staging, mj-worker-launch, mj-profile-catalog; mj-session-runtime, mj-review-host, mj-github-relevance; mj-controller; mj-server, mj-setup; mj-daemon; mj-chat, mj-tui (Charm); mj-cli and mj-worker-bin.
+
+Stale worktrees from the stopped run may remain under `.claude/worktrees/`; they hold only uncommitted partial work and can be removed with `git worktree remove --force`.
+
+
 ## Surprises & Discoveries
+
+- Observation: mj-core needed declarations first: in the bodies phase, agents reported dozens of tests blocked on other groups' functions, and all of them passed once merged. Two real failures remained after the first merge (a serde `default` missed in a custom decoder, and a test fixture built from Go zero values instead of `DefaultConfig()`).
+  Evidence: bodies workflow wf_0dc3082d-c19, merge round 1 (675 of 677 passing) and round 2 (all passing).
 
 - Observation: clap lists a command's own options interleaved with the global ones by declaration index (`--instance`, `--session`, `--all`, `--no-splash`, ...), and shows the current environment value in `[env: NAME=value]`.
   Evidence: `mj sessions --help` on the Rust build. `go/internal/cli/clapstyle.go` reproduces the ordering with an `mj_order` annotation per flag.
@@ -71,6 +89,14 @@ User-visible output must match the Rust build. Prove it with golden files captur
 
 - Decision: mj-core is ported in two fan-out phases over ten module groups: declarations (every type, constant and signature) so the package compiles, then bodies and tests against those declarations. Each agent works in its own git worktree and the results are merged.
   Rationale: parallel agents in one package need each other's signatures; declaring first means the bodies phase compiles against the real shapes instead of guesses.
+  Date/Author: 2026-11-20, agent.
+
+- Decision: keep tree-sitter-bash through cgo (`github.com/tree-sitter/go-tree-sitter`) for mj-transcript's shell command summaries.
+  Rationale: Rust uses the same C parser, including its error recovery on broken shell text, which the summaries and their tests depend on; a pure-Go shell parser (mvdan.cc/sh) fails on such input instead. The cost is a C cross-compiler for Windows/macOS cross builds and for static Linux workers, which the Rust build also needs for this parser.
+  Date/Author: 2026-11-20, agent.
+
+- Decision: the Go tree records, per crate, the Rust commit it was translated from (`go/PORTED_FROM`); `go/scripts/rust-changes.sh <crate>` shows what Rust changed since. Sync passes port those diffs.
+  Rationale: Rust development continues during the port (about 30 commits touched ported crates within hours); without a recorded base the Go port silently falls behind.
   Date/Author: 2026-11-20, agent.
 
 - Decision: parse with cobra but render help and usage errors with a small clap-layout renderer.

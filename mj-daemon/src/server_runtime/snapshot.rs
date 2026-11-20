@@ -41,51 +41,10 @@ pub(super) struct PhoneSessionViews<'a> {
         &'a std::collections::BTreeMap<String, crate::review_host::RuntimeReviewView>,
 }
 
-/// What the phone server remembers about one probe target: the target itself
-/// and the phone's own nudge of the poller. The readings, their times and
-/// failures belong to the daemon's capacity service and are read from it, so
-/// the page can never disagree with `mj hosts`.
-#[derive(Debug, Clone)]
-pub(super) struct PhoneCapacity {
-    pub(super) target: mj_controller::targets::DeploymentCapacityTarget,
-    pub(super) refresh: PhoneRefresh,
-}
-
-/// The phone's latest request for a new reading.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PhoneRefresh {
-    Idle,
-    /// Accepted with this generation; over once the target's
-    /// `answered_refresh` reaches it.
-    Waiting {
-        generation: u64,
-    },
-    /// The poller was gone and refused the request.
-    Rejected,
-}
-
-/// Keep the state map in step with the targets the daemon's capacity service
-/// probes.
-pub(super) fn track_capacity_targets(
-    targets: &[mj_controller::targets::DeploymentCapacityTarget],
-    state: &mut std::collections::BTreeMap<String, PhoneCapacity>,
-) {
-    state.retain(|id, _| targets.iter().any(|target| target.id == *id));
-    for target in targets {
-        state
-            .entry(target.id.clone())
-            .and_modify(|entry| entry.target = target.clone())
-            .or_insert_with(|| PhoneCapacity {
-                target: target.clone(),
-                refresh: PhoneRefresh::Idle,
-            });
-    }
-}
-
-/// Project the capacity readings for the phone.
+/// Project the capacity service's readings and refresh status for the phone.
 pub(super) fn viewer_capacity(
-    state: &std::collections::BTreeMap<String, PhoneCapacity>,
     readings: &std::collections::BTreeMap<String, mj_controller::targets::TargetCapacityState>,
+    inputs: &crate::pollers::CapacityProbeSet,
     container_capacities: &std::collections::BTreeMap<
         String,
         mj_client::runtime_feed::RuntimeContainerCapacity,
@@ -96,31 +55,28 @@ pub(super) fn viewer_capacity(
         .unwrap_or_default()
         .as_secs();
     let storage = mj_controller::target_storage::views_snapshot();
-    state
-        .values()
-        .map(|entry| {
-            let reading = readings.get(&entry.target.id).cloned().unwrap_or_default();
+    let empty = mj_controller::targets::TargetCapacityState::default();
+    inputs
+        .targets
+        .iter()
+        .map(|target| {
+            let reading = readings.get(&target.id).unwrap_or(&empty);
             let usage = reading.usage.as_ref();
-            let rejected = entry.refresh == PhoneRefresh::Rejected;
-            let waiting = matches!(
-                entry.refresh,
-                PhoneRefresh::Waiting { generation } if reading.answered_refresh < generation
-            );
-            let hosts = mj_core::targets::storage::capacity_storage_hosts(&entry.target, usage);
+            let hosts = mj_core::targets::storage::capacity_storage_hosts(target, usage);
             let container_capacity = container_capacities
-                .get(&entry.target.id)
+                .get(&target.id)
                 .map(|capacity| capacity.capacity);
             crate::server::ViewerTargetCapacity {
                 storage: crate::server::ViewerTargetStorage::list(
                     &mj_core::targets::storage::views_for(&storage, &hosts),
                     matches!(
-                        entry.target.kind,
+                        target.kind,
                         mj_controller::targets::DeploymentCapacityKind::AwsFleet
                     ),
                 ),
-                id: entry.target.id.clone(),
-                label: entry.target.host.clone(),
-                target_ids: entry.target.target_ids.clone(),
+                id: target.id.clone(),
+                label: target.host.clone(),
+                target_ids: target.target_ids.clone(),
                 cpu_percent: usage.and_then(|usage| usage.cpu_percent),
                 memory_used_bytes: usage.map(|usage| usage.memory_used_bytes),
                 memory_total_bytes: usage.map(|usage| usage.memory_total_bytes),
@@ -129,16 +85,14 @@ pub(super) fn viewer_capacity(
                 disk_total_bytes: usage.and_then(|usage| usage.disk_total_bytes),
                 // The same count `mj hosts` reports: absent for a plain host
                 // and for a fleet whose size is unknown.
-                virtual_machines: reading
-                    .fleet_instances(&entry.target)
-                    .map(|count| count as u64),
+                virtual_machines: reading.fleet_instances(target).map(|count| count as u64),
                 sampled_at_epoch_seconds: reading.sampled_at_epoch_seconds,
                 // A target with no result yet is loading, not idle.
-                refreshing: !rejected && (waiting || !reading.has_answered()),
+                refreshing: inputs.refreshing(reading) || !reading.has_answered(),
                 stale: reading.sampled_at_epoch_seconds.is_some_and(|sampled| {
                     mj_core::targets::capacity_sample_is_stale(sampled, now)
                 }),
-                has_error: rejected || reading.probe_error.is_some(),
+                has_error: reading.probe_error.is_some(),
             }
         })
         .collect()
@@ -470,43 +424,8 @@ pub(super) fn viewer_snapshot(
         views,
         revision,
         None,
-        &mut InstalledEngines::default(),
+        &Default::default(),
     )
-}
-
-/// Which local container engines' commands are on this daemon's PATH. The
-/// answer changes only when an engine is installed or removed, so it is
-/// looked up again on the capacity poller's cadence rather than for every
-/// published revision: each lookup searches every PATH directory, and the
-/// publisher runs it on its control loop.
-#[derive(Default)]
-pub(super) struct InstalledEngines {
-    checked_at: Option<Instant>,
-    path: Option<std::ffi::OsString>,
-    /// Whether each engine's command was missing at `checked_at`.
-    missing: std::collections::BTreeMap<&'static str, bool>,
-}
-
-impl InstalledEngines {
-    pub(super) fn runtime_missing(&mut self, template: &mj_core::config::TargetTemplate) -> bool {
-        let Some(engine) = mj_controller::targets::local_engine_command(template) else {
-            return false;
-        };
-        let path = std::env::var_os("PATH");
-        if self.path != path
-            || self
-                .checked_at
-                .is_none_or(|at| at.elapsed() >= crate::pollers::CAPACITY_POLL_INTERVAL)
-        {
-            self.missing.clear();
-            self.path = path;
-            self.checked_at = Some(Instant::now());
-        }
-        // The one classifier the wizards and launch options read decides.
-        *self.missing.entry(engine).or_insert_with(|| {
-            mj_controller::targets::runtime_missing_on_host(template, self.path.as_deref())
-        })
-    }
 }
 
 pub(super) struct ViewerRecordSelection<'a> {
@@ -522,7 +441,7 @@ pub(super) fn viewer_snapshot_selected(
     views: &PhoneSessionViews<'_>,
     revision: u64,
     selection: Option<ViewerRecordSelection<'_>>,
-    engines: &mut InstalledEngines,
+    availability: &mj_client::availability::RuntimeAvailability,
 ) -> ViewerSnapshot {
     let PhoneSessionViews {
         native_agents,
@@ -554,14 +473,22 @@ pub(super) fn viewer_snapshot_selected(
         ),
         None => ViewerSnapshot::from_config_state(&controller.config, &controller.state, revision),
     };
-    // Whether a target's runtime is installed is a fact about this host, so
-    // the daemon sets it where it publishes, from the one classifier the
-    // terminal wizards and the launch options also read.
+    snapshot.target_availability_notes = availability.browser.target_notes.clone();
+    for profile in &mut snapshot.profiles {
+        profile.availability = browser_availability(
+            availability.profiles.get(&profile.id),
+            availability.browser.profiles.get(&profile.id),
+        );
+    }
     for target in &mut snapshot.targets {
+        target.availability = browser_availability(
+            availability.targets.get(&target.id),
+            availability.browser.targets.get(&target.id),
+        );
+        target.runtime_missing = availability.uninstalled_engines.contains(&target.id);
         let Some(template) = controller.config.targets.get(&target.id) else {
             continue;
         };
-        target.runtime_missing = engines.runtime_missing(template);
         target.resource_allocation_kind = template.into();
         if mj_core::config::is_container_target(template) {
             let host_capacity = capacity
@@ -972,14 +899,23 @@ pub(super) fn viewer_snapshot_selected(
         session.capabilities.open = session.conversation_available && !session.transitioning;
     }
     snapshot.capacity = capacity.to_vec();
-    // The same classifier `/api/v1/options` uses, so a picker can say which
-    // host did not answer its last check. The engine probe is not run here.
-    for target in &mut snapshot.targets {
-        let status = crate::server::api::target_availability(target, capacity, None);
-        target.availability = status.availability;
-        target.unavailable_reason = status.unavailable_reason;
-    }
     snapshot
+}
+
+fn browser_availability(
+    verdict: Option<&mj_client::availability::AvailabilityVerdict>,
+    public_reason: Option<&String>,
+) -> mj_client::availability::AvailabilityVerdict {
+    use mj_client::availability::AvailabilityVerdict;
+    match verdict {
+        Some(AvailabilityVerdict::Available) => AvailabilityVerdict::Available,
+        Some(AvailabilityVerdict::Missing { .. }) => AvailabilityVerdict::Missing {
+            reason: public_reason
+                .cloned()
+                .unwrap_or_else(|| "Failed its availability check.".to_owned()),
+        },
+        Some(AvailabilityVerdict::Unknown) | None => AvailabilityVerdict::Unknown,
+    }
 }
 
 fn question_message(

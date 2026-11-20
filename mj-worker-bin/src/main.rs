@@ -400,7 +400,24 @@ fn bootstrap_login_environment(
                     mj_worker::worker_runtime::seed_container_github_token(root, std::env::vars())?;
                 }
             }
-            environment.extend(launch.target_environment);
+            let mut target_environment = launch.target_environment;
+            if target_environment
+                .remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV)
+                .is_some()
+            {
+                environment.remove("MJ_MBX_CONFIG_DIR");
+                // Drop settings inherited from login scripts and the image
+                // overlay, then restore only the engine's remote settings.
+                environment.retain(|name, _| {
+                    !name.starts_with(mj_core::worker_launch::MBX_REMOTE_ENV_PREFIX)
+                });
+                for name in mj_core::worker_launch::MBX_REMOTE_ENVIRONMENT {
+                    if let Ok(value) = std::env::var(name) {
+                        environment.insert(name.to_owned(), value);
+                    }
+                }
+            }
+            environment.extend(target_environment);
             if launch.no_github_credentials {
                 mj_core::credentials::remove_github_authentication_environment(&mut environment);
             }
@@ -418,6 +435,9 @@ fn bootstrap_login_environment(
                 launch.no_github_credentials,
             )?;
         }
+        // The worker consumes this setting from its launch map. It never
+        // enters the process environment where subprocesses could inherit it.
+        environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
         environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
         // The reliability lab's crash hooks run inside the worker after this
         // environment-isolating re-exec. Carry only those feature-gated test

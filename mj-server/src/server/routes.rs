@@ -29,7 +29,6 @@ pub(super) struct ServerState {
     /// report the saved default without reading the process environment.
     pub(super) preferences_path: PathBuf,
     /// Local container engine checks for the launch options route.
-    pub(super) engine_checks: Arc<api::LocalEngineChecks>,
     /// Why a target has no installable worker binary, if it has none.
     pub(super) worker_source_check: Option<WorkerSourceCheck>,
     /// Prompts held until startup or lifecycle work lets their session take them.
@@ -121,7 +120,6 @@ pub(super) fn router(options: ServerOptions) -> Router {
         api_token: options.api_token.into(),
         subagent: options.subagent,
         preferences_path: options.preferences_path,
-        engine_checks: options.engine_checks,
         worker_source_check: options.worker_source_check,
         held_prompts: Arc::new(api::HeldPrompts::default()),
         upgrade_gate: options.upgrade_gate,

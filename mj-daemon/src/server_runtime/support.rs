@@ -16,6 +16,7 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
         | ControllerAction::PushUnsubscribe { .. }
         | ControllerAction::PushTest { .. }
         | ControllerAction::New { .. }
+        | ControllerAction::CheckAvailability
         | ControllerAction::RecordOperatorActivity
         | ControllerAction::SetOperatorAway { .. } => None,
         ControllerAction::Prompt { session_id, .. }

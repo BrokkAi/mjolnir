@@ -98,6 +98,7 @@ pub fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleSnapshot
                 local: Some(resolved.checkout_root.clone()),
                 destination: id.clone().into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
         identities: BTreeMap::from([(id.clone(), resolved.identity.clone())]),
@@ -643,6 +644,7 @@ mod tests {
                 local: None,
                 destination: "old-id".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         };
         Config::update(|config| {
@@ -891,6 +893,7 @@ mod tests {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home)
         };

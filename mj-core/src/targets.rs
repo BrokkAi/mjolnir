@@ -2854,6 +2854,10 @@ pub fn command_thread_panic_message(payload: &(dyn std::any::Any + Send)) -> Str
     }
 }
 
+/// Internal namespace used to carry an exact checkout selection from a host
+/// snapshot into an ordinary clone without borrowing the snapshot's objects.
+pub const HOST_SNAPSHOT_EXACT_REFS: &str = "refs/mj/host-snapshot-exact";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositorySpec {
     /// Network clone URL. Managed workspaces require a configured remote.
@@ -2863,9 +2867,9 @@ pub struct RepositorySpec {
     pub destination: String,
     pub git_ref: Option<String>,
     /// Read-only bare repository mounted into the target for Git object reuse.
-    /// A missing or unusable reference is only an optimization miss. With
-    /// `history_cutoff`, it is instead a Git bundle in the target that holds
-    /// only the cutoff history, and the checkout fetches from it.
+    /// For a host-only source the snapshot is required and serves the clone.
+    /// With `history_cutoff`, it is instead a Git bundle in the target that
+    /// holds only the cutoff history, and the checkout fetches from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
     /// Start the checkout with these commits and their ancestors only. It is

@@ -13,6 +13,7 @@ pub mod cli;
 pub mod client;
 pub mod guest_agent;
 pub mod image;
+mod mbx_proxy;
 pub mod net;
 pub mod protocol;
 pub mod replace_root;

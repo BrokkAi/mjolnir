@@ -329,6 +329,7 @@ pub(super) fn input() -> ArchiveInput {
                 content: vec![serde_json::json!({"type": "text", "text": "next"})],
                 queued_at_ms: 104,
             }],
+            mailbox: None,
         },
         native_artifacts: vec![NativeArtifact {
             relative_path: PathBuf::from("sessions/native-1/rollout.jsonl"),

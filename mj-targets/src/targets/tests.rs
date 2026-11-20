@@ -5433,7 +5433,7 @@ fn move_destination_generations_have_independent_container_and_volume_ownership(
         &[],
         None,
         &destination_name,
-        None,
+        ProvisionOptions::default(),
     )
     .unwrap();
     assert!(plan.commands[0].args.contains(&destination_name));

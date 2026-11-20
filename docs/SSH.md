@@ -234,8 +234,7 @@ the machine when the host is Linux or macOS on x86_64 or arm64,
 check a launch runs, and `<machine>-apple-container` when the machine is
 Apple-silicon macOS 26 or newer with a running Apple container service. This
 covers machines that already have runtimes, so Docker installed later on a
-host you already use appears without any configuration. `mj setup` does the
-same, and Settings › Runtimes › Detect runtimes does it on demand. A runtime
+host you already use appears without any configuration. Settings › Runtimes › Detect runtimes checks on demand. A runtime
 whose machine did not answer, or whose engine stopped working, is left out of
 the pickers and named under the list with the reason. A machine that answers
 with nothing usable, or does not answer, keeps no runtime; Settings ›

@@ -20,13 +20,14 @@ use crate::targets::{
     CommandTimedOut, ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable,
     MICROVM_ENGINE, PODMAN_DOCUMENTATION_URL, PodmanPostcondition, ProcessExecutor,
     SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate,
-    failed_podman_postcondition, local_docker_vm_share, podman_probe_observation,
-    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_engine_command,
-    ssh_validation_command, verify_local_docker, verify_local_podman, verify_ssh_apple_container,
-    verify_ssh_docker, verify_ssh_nitro, verify_ssh_podman,
+    effective_target_images, failed_podman_postcondition, local_docker_vm_share,
+    podman_probe_observation, run_setup_smoke_test, ssh_command, ssh_connectivity_probe,
+    ssh_engine_command, ssh_validation_command, verify_local_docker, verify_local_podman,
+    verify_ssh_apple_container, verify_ssh_docker, verify_ssh_nitro, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
+    mbx_s3_location,
 };
 use mj_core::credentials::login_command;
 use mj_core::local_git::{MINIMUM_GIT_VERSION, parse_git_version};
@@ -53,7 +54,7 @@ pub const APPLE_CONTAINER_INSTALL_URL: &str = "https://github.com/apple/containe
 /// or a credential helper waiting on something that will never arrive.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The executor `mj doctor` and `mj setup` run their prerequisite probes
+/// The executor `mj doctor` and first-run setup run their prerequisite probes
 /// through: one deadline per probe, so a wedged runtime cannot hang the run.
 pub const fn probe_executor() -> BoundedProcessExecutor {
     BoundedProcessExecutor::new(PROBE_TIMEOUT)
@@ -190,7 +191,7 @@ pub fn run_with(
 
 /// The same checks as [`run_with`], against an explicit configuration file.
 ///
-/// `mj setup` uses this to report on the configuration it just wrote, so a
+/// First-run setup uses this to report on the configuration it just wrote, so a
 /// first run ends with exactly the summary and remediations `mj doctor`
 /// would print.
 pub fn run_with_config_path(
@@ -233,6 +234,7 @@ pub fn run_with_config_path(
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
     checks.extend(ssh_apple_container_checks(config, executor, options.smoke));
     checks.extend(ssh_nitro_checks(config, executor, options.smoke));
+    checks.extend(remote_build_cache_checks(config, executor));
     checks.extend(machine_runtime_checks(config, executor));
     checks.extend(storage_checks(config, executor));
     checks.extend(build_cache_checks(offered, executor));
@@ -382,6 +384,95 @@ fn build_cache_checks(
             }
         })
         .collect()
+}
+
+fn remote_build_cache_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    config
+        .targets
+        .iter()
+        .filter_map(|(id, target)| {
+            let cache = target.container()?.build_cache.as_ref()?;
+            let remote = cache.remote.as_deref()?;
+            let check_id = format!("build-cache.remote.{id}");
+            let title = format!("Remote build cache for target {id}");
+            let TargetTemplate::SshNitro { ssh, .. } = target else {
+                return Some(DoctorCheck::unsupported(
+                    check_id,
+                    title,
+                    "Remote build cache is used only on Nitro targets. This target uses its existing build cache settings.",
+                ));
+            };
+            // Bundles can use any target. Pick the first configured bundle
+            // with a namespace, using its default just as provisioning does.
+            let namespace = config.bundles.values().find_map(|bundle| {
+                bundle.mbx_namespaces().ok()?.into_iter().next()
+            });
+            let Some(namespace) = namespace else {
+                return Some(DoctorCheck::unsupported(check_id, title, "no repository namespace to check"));
+            };
+            let ssh = RuntimeSshTarget::from(ssh);
+            Some(match nitro_remote_cache_probe(&ssh, remote, cache.remote_region.as_deref(), &namespace, executor) {
+                Ok((true, detail)) => DoctorCheck::ready(check_id, title, detail),
+                Ok((false, detail)) => DoctorCheck::warning(
+                    check_id,
+                    title,
+                    detail,
+                    "Verify the Nitro host's instance profile and its S3 read permissions, then rerun `mj doctor`.",
+                ),
+                Err(error) => DoctorCheck::warning(
+                    check_id,
+                    title,
+                    format!("Could not check {remote} on {}: {error:#}", ssh.destination),
+                    "Verify SSH access and use Test in the Targets pane to update the Nitro engine.",
+                ),
+            })
+        })
+        .collect()
+}
+
+fn nitro_remote_cache_probe(
+    ssh: &RuntimeSshTarget,
+    remote: &str,
+    region: Option<&str>,
+    namespace: &str,
+    executor: &impl CommandExecutor,
+) -> Result<(bool, String)> {
+    let (bucket, prefix) = mbx_s3_location(remote)?;
+    let mut args = vec![
+        "mbx-check".to_owned(),
+        format!("--bucket={bucket}"),
+        format!("--namespace={namespace}"),
+    ];
+    if !prefix.is_empty() {
+        args.push(format!("--prefix={prefix}"));
+    }
+    if let Some(region) = region {
+        args.push(format!("--region={region}"));
+    }
+    let command = ssh_engine_command(SshTrafficClass::Control, ssh, MICROVM_ENGINE, args)
+        .purpose("check Nitro remote build cache readability");
+    let output = executor.execute(&command)?;
+    let detail = String::from_utf8_lossy(&output.stdout);
+    let detail = detail.trim();
+    if (output.status == 0 && detail == "remote cache readable")
+        || (output.status != 0
+            && (detail == "no instance role attached" || detail.starts_with("role cannot read ")))
+    {
+        return Ok((output.status == 0, detail.to_owned()));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!(
+        "Nitro mbx-check exited with status {}: {} {}",
+        output.status,
+        detail,
+        stderr.trim()
+    );
 }
 
 /// Report removed workspaces whose mbx build output Mjolnir could not release.
@@ -689,22 +780,20 @@ GitHub can ignore them.\n\n\
         InstructionsPlatform::Macos => format!(
             "# Mjolnir setup instructions for macOS\n\n\
 Run these commands as the user who will run `mj`:\n\n\
-1. Install and sign in to a supported coding agent, then run `mj setup`; or\n\
+1. Install and sign in to a supported coding agent, then run `mj`; or\n\
    add a profile in Settings → Agent Profiles and choose Sign in.\n\
-   Setup discovers agent homes and local runtimes, offers AWS when the AWS CLI\n\
-   has credentials, and offers SSH hosts from `~/.ssh/config`. Review its\n\
-   proposed configuration and confirm writing `config.toml`. It runs smoke\n\
-   tests for newly added container targets and ends with a doctor report.\n\
+   The first launch discovers agent homes and local runtimes, writes\n\
+   `config.toml`, and shows prerequisite errors.\n\
 2. Run `mj doctor --json` and follow every `fixable` remediation. Repeat until\n\
    no check is `fixable`. Review warnings for any target you intend to use;\n\
    `unsupported` runtimes are unavailable, not ready.\n\
 3. If you intend to use containers, start the runtime and run\n\
    `mj doctor --json --smoke`. Do this for Podman, Docker Desktop, and Apple\n\
    container. Resolve failures for the target you intend to use.\n\
-4. Run `mj`, then press n in the Sessions pane to start your first session.\n\
+4. Run `mj` and choose Create session (Ctrl-B then c by default).\n\
    If no profile was discovered, open Settings (Ctrl-B then s by default)\n\
    to add one first.\n\n\
-You can also configure profiles and targets in Settings instead of `mj setup`.\n\
+Profiles and targets can also be configured in Settings.\n\
 For a named instance, use the same `--instance <name>` on every command above.\n\n\
 For a coding-agent handoff, provide this entire instructions page together with\n\
 the latest `mj doctor --json` output.\n\n\
@@ -782,8 +871,7 @@ Podman prerequisites. Resolve every `fixable` status before starting a session.\
 enum ConfigGap {
     /// A newer Mjolnir wrote the file; the value is the version it carries.
     NewerVersion(u32),
-    /// There is no file yet. The first `mj` that adds an agent profile, or
-    /// `mj setup`, writes it.
+    /// There is no file yet. The first `mj` that adds an agent profile writes it.
     Missing,
     /// The file is not valid Mjolnir TOML.
     Unreadable,
@@ -811,7 +899,7 @@ impl ConfigGap {
                 "Update Mjolnir to the build that wrote config.toml or newer, then rerun `mj doctor`."
             }
             ConfigGap::Missing => {
-                "Run `mj` and add an agent profile, or run `mj setup`; either one writes config.toml. Then rerun `mj doctor`."
+                "Run `mj` and add an agent profile; that writes config.toml. Then rerun `mj doctor`."
             }
             ConfigGap::Unreadable => "Fix config.toml, then rerun `mj doctor`.",
         }
@@ -852,8 +940,8 @@ fn configuration_checks(path: &Path) -> (std::result::Result<Config, ConfigGap>,
             )],
         );
     }
-    // A config a newer build wrote is not broken TOML: replacing it with
-    // `mj setup` would discard that build's settings. Say what is actually
+    // A config a newer build wrote is not broken TOML: replacing it
+    // would discard that build's settings. Say what is actually
     // wrong before the load below reports it as invalid.
     if let Some(found) = mj_core::config::newer_version_on_disk(path) {
         return (
@@ -911,7 +999,7 @@ fn configuration_checks(path: &Path) -> (std::result::Result<Config, ConfigGap>,
                 "config",
                 "Mjolnir configuration",
                 format!("{} is invalid: {error:#}", path.display()),
-                "Fix the reported error in config.toml, then rerun `mj doctor`. `mj setup` does not replace an existing config.toml.",
+                "Fix the reported error in config.toml, then rerun `mj doctor`.",
             )],
         ),
     }
@@ -2726,7 +2814,7 @@ fn machine_runtime_check(probe: &crate::setup::MachineProbe) -> DoctorCheck {
                     check_id,
                     title,
                     format!("{missing}. It can run these runtimes: {kinds}."),
-                    "Start `mj` or run `mj setup` to add them.",
+                    "Start `mj` to add them.",
                 )
             }
         }
@@ -3024,10 +3112,10 @@ fn ssh_nitro_checks(
         .targets
         .iter()
         .filter_map(|(id, target)| match target {
-            TargetTemplate::SshNitro { ssh, container } => Some(ssh_nitro_check(
+            TargetTemplate::SshNitro { ssh, .. } => Some(ssh_nitro_check(
+                config,
                 id,
                 &RuntimeSshTarget::from(ssh),
-                &container.image,
                 executor,
                 smoke,
             )),
@@ -3037,9 +3125,9 @@ fn ssh_nitro_checks(
 }
 
 fn ssh_nitro_check(
+    config: &Config,
     id: &str,
     ssh: &RuntimeSshTarget,
-    image: &str,
     executor: &impl CommandExecutor,
     smoke: bool,
 ) -> DoctorCheck {
@@ -3068,7 +3156,20 @@ fn ssh_nitro_check(
             return DoctorCheck::fixable(check_id, title, format!("{error:#}"), remediation);
         }
     };
+    let crane = match (&preflight.info.crane_path, &preflight.info.crane_version) {
+        (Some(path), Some(version)) => format!("crane {version} at {path}"),
+        (Some(path), None) => format!("crane at {path} (version unavailable)"),
+        (None, _) => "crane is missing".to_owned(),
+    };
+    let mut detail = vec![preflight.summary(), crane];
+    let platform = preflight
+        .info
+        .architecture
+        .as_deref()
+        .map(mj_core::config::canonical_image_platform);
+    let images = effective_target_images(config, id, platform);
     if smoke {
+        let image = images[0];
         let target = RuntimeTargetTemplate::SshNitro {
             ssh: ssh.clone(),
             container: RuntimeContainerTemplate {
@@ -3079,16 +3180,8 @@ fn ssh_nitro_check(
                 workspace_storage: Default::default(),
             },
         };
-        return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
-            Ok(()) => DoctorCheck::ready(
-                check_id,
-                title,
-                format!(
-                    "{}; disposable run/exec/remove smoke test passed for image {image}.",
-                    preflight.summary()
-                ),
-            ),
-            Err(error) => DoctorCheck::fixable(
+        if let Err(error) = run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
+            return DoctorCheck::fixable(
                 check_id,
                 title,
                 format!(
@@ -3097,41 +3190,73 @@ fn ssh_nitro_check(
                 format!(
                     "Fix the configured image or the sandbox engine on {destination}, then run `mj doctor --json --smoke` again."
                 ),
-            ),
-        };
+            );
+        }
+        detail.push(format!(
+            "disposable run/exec/remove smoke test passed for image {image}"
+        ));
     }
-    let image_command = ssh_engine_command(
-        SshTrafficClass::Control,
-        ssh,
-        MICROVM_ENGINE,
-        ["image", "inspect", "--format", "{{.Id}}", image],
-    )
-    .purpose("check remote Nitro sandbox image presence");
-    match executor.execute(&image_command) {
-        Ok(output) if output.status == 0 => DoctorCheck::ready(
+    let mut missing = false;
+    for image in &images {
+        let image_command = ssh_engine_command(
+            SshTrafficClass::Control,
+            ssh,
+            MICROVM_ENGINE,
+            ["image", "inspect", "--format", "{{.Id}}", *image],
+        )
+        .purpose("check remote Nitro sandbox image presence");
+        match executor.execute(&image_command) {
+            Ok(output) if output.status == 0 => detail.push(format!("image {image} is present")),
+            Ok(output)
+                if output.status != 255
+                    && String::from_utf8_lossy(&output.stderr).contains("image not known") =>
+            {
+                missing = true;
+                detail.push(format!("image {image} will download on first use"));
+            }
+            Ok(output) => {
+                return DoctorCheck::fixable(
+                    check_id,
+                    title,
+                    format!(
+                        "Could not inspect Nitro sandbox image {image} on {destination}: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                    format!("Verify `ssh {destination}` succeeds, then run `mj doctor` again."),
+                );
+            }
+            Err(error) => {
+                return DoctorCheck::fixable(
+                    check_id,
+                    title,
+                    format!(
+                        "Could not inspect Nitro sandbox image {image} on {destination}: {error}"
+                    ),
+                    format!("Verify `ssh {destination}` succeeds, then run `mj doctor` again."),
+                );
+            }
+        }
+    }
+    if !smoke {
+        detail.push("run `mj doctor --json --smoke` to verify a disposable sandbox".into());
+    }
+    let detail = format!("{}.", detail.join("; "));
+    if preflight.info.crane_path.is_none() {
+        DoctorCheck::fixable(
             check_id,
             title,
-            format!(
-                "{}; image {image} is present. Run `mj doctor --json --smoke` to verify a disposable sandbox.",
-                preflight.summary()
-            ),
-        ),
-        Ok(output) => DoctorCheck::fixable(
+            detail,
+            format!("Install crane on {destination}."),
+        )
+    } else if missing {
+        DoctorCheck::warning(
             check_id,
             title,
-            format!(
-                "Image {image} is not present on {destination}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            "The first session pulls it, or run `mj doctor --json --smoke` to pull it now."
-                .to_owned(),
-        ),
-        Err(error) => DoctorCheck::fixable(
-            check_id,
-            title,
-            format!("Could not inspect Nitro sandbox image {image} on {destination}: {error}"),
-            format!("Verify `ssh {destination}` succeeds, then run `mj doctor` again."),
-        ),
+            detail,
+            "Start a session for the project to download its image.",
+        )
+    } else {
+        DoctorCheck::ready(check_id, title, detail)
     }
 }
 

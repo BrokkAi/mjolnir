@@ -315,11 +315,23 @@ impl ClaudePermissionMode {
 /// A profile's own choices about how its harness realizes an execution
 /// policy. The controller reads them from the profile and the worker from its
 /// launch config, and both resolve the enforcement through
-/// [`HarnessKind::resolve_execution_enforcement`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// [`HarnessKind::resolve_execution_enforcement`] and the reviewer through
+/// [`HarnessKind::mjolnir_guardian_reviews`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApprovalChoices {
     /// See [`HarnessProfile::claude_permission_mode`].
     pub claude_permission_mode: ClaudePermissionMode,
+    /// See [`HarnessProfile::mjolnir_guardian`].
+    pub mjolnir_guardian: bool,
+}
+
+impl Default for ApprovalChoices {
+    fn default() -> Self {
+        Self {
+            claude_permission_mode: ClaudePermissionMode::default(),
+            mjolnir_guardian: true,
+        }
+    }
 }
 
 impl ExecutionPolicy {
@@ -1344,6 +1356,20 @@ impl HarnessKind {
         }
     }
 
+    /// Whether the Mjolnir worker reviews this harness's tool approvals: the
+    /// target keeps configured approvals, the harness ships no reviewer of its
+    /// own, and the profile has not turned the Mjolnir guardian off. When it
+    /// does not, each approval the harness asks for goes to the person.
+    pub fn mjolnir_guardian_reviews(
+        self,
+        policy: ExecutionPolicy,
+        choices: ApprovalChoices,
+    ) -> bool {
+        policy == ExecutionPolicy::ConfiguredApprovals
+            && self.guardian() == GuardianReviewer::Mjolnir
+            && choices.mjolnir_guardian
+    }
+
     /// The launch flag the bridge command line carries, if any.
     ///
     pub const fn launch_flag_for(self, policy: ExecutionPolicy) -> Option<&'static str> {
@@ -1695,6 +1721,13 @@ pub struct HarnessProfile {
     /// Claude profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_permission_mode: Option<ClaudePermissionMode>,
+    /// Whether the Mjolnir guardian answers this profile's tool approvals
+    /// where the target keeps configured approvals (localhost, guardian SSH).
+    /// On by default; false sends every approval the harness asks for to the
+    /// person. Only valid on a profile whose harness has no reviewer of its
+    /// own (Kimi Code, OpenCode, DSH; see [`HarnessKind::guardian`]).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub mjolnir_guardian: bool,
     /// The IAM role Mjolnir assumes for each session of a profile that
     /// authenticates with the AWS credential chain (Bedrock), so the session
     /// gets short-lived credentials limited to that role instead of a copy
@@ -1855,6 +1888,7 @@ impl HarnessProfile {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             models: Default::default(),
             legacy_subagents: None,
@@ -1905,6 +1939,7 @@ impl HarnessProfile {
     pub fn approval_choices(&self) -> ApprovalChoices {
         ApprovalChoices {
             claude_permission_mode: self.claude_permission_mode.unwrap_or_default(),
+            mjolnir_guardian: self.mjolnir_guardian,
         }
     }
 
@@ -2010,10 +2045,8 @@ impl HarnessProfile {
             };
         }
         if self.kind == HarnessKind::Claude
-            && self
-                .environment
-                .get("CLAUDE_CODE_USE_BEDROCK")
-                .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+            && crate::credentials::claude_environment_auth(self.environment.resolved())
+                == Some(crate::credentials::ClaudeEnvironmentAuth::Bedrock)
         {
             return AuthScheme::AwsCredentialChain;
         }
@@ -2186,6 +2219,12 @@ impl HarnessProfile {
         }
         if self.claude_permission_mode.is_some() && self.kind != HarnessKind::Claude {
             bail!("profile {id:?}: `claude_permission_mode` applies only to a Claude profile");
+        }
+        if !self.mjolnir_guardian && self.kind.guardian() != GuardianReviewer::Mjolnir {
+            bail!(
+                "profile {id:?}: `mjolnir_guardian` applies only to a Kimi Code, OpenCode, or DSH profile; {} reviews approvals with its own guardian",
+                self.kind.display_name()
+            );
         }
         if !self.third_party_models && self.kind != HarnessKind::Antigravity {
             bail!("profile {id:?}: `third_party_models` applies only to an Antigravity profile");
@@ -2656,9 +2695,9 @@ impl HarnessProfile {
     ///
     /// Codex records the choice as `auth_mode` in `auth.json`: `"apikey"`
     /// after `codex login --with-api-key` and `"chatgpt"` after a ChatGPT
-    /// login. Anything but `"apikey"`, a missing file included, counts as a
-    /// ChatGPT login, because such a profile has no API key of its own: a key
-    /// could only reach it from somewhere else.
+    /// login. A missing file leaves the target free to supply credentials.
+    /// An unreadable or unrecognized file still protects a possible ChatGPT
+    /// login from inherited API credentials.
     pub fn codex_login(&self) -> Option<CodexLogin> {
         if self.kind != HarnessKind::Codex
             || self
@@ -2669,9 +2708,13 @@ impl HarnessProfile {
         {
             return None;
         }
-        let auth_mode = std::fs::read(harness_authentication_marker(self.kind, &self.home))
+        let bytes = match std::fs::read(harness_authentication_marker(self.kind, &self.home)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(_) => return Some(CodexLogin::ChatGpt),
+        };
+        let auth_mode = serde_json::from_slice::<serde_json::Value>(&bytes)
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .and_then(|login| login.get("auth_mode")?.as_str().map(str::to_owned));
         Some(match auth_mode.as_deref() {
             Some("apikey") => CodexLogin::ApiKey,

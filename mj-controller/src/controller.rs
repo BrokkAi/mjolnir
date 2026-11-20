@@ -70,8 +70,8 @@ use mj_core::config::{
     data_dir, is_bare_project_target, mount_history_host,
 };
 
-use crate::import::github_repository_from_origin;
 use crate::import::{RepositoryIdentity, setup_style_id};
+use mj_core::remote_git::{Shorthand, display_url, project_source};
 
 const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
 
@@ -282,9 +282,16 @@ pub fn create_quick_bundle_in_config(config: &mut Config, source: &str) -> Resul
 pub fn create_bundle_from_sources(
     sources: &[String],
 ) -> std::result::Result<QuickBundleCreation, QuickBundleFailure> {
+    persist_project_sources(sources, false)
+}
+
+pub fn persist_project_sources(
+    sources: &[String],
+    discovered: bool,
+) -> std::result::Result<QuickBundleCreation, QuickBundleFailure> {
     let (config, bundle_id) = Config::update(|config| {
         let previous = config.bundles.clone();
-        let id = create_bundle_from_sources_in_config(config, sources)
+        let id = add_project_sources(config, sources, discovered)
             .map_err(|error| anyhow::Error::new(QuickBundleFailure::InvalidSource(error)))?;
         if let Some(old) = previous.get(&id)
             && config.bundles.get(&id) != Some(old)
@@ -314,7 +321,20 @@ pub fn create_bundle_from_sources(
                 .find(|entry| entry.bundle_id == canonical)
                 .context("canonical project is missing")?
                 .project;
-            for repository in &mut saved.bundle.repositories {
+            let configured = config.bundles.get(&canonical);
+            let preserve_saved = discovered && configured.is_some();
+            if let Some(configured) = configured {
+                check_bundle_ssh_logins(&canonical, configured, &project.bundle)?;
+                if discovered {
+                    saved.bundle = configured.clone();
+                }
+            }
+            for repository in saved
+                .bundle
+                .repositories
+                .iter_mut()
+                .filter(|_| !preserve_saved)
+            {
                 let identity = saved
                     .identities
                     .get(&repository.id)
@@ -332,7 +352,9 @@ pub fn create_bundle_from_sources(
                 .insert(canonical.clone(), saved.bundle.clone());
             config.bundles.remove(&id);
             config.images.consolidate_bundle(&id, &canonical);
-            crate::database::store_catalog_project(&canonical, &saved, true)?;
+            if !preserve_saved {
+                crate::database::store_catalog_project(&canonical, &saved, true)?;
+            }
         }
         Ok(canonical)
     })
@@ -373,9 +395,23 @@ pub fn create_bundle_from_sources_in_config(
     config: &mut Config,
     sources: &[String],
 ) -> Result<String> {
+    add_project_sources(config, sources, false)
+}
+
+fn add_project_sources(
+    config: &mut Config,
+    sources: &[String],
+    discovered: bool,
+) -> Result<String> {
     let sources = sources
         .iter()
-        .map(|source| interpret_repository_source(source))
+        .map(|source| {
+            if discovered {
+                interpret_network_source(source, Shorthand::Rejected)
+            } else {
+                interpret_repository_source(source)
+            }
+        })
         .collect::<Result<Vec<_>>>()?;
     if sources.is_empty() {
         bail!("at least one repository source is required");
@@ -389,6 +425,9 @@ pub fn create_bundle_from_sources_in_config(
     }
 
     if let Some(existing) = exact_configured_bundle(config, &sources)? {
+        if discovered {
+            return Ok(existing);
+        }
         let bundle = config
             .bundles
             .get_mut(&existing)
@@ -444,7 +483,7 @@ pub fn create_bundle_from_sources_in_config(
 
 #[derive(Debug, Clone)]
 enum RepositorySourceKind {
-    Github(crate::import::GithubRepository),
+    Network(String),
     Local(PathBuf),
 }
 
@@ -463,10 +502,7 @@ impl InterpretedRepositorySource {
 
     fn into_project_repository(self, id: String) -> ProjectRepository {
         let (github, local) = match self.kind {
-            RepositorySourceKind::Github(repository) => (
-                Some(format!("{}/{}", repository.owner, repository.repository)),
-                None,
-            ),
+            RepositorySourceKind::Network(source) => (Some(source), None),
             RepositorySourceKind::Local(root) => (None, Some(root)),
         };
         ProjectRepository {
@@ -475,6 +511,7 @@ impl InterpretedRepositorySource {
             local,
             destination: PathBuf::from(id),
             git_ref: None,
+            mbx_namespace: None,
         }
     }
 }
@@ -507,18 +544,73 @@ fn interpret_repository_source(source: &str) -> Result<InterpretedRepositorySour
     if candidate.is_absolute() || source.starts_with('.') || source.starts_with('~') {
         bail!("local repository path {source:?} does not exist");
     }
-    let repository = github_repository_from_origin(source).context(format!(
-        "{source:?} is not a GitHub owner/repository or URL"
-    ))?;
+    interpret_network_source(source, Shorthand::Allowed)
+}
+
+fn interpret_network_source(
+    source: &str,
+    shorthand: Shorthand,
+) -> Result<InterpretedRepositorySource> {
+    let source = project_source(source, shorthand)
+        .context("use a Git URL, GitHub owner/repository, or an existing local repository")?;
+    if matches!(source, std::borrow::Cow::Owned(_)) {
+        tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
+    }
+    let identity = RepositoryIdentity::from_remote_with(&source, shorthand)
+        .context("Git source has no repository identity")?;
     Ok(InterpretedRepositorySource {
-        display_name: source.to_owned(),
-        name: repository.repository.clone(),
-        identity: RepositoryIdentity::Github(
-            repository.owner.to_ascii_lowercase(),
-            repository.repository.to_ascii_lowercase(),
-        ),
-        kind: RepositorySourceKind::Github(repository),
+        display_name: display_url(&source),
+        name: mj_core::remote_git::project_source_name(&source).unwrap_or_else(|| identity.name()),
+        identity,
+        kind: RepositorySourceKind::Network(source.into_owned()),
     })
+}
+
+fn check_bundle_ssh_logins(
+    id: &str,
+    saved: &ProjectBundle,
+    requested: &ProjectBundle,
+) -> Result<()> {
+    for source in &requested.repositories {
+        let Some(url) = source.github.as_deref() else {
+            continue;
+        };
+        if let Some(existing) = saved
+            .repositories
+            .iter()
+            .find(|repo| repo.destination == source.destination)
+        {
+            check_ssh_login(id, existing, url)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_ssh_login(id: &str, saved: &ProjectRepository, requested: &str) -> Result<()> {
+    if !matches!(
+        RepositoryIdentity::from_remote(requested),
+        Some(RepositoryIdentity::Network(_))
+    ) {
+        return Ok(());
+    }
+    let Some(requested_login) = mj_core::remote_git::ssh_login(requested) else {
+        return Ok(());
+    };
+    let source = mj_core::remote_git::resolve_repository(saved, &targets::ProcessExecutor)?;
+    let saved_login = mj_core::remote_git::ssh_login(&source.fetch_url);
+    if let Some(login) = saved_login
+        && login != requested_login
+    {
+        let login = if login.is_empty() {
+            "from SSH configuration".to_owned()
+        } else {
+            format!("{login:?}")
+        };
+        return Err(mj_core::refusal::Refusal::unusable(format!(
+            "Project {id:?} uses a different SSH login ({login}). Select project {id:?} to use that login, or configure a project with a different checkout folder for the other login."
+        )).into());
+    }
+    Ok(())
 }
 
 fn exact_configured_bundle(
@@ -570,6 +662,13 @@ fn exact_configured_bundle(
             continue;
         };
         if layout == requested_layout && identities.get(primary_index) == Some(&primary) {
+            for (repo, identity) in bundle.repositories.iter().zip(&identities) {
+                if let Some(source) = requested.iter().find(|source| &source.identity == identity)
+                    && let RepositorySourceKind::Network(url) = &source.kind
+                {
+                    check_ssh_login(id, repo, url)?;
+                }
+            }
             return Ok(Some(id.clone()));
         }
     }
@@ -1467,15 +1566,11 @@ impl Controller {
         Ok(true)
     }
 
-    /// Record the per-session container size overrides and attached
-    /// directories. Nothing is applied to a running container: the values are
-    /// read the next time the session's container is created.
-    pub fn update_session_container_settings(
-        &mut self,
+    fn validate_session_container_settings(
+        &self,
         session_id: &str,
-        resource_allocation: Option<SessionResourceAllocation>,
-        additional_mounts: Vec<targets::AdditionalMount>,
-        mount_history: Vec<std::path::PathBuf>,
+        resource_allocation: Option<&SessionResourceAllocation>,
+        additional_mounts: &[targets::AdditionalMount],
         executor: &impl CommandExecutor,
     ) -> Result<()> {
         let session = self
@@ -1489,7 +1584,7 @@ impl Controller {
         // this host for a local runtime, over the machine's connection for an
         // SSH one. A directory already attached was checked when it was
         // added, and a size change must not fail because it has since gone.
-        for mount in &additional_mounts {
+        for mount in additional_mounts {
             if session
                 .additional_mounts
                 .iter()
@@ -1504,12 +1599,36 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .context("session target template is missing")?;
-        backend::validate_resource_allocation(template, resource_allocation.as_ref())?;
-        if resource_allocation != session.resource_allocation
-            && let Some(allocation) = &resource_allocation
+        backend::validate_resource_allocation(template, resource_allocation)?;
+        if resource_allocation != session.resource_allocation.as_ref()
+            && let Some(allocation) = resource_allocation
         {
             allocation.validate_minimum_useful_container()?;
         }
+        targets::validate_additional_mounts(additional_mounts)
+    }
+
+    /// Record the per-session container size overrides and attached
+    /// directories. Nothing is applied to a running container: the values are
+    /// read the next time the session's container is created.
+    pub fn update_session_container_settings(
+        &mut self,
+        session_id: &str,
+        resource_allocation: Option<SessionResourceAllocation>,
+        additional_mounts: Vec<targets::AdditionalMount>,
+        mount_history: Option<Vec<std::path::PathBuf>>,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        self.validate_session_container_settings(
+            session_id,
+            resource_allocation.as_ref(),
+            &additional_mounts,
+            executor,
+        )?;
+        // The host checks above can be abandoned during handoff. Only the
+        // deferred save takes admission, once it is ready to write.
+        let _admission =
+            crate::upgrade::activity_unless_draining("save deferred container settings")?;
         let updated_at = now();
         crate::database::set_session_container_settings(
             session_id,
@@ -1530,9 +1649,11 @@ impl Controller {
             let host = host.to_owned();
             // The dialog owns the suggestion list, so forgetting a directory
             // there has to survive the mounts being remembered right after.
-            crate::database::replace_mount_history(&host, &mount_history)?;
+            if let Some(history) = mount_history {
+                crate::database::replace_mount_history(&host, &history)?;
+                self.state.mount_history.insert(host.clone(), history);
+            }
             crate::database::remember_mount_sources(&host, &additional_mounts)?;
-            self.state.mount_history.insert(host.clone(), mount_history);
             self.state.remember_mount_sources(&host, &additional_mounts);
         }
         let record = self

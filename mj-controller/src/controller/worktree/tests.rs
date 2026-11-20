@@ -1394,6 +1394,7 @@ fn a_multi_repository_project_cannot_become_a_checkout() {
         local: Some(PathBuf::from("/home/dev/tools")),
         destination: PathBuf::from("tools"),
         git_ref: None,
+        mbx_namespace: None,
     });
     config.bundles.insert("project".into(), bundle);
 
@@ -2029,6 +2030,7 @@ fn raw_to_workspace_keeps_the_accepted_bundle_and_adds_its_source() {
             local: Some(checkout.path().canonicalize().unwrap()),
             destination: PathBuf::from("accepted/layout"),
             git_ref: None,
+            mbx_namespace: None,
         }],
     };
     let project = crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap();
@@ -2077,6 +2079,7 @@ fn raw_to_workspace_uses_the_configured_github_source() {
             local: None,
             destination: PathBuf::from("accepted/layout"),
             git_ref: None,
+            mbx_namespace: None,
         }],
     };
     let project = crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap();

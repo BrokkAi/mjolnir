@@ -221,6 +221,87 @@ pub fn default_branch(
 /// is expected. They would make a target checkout depend on the controller's
 /// filesystem or execute an unbounded helper, so they are rejected here.
 pub fn validate_network_url(url: &str) -> Result<()> {
+    network_url(url, false).map(drop)
+}
+
+/// Parse a project source and remove HTTP userinfo before it can be saved.
+/// Return the accepted spelling verbatim except for its HTTP credentials.
+pub fn project_source(source: &str, shorthand: Shorthand) -> Result<std::borrow::Cow<'_, str>> {
+    let source = source.trim();
+    if parse_github_remote(source, shorthand)
+        .is_some_and(|remote| remote.spelling == GithubSpelling::Shorthand)
+    {
+        return Ok(source.into());
+    }
+    network_url(source, true)
+}
+
+/// Keep loading all sources accepted by the previous config validator.
+pub(crate) fn validate_configured_project_source(source: &str) -> Result<()> {
+    match project_source(source, Shorthand::Allowed) {
+        Ok(_) => Ok(()),
+        Err(_) if was_configured_github_source(source) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+// Validation at checkout still rejects unusable sources.
+fn was_configured_github_source(source: &str) -> bool {
+    let source = source.trim();
+    if source.is_empty() || source.starts_with('-') || source.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if parse_github_remote(source, Shorthand::Allowed).is_some() {
+        return true;
+    }
+    let repository_path = source
+        .strip_prefix("https://github.com/")
+        .or_else(|| source.strip_prefix("git@github.com:"))
+        .or_else(|| source.strip_prefix("ssh://git@github.com/"))
+        .unwrap_or(source);
+    let mut parts = repository_path.trim_end_matches(".git").split('/');
+    matches!((parts.next(), parts.next(), parts.next()), (Some(owner), Some(repository), None) if !owner.is_empty() && !repository.is_empty())
+}
+
+/// The SSH login in an accepted Git URL. An empty login uses SSH configuration.
+pub fn ssh_login(source: &str) -> Option<String> {
+    if source.contains("://") {
+        let url = Url::parse(source).ok()?;
+        return (url.scheme() == "ssh").then(|| url.username().to_owned());
+    }
+    let (authority, _) = source.split_once(':')?;
+    Some(
+        authority
+            .rsplit_once('@')
+            .map_or("", |(user, _)| user)
+            .to_owned(),
+    )
+}
+
+/// Label derived from the repository path, independent of HTTP query data.
+pub fn project_source_name(source: &str) -> Option<String> {
+    let remote = parse_github_remote(source, Shorthand::Allowed);
+    if let Some(remote) = remote {
+        return Some(remote.repository);
+    }
+    let parsed = if source.contains("://") {
+        Url::parse(source).ok()
+    } else {
+        None
+    };
+    let path = parsed.as_ref().map_or(source, Url::path);
+    path.trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit(['/', ':'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+pub const HTTP_USERINFO_REMOVED: &str =
+    "Removed credentials from the HTTP Git URL. Configure Git credentials on the target.";
+
+fn network_url(url: &str, strip_http_userinfo: bool) -> Result<std::borrow::Cow<'_, str>> {
     let value = url.trim();
     if value.is_empty() {
         bail!("Git URL is empty");
@@ -268,7 +349,21 @@ pub fn validate_network_url(url: &str) -> Result<()> {
                 display_url(value)
             );
         }
-        return Ok(());
+        if strip_http_userinfo && matches!(scheme, "http" | "https") {
+            // Keep the path, query, fragment and escape spelling exactly as
+            // entered. The parsed URL establishes its transport and host.
+            let (_, endpoint) = value.split_once("://").expect("validated URL scheme");
+            let authority = endpoint.trim_start_matches(['/', '\\']);
+            let start = value.len() - authority.len();
+            let authority = authority
+                .split(['/', '?', '#', '\\'])
+                .next()
+                .unwrap_or_default();
+            if let Some(at) = authority.rfind('@') {
+                return Ok(format!("{}{}", &value[..start], &value[start + at + 1..]).into());
+            }
+        }
+        return Ok(value.into());
     }
 
     // The remaining network spelling Git accepts is scp-like SSH, for
@@ -303,7 +398,48 @@ pub fn validate_network_url(url: &str) -> Result<()> {
             display_url(value)
         );
     }
-    Ok(())
+    Ok(value.into())
+}
+
+/// Whether a Git source names the host's filesystem or loopback network.
+/// Bundle validation rejects local paths and file URLs before checkout.
+pub fn is_host_only_git_source(source: &str) -> bool {
+    let source = source.trim();
+    if crate::path_completion::looks_like_path(source) {
+        return true;
+    }
+    if source.contains("://")
+        || source
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:"))
+    {
+        return Url::parse(source).is_ok_and(|url| {
+            url.scheme() == "file" || url.host_str().is_some_and(is_loopback_git_host)
+        });
+    }
+    let Some((authority, _)) = source.split_once(':') else {
+        return true; // Git interprets a bare name as a relative filesystem path.
+    };
+    if authority.contains(['/', '\\']) {
+        return true;
+    }
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    if host.starts_with('[') {
+        // Git recognizes the colon after a bracketed IPv6 host as the path separator.
+        let endpoint = &source[authority.len() - host.len()..];
+        return endpoint
+            .split_once("]:")
+            .is_some_and(|(host, _)| is_loopback_git_host(host));
+    }
+    is_loopback_git_host(host)
+}
+
+fn is_loopback_git_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 /// Return a URL suitable for diagnostics or persistence in user-visible state.
@@ -335,7 +471,7 @@ pub fn display_url(url: &str) -> String {
     url.to_owned()
 }
 
-fn expand_github_source(source: &str) -> Result<String> {
+pub fn expand_github_source(source: &str) -> Result<String> {
     let source = source.trim();
     let shorthand = !source.contains("://")
         && !source.contains('@')
@@ -692,6 +828,7 @@ mod tests {
             local: None,
             destination: "repo".into(),
             git_ref: None,
+            mbx_namespace: None,
         };
         let source = resolve_repository(&repository, &crate::targets::ProcessExecutor).unwrap();
         assert_eq!(source.fetch_url, "https://github.com/BrokkAi/hel.git");
@@ -911,8 +1048,31 @@ mod tests {
             "ssh://git@example.com/repo.git",
             "git://example.com/repo.git",
             "git@example.com:org/repo.git",
+            "git@example.com:path@[::1]:repo.git",
         ] {
             assert!(validate_network_url(url).is_ok(), "rejected {url}");
+            assert!(
+                !is_host_only_git_source(url),
+                "classified {url} as host-only"
+            );
+        }
+        for url in [
+            "git://127.192.1.9/repo.git",
+            "ssh://git@[::1]/repo.git",
+            "git@LOCALHOST:repo.git",
+        ] {
+            assert!(validate_network_url(url).is_ok(), "rejected {url}");
+            assert!(
+                is_host_only_git_source(url),
+                "missed host-only source {url}"
+            );
+        }
+        for url in ["file:///tmp/repo", "relative/repo", r"C:\git\repo"] {
+            assert!(validate_network_url(url).is_err(), "accepted {url}");
+            assert!(
+                is_host_only_git_source(url),
+                "missed host-only source {url}"
+            );
         }
     }
 

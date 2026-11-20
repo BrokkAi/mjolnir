@@ -119,3 +119,66 @@ specification. Go test names are the Rust names in PascalCase with a
 - Run `gofmt -w` on your files.
 - Commit your files in your worktree when done (one commit; message
   "go port: <modules>") and report the commit.
+
+## Decisions for the bodies phase (2026-11-20)
+
+The declarations are merged and compile (commit 823be3abb). About 970
+function bodies are `panic("unported: ...")`. These rules settle what the
+declaration agents left open.
+
+- Libraries: zstd `github.com/klauspost/compress/zstd`; Windows APIs
+  `golang.org/x/sys/windows`; YAML `go.yaml.in/yaml/v3`; JSONC
+  `github.com/tailscale/hujson`; HuggingFace tokenizer JSON
+  `github.com/sugarme/tokenizer` (only the `github-history` code uses it).
+  Unified diffs (Rust `similar`): use an established Go diff library only if
+  its output matches the Rust tests byte for byte; otherwise write the Myers
+  diff in the module, which is small.
+- toml_edit (format-preserving edits in config/document.rs): parse with
+  `github.com/pelletier/go-toml/v2/unstable` and splice the edits into the
+  original text by byte range, so comments and layout survive as they do
+  in Rust. Plain TOML decoding and encoding: `github.com/BurntSushi/toml`
+  or go-toml/v2, whichever reproduces the Rust output; the config group
+  decides and uses one.
+- Thread-local state in Rust (the config secret resolver and the
+  sources-only flag) becomes an explicit value passed through decoding, not
+  a process-wide variable.
+- Keep each group's declared conventions (sealed interface or kind struct,
+  decoder names). Do not rename another group's API. Shared helpers that
+  exist in several copies stay as they are until the final cleanup.
+- JSON: nil Go slices and maps must serialize as Rust does (`[]`/`{}` for a
+  present empty Vec/map, absent or `null` exactly as serde writes it), and
+  required fields must be required, exactly as serde decodes.
+- Fields holding a sealed interface must decode through the owner's
+  decoder; plain encoding/json cannot fill an interface.
+
+## Crates above mj-core
+
+Every other crate follows the same rules with these changes.
+
+- Package: one Go package per crate, `go/internal/<crate without mj->`
+  with dashes removed (`mj-transcript` -> `go/internal/transcript`, package
+  `transcript`; `mj-build-id` -> `go/internal/buildid`; `mj-worker` ->
+  `go/internal/worker`). A crate's internal modules all go in its package,
+  files named as in mj-core (`archive_git_operation.go`). Binaries
+  (`mj-worker-bin`, `mj-cli`'s `main`) go under `go/cmd/`.
+- Imports: a crate's dependencies are the Go packages of its Cargo
+  dependencies (`github.com/BrokkAi/mjolnir/go/internal/core`, ...). Use the
+  existing exported API of those packages; if it lacks something the Rust
+  crate uses from the dependency, it is a porting gap there: add it to the
+  dependency's file that ports the Rust item, following the Rust source.
+- Name collisions only matter within a package; prefix with the module
+  name as for mj-core.
+- Files a crate `include_str!`s, and its `tests/golden` and `tests/fixtures`
+  files, are copied under the package's `testdata/` (or `data/` when not
+  test-only) and embedded or read from there.
+- Golden tests compare with the copied expected files, which must stay
+  identical to the Rust ones; `MJ_UPDATE_GOLDEN` never rewrites them from Go
+  output.
+- Tests that need a crate not yet ported (a Rust dev-dependency such as
+  mj-controller) are ported with `t.Skip("needs <crate> (not yet ported)")`
+  and listed in the result, so they are enabled when that crate lands.
+- mj-build-id: Go records the commit and its time itself
+  (`runtime/debug.ReadBuildInfo`, `vcs.revision`/`vcs.time`); release-only
+  values come from `-ldflags -X`. The worker build identity is computed by
+  `go/scripts/build.sh` from the Git tree of the Go worker's inputs and
+  passed with `-ldflags -X`.

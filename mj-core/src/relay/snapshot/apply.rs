@@ -2343,7 +2343,16 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             .get(id)
             .and_then(|d| d.command.prompt_blocks())
     {
-        if crate::continuation::GeneratedPrompt::is_subagent_assignment(id) {
+        use crate::continuation::GeneratedPrompt;
+        // The initial assignment can be queued before the worker records
+        // that it is managed. Establish its quota frontier on dispatch.
+        if snapshot.managed_subagent
+            && (GeneratedPrompt::is_subagent_assignment(id)
+                || GeneratedPrompt::of(id) == Some(GeneratedPrompt::QuotaRetry))
+        {
+            begin_delivered_message_turn(&mut snapshot.continuation, id);
+        }
+        if GeneratedPrompt::is_subagent_assignment(id) {
             snapshot.handback_checks.assignment_id = Some(id.clone());
             snapshot.handback_checks.context.get_or_insert_default();
         }

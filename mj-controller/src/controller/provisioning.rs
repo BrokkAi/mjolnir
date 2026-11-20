@@ -677,7 +677,20 @@ impl Controller {
         // later daemon keeps reconnecting to. A failed record that still
         // names its target is one Destroy knows how to clean up.
         let original = note_new_session_launch_failure(session_id, &error);
-        apply_failed_new_session_launch(&mut self.state, session_id, &original);
+        let recorded = if error.is::<super::readiness::WorkerStartupFailure>()
+            || error.is::<super::readiness::HarnessPreparationFailure>()
+            || error.is::<mj_core::relay::WorkerHarnessStartupFailure>()
+        {
+            launch_failure_text(
+                &self.config,
+                &session.last_profile,
+                &original,
+                "retry the launch",
+            )
+        } else {
+            original
+        };
+        apply_failed_new_session_launch(&mut self.state, session_id, &recorded);
         self.persist_session_transition_or_restore(
             session_id,
             &session,
@@ -685,7 +698,7 @@ impl Controller {
         )
         .map_err(|persist_error| {
             persist_error.context(format!(
-                "{original}; its target was left in place because the failure could not be recorded"
+                "{recorded}; its target was left in place because the failure could not be recorded"
             ))
         })?;
         let target_cleanup = match session.target.as_ref() {
@@ -719,7 +732,7 @@ impl Controller {
         let failure = apply_failed_new_session_rollback(
             &mut self.state,
             session_id,
-            &original,
+            &recorded,
             cleanup_error,
         );
         self.persist_session_state(session_id)?;
@@ -789,6 +802,13 @@ impl Controller {
                 .get(&session.last_profile)
                 .context("harness profile disappeared before provisioning")?
                 .ensure_ready(&session.last_profile)?;
+            // A recovered Move may already have sealed its handoff. Check
+            // the recorded source before running any destination preflight.
+            let move_bundle = if self.state.checkout(session_id)?.project_directory().is_none() {
+                self.move_destination_bundle(session_id, executor)?
+            } else {
+                None
+            };
             let mut runtime = mj_core::state::TargetRuntimeSettings::from(selected);
             if let Some(recorded) = &session.target_runtime {
                 runtime.tool_cache = recorded.tool_cache.clone();
@@ -821,9 +841,10 @@ impl Controller {
                 super::worker_binary::preflight_harness(template, profile, executor)?;
             }
             let _timing = LaunchPhaseTimer::new(session_id, "plan managed checkout");
-            self.plan_managed_raw_worktree(session_id, executor)
+            let managed_checkout = self.plan_managed_raw_worktree(session_id, executor)?;
+            Ok((managed_checkout, move_bundle))
         })();
-        let managed_checkout = match preparation {
+        let (managed_checkout, move_bundle) = match preparation {
             Ok(created) => created,
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
                 return Err(self.rollback_unless_interrupted(session_id, error, interrupted)?);
@@ -848,6 +869,7 @@ impl Controller {
                 session.resource_allocation.as_ref(),
                 ContainerOverrides::for_session(&session),
             )?;
+            let nitro_cache = nitro_build_cache(template, session.project_bundle(&self.config))?;
             let mut runtime_mounts = session.additional_mounts.clone();
             // The mounts this container runs with, not the ones the session
             // stores: a forced downgrade belongs to the host the container
@@ -856,25 +878,15 @@ impl Controller {
             for notice in enforce_overlay_capable_mounts(&target, &mut runtime_mounts, executor) {
                 executor.notify_notice(&notice);
             }
-            let build_cache_enabled = {
-                let mut machines = self.config.machines.clone();
-                let stored = mj_core::config::stored_target(
-                    &session.target_template_id,
-                    template,
-                    &mut machines,
-                );
-                machines
-                    .get(stored.machine())
-                    .and_then(|machine| machine.build_cache())
-                    .and_then(|cache| cache.enabled)
-                    != Some(false)
-            };
-            for notice in drop_nitro_host_directories(&target, &mut runtime_mounts, build_cache_enabled) {
+            for notice in drop_nitro_host_directories(&target, &mut runtime_mounts) {
                 executor.notify_notice(&notice);
+            }
+            if matches!(nitro_cache, NitroBuildCache::GuestLocal) {
+                executor.notify_notice("This Nitro sandbox keeps its mbx build cache inside the VM, so its first build starts cold. Set `build_cache.remote` on the host to share CI's cache (see Project environments).");
             }
             let mut bundle = if project_directory.is_some() {
                 None
-            } else if let Some(bundle) = self.move_destination_bundle(session_id)? {
+            } else if let Some(bundle) = move_bundle {
                 Some(bundle)
             } else if failure_disposition == ProvisioningFailureDisposition::Preserve {
                 Some(super::network_git::checkpoint_bundle(&session)?)
@@ -934,16 +946,28 @@ impl Controller {
             let prepared_cache = bundle
                 .as_mut()
                 .filter(|_| !moving_workspace)
-                .and_then(|bundle| {
+                .map(|bundle| {
+                    let exact = session.checkout.as_ref()
+                        .filter(|checkout| !checkout.no_later_history)
+                        .map(|checkout| {
+                            super::backend::session_checkout_destination(
+                                &session, &self.config, &checkout.repository_id,
+                            )
+                            .map(|destination| (destination.to_string_lossy(), checkout.commit.as_str()))
+                        })
+                        .transpose()?;
                     git_cache::prepare(
                         &target,
                         session_id,
                         bundle,
                         &mut runtime_mounts,
                         github_token,
+                        exact.as_ref().map(|(destination, commit)| (destination.as_ref(), *commit)),
                         executor,
                     )
-                });
+                })
+                .transpose()?
+                .flatten();
             // Mounts are fixed when the container is created, so the build
             // cache is decided here, before the provisioning plan is built.
             let build_cache = super::mbx::prepare(
@@ -974,7 +998,13 @@ impl Controller {
                             &runtime_mounts,
                             session.container_workspace.as_deref(),
                             &resource_name,
-                            session.no_github_credentials.then_some(github_token).flatten(),
+                            targets::ProvisionOptions {
+                                github_token: session.no_github_credentials.then_some(github_token).flatten(),
+                                nitro_mbx_remote: match &nitro_cache {
+                                    NitroBuildCache::Remote(remote) => Some(remote),
+                                    _ => None,
+                                },
+                            },
                         )
                     })
             };
@@ -1021,6 +1051,22 @@ impl Controller {
                 executor,
                 |_| None,
                 |outputs| {
+                    // The engine's run command is one step of the creation plan
+                    // (Git installation follows it); its warning names this VM.
+                    if matches!(nitro_cache, NitroBuildCache::Remote(_)) {
+                        let warning = format!(
+                            "warning: {resource_name} starts without the remote mbx cache: "
+                        );
+                        if let Some(reason) = outputs.iter().find_map(|output| {
+                            String::from_utf8_lossy(&output.stderr)
+                                .lines()
+                                .find_map(|line| line.strip_prefix(&warning).map(str::to_owned))
+                        }) {
+                            executor.notify_notice(&format!(
+                                "This Nitro sandbox started without the shared mbx build cache: {reason}. Builds use the cache inside the VM."
+                            ));
+                        }
+                    }
                     let locator = super::backend::locator_after_provision_named(
                         template,
                         &target,
@@ -1406,19 +1452,114 @@ fn apply_new_session_provisioning_result(
     }
 }
 
+/// Add credential guidance when the ACP startup response identified an auth
+/// failure. The original diagnostic is retained, including any log path.
+pub(super) fn launch_failure_text(
+    config: &mj_core::config::Config,
+    profile_id: &str,
+    detail: &str,
+    retry: &str,
+) -> String {
+    use mj_core::acp::PROMPT_AUTH_REQUIRED_MARKER;
+    use mj_core::config::AuthScheme;
+    use mj_core::credentials::{ClaudeEnvironmentAuth, claude_environment_auth};
+
+    let Some(profile) = config.profiles.get(profile_id) else {
+        return detail.to_owned();
+    };
+    // The worker puts the failure before the bridge's stderr tail.
+    let cause = detail.lines().next().unwrap_or(detail);
+    let typed = cause.contains(&format!(
+        "initialize ACP bridge ({PROMPT_AUTH_REQUIRED_MARKER}):"
+    )) || cause.contains(&format!(
+        "create ACP session ({PROMPT_AUTH_REQUIRED_MARKER}):"
+    ));
+    // Older workers flatten ACP responses without a code. Only the known
+    // signatures from the ACP error itself merit credential guidance.
+    let reported = [
+        "initialize ACP bridge: ",
+        "create ACP session: ",
+        "ACP protocol failed: ",
+    ]
+    .into_iter()
+    .find_map(|context| cause.split_once(context))
+    .is_some_and(|(_, cause)| {
+        mj_core::credentials::text_reports_auth_failure(cause)
+            || (profile.kind == mj_core::config::HarnessKind::Muse
+                && cause.starts_with("Muse Code is not logged in"))
+    });
+    if !typed && !reported {
+        return detail.to_owned();
+    }
+    let update_key = |env_key: &str| {
+        format!(
+            "Update {env_key} in Settings > Agent Profiles > {profile_id} > Environment variables"
+        )
+    };
+    let remedy = match profile.auth_scheme() {
+        AuthScheme::ApiKey { env_key } => update_key(&env_key),
+        AuthScheme::InlineApiKey => format!(
+            "Update the selected provider's experimental_bearer_token in {}",
+            mj_core::codex_provider::describe_config(
+                &profile.home,
+                profile.codex_profile.as_deref()
+            )
+        ),
+        AuthScheme::AwsCredentialChain => {
+            "Refresh the AWS credentials used by the profile".to_owned()
+        }
+        AuthScheme::NoAuthentication => return detail.to_owned(),
+        AuthScheme::NativeLogin | AuthScheme::NativeLoginStore => {
+            let claude_auth = (profile.kind == mj_core::config::HarnessKind::Claude)
+                .then(|| claude_environment_auth(profile.environment.resolved()))
+                .flatten();
+            let mut stored_login =
+                format!("For a stored login, run `mj login --profile {profile_id}`");
+            if profile.kind == mj_core::config::HarnessKind::Claude {
+                stored_login.push_str(&format!(
+                    ". For a stored setup token, run `mj login --profile {profile_id} --setup-token`"
+                ));
+            }
+            match claude_auth {
+                Some(ClaudeEnvironmentAuth::Token(env_key)) => format!(
+                    "If the launch uses {env_key}, refresh it in Settings > Agent Profiles > {profile_id} > Environment variables. {stored_login}. If the target selects a Claude cloud provider, refresh that provider's credentials"
+                ),
+                Some(ClaudeEnvironmentAuth::ExternalProvider) => {
+                    "Refresh the credentials for the configured Claude cloud provider".to_owned()
+                }
+                _ => match profile.kind {
+                    mj_core::config::HarnessKind::Claude => format!(
+                        "{stored_login}. For credentials supplied by the profile or target, update ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN where it is set, or refresh the selected Claude cloud provider's credentials"
+                    ),
+                    mj_core::config::HarnessKind::Codex => format!(
+                        "{stored_login}. If the profile or target supplies credentials, update OPENAI_API_KEY, CODEX_API_KEY or CODEX_ACCESS_TOKEN where it is set"
+                    ),
+                    mj_core::config::HarnessKind::Kimi => format!(
+                        "{stored_login}. If the profile or target supplies KIMI_API_KEY, update it where it is set"
+                    ),
+                    _ => format!("Run `mj login --profile {profile_id}`"),
+                },
+            }
+        }
+    };
+    format!(
+        "Authentication failed while starting profile {profile_id}. {remedy}. Then {retry}.\n{detail}"
+    )
+}
+
 /// Mark a new session's launch failed while it still names its target, so the
 /// record is true while the rollback removes that target.
-fn apply_failed_new_session_launch(state: &mut State, session_id: &str, original_error: &str) {
+fn apply_failed_new_session_launch(state: &mut State, session_id: &str, recorded_error: &str) {
     let record = state.sessions.get_mut(session_id).unwrap();
     record.state = SessionState::StartupCleanup;
     record.updated_at = now();
-    record.last_error = Some(format!("worker bootstrap failed: {original_error}"));
+    record.last_error = Some(format!("worker bootstrap failed: {recorded_error}"));
 }
 
 pub(super) fn apply_failed_new_session_rollback(
     state: &mut State,
     session_id: &str,
-    original_error: &str,
+    recorded_error: &str,
     cleanup_error: Option<String>,
 ) -> anyhow::Error {
     match cleanup_error {
@@ -1427,18 +1568,18 @@ pub(super) fn apply_failed_new_session_rollback(
             record.state = SessionState::Error;
             record.target = None;
             record.updated_at = now();
-            record.last_error = Some(format!("worker bootstrap failed: {original_error}"));
-            anyhow::anyhow!("{original_error}; partial target removed and failed session retained")
+            record.last_error = Some(format!("worker bootstrap failed: {recorded_error}"));
+            anyhow::anyhow!("{recorded_error}; partial target removed and failed session retained")
         }
         Some(cleanup_error) => {
-            let failure = format!(
-                "{original_error}; cleanup of the failed session target failed: {cleanup_error}"
-            );
+            let cleanup = format!("; cleanup of the failed session target failed: {cleanup_error}");
             let record = state.sessions.get_mut(session_id).unwrap();
             record.state = SessionState::StartupCleanup;
             record.updated_at = now();
-            record.last_error = Some(format!("worker bootstrap failed: {failure}"));
-            anyhow::anyhow!(failure)
+            record.last_error = Some(format!(
+                "worker bootstrap failed: {recorded_error}{cleanup}"
+            ));
+            anyhow::anyhow!("{recorded_error}{cleanup}")
         }
     }
 }
@@ -1491,9 +1632,16 @@ pub(super) fn execute_concurrent_lanes<A: Send, B: Send>(
 ) -> Result<(A, B)> {
     std::thread::scope(|scope| {
         let owner = crate::worker_lifecycle::capture();
-        let second = scope.spawn(move || match owner {
-            Some(owner) => owner.scope_blocking(second),
-            None => second(),
+        // The second lane runs on its own thread, which starts outside the
+        // runtime the first lane runs in; enter it so runtime-backed waits
+        // (mj_core::runtime::block_on, downloads) work in both lanes.
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        let second = scope.spawn(move || {
+            let _entered = runtime.as_ref().map(tokio::runtime::Handle::enter);
+            match owner {
+                Some(owner) => owner.scope_blocking(second),
+                None => second(),
+            }
         });
         let first = first();
         let second = second.join().unwrap_or_else(|panic| {
@@ -1765,19 +1913,45 @@ fn provisioned_locator_named(
     })
 }
 
-/// Drop what a Nitro sandbox cannot have and say so.
-///
-/// A sandbox is a virtual machine on the host: Firecracker has no virtio-fs,
-/// so a host directory cannot be attached, and the shared mbx build cache is a
-/// host directory. The session is created without them instead of refused,
-/// and the notice names each thing that is missing so the person is not left
-/// guessing why a build starts cold or an attachment is absent. The session's
-/// stored attachments stay as chosen; this is decided at every creation, like
-/// the overlay downgrade.
+pub(super) enum NitroBuildCache<'a> {
+    Disabled,
+    GuestLocal,
+    Remote(targets::NitroMbxRemote<'a>),
+}
+
+/// Resolve the guest's cache placement from the fused target and accepted bundle.
+pub(super) fn nitro_build_cache<'a>(
+    template: &'a TargetTemplate,
+    bundle: Option<&mj_core::config::ProjectBundle>,
+) -> Result<NitroBuildCache<'a>> {
+    let TargetTemplate::SshNitro { container, .. } = template else {
+        return Ok(NitroBuildCache::Disabled);
+    };
+    let Some(cache) = &container.build_cache else {
+        return Ok(NitroBuildCache::GuestLocal);
+    };
+    if cache.enabled == Some(false) {
+        return Ok(NitroBuildCache::Disabled);
+    }
+    let (Some(url), Some(bundle)) = (cache.remote.as_deref(), bundle) else {
+        return Ok(NitroBuildCache::GuestLocal);
+    };
+    let namespaces = bundle.mbx_namespaces()?;
+    if namespaces.is_empty() {
+        return Ok(NitroBuildCache::GuestLocal);
+    }
+    Ok(NitroBuildCache::Remote(targets::NitroMbxRemote {
+        url,
+        region: cache.remote_region.as_deref(),
+        budget: cache.max_total_size.as_deref(),
+        namespaces,
+    }))
+}
+
+/// Drop host directories from the runtime mounts for a Firecracker guest.
 pub(super) fn drop_nitro_host_directories(
     target: &targets::TargetTemplate,
     mounts: &mut Vec<targets::AdditionalMount>,
-    build_cache_enabled: bool,
 ) -> Vec<String> {
     if !matches!(target, targets::TargetTemplate::SshNitro { .. }) {
         return Vec::new();
@@ -1793,13 +1967,6 @@ pub(super) fn drop_nitro_host_directories(
             "Nitro sandboxes cannot attach host directories, so this session starts without \
              {attached}. Copy what it needs into the workspace, or use a Podman target."
         ));
-    }
-    if build_cache_enabled {
-        notices.push(
-            "Nitro sandboxes cannot share the host's mbx build cache, so builds in this session \
-             start cold."
-                .to_owned(),
-        );
     }
     notices
 }

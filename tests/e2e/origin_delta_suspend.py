@@ -234,7 +234,7 @@ while True:
         assert not checkout.exists(), str(checkout)
         with zipfile.ZipFile(stopped["checkpoint"]["archive_path"]) as archive:
             manifest = json.loads(archive.read("manifest.json"))
-            assert manifest["schema_version"] == 13, manifest
+            assert manifest["schema_version"] == 14, manifest
             repository, = manifest["repositories"]
             assert repository["origin_delta_pack_path"] in archive.namelist()
             assert "untracked_tar_path" not in repository

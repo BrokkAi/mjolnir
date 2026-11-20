@@ -16,6 +16,7 @@ function request(body: unknown = state) {
 test("EOT GLiDE sends bundled frozen questions and validates complete distributions", async t => {
   t.mock.method(globalThis, "fetch", async (url, options) => {
     assert.equal(url, "https://api.fastino.ai/v1/systemone");
+    assert.equal(new Headers(options?.headers).get("X-API-Key"), env.FASTINO_API_KEY);
     assert.deepEqual(JSON.parse(options!.body as string), { model: "fastino/GLiDE", state, questions, store: false });
     return Response.json({ answers });
   });
@@ -36,6 +37,29 @@ test("EOT provider backpressure preserves status and Retry-After", async t => {
   assert.equal(response.headers.get("Retry-After"), "17");
   assert.equal(await response.text(), "busy");
   assert.equal(mock.mock.callCount(), 1);
+});
+test("Fastino BYOK bypasses the proxy limit and contains its credential", async t => {
+  const key = "personal-fastino-key";
+  let admit = 0;
+  const denied = { ...env, TURN_RATE_LIMITER: { async limit() { admit++; return { success: false }; } } };
+  const outbound = t.mock.method(globalThis, "fetch", async (url, options) => {
+    assert.equal(url, "https://api.fastino.ai/v1/systemone");
+    assert.equal(options?.redirect, "error");
+    assert.equal(new Headers(options?.headers).get("X-API-Key"), key);
+    return new Response(key, { status: 429, headers: { "Retry-After": "17", "X-Fastino-Key": key } });
+  });
+  const withoutKey = await proxy.fetch(request(), denied);
+  assert.equal(withoutKey.status, 429);
+  assert.deepEqual(await withoutKey.json(), { error: "rate_limited" });
+  const ownRequest = request();
+  ownRequest.headers.set("X-Fastino-Key", key);
+  const withKey = await proxy.fetch(ownRequest, denied);
+  assert.equal(withKey.status, 429);
+  assert.equal(withKey.headers.get("Retry-After"), "17");
+  assert.equal(withKey.headers.get("X-Fastino-Key"), null);
+  assert.deepEqual(await withKey.json(), { error: "fastino_request_failed" });
+  assert.equal(admit, 1);
+  assert.equal(outbound.mock.callCount(), 1);
 });
 test("EOT applies admission and the GLiDE-derived body bound before provider work", async t => {
   const mock = t.mock.method(globalThis, "fetch", async () => Response.json({ answers }));

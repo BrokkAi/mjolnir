@@ -19,8 +19,14 @@ pub fn provision_plan(
         additional_mounts,
         container_workspace,
         &resource_name(session_id)?,
-        None,
+        ProvisionOptions::default(),
     )
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ProvisionOptions<'a> {
+    pub github_token: Option<&'a str>,
+    pub nitro_mbx_remote: Option<&'a NitroMbxRemote<'a>>,
 }
 
 pub fn provision_plan_named(
@@ -30,13 +36,27 @@ pub fn provision_plan_named(
     additional_mounts: &[AdditionalMount],
     container_workspace: Option<&Path>,
     name: &str,
-    github_token: Option<&str>,
+    options: ProvisionOptions<'_>,
 ) -> Result<CommandPlan> {
+    let github_token = options.github_token;
     ensure!(
         resource_name_belongs_to(name, session_id)?,
         "invalid target resource generation"
     );
     bundle.validate()?;
+    if template.container_engine().is_some()
+        && let Some(source) = bundle.repositories.iter().find_map(|repository| {
+            repository.url.as_deref().filter(|source| {
+                repository.reference.is_none()
+                    && mj_core::remote_git::is_host_only_git_source(source)
+            })
+        })
+    {
+        return Err(mj_core::refusal::Refusal::precondition(format!(
+            "Git source {} is host-only and needs a container host with the Git cache. Choose a target that can mount the cache or configure a reachable Git source.",
+            mj_core::remote_git::display_url(source)
+        )).into());
+    }
     let workspace = container_workspace_root(container_workspace);
     if !additional_mounts.is_empty()
         && !matches!(
@@ -63,7 +83,7 @@ pub fn provision_plan_named(
             additional_mounts,
             container_workspace,
             name,
-            github_token,
+            options,
         )?;
         plan.commands = plan
             .commands
@@ -81,7 +101,7 @@ pub fn provision_plan_named(
             additional_mounts,
             container_workspace,
             name,
-            github_token,
+            options,
         )?;
         plan.commands = plan
             .commands
@@ -196,6 +216,7 @@ pub fn provision_plan_named(
                 additional_mounts,
                 ssh,
                 &workspace,
+                options.nitro_mbx_remote,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::SshContainer {
@@ -297,8 +318,15 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
     if let TargetTemplate::SshNitro { ssh, container } = template {
         validate_ssh(ssh)?;
         validate_container_template(container)?;
-        let mut create =
-            nitro_container_run(container, &name, smoke_id, &[], ssh, CONTAINER_WORKSPACE)?;
+        let mut create = nitro_container_run(
+            container,
+            &name,
+            smoke_id,
+            &[],
+            ssh,
+            CONTAINER_WORKSPACE,
+            None,
+        )?;
         create.truncate(1);
         return Ok(CommandPlan {
             description: format!("smoke test Mjolnir setup target {smoke_id}"),

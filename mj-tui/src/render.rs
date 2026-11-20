@@ -36,7 +36,7 @@ use crate::dialogs::{
     render_rename_editor, render_repository_origin, render_session_cpu_report,
     render_target_actions, render_web_dialog,
 };
-use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
+use crate::ingest::{SessionDetail, SessionOperationDisplay};
 use crate::resume::render_resume_dialog;
 use crate::widgets::{Truncate, format_resource_bytes, truncate_to_cells};
 use crate::wizards::{render_new_wizard, render_resume_wizard};
@@ -45,6 +45,7 @@ use crate::{
     AttentionLevel, DashboardState, Focus, Mode, PaneSize, SessionOperationKind, SessionsRow,
     SupportPane,
 };
+use mj_client::runtime_feed::RuntimeHostCapacity;
 
 const SESSION_TABLE_CHROME_HEIGHT: u16 = 3;
 /// One fixed row at the top of Sessions for Create and Resume.

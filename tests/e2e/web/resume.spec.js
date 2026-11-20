@@ -101,7 +101,9 @@ async function mount(page, {
       return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'fixture stops after preparation request' }) });
     }
     if (pathname === '/api/actions') {
-      state.actions.push(route.request().postDataJSON());
+      const body = route.request().postDataJSON();
+      if (body.action === 'check-availability') return route.fulfill({ status: 202, body: '' });
+      state.actions.push(body);
       if (state.holdAction) await state.holdAction;
       if (state.rejectAction) {
         return route.fulfill({
@@ -243,6 +245,48 @@ test('Move loads a summary row before rendering destination controls', async ({ 
   await expect(page.locator('#move-next')).toHaveText('Prepare move');
 });
 
+// Hard-won: #1372: availability updates left hidden Move choices or substituted a profile.
+test('Move requires an explicit replacement for a newly missing profile or target', async ({ page }) => {
+  const state = await mount(page, {
+    sessions: [session('moving', {
+      capabilities: { resume: true, move_session: true },
+      compatible_resume_targets: ['local', 'remote'],
+    })],
+    profiles: [{ id: 'alpha' }, { id: 'beta' }, { id: 'gamma' }],
+  });
+  await page.evaluate(() => { location.hash = '#workspace/test/move/moving'; });
+  const profiles = page.locator('#move-profile-moving');
+  const targets = page.locator('#move-target-moving');
+  const prepare = page.locator('#move-next');
+  await profiles.locator('input[value="beta"]').check();
+  await targets.locator('input[value="remote"]').check();
+  const missing = { status: 'missing', reason: 'The last check failed.' };
+  const profile = id => state.snapshot.profiles.find(profile => profile.id === id);
+  profile('gamma').availability = missing;
+  await refresh(page, state);
+  await expect(profiles.locator('input[value="gamma"]')).toHaveCount(0);
+  await expect(profiles.locator('input[value="beta"]')).toBeChecked();
+  profile('beta').availability = missing;
+  await refresh(page, state);
+  await expect(profiles.locator('input[value="beta"]')).toHaveCount(0);
+  await expect(profiles.locator('input[value="alpha"]')).not.toBeChecked();
+  await expect(prepare).toBeDisabled();
+  await profiles.getByText('alpha', { exact: true }).click();
+  await expect(prepare).toBeEnabled();
+
+  state.snapshot.targets.find(target => target.id === 'remote').availability = missing;
+  await refresh(page, state);
+  await expect(targets.locator('input[value="remote"]')).toHaveCount(0);
+  await expect(targets.locator('input[value="local"]')).not.toBeChecked();
+  await expect(prepare).toBeDisabled();
+  await targets.getByRole('radio', { name: /^local/ }).click();
+  await expect(prepare).toBeEnabled();
+  await prepare.click();
+  await expect.poll(() => state.movePreflights?.[0]).toMatchObject({
+    profile_id: 'alpha', target_template_id: 'local',
+  });
+});
+
 test('Move preserves a legacy delegation policy and retains an oracle override', async ({ page }) => {
   const state = await mount(page, {
     sessions: [session('legacy', {
@@ -381,7 +425,11 @@ test('golden_viewer_resume', async ({ context }) => {
   failed.failed_launch_retry = true;
   failed.launch_error = 'Worker bootstrap failed.';
   failed.queued_prompts = [];
-  await refresh(selectedPage, selectedState);
+  // Hard-won: #1372: a cached Retry launch tried to validate hidden picker choices.
+  const unavailable = { status: 'missing', reason: 'The last check failed.' };
+  selectedState.snapshot.profiles.find(profile => profile.id === 'alpha').availability = unavailable;
+  selectedState.snapshot.targets.find(target => target.id === 'local').availability = unavailable;
+  for (let i = 0; i < 3; i++) await refresh(selectedPage, selectedState);
   await expect(selectedPage.getByRole('button', { name: 'Retry launch', exact: true })).toBeEnabled();
   await captureResumeState(output, selectedPage, 'failed first launch uses saved settings', selectedState);
   await selectedPage.getByRole('button', { name: 'Retry launch', exact: true }).click();

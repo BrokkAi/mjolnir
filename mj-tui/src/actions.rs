@@ -31,7 +31,6 @@ pub enum CommandId {
     NotificationIgnoreSession,
     NotificationPreviousMessage,
     NotificationNextMessage,
-    NotificationClearImportant,
     NotificationScrollUp,
     NotificationScrollDown,
     GoAfk,
@@ -722,18 +721,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: |dashboard| {
             notification_navigation_available(dashboard, CommandId::NotificationNextMessage)
         },
-    },
-    CommandSpec {
-        id: CommandId::NotificationClearImportant,
-        label: "Clear all !",
-        description: "Clear all ! in the Notifications pane.",
-        scope: Scope::Notifications,
-        pane_keys: &[KeyHint::alt(KeyCode::Char('c'), "Alt+c")],
-        action: None,
-        footer: footer_word!("all !"),
-        footer_group: FooterGroup::Pane,
-        footer_rank: 0,
-        available: notification_important_available,
     },
     CommandSpec {
         id: CommandId::NotificationScrollUp,
@@ -1833,18 +1820,6 @@ fn notification_clear_available(dashboard: &DashboardState) -> Availability {
         None => Availability::Hidden,
     }
 }
-fn notification_important_available(dashboard: &DashboardState) -> Availability {
-    if dashboard
-        .notification_entries()
-        .iter()
-        .any(|entry| entry.level == crate::AttentionLevel::Important && entry.target.is_some())
-    {
-        Availability::Ready
-    } else {
-        Availability::Hidden
-    }
-}
-
 fn scope_applies(scope: Scope, focus: Focus) -> bool {
     match scope {
         Scope::Global | Scope::Settings | Scope::Pane | Scope::Setup => true,
@@ -2185,7 +2160,6 @@ impl DashboardState {
             CommandId::NotificationIgnoreSession => {
                 self.notification_action(CommandId::NotificationIgnoreSession)
             }
-            CommandId::NotificationClearImportant => self.notification_clear_important(),
             CommandId::NotificationScrollUp => {
                 self.scroll_notification(-1);
                 DashboardAction::None
@@ -2804,6 +2778,7 @@ mod tests {
             action => panic!("entering move review should request preparation: {action:?}"),
         };
         let preparation = mj_core::state::MovePreparation {
+            container_upgrade: None,
             destination_checks: Default::default(),
             workspace: None,
             in_place: false,

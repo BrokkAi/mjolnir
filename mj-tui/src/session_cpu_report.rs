@@ -77,11 +77,11 @@ pub(crate) fn report_groups(dashboard: &DashboardState, metric: CpuMetric) -> Ve
             .values()
             .find(|detail| {
                 detail
-                    .target
+                    .reading
                     .target_ids
                     .contains(&session.target_template_id)
             })
-            .map(|detail| detail.target.host.clone())
+            .map(|detail| detail.reading.host.clone())
             .unwrap_or_else(|| {
                 crate::render::session_target_label(
                     &dashboard.state,

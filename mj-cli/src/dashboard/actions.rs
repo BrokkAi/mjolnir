@@ -425,12 +425,8 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             );
         }
-        DashboardAction::CheckAvailability { generation } => {
-            super::io::spawn_availability_check(
-                generation,
-                context.dashboard_io_tx.clone(),
-                context.critical_operations.clone(),
-            );
+        DashboardAction::CheckAvailability => {
+            super::io::spawn_availability_check(context.dashboard_io_tx.clone());
         }
         DashboardAction::ResolveContainerPath { session_id, source } => {
             let input_context = context.dashboard.path_input_context();
@@ -662,7 +658,7 @@ pub(crate) async fn apply_dashboard_action(
             Err(error) => context.dashboard.setup_login_finished(
                 generation,
                 &profile_id,
-                Err(format!("{error:#}")),
+                mj_tui::SetupLoginOutcome::Failed(format!("{error:#}")),
             ),
         },
         // One key refreshes both panes, so it runs both requests rather than
@@ -672,7 +668,7 @@ pub(crate) async fn apply_dashboard_action(
             context.checkpoint_archive_records.clear();
             context.controller_changed = true;
             context.request_quota_refresh();
-            context.request_capacity_refresh();
+            super::io::spawn_capacity_refresh_request(context.dashboard_io_tx.clone());
             context.dashboard.set_notice(QUOTA_REFRESH_NOTICE);
         }
         action @ (DashboardAction::LoadWebAccess

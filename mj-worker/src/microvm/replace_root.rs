@@ -428,6 +428,7 @@ mod tests {
             nano_cpus: 2_000_000_000,
             memory_bytes: 4 << 30,
             env: Vec::new(),
+            mbx_remote: None,
             user: "0:0".to_owned(),
             working_dir: "/workspace".to_owned(),
             entrypoint: Vec::new(),

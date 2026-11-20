@@ -860,7 +860,10 @@ mod tests {
         let mut permission = question.clone();
         permission.id = "tool-permission-1".into();
         permission.message = "May I run this command?".into();
-        permission.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+        permission.tool_permission = Some(mj_core::elicitation::ToolPermissionForm {
+            skip: true,
+            tool_call_id: None,
+        });
         let mut secret = question.clone();
         secret.message = "Paste the token".into();
         secret.fields[0].secret = true;

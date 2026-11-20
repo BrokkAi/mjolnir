@@ -79,7 +79,10 @@ fn probed_runtimes_are_added_once_and_only_to_the_machine_that_was_probed() {
 
     let added = add_machine_runtimes(&path, &probes, &|| false).unwrap();
     assert_eq!(
-        added,
+        added
+            .into_iter()
+            .map(|(machine, runtimes)| (machine, runtimes.into_keys().collect()))
+            .collect::<BTreeMap<_, Vec<_>>>(),
         BTreeMap::from([
             (
                 "builder".to_owned(),

@@ -1,5 +1,21 @@
 use super::*;
 
+/// How an interactive sign-in ended. A cancel is the user's choice, not a failure.
+pub enum SetupLoginOutcome {
+    Signed,
+    Cancelled,
+    Failed(String),
+}
+
+impl From<Result<(), String>> for SetupLoginOutcome {
+    fn from(result: Result<(), String>) -> Self {
+        match result {
+            Ok(()) => Self::Signed,
+            Err(error) => Self::Failed(error),
+        }
+    }
+}
+
 impl DashboardState {
     pub fn build_cache_previewed(
         &mut self,
@@ -246,14 +262,17 @@ impl DashboardState {
         &mut self,
         generation: u64,
         profile_id: &str,
-        result: Result<(), String>,
+        result: SetupLoginOutcome,
     ) {
         self.profile_login_refresh = true;
         let message = match result {
-            Ok(()) => format!(
+            SetupLoginOutcome::Signed => format!(
                 "Signed in to {profile_id}. New and resumed sessions use the updated login."
             ),
-            Err(error) => format!("Sign-in failed for {profile_id}: {error}"),
+            SetupLoginOutcome::Cancelled => format!("Sign-in to {profile_id} was cancelled."),
+            SetupLoginOutcome::Failed(error) => {
+                format!("Sign-in failed for {profile_id}: {error}")
+            }
         };
         let current =
             setup_dialog_mut(&mut self.mode).is_some_and(|dialog| dialog.generation == generation);

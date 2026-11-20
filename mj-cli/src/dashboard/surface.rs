@@ -1,51 +1,5 @@
 use super::io::spawn_quota_refresh_request;
 use super::*;
-use mj_core::state::State;
-
-#[derive(Default)]
-pub(super) struct PollingRecords {
-    records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
-    active: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
-}
-
-impl PollingRecords {
-    fn controller(&mut self, source: &Controller) -> Controller {
-        for (id, record) in self.records.changes(&source.state.sessions) {
-            if let Some(record) = record.filter(|record| record.state.is_active()) {
-                self.active.insert(id.clone(), record.clone());
-            } else {
-                self.active.remove(id);
-            }
-        }
-        self.records = source.state.sessions.clone();
-        let mut sessions = self.active.clone();
-        let mut pending = self.active.keys().cloned().collect::<Vec<_>>();
-        let mut seen = BTreeSet::new();
-        while let Some(id) = pending.pop() {
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            if let Some(parent) = source
-                .state
-                .subagents
-                .get(&id)
-                .and_then(|relation| source.state.sessions.get(&relation.parent_session_id))
-            {
-                sessions.insert(parent.id.clone(), parent.clone());
-                pending.push(parent.id.clone());
-            }
-        }
-        Controller {
-            config: source.config.clone(),
-            state: State {
-                sessions,
-                subagents: source.state.subagents.clone(),
-                last_subagent_policies: source.state.last_subagent_policies.clone(),
-                ..source.state.clone()
-            },
-        }
-    }
-}
 
 /// Posts one desktop notification with the platform's own helper. Output is
 /// piped and discarded so a helper's stderr cannot reach the terminal that
@@ -477,17 +431,6 @@ impl DashboardContext {
                 changed_targets,
                 self.dashboard_io_tx.clone(),
             );
-        }
-        let capacity_targets = self
-            .polling_records
-            .borrow_mut()
-            .controller(&self.controller)
-            .deployment_capacity_targets();
-        if *self.capacity_targets_tx.borrow() != capacity_targets {
-            self.capacity_targets_tx
-                .send_replace(capacity_targets.clone());
-            self.dashboard
-                .set_deployment_capacity_targets(capacity_targets);
         }
     }
 

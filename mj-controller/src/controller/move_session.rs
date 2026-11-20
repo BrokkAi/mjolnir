@@ -1213,8 +1213,10 @@ impl Controller {
         ensure!(
             selection.profile_id.is_some()
                 || selection.target_template_id.is_some()
-                || selection.resource_allocation.is_some(),
-            "move requires a target, a profile, or a container size"
+                || selection.resource_allocation.is_some()
+                || selection.additional_mounts.is_some()
+                || selection.clear_resource_allocation,
+            "move requires a target, a profile, or container settings"
         );
         ensure!(
             previous
@@ -1411,7 +1413,24 @@ impl Controller {
             "attached resources are unsupported for this target; select compatible resources explicitly"
         );
         crate::targets::validate_additional_mounts(mounts)?;
-        let planned_conversion = if in_place {
+        let mut container_upgrade = None;
+        if !retry && target_id == source.target_template_id && !in_place {
+            let settings = mj_core::state::ContainerSettingsChange {
+                resource_allocation: move_requested_allocation(source, &selection).cloned(),
+                mounts: mounts.to_vec(),
+                mount_history: None,
+            };
+            if let Some(plan) = self
+                .plan_container_settings_replacement(&source.id, "preview", &settings, executor)?
+            {
+                ensure!(move_keeps_profile_and_policy(source, &selection), mj_core::refusal::Refusal::precondition(
+                    "Apply the container size and mounts first, then Move to change the profile or policy."
+                ).with_code("container-settings-with-profile-move"));
+                container_upgrade = Some(Box::new(plan.settings_preview(&source.id, settings)));
+            }
+        }
+        let keeps_workspace = in_place || container_upgrade.is_some();
+        let planned_conversion = if keeps_workspace {
             None
         } else {
             for mount in mounts {
@@ -1435,7 +1454,7 @@ impl Controller {
         )?;
         // A compatible in-place Move already has its worker, mounts and
         // runtime. Only reconstruction needs provisioning prerequisites.
-        if !in_place || cross_harness || retry {
+        if !keeps_workspace || cross_harness || retry {
             let worker_target = super::backend::session_target(
                 &self.config,
                 &source_record.bundle_id,
@@ -1493,12 +1512,13 @@ impl Controller {
         {
             bail!("{error}; close or finish those children before moving to this harness");
         }
-        let workspace = if in_place {
+        let workspace = if keeps_workspace {
             None
         } else {
             Some(self.assess_move_workspace(&selection, executor)?)
         };
         Ok(MovePreparation {
+            container_upgrade,
             destination_checks: DestinationChecks::Checked,
             workspace,
             source_unavailable: false,
@@ -1610,6 +1630,10 @@ impl Controller {
             }
             checked
         };
+        ensure!(
+            checked.container_upgrade.is_none(),
+            mj_core::refusal::Refusal::precondition("Prepare Move again and confirm the container settings replacement.")
+        );
         ensure!(
             checked.fingerprint == prepared.fingerprint,
             "session, pending work, or destination configuration changed; prepare and confirm Move again"
@@ -2725,9 +2749,12 @@ impl Controller {
             );
             relay
         };
-        if !operation.queue_admission_finished && operation.queue == ResumeQueueDisposition::Start {
-            let _starting_queue = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
-            executor.notify_notice("Starting queued work");
+        // The destination's restore left the archived source's pending mail
+        // for this point, after the ownership commit: until then a failed Move
+        // hands the session back to a source that still holds it.
+        let verified = if operation.queue_admission_finished {
+            None
+        } else {
             let checkpoint = operation
                 .restore_artifact()
                 .context("move queue archive is missing")?;
@@ -2736,6 +2763,13 @@ impl Controller {
                 verified.archive_sha256 == checkpoint.sha256 && verified.manifest.session.id == *id,
                 "move queue checkpoint verification failed"
             );
+            Some(verified)
+        };
+        if let Some(verified) = verified.as_ref()
+            && operation.queue == ResumeQueueDisposition::Start
+        {
+            let _starting_queue = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
+            executor.notify_notice("Starting queued work");
             relay
                 .update_command_retention(
                     Some(operation.operation_id.clone()),
@@ -2772,27 +2806,43 @@ impl Controller {
                     )
                     .await?;
             }
-            for queued in verified.canonical_session.queued_prompts {
-                if operation.queue_admission_finished {
-                    continue;
-                }
+            for queued in &verified.canonical_session.queued_prompts {
                 ensure!(
                     !executor.cancellation_requested(),
                     "move cancelled during queue admission; destination retained"
                 );
-                let command = match queued.kind {
+                let command = match &queued.kind {
                     CanonicalQueuedCommandKind::Prompt => RelayCommand::Prompt {
                         prompt: queued
                             .content
-                            .into_iter()
+                            .iter()
+                            .cloned()
                             .map(serde_json::from_value)
                             .collect::<serde_json::Result<_>>()?,
                     },
                     CanonicalQueuedCommandKind::SetConfig { key, value } => {
-                        RelayCommand::SetConfig { key, value }
+                        RelayCommand::SetConfig {
+                            key: key.clone(),
+                            value: value.clone(),
+                        }
                     }
                 };
-                relay.submit_accepted(queued.command_id, command).await?;
+                relay
+                    .submit_accepted(queued.command_id.clone(), command)
+                    .await?;
+            }
+        }
+        // Mail joins behind the admitted queue, whichever way the queue went:
+        // discarding queued prompts never discards messages sent to the session.
+        if let Some(verified) = &verified {
+            for (command_id, command) in
+                super::resume::deferred_mail_commands(&verified.canonical_session)
+            {
+                ensure!(
+                    !executor.cancellation_requested(),
+                    "move cancelled during queue admission; destination retained"
+                );
+                relay.submit_accepted(command_id, command).await?;
             }
         }
         operation.queue_admission_finished = true;
@@ -2844,6 +2894,60 @@ impl Controller {
         Ok(())
     }
 
+    /// A captured Move still clones the recorded origin before unpacking the
+    /// transfer. Check it while the source barrier can still be released.
+    fn validate_move_bundle_sources(
+        &self,
+        operation: &MoveOperation,
+        manifest: &mj_checkpoint::archive::ArchiveManifest,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        let target = operation
+            .selection
+            .target_template_id
+            .as_ref()
+            .and_then(|id| self.config.targets.get(id));
+        if !target.is_some_and(|target| target.container().is_some()) {
+            return Ok(());
+        }
+        let Some(origin) = manifest
+            .repositories
+            .iter()
+            .map(|repository| repository.metadata.origin.as_str())
+            .find(|origin| {
+                !origin.is_empty() && mj_core::remote_git::is_host_only_git_source(origin)
+            })
+        else {
+            return Ok(());
+        };
+        use mj_core::targets::storage::{LOCAL_STORAGE_HOST, session_storage_paths};
+        let host = operation.source_target.as_ref().map(|source| {
+            session_storage_paths(source, &operation.selection.session_id, None).host
+        });
+        let host = match host.as_deref() {
+            Some(host) if host != LOCAL_STORAGE_HOST => host.to_owned(),
+            Some(_) => {
+                // Read the name of the engine host, outside the source container.
+                let command =
+                    crate::targets::CommandSpec::new("hostname", std::iter::empty::<&str>())
+                        .purpose("identify the source container host");
+                executor
+                    .execute(&command)
+                    .ok()
+                    .filter(|output| output.status == 0)
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .map(|name| name.trim().to_owned())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "the local container host".into())
+            }
+            None => "the source host".into(),
+        };
+        Err(mj_core::refusal::Refusal::precondition(format!(
+            "Git source {} is reachable only from {host}, and Move clones from the source. Keep the existing environment on {host} for an in-place Move, or set the checkout's origin to a URL the destination can reach and retry.",
+            mj_core::remote_git::display_url(origin)
+        )).into())
+    }
+
     pub(super) fn validate_move_checkpoint(
         &self,
         operation: &MoveOperation,
@@ -2862,6 +2966,34 @@ impl Controller {
             "destination configuration changed during move"
         );
         let id = &operation.selection.session_id;
+        let bundle_move = !operation.in_place && operation.workspace_transfer.is_some();
+        if bundle_move || preparation.is_some() {
+            let checkpoint = operation
+                .restore_artifact()
+                .or(self.state.sessions[id].checkpoint.as_deref())
+                .context("no move checkpoint")?;
+            let verified = verify_archive_streaming(&checkpoint.archive_path)?;
+            if bundle_move {
+                current.validate_move_bundle_sources(operation, &verified.manifest, executor)?;
+            }
+            if let Some(prepared) = preparation {
+                let actual: Vec<_> = verified
+                    .canonical_session
+                    .queued_prompts
+                    .iter()
+                    .map(|p| p.command_id.as_str())
+                    .collect();
+                let expected: Vec<_> = prepared
+                    .queued_commands
+                    .iter()
+                    .map(|p| p.command_id.as_str())
+                    .collect();
+                ensure!(
+                    actual == expected,
+                    "pending queue changed before checkpoint capture; source retained, confirm Move again"
+                );
+            }
+        }
         current.validate_move_destination_paths(
             &self.state.sessions[id],
             operation.selection.target_template_id.as_deref().unwrap(),
@@ -2880,28 +3012,6 @@ impl Controller {
             bail!(
                 "destination repository source is missing checkpoint commit {}; source retained",
                 mismatch.missing_commit
-            );
-        }
-        if let Some(prepared) = preparation {
-            let checkpoint = operation
-                .restore_artifact()
-                .or(self.state.sessions[id].checkpoint.as_deref())
-                .context("no move checkpoint")?;
-            let verified = verify_archive_streaming(&checkpoint.archive_path)?;
-            let actual: Vec<_> = verified
-                .canonical_session
-                .queued_prompts
-                .iter()
-                .map(|p| p.command_id.as_str())
-                .collect();
-            let expected: Vec<_> = prepared
-                .queued_commands
-                .iter()
-                .map(|p| p.command_id.as_str())
-                .collect();
-            ensure!(
-                actual == expected,
-                "pending queue changed before checkpoint capture; source retained, confirm Move again"
             );
         }
         Ok(())
@@ -2948,8 +3058,15 @@ fn move_subagent_policy(
 /// the restart a Move performs.
 fn move_changes_nothing(source: &mj_core::state::SessionRecord, selection: &MoveSelection) -> bool {
     source.state == SessionState::Running
-        && selection.profile_id.as_deref() == Some(source.last_profile.as_str())
         && move_environment_change(source, selection, false).is_none()
+        && move_keeps_profile_and_policy(source, selection)
+}
+
+fn move_keeps_profile_and_policy(
+    source: &mj_core::state::SessionRecord,
+    selection: &MoveSelection,
+) -> bool {
+    selection.profile_id.as_deref() == Some(source.last_profile.as_str())
         && move_subagent_policy(source, selection) == source.subagents.clone().unwrap_or_default()
         && selection
             .oracle

@@ -47,11 +47,12 @@ pub(in crate::acp) struct Guardian {
 }
 
 impl Guardian {
-    /// The guardian for `spec`, when its harness relies on Mjolnir's and its
-    /// target keeps configured approvals.
+    /// The guardian for `spec`, when its harness relies on Mjolnir's, its
+    /// target keeps configured approvals, and its profile has not turned the
+    /// guardian off.
     pub(in crate::acp) fn for_launch(spec: &LaunchSpec) -> Option<Arc<Self>> {
-        (spec.execution_policy == ExecutionPolicy::ConfiguredApprovals
-            && spec.harness.guardian() == mj_core::config::GuardianReviewer::Mjolnir)
+        spec.harness
+            .mjolnir_guardian_reviews(spec.execution_policy, spec.approval_choices)
             .then(|| {
                 Arc::new(Self {
                     spec: spec.clone(),

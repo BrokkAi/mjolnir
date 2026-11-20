@@ -2,7 +2,7 @@
 //!
 //! A machine is only a host: sessions run on its runtimes, so a machine with
 //! none never appears as a session target. Saving a machine, starting the
-//! dashboard, Settings' Detect runtimes and `mj setup` all probe the machine
+//! dashboard, and Settings' Detect runtimes both probe the machine
 //! here and add what it runs. `mj doctor` probes a machine the same way to
 //! say why it still has no runtime.
 
@@ -583,7 +583,7 @@ pub fn add_machine_runtimes(
     config_path: &Path,
     probes: &[MachineProbe],
     cancelled: &dyn Fn() -> bool,
-) -> Result<BTreeMap<String, Vec<String>>> {
+) -> Result<BTreeMap<String, BTreeMap<String, TargetTemplate>>> {
     let additions = |config: &Config| {
         probes
             .iter()
@@ -603,14 +603,14 @@ pub fn add_machine_runtimes(
     if additions(&Config::load_from(config_path)?).is_empty() {
         return Ok(BTreeMap::new());
     }
-    let (_, added) = Config::update_to(config_path, |latest| {
+    let (_, added) = Config::update_to_cancellable(config_path, cancelled, |latest| {
         // Decide against the latest file under its lock, so a concurrent
         // Settings save or another client's probe is preserved and never
         // doubled.
         let mut added = BTreeMap::new();
         for (machine_id, runtimes) in additions(latest) {
-            added.insert(machine_id, runtimes.keys().cloned().collect());
-            latest.targets.extend(runtimes);
+            latest.targets.extend(runtimes.clone());
+            added.insert(machine_id, runtimes);
         }
         Ok(added)
     })?;

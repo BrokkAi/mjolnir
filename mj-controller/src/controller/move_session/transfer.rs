@@ -841,6 +841,7 @@ impl Controller {
     pub(in crate::controller) fn move_destination_bundle(
         &self,
         id: &str,
+        executor: &impl CommandExecutor,
     ) -> Result<Option<targets::ProjectBundleSpec>> {
         let Some(operation) = crate::database::load_move_operation(id)? else {
             return Ok(None);
@@ -853,6 +854,7 @@ impl Controller {
         }
         let handoff = operation.handoff.as_ref().context("Move handoff missing")?;
         let archive = super::super::resume::verify_resume_checkpoint(id, handoff)?;
+        self.validate_move_bundle_sources(&operation, &archive.manifest, executor)?;
         let (bundle, destinations) = self.move_destination_repositories(id, transfer)?;
         let primary = bundle
             .primary()

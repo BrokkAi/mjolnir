@@ -318,8 +318,7 @@ without reading `config.toml`. It never fails.
   container target is also `unavailable` when its engine is missing or does
   not answer, as `mj doctor` and the dashboard report it. An `unavailable`
   target may carry `unavailable_reason`, a sentence for a person.
-- `bundles[].repositories[].github` appears only for a repository with a
-  GitHub source.
+- `bundles[].repositories[].github` contains a saved Git URL or GitHub shorthand.
 - `hosts` has one entry per host that has reported capacity. It is omitted
   when empty.
 - `default` is the profile and target a create request uses when it names
@@ -350,10 +349,12 @@ POST /api/v1/sessions
 }
 ```
 
-`profile_id` and `target_id` may be omitted; each then follows the saved
-default that [`GET /api/v1/options`](#list-launch-options) reports. Supply `bundle_id`, or
-`project_directory`, or both: a directory with no bundle is bundled the way the
-viewer's own form does it.
+When omitted, `profile_id` and `target_id` follow the saved default from
+[`GET /api/v1/options`](#list-launch-options) or the sole eligible choice.
+A bare target needs `project_directory` on its own host. An isolated target
+needs a `bundle_id` or a `project_directory` on the controller host. With only
+a directory, an isolated launch finds or creates a bundle from the fetch URL
+of `origin` or the checkout's sole remote.
 
 Sessions started through this route do not change the saved default, the
 remembered sub-agent choice, or what a new-session form preselects next. Only
