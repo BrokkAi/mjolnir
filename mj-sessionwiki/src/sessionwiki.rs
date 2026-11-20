@@ -3272,6 +3272,7 @@ mod tests {
                     local: None,
                     destination: PathBuf::from("bifrost"),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
         );

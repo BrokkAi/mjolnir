@@ -35,6 +35,7 @@ fn registration_config() -> Config {
                 local: None,
                 destination: PathBuf::from("project"),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -690,6 +691,7 @@ fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
                     local: None,
                     destination: "app".into(),
                     git_ref: None,
+                    mbx_namespace: None,
                 },
                 ProjectRepository {
                     id: "shared".into(),
@@ -697,6 +699,7 @@ fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
                     local: None,
                     destination: "shared".into(),
                     git_ref: None,
+                    mbx_namespace: None,
                 },
             ],
         },
@@ -753,6 +756,7 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
                 local: Some(stale_local.path().to_owned()),
                 destination: "stale".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -766,6 +770,7 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
                 local: None,
                 destination: "existing".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );

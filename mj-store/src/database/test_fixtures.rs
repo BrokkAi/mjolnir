@@ -177,6 +177,7 @@ pub fn local_bundle(repository: &std::path::Path) -> mj_core::config::ProjectBun
             local: Some(repository.to_path_buf()),
             destination: std::path::PathBuf::from("project"),
             git_ref: None,
+            mbx_namespace: None,
         }],
     }
 }

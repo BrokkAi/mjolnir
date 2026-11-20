@@ -7563,6 +7563,7 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
                     local: None,
                     destination: "source".into(),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
             identities: BTreeMap::from([(

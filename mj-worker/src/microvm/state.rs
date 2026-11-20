@@ -57,6 +57,10 @@ impl Layout {
         self.root.join("vms")
     }
 
+    pub fn mbx_cache(&self) -> PathBuf {
+        self.root.join("mbx-cache")
+    }
+
     pub fn vm(&self, name: &str) -> PathBuf {
         self.vms().join(name)
     }
@@ -288,6 +292,17 @@ pub struct VmVolume {
     pub chown: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MbxRemote {
+    pub bucket: String,
+    pub prefix: String,
+    pub region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<u64>,
+    /// Non-empty. The first namespace is the guest client's default.
+    pub namespaces: Vec<String>,
+}
+
 /// Everything the engine remembers about a VM. Fields added in later formats
 /// carry `serde(default)` so older files still load.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -304,6 +319,8 @@ pub struct VmState {
     pub memory_bytes: u64,
     /// Environment of the container: the image's plus `--env`.
     pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mbx_remote: Option<MbxRemote>,
     pub user: String,
     pub working_dir: String,
     pub entrypoint: Vec<String>,
@@ -563,6 +580,7 @@ mod tests {
             nano_cpus: 2_000_000_000,
             memory_bytes: 4 << 30,
             env: vec!["A=1".to_owned()],
+            mbx_remote: None,
             user: "0:0".to_owned(),
             working_dir: "/workspace".to_owned(),
             entrypoint: Vec::new(),
@@ -585,7 +603,14 @@ mod tests {
         let layout = Layout::new(directory.path());
         layout.ensure().unwrap();
         fs::create_dir_all(layout.vm("t1")).unwrap();
-        let state = sample("t1");
+        let mut state = sample("t1");
+        state.mbx_remote = Some(MbxRemote {
+            bucket: "ci-builds".to_owned(),
+            prefix: "mbx".to_owned(),
+            region: None,
+            budget: Some(20 << 30),
+            namespaces: vec!["org/repo".to_owned()],
+        });
         state.write(&layout).unwrap();
         assert_eq!(VmState::read(&layout, "t1").unwrap(), Some(state.clone()));
         assert_eq!(VmState::read(&layout, "absent").unwrap(), None);
@@ -594,8 +619,12 @@ mod tests {
         let mut older = serde_json::to_value(&state).unwrap();
         older["format"] = serde_json::json!(1);
         older.as_object_mut().unwrap().remove("jailed");
+        older.as_object_mut().unwrap().remove("mbx_remote");
         let older = VmState::parse(&serde_json::to_vec(&older).unwrap()).unwrap();
-        assert_eq!((older.format, older.jailed), (1, false));
+        assert_eq!(
+            (older.format, older.jailed, older.mbx_remote),
+            (1, false, None)
+        );
 
         // A file from a future engine: unknown fields are not ours to drop.
         let mut newer = serde_json::to_value(&state).unwrap();

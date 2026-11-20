@@ -68,7 +68,21 @@ pub fn ensure_image(
         // this lock, so it cannot remove the image between the two.
         let lock = layout.lock_image(&id)?;
         if layout.image(&id).join("config.json").is_file() {
-            return Ok((id, lock));
+            let config = ImageConfig::read(layout, &id)?;
+            let host = host_architecture()?;
+            if config.architecture == host {
+                return Ok((id, lock));
+            }
+            // A copy an older engine cached for another architecture is
+            // unusable; pull again in case the tag has been corrected.
+            ensure!(
+                policy != PullPolicy::Never,
+                "image {reference} is linux/{}, but this Nitro host runs linux/{host}; \
+                 assign an image built for linux/{host}",
+                config.architecture
+            );
+            drop(lock);
+            return pull_reserved(layout, reference, platform);
         }
         // Pruned while we waited for the lock.
         layout.forget_image_lock(&id, &lock)?;
@@ -142,7 +156,7 @@ fn pull_reserved(
     // configuration with another's files.
     let pinned = String::from_utf8(
         sys::run_checked(&crane, &["digest", "--full-ref", reference])
-            .with_context(|| format!("resolve {reference}"))?
+            .with_context(|| format!("resolve {reference}; if this is a private registry, authorize crane on the host with `ssh <host> sudo crane auth login <registry> -u <user> --password-stdin` (token on stdin) and retry"))?
             .stdout,
     )
     .context("crane printed a digest that is not UTF-8")?
@@ -157,6 +171,21 @@ fn pull_reserved(
     let id = hex(&Sha256::digest(&config_bytes));
     let config: serde_json::Value =
         serde_json::from_slice(&config_bytes).context("decode the OCI image configuration")?;
+    // Crane applies `--platform` only to multi-platform indexes, so a
+    // single-platform image for another architecture arrives here unchecked.
+    let field = |name: &str| {
+        config
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let (actual_os, actual_architecture) = (field("os"), field("architecture"));
+    ensure!(
+        actual_os == "linux" && actual_architecture == host_architecture()?,
+        "image {reference} is {actual_os}/{actual_architecture}, but this Nitro host runs {platform}; \
+         assign an image built for {platform}"
+    );
     // The image lock covers flattening and recording the reference, so a prune
     // (which decides under the same lock) never sees the image between the two.
     // Lock order everywhere is image, then global.
@@ -176,6 +205,38 @@ fn pull_reserved(
     refs.refs.insert(normalize_reference(reference), id.clone());
     refs.write(layout)?;
     Ok((id, image_lock))
+}
+
+fn host_architecture() -> Result<&'static str> {
+    sys::host_architecture()
+}
+
+/// Remove references outside the wanted set while serializing against image use and prune.
+pub fn reconcile_references(layout: &Layout, wanted: &[String]) -> Result<Vec<String>> {
+    layout.ensure()?;
+    let _global = layout.lock_global()?;
+    let mut refs = ImageRefs::read(layout)?;
+    // A selector can be a tag or a local image id (or unambiguous prefix);
+    // keep every reference to an image a selector names.
+    let mut wanted_ids = std::collections::BTreeSet::new();
+    for selector in wanted {
+        if let Some(id) = lookup(layout, selector)? {
+            wanted_ids.insert(id);
+        }
+    }
+    let wanted: std::collections::BTreeSet<_> =
+        wanted.iter().map(|r| normalize_reference(r)).collect();
+    let keep =
+        |reference: &String, id: &String| wanted.contains(reference) || wanted_ids.contains(id);
+    let removed: Vec<_> = refs
+        .refs
+        .iter()
+        .filter(|(reference, id)| !keep(reference, id))
+        .map(|(reference, _)| reference.clone())
+        .collect();
+    refs.refs.retain(|reference, id| keep(reference, id));
+    refs.write(layout)?;
+    Ok(removed)
 }
 
 fn first_number(output: &[u8]) -> Option<u64> {
@@ -450,4 +511,107 @@ pub fn prune(layout: &Layout) -> Result<Vec<String>> {
 /// Paths to an image's parts.
 pub fn root_image(layout: &Layout, id: &str) -> PathBuf {
     layout.image(id).join("root.ext4")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_image(layout: &Layout, id: &str, architecture: &str) {
+        fs::create_dir_all(layout.image(id)).unwrap();
+        fs::write(layout.image(id).join("root.ext4"), b"disk").unwrap();
+        fs::write(
+            layout.image(id).join("config.json"),
+            serde_json::to_vec(&ImageConfig {
+                format: METADATA_FORMAT,
+                id: id.to_owned(),
+                architecture: architecture.to_owned(),
+                env: vec![],
+                user: String::new(),
+                working_dir: String::new(),
+                entrypoint: vec![],
+                cmd: vec![],
+                labels: Default::default(),
+                root_bytes: 4,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    // An engine that predates the architecture check may have cached a
+    // single-platform image for another architecture; it must not boot.
+    #[test]
+    fn a_cached_image_for_another_architecture_is_not_reused() {
+        let directory = tempfile::tempdir().unwrap();
+        let layout = Layout::new(directory.path());
+        layout.ensure().unwrap();
+        let other = if sys::host_architecture().unwrap() == "amd64" {
+            "arm64"
+        } else {
+            "amd64"
+        };
+        let id = "d".repeat(64);
+        write_image(&layout, &id, other);
+        let mut refs = ImageRefs::default();
+        refs.refs.insert("foreign:latest".into(), id.clone());
+        refs.write(&layout).unwrap();
+
+        let error = ensure_image(&layout, "foreign:latest", None, PullPolicy::Never).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&format!("is linux/{other}, but this Nitro host runs")),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn maintain_keeps_the_in_use_disk_and_removes_an_unkept_unused_reference() {
+        use super::super::state::{STATE_FORMAT, VmVolume};
+        let directory = tempfile::tempdir().unwrap();
+        let layout = Layout::new(directory.path());
+        layout.ensure().unwrap();
+        let live = "a".repeat(64);
+        let unused = "b".repeat(64);
+        for id in [&live, &unused] {
+            write_image(&layout, id, sys::host_architecture().unwrap());
+        }
+        let mut refs = ImageRefs::default();
+        refs.refs.insert("live:latest".into(), live.clone());
+        refs.refs.insert("unused:latest".into(), unused.clone());
+        refs.write(&layout).unwrap();
+        fs::create_dir_all(layout.vm("live")).unwrap();
+        VmState {
+            format: STATE_FORMAT,
+            id: "c".repeat(64),
+            name: "live".into(),
+            created: String::new(),
+            image_reference: "live:latest".into(),
+            image_id: live.clone(),
+            labels: Default::default(),
+            vcpus: 1,
+            nano_cpus: 1_000_000_000,
+            memory_bytes: 1,
+            env: vec![],
+            mbx_remote: None,
+            user: String::new(),
+            working_dir: String::new(),
+            entrypoint: vec![],
+            cmd: vec![],
+            volumes: Vec::<VmVolume>::new(),
+            slot: 0,
+            engine_build: "test".into(),
+            jailed: false,
+        }
+        .write(&layout)
+        .unwrap();
+
+        let removed = reconcile_references(&layout, &[]).unwrap();
+        assert_eq!(removed, ["live:latest", "unused:latest"]);
+        let pruned = prune(&layout).unwrap();
+        assert!(pruned.contains(&unused));
+        assert!(!pruned.contains(&live));
+        assert!(layout.image(&live).exists());
+        assert!(!layout.image(&unused).exists());
+        assert!(ImageRefs::read(&layout).unwrap().refs.is_empty());
+    }
 }

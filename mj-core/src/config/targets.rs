@@ -35,6 +35,9 @@ pub struct ProjectRepository {
     /// Network Git URL (or GitHub `owner/repository` shorthand).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github: Option<String>,
+    /// S3 build cache namespace. Defaults to the GitHub owner/repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mbx_namespace: Option<String>,
     /// Controller-side repository whose default network remotes seed isolated sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<PathBuf>,
@@ -125,6 +128,8 @@ impl ProjectBundle {
                 self.primary_repo
             );
         }
+        self.mbx_namespaces()
+            .with_context(|| format!("bundle {bundle_id:?}"))?;
         Ok(())
     }
 
@@ -132,6 +137,41 @@ impl ProjectBundle {
         self.repositories
             .iter()
             .find(|repository| repository.id == self.primary_repo)
+    }
+
+    /// The session's default namespace followed by its other allowed namespaces.
+    pub fn mbx_namespaces(&self) -> Result<Vec<String>> {
+        let primary = self.primary();
+        let mut seen = BTreeSet::new();
+        let mut namespaces = Vec::new();
+        for repository in primary.into_iter().chain(
+            self.repositories
+                .iter()
+                .filter(|repo| repo.id != self.primary_repo),
+        ) {
+            let namespace = repository.mbx_namespace.clone().or_else(|| {
+                let (owner, name) =
+                    crate::remote_git::github_owner_repo(repository.github.as_deref()?)?;
+                Some(format!("{owner}/{name}"))
+            });
+            if let Some(namespace) = namespace {
+                if !namespace.split('/').all(|segment| {
+                    !matches!(segment, "" | "." | "..")
+                        && segment.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                        })
+                }) {
+                    bail!(
+                        "repository {:?} has invalid mbx_namespace {namespace:?}",
+                        repository.id
+                    );
+                }
+                if seen.insert(namespace.clone()) {
+                    namespaces.push(namespace);
+                }
+            }
+        }
+        Ok(namespaces)
     }
 }
 
@@ -175,6 +215,12 @@ pub struct TargetBuildCache {
     /// Shared storage budget, an mbx size string such as `100GiB`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_total_size: Option<String>,
+    /// S3 cache read by the Nitro host on behalf of its guests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// S3 bucket region. Defaults to the Nitro host's region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_region: Option<String>,
     /// Machine-wide compiler admission settings shared by all builds on this host.
     #[serde(default, skip_serializing_if = "BuildCacheScheduler::is_default")]
     pub scheduler: BuildCacheScheduler,
@@ -213,6 +259,8 @@ struct BuildCacheSettings {
     directory: Option<PathBuf>,
     tools_directory: Option<PathBuf>,
     max_total_size: Option<String>,
+    remote: Option<String>,
+    remote_region: Option<String>,
     scheduler: BuildCacheScheduler,
     #[serde(rename = "max_size")]
     _legacy_max_size: Option<serde_json::Value>,
@@ -227,6 +275,8 @@ impl From<BuildCacheSettings> for TargetBuildCache {
             directory: settings.directory,
             tools_directory: settings.tools_directory,
             max_total_size: settings.max_total_size,
+            remote: settings.remote,
+            remote_region: settings.remote_region,
             scheduler: settings.scheduler,
         }
     }
@@ -239,6 +289,10 @@ impl TargetBuildCache {
     }
 
     pub(super) fn validate(&self, template_id: &str) -> Result<()> {
+        if let Some(remote) = &self.remote {
+            mbx_s3_location(remote)
+                .with_context(|| format!("target template {template_id:?} build cache"))?;
+        }
         if let Some(directory) = &self.tools_directory
             && !crate::target_path::is_absolute(directory)
         {
@@ -272,6 +326,38 @@ impl TargetBuildCache {
         }
         Ok(())
     }
+}
+
+/// Check the bucket name's length, alphabet and endpoints for an mbx S3 remote.
+pub fn valid_mbx_s3_bucket(bucket: &str) -> bool {
+    (3..=63).contains(&bucket.len())
+        && bucket.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+        && bucket.as_bytes()[0].is_ascii_alphanumeric()
+        && bucket.as_bytes()[bucket.len() - 1].is_ascii_alphanumeric()
+}
+
+/// Split an mbx S3 cache location, allowing the bucket root as its prefix.
+pub fn mbx_s3_location(remote: &str) -> Result<(&str, &str)> {
+    let location = remote.strip_prefix("s3://").unwrap_or_default();
+    let (bucket, prefix) = location.split_once('/').unwrap_or((location, ""));
+    if !valid_mbx_s3_bucket(bucket) {
+        bail!("build cache remote {remote:?} must be s3://<bucket>/<prefix>");
+    }
+    let prefix = prefix.trim_matches('/');
+    if prefix
+        .split('/')
+        .any(|segment| matches!(segment, "." | ".."))
+    {
+        bail!("build cache remote {remote:?} contains an S3 prefix with a dot segment");
+    }
+    // The IAM policy and the host proxy must read the prefix the same way;
+    // a percent escape would mean one literal key to IAM and another to S3.
+    if prefix.contains('%') {
+        bail!("build cache remote {remote:?} must spell its S3 prefix without percent escapes");
+    }
+    Ok((bucket, prefix))
 }
 
 fn is_build_cache_scheduler_memory(value: &str) -> bool {

@@ -42,6 +42,8 @@ pub struct ImageResult {
 pub struct ImageStatus {
     pub platform: String,
     pub image: String,
-    /// None when no configured builder can inspect this platform.
+    /// None when freshness could not be determined.
     pub current: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_builder: bool,
 }

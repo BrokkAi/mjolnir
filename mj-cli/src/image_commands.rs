@@ -216,9 +216,11 @@ fn render_status(status: &[ImageStatus]) -> String {
                 entry.platform,
                 entry.image,
                 match entry.current {
-                    Some(true) => "current",
-                    Some(false) => "recipe changed",
-                    None => "unknown (use --target ID)",
+                    Some(true) => "current".to_owned(),
+                    Some(false) => "recipe changed".to_owned(),
+                    None if entry.no_builder =>
+                        format!("unknown (no builder for {})", entry.platform),
+                    None => "unknown (use --target ID)".to_owned(),
                 }
             )
         })
@@ -256,16 +258,19 @@ mod tests {
                 platform: "linux/amd64".into(),
                 image: "localhost:5000/projects/app:0123456789abcdef".into(),
                 current: Some(true),
+                no_builder: false,
             },
             ImageStatus {
                 platform: "linux/arm64".into(),
                 image: "localhost:5000/projects/app:fedcba9876543210".into(),
                 current: Some(false),
+                no_builder: false,
             },
             ImageStatus {
                 platform: "linux/riscv64".into(),
                 image: "localhost:5000/projects/app:0011223344556677".into(),
                 current: None,
+                no_builder: false,
             },
         ];
         mj_core::golden::assert_golden(

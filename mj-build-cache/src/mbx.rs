@@ -1,12 +1,11 @@
-//! The shared mbx build cache for Rust container sessions.
+//! The mbx build cache for Rust container sessions.
 //!
 //! mbx wraps Cargo: a binary named `cargo` that is really `mbx` intercepts the
 //! build, looks every compiler action up in a content-addressed store, and
-//! restores cached outputs instead of recompiling. Its store is an ordinary
-//! directory on the container host, which every mj container on that host
-//! mounts read-write at the same absolute path. Nothing is synchronized
-//! between hosts and mj never runs mbx garbage collection; it only tells mbx
-//! when a workspace it removed will never build again (see [`release`]).
+//! restores cached outputs instead of recompiling. Podman and Docker mount
+//! the host store read-write at the same path in each container. Nitro guests
+//! keep their store on the guest filesystem. Mjolnir tells host mbx when a
+//! workspace it removed will never build again (see [`release`]).
 //!
 //! Cache discovery can leave new sessions uncached. Once a cache is selected,
 //! configuration failures are reported rather than launching with stale policy.
@@ -28,8 +27,15 @@ use mj_core::state::{
     SessionBuildCache,
 };
 
-/// Release installed by Mjolnir when a user installs or upgrades host mbx.
+/// Release installed by Mjolnir for host setup and Nitro guests.
 pub const MBX_VERSION: &str = "1.30.0";
+
+const NITRO_CACHE_DIRECTORY: &str = "/var/lib/hel/mbx";
+
+enum CachePlacement {
+    Shared(CacheHost),
+    NitroGuest,
+}
 
 const MBX_COPY_RELATIVE: &str = ".mjolnir/bin/mbx";
 /// mbx's running totals, relative to the cache directory.
@@ -161,14 +167,23 @@ fn inspect(
     inspection
 }
 
-/// Resolve the build cache for one container target, or `None` when this
-/// target runs without one.
+/// Resolve a target's shared host cache. Nitro guest caches are prepared without a host lookup.
 pub fn resolve(
     target: &targets::TargetTemplate,
     executor: &impl CommandExecutor,
 ) -> Option<ResolvedBuildCache> {
-    let (host, settings) = supported_host(target)?;
-    let inspection = match inspect(&host, &settings, Freshness::Memoized, executor) {
+    let (CachePlacement::Shared(host), settings) = supported_host(target)? else {
+        return None;
+    };
+    resolve_shared(&host, &settings, executor)
+}
+
+fn resolve_shared(
+    host: &CacheHost,
+    settings: &TargetBuildCache,
+    executor: &impl CommandExecutor,
+) -> Option<ResolvedBuildCache> {
+    let inspection = match inspect(host, settings, Freshness::Memoized, executor) {
         Ok(inspection) => inspection,
         Err(error) => {
             tracing::warn!(host = host.key(), "build cache unavailable: {error:#}");
@@ -192,14 +207,14 @@ pub fn resolve(
     // settings screen does not, so it sits here rather than inside the shared
     // inspection. It runs per session because a memoized inspection says what
     // the host looked like, not that the directory still exists.
-    if let Err(error) = create_directory(&host, &cache.directory, executor) {
+    if let Err(error) = create_directory(host, &cache.directory, executor) {
         tracing::warn!(
             directory = %cache.directory.display(),
             "the build cache directory could not be created: {error:#}"
         );
         return None;
     }
-    match apply_cache(&host, &settings, cache, executor) {
+    match apply_cache(host, settings, cache, executor) {
         Ok(cache) => Some(cache),
         Err(error) => {
             tracing::warn!(
@@ -252,25 +267,23 @@ fn apply_cache(
     result
 }
 
-/// The targets that can share a host build cache. Apple `container` runs each
-/// container in its own virtual machine, where file locks across the shared
-/// store are unverified, and bare and EC2 targets are out of scope.
-fn supported_host(target: &targets::TargetTemplate) -> Option<(CacheHost, TargetBuildCache)> {
-    let settings = match target {
+/// Where a session can keep its build cache. Apple container's host mount
+/// lacks verified shared locks. Nitro keeps its store on the guest filesystem.
+fn supported_host(target: &targets::TargetTemplate) -> Option<(CachePlacement, TargetBuildCache)> {
+    let (placement, container) = match target {
         targets::TargetTemplate::LocalPodman(container)
         | targets::TargetTemplate::LocalDocker(container)
         | targets::TargetTemplate::SshPodman { container, .. }
-        | targets::TargetTemplate::SshDocker { container, .. } => {
-            container.build_cache.clone().unwrap_or_default()
+        | targets::TargetTemplate::SshDocker { container, .. } => (
+            CachePlacement::Shared(CacheHost::for_target(target)?),
+            container,
+        ),
+        targets::TargetTemplate::SshNitro { container, .. } => {
+            (CachePlacement::NitroGuest, container)
         }
-        targets::TargetTemplate::AppleContainer(_)
-        | targets::TargetTemplate::SshAppleContainer { .. }
-        // A sandbox is a VM with no way to mount a host directory.
-        | targets::TargetTemplate::SshNitro { .. }
-        | targets::TargetTemplate::LocalBare
-        | targets::TargetTemplate::SshBare { .. } => return None,
+        _ => return None,
     };
-    Some((CacheHost::for_target(target)?, settings))
+    Some((placement, container.build_cache.clone().unwrap_or_default()))
 }
 
 /// What the settings screen shows for one machine's blank build cache fields:
@@ -1247,22 +1260,29 @@ fn checked(output: CommandOutput, command: &CommandSpec) -> Result<CommandOutput
 
 // -- per-session decision -------------------------------------------------
 
-/// Decide the build cache for one session and attach its mounts, returning the
-/// placement to record on the session. Resumes and moves resolve current
-/// machine policy instead of reviving a saved session budget.
+/// Decide the cache placement to record on the session and attach any shared
+/// mounts. Resumes and moves resolve current policy.
 pub fn prepare(
     target: &targets::TargetTemplate,
     session: &mj_core::state::SessionRecord,
     mounts: &mut Vec<targets::AdditionalMount>,
     executor: &impl CommandExecutor,
 ) -> Option<SessionBuildCache> {
-    // This function prepares container mounts. Budgets always come from the
-    // machine; a previously recorded budget is never revived on recreation.
-    // A session at the legacy shared `/workspace` would collide with every
-    // other legacy session in mbx's path-keyed records.
+    let (placement, settings) = supported_host(target)?;
+    let CachePlacement::Shared(host) = placement else {
+        // Use the session's identity so the machine policy service never
+        // mistakes this guest directory for a retained host mount.
+        return (settings.enabled != Some(false)).then(|| SessionBuildCache {
+            host: format!("nitro:{}", session.id),
+            directory: PathBuf::from(NITRO_CACHE_DIRECTORY),
+            max_size: None,
+            target_root: None,
+        });
+    };
+    // Sessions at the legacy shared `/workspace` would collide in the
+    // shared store's path-keyed records.
     session.container_workspace.as_ref()?;
-    let resolved = resolve(target, executor)?;
-    let host = supported_host(target)?.0;
+    let resolved = resolve_shared(&host, &settings, executor)?;
     // Make mbx available before the checkout exists. Target-side discovery
     // decides whether to wrap C/C++ tools; a mirror's HEAD can differ from
     // the session's branch, and Cargo is no longer the only consumer.
@@ -2052,10 +2072,7 @@ mod tests {
             resolve(
                 &podman(Some(TargetBuildCache {
                     enabled: Some(true),
-                    directory: None,
-                    tools_directory: None,
-                    max_total_size: None,
-                    scheduler: Default::default(),
+                    ..Default::default()
                 })),
                 &executor,
             ),

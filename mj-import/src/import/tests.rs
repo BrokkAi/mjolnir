@@ -325,6 +325,7 @@ fn resolve_bundle_matches_an_existing_bundle_from_a_linked_worktree() {
                 github: None,
                 destination: PathBuf::from("app"),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -589,6 +590,7 @@ fn local_repository_collection_preserves_bundle_order() {
                 local: None,
                 destination: "worker".into(),
                 git_ref: None,
+                mbx_namespace: None,
             },
             ProjectRepository {
                 id: "app".into(),
@@ -596,6 +598,7 @@ fn local_repository_collection_preserves_bundle_order() {
                 local: None,
                 destination: "app".into(),
                 git_ref: None,
+                mbx_namespace: None,
             },
         ],
     };
@@ -634,6 +637,7 @@ fn local_source_repository_import_carries_no_committed_bundle() {
             local: Some(app.clone()),
             destination: "app".into(),
             git_ref: None,
+            mbx_namespace: None,
         }],
     };
 
@@ -682,6 +686,7 @@ fn isolated_repository_import_records_network_provenance_and_delta() {
             local: None,
             destination: "app".into(),
             git_ref: None,
+            mbx_namespace: None,
         }],
     };
 
@@ -714,6 +719,7 @@ fn isolated_local_source_import_resolves_the_checkout_network_remote() {
             local: Some(app.clone()),
             destination: "app".into(),
             git_ref: None,
+            mbx_namespace: None,
         }],
     };
 
@@ -880,6 +886,7 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
                 local: None,
                 destination: "app".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -993,6 +1000,7 @@ fn github_bundle(ids: &[&str]) -> ProjectBundle {
                 local: None,
                 destination: PathBuf::from(id),
                 git_ref: None,
+                mbx_namespace: None,
             })
             .collect(),
     }

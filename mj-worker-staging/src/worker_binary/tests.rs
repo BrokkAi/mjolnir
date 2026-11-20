@@ -2345,6 +2345,36 @@ fn ssh_bare_and_ssh_container_installs_share_one_worker_cache() {
         executor.worker_uploads.take().is_empty(),
         "a container session on the same host reuses the cached worker, got {lines:#?}"
     );
+
+    let nitro = targets::TargetLocator::SshNitro {
+        borrowed_from: None,
+        ssh: SshTarget {
+            destination: "user@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        container_id: targets::resource_name(container).unwrap(),
+    };
+    let mbx = fixture.worker_binary.with_file_name("mbx");
+    let bytes = [b"#!/bin/sh\n".as_slice(), &vec![b'#'; 128 * 1024]].concat();
+    std::fs::write(&mbx, &bytes).unwrap();
+    let installed = install_session_executable(&executor, &nitro, container, &mbx, "mbx").unwrap();
+    assert_eq!(executor.worker_uploads.take(), [bytes]);
+
+    let guest_root = targets::worker_root(&nitro, container).unwrap();
+    assert_eq!(installed, Path::new(&guest_root).join("mbx"));
+    let commands = rendered(&executor.commands.take());
+    assert!(
+        commands.iter().any(|line| {
+            line.contains("microvm") && line.contains("'cp'") && line.contains(".transport-")
+        }),
+        "{commands:#?}"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|line| { line.contains(&format!("{guest_root}/mbx")) && line.contains("ln --") }),
+        "{commands:#?}"
+    );
 }
 
 #[test]
@@ -4168,7 +4198,7 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
         &locator,
         "/home/hel/.hel/worker",
         Path::new("/mnt/fast/mbx-cache/.mjolnir/bin/mbx"),
-        Path::new("/cache/.mjolnir/config/mbx"),
+        Some(Path::new("/cache/.mjolnir/config/mbx")),
         &[],
     )
     .unwrap();

@@ -1479,19 +1479,17 @@ impl CheckpointMetadata {
     }
 }
 
-/// The mbx build cache a container session was provisioned with. The
-/// directory is a host path mounted read-write at the same absolute path
-/// inside the container. Older containers retain their private binaries until
-/// recreated; the worker's `bin/mbx` contents identify that legacy scheme.
+/// The mbx build cache a container session was provisioned with. A shared
+/// cache mounts the host directory read-write at the same path inside the
+/// container. Nitro keeps its cache directory on the guest root disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBuildCache {
-    /// The container host this cache was resolved on. A session moved to a
-    /// different host cannot reuse it, so the decision is made again there.
+    /// The cache owner, a container host or a Nitro session.
     pub host: String,
     pub directory: PathBuf,
-    /// Read compatibility for old records only. Launch never uses this value;
-    /// budgets belong to the shared machine configuration.
+    /// Read compatibility for old records only. Shared caches use machine
+    /// policy and Nitro guests use mbx's automatic budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_size: Option<String>,
     /// A `[target] root` the host's mbx configuration relocates outside the

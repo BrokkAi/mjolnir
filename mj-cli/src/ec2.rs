@@ -5,17 +5,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
 use clap::{Args, Subcommand, ValueEnum};
 use mj_core::config::{
     Config, ContainerTemplate, Machine, SshConnection, TargetBuildCache, TargetTemplate,
-    config_dir, config_path, validate_id,
+    config_dir, config_path, mbx_s3_location, validate_id,
 };
 use mj_core::subprocess::run_with_input;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const MANAGER: &str = "mj-ec2";
 const NVME_CACHE_DIRECTORY: &str = "/mnt/nvme/mbx";
@@ -74,6 +76,12 @@ struct CreateArgs {
     /// Host runtime to install. Nitro hosts run workloads in isolated microVMs.
     #[arg(long, value_enum, default_value_t = Ec2Runtime::Podman)]
     runtime: Ec2Runtime,
+    /// Read-only S3 build cache for Nitro sandboxes, as s3://bucket/prefix.
+    #[arg(long)]
+    mbx_remote: Option<String>,
+    /// Region of the S3 bucket. Defaults to the Nitro host's region.
+    #[arg(long)]
+    mbx_remote_region: Option<String>,
     /// Zones in preference order; repeat or separate with commas.
     /// Listed regions without explicit zones try all available ordinary zones.
     #[arg(long, value_delimiter = ',', required_unless_present = "region")]
@@ -550,7 +558,28 @@ struct Placement<'a> {
     zone: &'a str,
 }
 
-fn create(args: CreateArgs, root: &Path) -> Result<()> {
+fn create(mut args: CreateArgs, root: &Path) -> Result<()> {
+    if args.runtime == Ec2Runtime::Podman
+        && (args.mbx_remote.is_some() || args.mbx_remote_region.is_some())
+    {
+        eprintln!(
+            "Warning: --mbx-remote and --mbx-remote-region apply only to Nitro hosts. Ignoring them for Podman."
+        );
+        args.mbx_remote = None;
+        args.mbx_remote_region = None;
+    }
+    if let Some(remote) = &args.mbx_remote {
+        let (_, prefix) = mbx_s3_location(remote)?;
+        ensure!(
+            !prefix.contains(['*', '?']) && !prefix.contains("${"),
+            "the S3 cache prefix cannot contain IAM wildcards or policy variables"
+        );
+    } else {
+        ensure!(
+            args.mbx_remote_region.is_none(),
+            "--mbx-remote-region requires --mbx-remote"
+        );
+    }
     let locations = regions_and_zones(&args)?;
     ensure!(
         args.runtime != Ec2Runtime::Nitro || !args.zfs_cache,
@@ -747,6 +776,204 @@ fn report_attempts(attempts: &[Attempt]) {
 fn report_attempts_to_stdout(attempts: &[Attempt]) {
     for attempt in attempts {
         println!("  {}", attempt_text(attempt));
+    }
+}
+
+fn aws_error_code(error: &anyhow::Error, code: &str) -> bool {
+    error
+        .downcast_ref::<AwsFailure>()
+        .is_some_and(|failure| failure.code.as_deref() == Some(code))
+}
+
+fn aws_permission_denied(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<AwsFailure>().is_some_and(|failure| {
+        matches!(
+            failure.code.as_deref(),
+            Some("AccessDenied" | "AccessDeniedException" | "UnauthorizedOperation")
+        )
+    })
+}
+
+/// The resource, and whether this call created it.
+fn get_or_create_iam(
+    cloud: &Cloud,
+    get: &str,
+    create: &str,
+    lookup: &Value,
+    request: Value,
+) -> Result<(Value, bool)> {
+    match cloud.call("iam", &[get], lookup.clone()) {
+        Err(error) if aws_error_code(&error, "NoSuchEntity") => {
+            match cloud.call("iam", &[create], request) {
+                // A create for another target can share this role.
+                Err(error) if aws_error_code(&error, "EntityAlreadyExists") => {
+                    Ok((cloud.call("iam", &[get], lookup.clone())?, false))
+                }
+                result => Ok((result?, true)),
+            }
+        }
+        result => Ok((result?, false)),
+    }
+}
+
+fn prepare_mbx_instance_profile(cloud: &Cloud, identity: &Value, remote: &str) -> Result<String> {
+    let (bucket, prefix) = mbx_s3_location(remote)?;
+    let partition = identity["Arn"]
+        .as_str()
+        .and_then(|arn| arn.strip_prefix("arn:")?.split_once(':'))
+        .map(|(partition, _)| partition)
+        .context("AWS identity has no ARN partition")?;
+    let digest = mj_core::hex::lower_hex(Sha256::digest(format!("{bucket}/{prefix}")));
+    let name = format!("mjolnir-nitro-mbx-{}", &digest[..8]);
+    let description = format!("Mjolnir Nitro build cache scope {digest}");
+    let (role, created) = get_or_create_iam(
+        cloud,
+        "get-role",
+        "create-role",
+        &json!({"RoleName": name}),
+        json!({
+            "RoleName": name,
+            "Description": description,
+            "AssumeRolePolicyDocument": json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"Service": "ec2.amazonaws.com"},
+                    "Action": "sts:AssumeRole",
+                }],
+            }).to_string(),
+        }),
+    )?;
+    // CreateRole's response omits the description, so only a role that
+    // already existed is checked against it.
+    ensure!(
+        created || role["Role"]["Description"] == description,
+        "IAM role {name} already exists for a different purpose"
+    );
+    let bucket_arn = format!("arn:{partition}:s3:::{bucket}");
+    let object_pattern = if prefix.is_empty() {
+        "*".to_owned()
+    } else {
+        format!("{prefix}/*")
+    };
+    // S3 checks bucket-level ListBucket when deciding the status of a
+    // missing GetObject. A conditional list grant can turn a miss into 403.
+    cloud.call(
+        "iam",
+        &["put-role-policy"],
+        json!({
+            "RoleName": name,
+            "PolicyName": "mjolnir-nitro-mbx-read",
+            "PolicyDocument": json!({
+                "Version": "2012-10-17",
+                "Statement": [
+                    {"Effect": "Allow", "Action": "s3:GetObject", "Resource": format!("{bucket_arn}/{object_pattern}")},
+                    {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": bucket_arn},
+                ],
+            }).to_string(),
+        }),
+    )?;
+    let lookup = json!({"InstanceProfileName": name});
+    let (profile, _) = get_or_create_iam(
+        cloud,
+        "get-instance-profile",
+        "create-instance-profile",
+        &lookup,
+        lookup.clone(),
+    )?;
+    match profile["InstanceProfile"]["Roles"]
+        .as_array()
+        .map(Vec::as_slice)
+    {
+        Some([]) => {
+            if let Err(error) = cloud.call(
+                "iam",
+                &["add-role-to-instance-profile"],
+                json!({"InstanceProfileName": name, "RoleName": name}),
+            ) {
+                // A concurrent create can have added the same role already.
+                if !aws_error_code(&error, "LimitExceeded")
+                    || !profile_has_role(
+                        &cloud.call("iam", &["get-instance-profile"], lookup)?,
+                        &name,
+                    )
+                {
+                    return Err(error);
+                }
+            }
+        }
+        _ => ensure!(
+            profile_has_role(&profile, &name),
+            "IAM instance profile {name} has an unexpected role"
+        ),
+    }
+    Ok(name)
+}
+
+fn profile_has_role(profile: &Value, name: &str) -> bool {
+    matches!(
+        profile["InstanceProfile"]["Roles"].as_array().map(Vec::as_slice),
+        Some([role]) if role["RoleName"] == name
+    )
+}
+
+fn launch_instance(
+    cloud: &Cloud,
+    mut request: Value,
+    profile: Option<&str>,
+) -> Result<(Value, bool)> {
+    let Some(profile) = profile else {
+        return Ok((cloud.ec2("run-instances", request)?, false));
+    };
+    request["IamInstanceProfile"] = json!({"Name": profile});
+    let mut backoff = Duration::from_millis(250);
+    loop {
+        match cloud.ec2("run-instances", request.clone()) {
+            Ok(instance) => return Ok((instance, true)),
+            Err(error) if aws_permission_denied(&error) => {
+                // A RunInstances denial can encode the missing action. Only a
+                // successful launch without the profile isolates the denial.
+                request
+                    .as_object_mut()
+                    .expect("launch request is a JSON object")
+                    .remove("IamInstanceProfile");
+                let instance = cloud.ec2("run-instances", request).with_context(|| {
+                    format!("launch with IAM instance profile {profile} was denied: {error}")
+                })?;
+                eprintln!(
+                    "Remote cache is off for this host. AWS denied launch with IAM instance profile {profile}. Grant iam:PassRole on the role {profile} to the EC2 provisioning identity: {error}"
+                );
+                return Ok((instance, false));
+            }
+            Err(error)
+                if aws_error_code(&error, "InvalidParameterValue")
+                    && error.to_string().contains("Invalid IAM Instance Profile") =>
+            {
+                let lookup = json!({"InstanceProfileName": profile});
+                loop {
+                    eprintln!(
+                        "EC2 is waiting for IAM instance profile {profile} to propagate. Retrying in {backoff:?}."
+                    );
+                    std::thread::sleep(backoff);
+                    // The AWS CLI's standard retry behavior caps backoff at 20s.
+                    backoff = (backoff * 2).min(Duration::from_secs(20));
+                    match cloud.call("iam", &["get-instance-profile"], lookup.clone()) {
+                        Ok(observed) if profile_has_role(&observed, profile) => break,
+                        Ok(observed)
+                            if matches!(
+                                observed["InstanceProfile"]["Roles"]
+                                    .as_array()
+                                    .map(Vec::as_slice),
+                                Some([])
+                            ) => {}
+                        Ok(_) => bail!("IAM instance profile {profile} has an unexpected role"),
+                        Err(error) if aws_error_code(&error, "NoSuchEntity") => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -963,8 +1190,33 @@ fn create_attempt(
     });
     if args.runtime == Ec2Runtime::Nitro {
         launch_request["EnclaveOptions"] = json!({"Enabled":true});
+        launch_request["MetadataOptions"]["HttpPutResponseHopLimit"] = json!(1);
     }
-    let launched = cloud.ec2("run-instances", launch_request)?;
+    let profile = match args.mbx_remote.as_deref() {
+        Some(remote) => match prepare_mbx_instance_profile(cloud, &identity, remote) {
+            Ok(profile) => Some(profile),
+            Err(error) if aws_permission_denied(&error) => {
+                let failure = error
+                    .downcast_ref::<AwsFailure>()
+                    .expect("classified AWS permission error");
+                eprintln!(
+                    "Remote cache is off for this host. AWS denied IAM profile setup ({error}). Grant iam:{} to the EC2 provisioning identity.",
+                    failure
+                        .operation
+                        .split('-')
+                        .map(|part| {
+                            let (first, rest) = part.split_at(1);
+                            format!("{}{rest}", first.to_ascii_uppercase())
+                        })
+                        .collect::<String>()
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        },
+        None => None,
+    };
+    let (launched, remote_enabled) = launch_instance(cloud, launch_request, profile.as_deref())?;
     let id = launched["Instances"][0]["InstanceId"]
         .as_str()
         .context("AWS launch response has no instance ID")?
@@ -1063,17 +1315,25 @@ fn create_attempt(
         &mj_controller::targets::ProcessExecutor,
         &(&ssh).into(),
     )?;
-    let cache = (args.runtime == Ec2Runtime::Podman).then(|| TargetBuildCache {
-        directory: Some(
-            if local_nvme {
-                NVME_CACHE_DIRECTORY
-            } else {
-                EBS_CACHE_DIRECTORY
-            }
-            .into(),
-        ),
-        ..Default::default()
-    });
+    let cache = (args.runtime == Ec2Runtime::Podman)
+        .then(|| TargetBuildCache {
+            directory: Some(
+                if local_nvme {
+                    NVME_CACHE_DIRECTORY
+                } else {
+                    EBS_CACHE_DIRECTORY
+                }
+                .into(),
+            ),
+            ..Default::default()
+        })
+        .or_else(|| {
+            remote_enabled.then(|| TargetBuildCache {
+                remote: args.mbx_remote.clone(),
+                remote_region: args.mbx_remote_region.clone(),
+                ..Default::default()
+            })
+        });
     let machine = Machine::Ssh {
         ssh: ssh.clone(),
         workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
@@ -1143,33 +1403,32 @@ fn create_attempt(
     record.save(root)?;
     drop(lock.take());
     eprintln!(
-        "Registered {} target {}. Preloading {image}.",
+        "Registered {} target {}.",
         args.runtime.label(),
         record.target
     );
-    let image_host = match args.runtime {
-        Ec2Runtime::Podman => mj_core::targets::ImageHost::SshPodman((&ssh).into()),
-        Ec2Runtime::Nitro => mj_core::targets::ImageHost::SshNitro((&ssh).into()),
-    };
-    let preload = mj_core::targets::image_refresh(
-        image_host,
-        image,
-        Some(platform),
-        mj_core::config::ImagePullPolicy::Missing,
-    )
-    .context("prepare EC2 dev image preload")
-    .and_then(|refresh| {
-        mj_daemon::pollers::refresh_host_image(
-            &refresh,
-            &mj_controller::targets::ProcessExecutor,
-            &|_| {},
-        )
-        .map(|_| ())
-    });
-    if let Err(error) = preload {
-        eprintln!(
-            "Warning: dev image predownload failed: {error:#}\nThe host is registered; the background image refresher can retry."
-        );
+    match Config::load() {
+        Ok(config) => {
+            for refresh in
+                mj_controller::targets::image_refresh_plan(&config, [record.target.as_str()], None)
+                    .pulls
+            {
+                eprintln!("Preloading {} on {}.", refresh.image, record.target);
+                if let Err(error) = mj_daemon::pollers::refresh_host_image(
+                    &refresh,
+                    &mj_controller::targets::ProcessExecutor,
+                    &|_| {},
+                ) {
+                    eprintln!(
+                        "Warning: dev image predownload failed for {}: {error:#}\nThe host is registered; the background image refresher can retry.",
+                        refresh.image
+                    );
+                }
+            }
+        }
+        Err(error) => eprintln!(
+            "Warning: could not plan EC2 image warming: {error:#}\nThe host is registered; the background image refresher can retry."
+        ),
     }
     Ok(
         json!({"instance_id":id,"target":record.target,"region":record.region,"zone":placement.zone,"instance_type":placement.instance_type,"public_ip":host,"zfs_cache":local_nvme,"operation":record.operation}),
@@ -1731,7 +1990,7 @@ mod tests {
 import json, pathlib, sys
 root = pathlib.Path(__file__).parent
 args = sys.argv[1:]
-service = next(a for a in args if a in ('ec2', 'ssm', 'sts'))
+service = next(a for a in args if a in ('ec2', 'ssm', 'sts', 'iam'))
 pos = args.index(service)
 op = args[pos+1]
 if op == 'wait': op += ' ' + args[pos+2]
@@ -1751,7 +2010,37 @@ if (root/'errors.json').exists():
 assert args[args.index('--cli-binary-format')+1] == 'base64'
 response = {}
 state = resources/'instance.json'
-if op == 'get-caller-identity': response = {'Account':(root/'account').read_text() if (root/'account').exists() else '123456789012'}
+if op == 'get-caller-identity':
+    account = (root/'account').read_text() if (root/'account').exists() else '123456789012'
+    response = {'Account':account, 'Arn':f'arn:aws:iam::{account}:user/fixture'}
+elif service == 'iam':
+    role, profile = root/'iam-role.json', root/'iam-profile.json'
+    if op in ('get-role', 'get-instance-profile'):
+        path, kind = (role, 'Role') if op == 'get-role' else (profile, 'InstanceProfile')
+        if not path.exists():
+            sys.exit('An error occurred (NoSuchEntity) when calling the '+op+' operation: missing IAM resource')
+        response = {kind:json.loads(path.read_text())}
+    elif op == 'create-role':
+        trust = json.loads(request['AssumeRolePolicyDocument'])
+        assert trust['Statement'] == [{'Effect':'Allow', 'Principal':{'Service':'ec2.amazonaws.com'}, 'Action':'sts:AssumeRole'}]
+        assert not role.exists()
+        role.write_text(json.dumps({'RoleName':request['RoleName'], 'Description':request['Description']}))
+        # Like AWS, CreateRole does not echo the description.
+        response = {'Role':{'RoleName':request['RoleName']}}
+    elif op == 'put-role-policy':
+        assert request['RoleName'] == json.loads(role.read_text())['RoleName']
+    elif op == 'create-instance-profile':
+        assert not profile.exists()
+        profile.write_text(json.dumps({'InstanceProfileName':request['InstanceProfileName'], 'Roles':[]}))
+        response = {'InstanceProfile':json.loads(profile.read_text())}
+    elif op == 'add-role-to-instance-profile':
+        document = json.loads(profile.read_text())
+        assert request['InstanceProfileName'] == document['InstanceProfileName']
+        assert document['Roles'] == []
+        document['Roles'].append(json.loads(role.read_text()))
+        profile.write_text(json.dumps(document))
+    else:
+        sys.exit('unexpected IAM operation: '+op)
 elif op == 'describe-instances':
     instance = json.loads(state.read_text()) if state.exists() else None
     instances = [instance] if instance else []
@@ -1792,6 +2081,14 @@ elif op == 'create-security-group':
     (resources/'group.json').write_text(json.dumps({'GroupId':'sg-test','Tags':request['TagSpecifications'][0]['Tags']}))
     response = {'GroupId':'sg-test'}
 elif op == 'run-instances':
+    if 'IamInstanceProfile' in request:
+        profile = json.loads((root/'iam-profile.json').read_text())
+        assert request['IamInstanceProfile'] == {'Name':profile['InstanceProfileName']}
+        assert profile['Roles'][0]['RoleName'] == profile['InstanceProfileName']
+        propagated = root/'iam-profile-propagated'
+        if not propagated.exists():
+            propagated.touch()
+            sys.exit('An error occurred (InvalidParameterValue) when calling the RunInstances operation: Invalid IAM Instance Profile name')
     assert request['MinCount'] == request['MaxCount'] == 1
     assert request['MetadataOptions']['HttpTokens'] == 'required'
     mappings = request['BlockDeviceMappings']
@@ -2003,6 +2300,7 @@ else:
                 concat!(
                     "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MJ_EC2_FIXTURE_CHILD/ssh-calls\"\n",
                     "export HOME=\"$MJ_EC2_FIXTURE_CHILD/remote-home\" SHELL=/bin/bash\n",
+                    "cd \"$HOME\" || exit 1\n",
                     "export PATH=\"$MJ_EC2_FIXTURE_CHILD/remote-bin:$PATH\"\n",
                     "unset XDG_CONFIG_HOME XDG_DATA_HOME\n",
                     "for remote_command do :; done\n",
@@ -2016,6 +2314,8 @@ else:
                     // instead of running it on the test host.
                     "*'sudo bash -s'*) cat > \"$MJ_EC2_FIXTURE_CHILD/tune-script\" ;;\n",
                     "*'cat /proc/sys/fs/inotify/max_user_instances'*) printf 'fs.inotify.max_user_instances=8192\nkernel.keys.maxkeys=4096\n' ;;\n",
+                    "*microvm*\"'image' 'inspect'\"*) exit 125 ;;\n",
+                    "*microvm*\"'pull'\"*) : ;;\n",
                     "*) exec sh -c \"$remote_command\" ;;\nesac\n",
                 ),
             ),
@@ -2027,7 +2327,12 @@ else:
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         }
         let mut paths = vec![bin];
-        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        // The fake host must not find the developer's own mbx (for example
+        // in ~/.cargo/bin), which mj refuses to manage; CI has none.
+        paths.extend(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .filter(|directory| !directory.join("mbx").exists()),
+        );
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args(["--exact", name, "--nocapture"])
@@ -2035,6 +2340,10 @@ else:
             .env("MJ_CONFIG_DIR", directory.path().join("config"))
             .env("MJ_DATA_DIR", directory.path().join("data"))
             .env("MJ_INSTANCE", "ec2-fixture")
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::test_hooks::fake_worker_dispatcher(),
+            )
             .env("MJ_SSH_CONTROL_MASTER", "0")
             .env("PATH", std::env::join_paths(paths).unwrap());
         let output = checked(&mut command, &[]).unwrap();
@@ -2053,6 +2362,8 @@ else:
             instance_type: vec!["c8id.16xlarge".into()],
             types: Vec::new(),
             runtime: Ec2Runtime::Podman,
+            mbx_remote: None,
+            mbx_remote_region: None,
             zone: vec!["us-east-1a".into()],
             region: Vec::new(),
             aws_profile: None,
@@ -2622,8 +2933,59 @@ else:
         let bin = fixture.join("bin");
         let root = config_dir().join("ec2");
         fs::write(bin.join("nitro"), "").unwrap();
-        let mut args = create_args();
-        args.runtime = Ec2Runtime::Nitro;
+        let bundle_image = "ghcr.io/example/project:built";
+        Config::update(|config| {
+            config.bundles.insert(
+                "app".into(),
+                mj_core::config::ProjectBundle {
+                    primary_repo: "app".into(),
+                    repositories: vec![mj_core::config::ProjectRepository {
+                        id: "app".into(),
+                        github: Some("example/app".into()),
+                        destination: "app".into(),
+                        ..Default::default()
+                    }],
+                },
+            );
+            config.images.bundles.insert(
+                "app".into(),
+                std::collections::BTreeMap::from([("linux/amd64".into(), bundle_image.into())]),
+            );
+            Ok(())
+        })
+        .unwrap();
+        let worker = fixture
+            .join("remote-home")
+            .join(mj_core::targets::MICROVM_ENGINE_WORKER);
+        fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        fs::copy(mj_core::test_hooks::fake_worker_dispatcher(), &worker).unwrap();
+        let cli = crate::Cli::try_parse_from([
+            "mj",
+            "--instance",
+            "ec2-fixture",
+            "ec2",
+            "create",
+            "c8id.16xlarge",
+            "--runtime",
+            "nitro",
+            "--zone",
+            "us-east-1a",
+            "--ssh-cidr",
+            "192.0.2.3/32",
+            "--name",
+            "builder",
+            "--mbx-remote",
+            "s3://fixture-cache/nitro/mbx",
+            "--mbx-remote-region",
+            "us-west-2",
+        ])
+        .unwrap();
+        let Some(crate::Command::Ec2(Ec2Args {
+            command: Ec2Command::Create(args),
+        })) = cli.command
+        else {
+            panic!("expected EC2 create command");
+        };
         create(args, &root).unwrap();
 
         let calls: Vec<Value> = fs::read_to_string(bin.join("calls"))
@@ -2631,10 +2993,62 @@ else:
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        let launch = calls
+        let iam_calls: Vec<_> = calls
             .iter()
-            .find(|call| call["operation"] == "run-instances")
-            .unwrap();
+            .filter(|call| {
+                call["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|arg| arg == "iam")
+            })
+            .collect();
+        assert_eq!(
+            iam_calls
+                .iter()
+                .map(|call| call["operation"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "get-role",
+                "create-role",
+                "put-role-policy",
+                "get-instance-profile",
+                "create-instance-profile",
+                "add-role-to-instance-profile",
+                "get-instance-profile"
+            ],
+        );
+        let name = "mjolnir-nitro-mbx-c32e5a4f";
+        assert_eq!(iam_calls[1]["request"]["RoleName"], name);
+        assert_eq!(
+            iam_calls[5]["request"],
+            json!({"InstanceProfileName": name, "RoleName": name})
+        );
+        let policy: Value =
+            serde_json::from_str(iam_calls[2]["request"]["PolicyDocument"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(
+            policy["Statement"],
+            json!([
+                {"Effect":"Allow", "Action":"s3:GetObject", "Resource":"arn:aws:s3:::fixture-cache/nitro/mbx/*"},
+                {"Effect":"Allow", "Action":"s3:ListBucket", "Resource":"arn:aws:s3:::fixture-cache"},
+            ])
+        );
+        let launches: Vec<_> = calls
+            .iter()
+            .filter(|call| call["operation"] == "run-instances")
+            .collect();
+        assert_eq!(launches.len(), 2);
+        assert_eq!(launches[0]["request"], launches[1]["request"]);
+        let launch = launches[1];
+        assert_eq!(
+            launch["request"]["IamInstanceProfile"],
+            json!({"Name": name})
+        );
+        assert_eq!(
+            launch["request"]["MetadataOptions"]["HttpPutResponseHopLimit"],
+            1
+        );
         assert_eq!(launch["request"]["EnclaveOptions"]["Enabled"], true);
         let bootstrap = String::from_utf8(
             base64::engine::general_purpose::STANDARD
@@ -2654,9 +3068,24 @@ else:
         let ssh_calls = fs::read_to_string(fixture.join("ssh-calls")).unwrap();
         assert!(ssh_calls.contains("ec2-user@192.0.2.1"));
         assert!(ssh_calls.contains("ec2-user@192.0.2.7"));
+        for image in [mj_core::config::DEFAULT_SESSION_IMAGE, bundle_image] {
+            let expected = format!("'pull' '--platform=linux/amd64' '{image}'");
+            assert!(
+                ssh_calls
+                    .lines()
+                    .any(|line| line.contains("microvm") && line.contains(&expected)),
+                "{ssh_calls}"
+            );
+        }
         let record = records(&root).unwrap().pop().unwrap();
         assert_eq!(record.instance_id.as_deref(), Some("i-test"));
         let config = Config::load().unwrap();
+        let cache = config.machines["builder"].build_cache().unwrap();
+        assert_eq!(
+            cache.remote.as_deref(),
+            Some("s3://fixture-cache/nitro/mbx")
+        );
+        assert_eq!(cache.remote_region.as_deref(), Some("us-west-2"));
         assert!(matches!(
             config.targets.get("builder"),
             Some(TargetTemplate::SshNitro { .. })

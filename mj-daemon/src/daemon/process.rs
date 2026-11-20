@@ -442,7 +442,7 @@ pub(super) async fn run_daemon_runtime(
     let image_refresh = spawn_image_refresher(
         {
             let state = state.clone();
-            move || state.with_config(mj_controller::controller::image_refresh_plan)
+            move || state.with_config(Clone::clone)
         },
         {
             // A background download is the daemon's own work, not a session's,

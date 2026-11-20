@@ -379,16 +379,50 @@ pub fn install_worker_binary_at(
     destination: &str,
     session_root: Option<&str>,
 ) -> Result<()> {
-    let binary = match worker {
-        WorkerInstall::Host(source) => {
-            verify_worker_build(source)?;
-            Some((
-                source,
-                mj_core::worker_launch::worker_executable_digest(source)?,
-            ))
-        }
-        WorkerInstall::Image => None,
-    };
+    let source = worker.host_binary();
+    if let Some(source) = source {
+        verify_worker_build(source)?;
+    }
+    install_binary_at(
+        executor,
+        locator,
+        session_id,
+        source,
+        destination,
+        session_root,
+    )
+}
+
+/// Install a caller-verified executable through the same immutable stores and
+/// transport used by the worker. The store verifies the bytes at each hop.
+pub fn install_session_executable(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    source: &Path,
+    name: &str,
+) -> Result<PathBuf> {
+    let root = targets::worker_root(locator, session_id)?;
+    let destination = mj_core::target_path::join(Path::new(&root), Path::new(name));
+    install_binary_at(
+        executor,
+        locator,
+        session_id,
+        Some(source),
+        &mj_core::target_path::text(&destination),
+        Some(&root),
+    )?;
+    Ok(destination)
+}
+
+fn install_binary_at(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    source: Option<&Path>,
+    destination: &str,
+    session_root: Option<&str>,
+) -> Result<()> {
     let store = mj_core::target_path::text(&store_root(locator, session_id)?);
     // Register before any pin can be created. Registration and sweeping share
     // one session owner, so no sweep can use a snapshot predating a live pin.
@@ -404,14 +438,15 @@ pub fn install_worker_binary_at(
         || format!("{destination}.{name}"),
         |root| format!("{root}/{name}"),
     );
-    let Some((source, digest)) = binary else {
-        super::upgrade::worker_binary_upload_plan(locator, session_id, worker, destination, None)?
+    let Some(source) = source else {
+        super::upgrade::binary_upload_plan(locator, session_id, None, destination, None)?
             .execute(executor)?;
         // Switching to an image link can release the last session reference
         // to a host-copied build. Image installs must collect that store too.
         collect_if_due(executor, locator, session_id, &store, None);
         return Ok(());
     };
+    let digest = mj_core::worker_launch::worker_executable_digest(source)?;
     let directory = format!("{store}/{digest}");
     let cached = format!("{directory}/hel");
     // A published build needs no store lock: the link script verifies the
@@ -422,9 +457,7 @@ pub fn install_worker_binary_at(
     let mut publish = false;
     for _ in 0..3 {
         if publish {
-            ensure_published(
-                executor, locator, session_id, worker, source, &store, &digest,
-            )?;
+            ensure_published(executor, locator, session_id, source, &store, &digest)?;
         }
         let command = |mode| {
             script(
@@ -495,7 +528,6 @@ fn ensure_published(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
-    worker: &WorkerInstall,
     source: &Path,
     store: &str,
     digest: &str,
@@ -547,7 +579,7 @@ fn ensure_published(
             )
             .purpose("create private worker store upload"),
         )?;
-        transfer_binary(executor, locator, session_id, worker, &temporary)?;
+        transfer_binary(executor, locator, session_id, source, &temporary)?;
         let steps = [
             targets::CommandStep::new(
                 "verify uploaded Mjolnir worker",
@@ -624,12 +656,11 @@ fn transfer_binary(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
-    worker: &WorkerInstall,
+    source: &Path,
     destination: &str,
 ) -> Result<()> {
-    if let targets::TargetLocator::AwsEc2 { ssh, .. } | targets::TargetLocator::SshBare { ssh, .. } =
-        locator
-        && let WorkerInstall::Host(source) = worker
+    if let targets::TargetLocator::AwsEc2 { ssh, .. }
+    | targets::TargetLocator::SshBare { ssh, .. } = locator
     {
         // This path already belongs to the private store upload. Stream the
         // worker without the deadline reserved for the surrounding commands.
@@ -681,11 +712,11 @@ fn transfer_binary(
                 )
                 .purpose("create private host worker transport"),
             )?;
-            install_worker_binary_at(executor, &host, session_id, worker, &pin, None)?;
-            super::upgrade::worker_binary_upload_plan(
+            install_binary_at(executor, &host, session_id, Some(source), &pin, None)?;
+            super::upgrade::binary_upload_plan(
                 locator,
                 session_id,
-                worker,
+                Some(source),
                 destination,
                 Some(&pin),
             )?
@@ -706,7 +737,7 @@ fn transfer_binary(
         }
         result
     } else {
-        super::upgrade::worker_binary_upload_plan(locator, session_id, worker, destination, None)?
+        super::upgrade::binary_upload_plan(locator, session_id, Some(source), destination, None)?
             .execute(executor)?;
         Ok(())
     }

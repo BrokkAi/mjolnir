@@ -561,6 +561,7 @@ fn golden_phone_new_session_preflight() {
                 local: Some(PathBuf::from("/definitely/not/a/repository")),
                 destination: "hel".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );

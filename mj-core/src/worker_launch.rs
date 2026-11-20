@@ -122,6 +122,12 @@ fn is_default_subtle_subagents(value: &bool) -> bool {
     *value
 }
 
+/// Launch directive that makes the Nitro engine's mbx settings authoritative.
+pub const SESSION_NITRO_MBX_ENV: &str = "MJ_SESSION_NITRO_MBX";
+pub const MBX_REMOTE_ENV_PREFIX: &str = "MBX_REMOTE_";
+pub const MBX_REMOTE_ENVIRONMENT: [&str; 3] =
+    ["MBX_REMOTE_URL", "MBX_REMOTE_NAMESPACE", "MBX_REMOTE_MODE"];
+
 /// Internal launch directive: include this absolute Git config file in the
 /// worker-owned session global config, then remove the key before harness use.
 pub const SESSION_GIT_CONFIG_INCLUDE_PATH: &str = "MJ_SESSION_GIT_CONFIG_INCLUDE_PATH";
@@ -590,6 +596,19 @@ impl WorkerLaunchConfig {
         launch
             .target_environment
             .remove(crate::config::INSTANCE_ENV);
+        if launch
+            .target_environment
+            .contains_key(SESSION_NITRO_MBX_ENV)
+        {
+            // Older launch files may contain remote options from the target
+            // or profile. The Nitro engine supplies them in the process env.
+            launch
+                .target_environment
+                .retain(|name, _| !name.starts_with(MBX_REMOTE_ENV_PREFIX));
+            launch
+                .environment
+                .retain(|name, _| !name.starts_with(MBX_REMOTE_ENV_PREFIX));
+        }
         Ok(launch)
     }
 

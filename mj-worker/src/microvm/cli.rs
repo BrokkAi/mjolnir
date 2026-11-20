@@ -18,7 +18,7 @@ use super::image::{self, PullPolicy};
 use super::protocol::ExecRequest;
 use super::state::{ImageConfig, Layout, VolumeMetadata, validate_label, validate_name};
 use super::vm::{self, RunSpec, VolumeArg};
-use super::{net, replace_root, sys, tarcopy, template, volume};
+use super::{mbx_proxy, net, replace_root, sys, tarcopy, template, volume};
 
 /// The exit status of an engine failure, as Podman uses.
 const ENGINE_FAILURE: i32 = 125;
@@ -45,6 +45,11 @@ enum Command {
     Image(ImageCommand),
     /// Create and start a VM.
     Run(Box<RunArgs>),
+    /// Probe the configured S3 remote with the host's instance role.
+    MbxCheck(mbx_proxy::CheckArgs),
+    /// Serve the read-only cache for one VM.
+    #[command(hide = true)]
+    MbxProxy(mbx_proxy::ProxyArgs),
     /// Run a command in a running VM.
     Exec(ExecArgs),
     /// Copy files between the host and a running VM.
@@ -54,6 +59,8 @@ enum Command {
     Container(ContainerCommand),
     /// List VMs.
     Ps(PsArgs),
+    /// Reconcile the host's images with the wanted set and trim the mbx cache.
+    Maintain(MaintainArgs),
     /// Start stopped VMs from their retained disks.
     Start(NamesArgs),
     /// Stop VMs.
@@ -76,6 +83,21 @@ enum Command {
     /// Remove a stopped VM's TAP device and jail; run by the VM's unit when it stops.
     #[command(hide = true)]
     HostJailDown { slot: u32 },
+}
+
+#[derive(Debug, Args)]
+struct MaintainArgs {
+    /// Image references the host must retain. Without any, images are left alone.
+    #[arg(long = "keep-image")]
+    keep_image: Vec<String>,
+    /// Total size of the remote mbx cache, for example 20GiB. Defaults to mbx's automatic budget.
+    #[arg(long, value_parser = parse_mbx_cache_budget)]
+    mbx_cache_budget: Option<u64>,
+}
+
+fn parse_mbx_cache_budget(value: &str) -> Result<u64> {
+    mj_core::config::parse_build_cache_size(value)
+        .ok_or_else(|| anyhow!("invalid --mbx-cache-budget {value:?}: use a size such as 20GiB"))
 }
 
 #[derive(Debug, Args)]
@@ -136,6 +158,14 @@ struct RunArgs {
     pull: Option<String>,
     #[arg(long)]
     platform: Option<String>,
+    #[arg(long, requires = "mbx_namespaces")]
+    mbx_remote: Option<String>,
+    #[arg(long, requires = "mbx_remote")]
+    mbx_remote_region: Option<String>,
+    #[arg(long, requires = "mbx_remote", value_parser = parse_mbx_cache_budget)]
+    mbx_cache_budget: Option<u64>,
+    #[arg(long = "mbx-namespace", requires = "mbx_remote")]
+    mbx_namespaces: Vec<String>,
     /// Accepted: the guest agent is always an init.
     #[arg(long)]
     init: bool,
@@ -350,6 +380,8 @@ fn dispatch(layout: &Layout, command: Command) -> Result<i32> {
         }
         Command::Image(command) => image_command(layout, command),
         Command::Run(args) => run(layout, *args),
+        Command::MbxCheck(args) => mbx_proxy::check(args),
+        Command::MbxProxy(args) => mbx_proxy::run(args),
         Command::Exec(args) => exec(layout, args),
         Command::Cp(args) => copy(layout, args),
         Command::Container(ContainerCommand::Exists { name }) => {
@@ -362,6 +394,7 @@ fn dispatch(layout: &Layout, command: Command) -> Result<i32> {
         }
         Command::Container(ContainerCommand::ReplaceRoot(command)) => replace_root(layout, command),
         Command::Ps(args) => list(layout, args),
+        Command::Maintain(args) => maintain(layout, args),
         Command::Start(args) => {
             for name in &args.names {
                 vm::start(layout, name)?;
@@ -497,6 +530,41 @@ fn image_command(layout: &Layout, command: ImageCommand) -> Result<i32> {
             1
         }),
     }
+}
+
+fn maintain(layout: &Layout, args: MaintainArgs) -> Result<i32> {
+    layout.ensure()?;
+    // Trim first: a full filesystem must not stop the trim that frees it,
+    // and rewriting the image references needs space for a temporary file.
+    {
+        let _global = layout.lock_global()?;
+        let freed = mbx_proxy::trim_cache(layout, args.mbx_cache_budget)?;
+        println!("Reclaimed {freed} bytes from the mbx cache");
+    }
+    // An empty keep set would remove every reference; only a caller that
+    // names the host's wanted images reconciles them.
+    if !args.keep_image.is_empty() {
+        let removed_refs = image::reconcile_references(layout, &args.keep_image)?;
+        // Root disks are sparse, so their nominal size says nothing about the
+        // space a prune frees; count the blocks they actually hold.
+        let mut allocated = BTreeMap::new();
+        for entry in std::fs::read_dir(layout.images())? {
+            let id = entry?.file_name().to_string_lossy().into_owned();
+            if let Ok(metadata) = std::fs::metadata(image::root_image(layout, &id)) {
+                allocated.insert(id, std::os::unix::fs::MetadataExt::blocks(&metadata) * 512);
+            }
+        }
+        let removed = image::prune(layout)?;
+        let bytes = removed
+            .iter()
+            .filter_map(|id| allocated.get(id))
+            .sum::<u64>();
+        for reference in removed_refs {
+            println!("{reference}");
+        }
+        println!("bytes reclaimed: {bytes}");
+    }
+    Ok(0)
 }
 
 fn parse_memory(text: &str) -> Result<u64> {
@@ -678,6 +746,17 @@ fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
         cpus: args.cpus,
         memory_bytes: memory,
         env: resolve_env(args.env),
+        mbx_remote: args
+            .mbx_remote
+            .map(|url| {
+                mbx_proxy::parse_remote(
+                    &url,
+                    args.mbx_remote_region,
+                    args.mbx_namespaces,
+                    args.mbx_cache_budget,
+                )
+            })
+            .transpose()?,
         user: args.user,
         workdir: args.workdir,
         volumes: args

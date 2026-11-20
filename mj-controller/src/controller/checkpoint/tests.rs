@@ -2198,6 +2198,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
                 local: None,
                 destination: "project".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -2600,6 +2601,7 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
                 local: None,
                 destination: "project".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -3063,6 +3065,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
                     local: None,
                     destination: "project".into(),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
         );

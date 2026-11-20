@@ -215,6 +215,7 @@ mod tests {
                         local: None,
                         destination: id.into(),
                         git_ref: None,
+                        mbx_namespace: None,
                     })
                     .collect(),
             },

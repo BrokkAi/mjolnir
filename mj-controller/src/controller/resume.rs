@@ -1356,6 +1356,7 @@ fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectR
         local,
         destination: PathBuf::from(id),
         git_ref: None,
+        mbx_namespace: None,
     })
 }
 

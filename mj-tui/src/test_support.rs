@@ -407,6 +407,7 @@ pub(crate) fn config() -> Config {
                     local: None,
                     destination: PathBuf::from("hel"),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
         )]),

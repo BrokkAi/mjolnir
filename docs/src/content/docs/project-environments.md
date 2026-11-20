@@ -101,16 +101,116 @@ go back to the target's image.
 Options: `--target` chooses the target whose image is the base and whose host
 builds, `--bundle` the project to record it for, `--name` the image name
 (default: the project id), and `--print` prints the generated Containerfile
-without building. A Nitro target has no engine of its own, so mj builds on a
-configured container target of the same platform and says which one.
+without building. For Nitro, mj builds on a configured container target for
+the same platform and reports which builder it chose. Build every Nitro
+image for the host's architecture. Sessions run as root inside the guest.
 
 Pushing and pulling use the engine's own registry login on that host. If the
 registry refuses, the error shows the login command to run there, for example
-`podman login ghcr.io` or `ssh host podman login ghcr.io`.
+`podman login ghcr.io` or `ssh host podman login ghcr.io`. Nitro pulls with
+crane as root on the host. For a private registry, run
+`ssh host sudo crane auth login ghcr.io -u <user> --password-stdin`, replacing the
+host, registry, and credentials.
+
+`mj ec2 create` warms the base image and the bundle images assigned for the new
+host's platform. The refresh poller reclaims obsolete images on Nitro after
+all pulls for that host succeed. Images in use by retained sandboxes or staged
+root replacements stay available.
 
 `mj image status` reports, for each recorded platform, whether the image still
 matches the current recipe (`current` or `recipe changed`), or `unknown` when
-no target identifies the base; pass `--target` to resolve it.
+no target identifies the base. Pass `--target` to resolve it. When a Nitro target
+has no available builder for the platform, status still lists its assignments
+with freshness `unknown (no builder for <platform>)`.
+
+## Shared build cache on Nitro
+
+Each Nitro sandbox keeps its mbx build cache inside its VM. Use an S3 remote
+to reuse Rust and C/C++ build outputs published by CI:
+
+```sh
+mj ec2 create c8id.4xlarge --zone us-east-1a --runtime nitro \
+  --mbx-remote s3://your-build-cache/mbx
+```
+
+Mjolnir creates or reuses a read-only EC2 instance profile and records the
+remote in the machine's configuration. Use `--mbx-remote-region` if the
+bucket is in a different region. If AWS denies profile setup or attachment,
+Mjolnir reports the denial and creates the host with the remote disabled.
+
+For an existing host, attach an instance profile and set the same keys in
+`~/.config/mjolnir/config.toml`:
+
+```sh
+aws ec2 associate-iam-instance-profile --instance-id i-0123456789abcdef0 \
+  --iam-instance-profile Name=your-nitro-cache-reader
+```
+
+```toml
+[machines.nitro-builder.build_cache]
+remote = "s3://your-build-cache/mbx"
+remote_region = "us-east-1" # Optional. Defaults to the Nitro host's region.
+```
+
+A role you attach yourself needs `s3:GetObject` for objects beneath the cache
+prefix and unconditional `s3:ListBucket` on the cache bucket. S3 can report
+a missing object as AccessDenied when the role cannot list the bucket.
+The Nitro proxy never exposes bucket listing to guests. Check the host's
+access with `mj doctor`. [S3 GetObject permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)
+
+The namespace defaults to the GitHub `owner/repository` as written in the
+bundle's `github` setting, including its case. Set `mbx_namespace` on a bundle
+repository to override it or enable a local repository with no GitHub source.
+Match this value in CI. A sandbox can read the namespaces of all repositories
+in its bundle. Its primary repository supplies the default namespace, or the
+first repository with a namespace supplies it when the primary has none.
+
+Only trusted CI should have write access. A writer can overwrite build
+results that another session will use. Scope the CI role's S3 permissions
+to its own cache namespace. The host reads S3 with its instance role and
+serves the guest through a read-only proxy. mbx warns about unauthenticated,
+plain HTTP on the guest-to-host link because plain HTTP does not protect
+traffic from reading or modification in transit. Use the private Nitro
+link for this endpoint.
+
+The following workflow assumes your CI setup has installed the pinned
+`mbx` and project toolchain. Replace `main` with your protected default
+branch. Configure the GitHub OIDC subject template with
+`include_claim_keys: ["repo", "ref", "event_name"]`. The AWS trust policy
+must compare the audience with `sts.amazonaws.com` and the subject with the
+exact value for the trusted repository, branch and push event. For a
+name-based subject, use `repo:your-org/your-repo:ref:refs/heads/main:event_name:push`.
+Include the owner and repository IDs if your repository uses immutable
+subjects. This scopes the AWS credentials even if someone changes the
+workflow trigger. [GitHub OIDC subject customization](https://docs.github.com/en/actions/reference/security/oidc#customizing-the-subject-claims-for-an-organization-or-repository)
+
+```yaml
+on:
+  push:
+    branches: [main]
+
+jobs:
+  seed-build-cache:
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.ref_protected
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MBX_REMOTE_URL: s3://your-build-cache/mbx
+      MBX_REMOTE_NAMESPACE: ${{ github.repository }}
+      MBX_REMOTE_S3_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # Install the pinned mbx and build toolchain here.
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/your-mbx-ci-writer
+          aws-region: us-east-1
+      - run: mbx build --locked
+```
 
 ## Limits
 

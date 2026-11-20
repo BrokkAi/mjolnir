@@ -146,6 +146,7 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
             local: None,
             destination: "custom-layout".into(),
             git_ref: None,
+            mbx_namespace: None,
         }],
     };
     let project = crate::project_catalog::snapshot(&bundle, &SourceExists, true).unwrap();
@@ -549,6 +550,7 @@ fn repository_preflight_distinguishes_the_original_source_from_a_reused_name() {
         local: Some(origin.clone()),
         destination: "project".into(),
         git_ref: None,
+        mbx_namespace: None,
     };
     assert_eq!(
         checkpoint_source_missing_commit(
@@ -646,6 +648,7 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
             local: Some(PathBuf::from(format!("/origin/{id}"))),
             destination: id.into(),
             git_ref: None,
+            mbx_namespace: None,
         })
         .to_vec();
     let mut session = checkpoint_test_session(session_id);
@@ -797,6 +800,7 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
         local: None,
         destination: "project".into(),
         git_ref: None,
+        mbx_namespace: None,
     };
     let executor = RecordingExecutor {
         commands: Mutex::new(Vec::new()),
@@ -1085,6 +1089,30 @@ fn independent_target_lanes_run_at_the_same_time() {
     seen.sort();
     assert_eq!(seen, ["install the worker", "upload the checkpoint"]);
 }
+// Hard-won: #1495: the second lane's thread had no runtime context, so a runtime-backed wait there panicked.
+#[test]
+fn both_lanes_can_wait_on_the_runtime() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    // Lifecycle work runs synchronously on a blocking-pool thread.
+    let (first, second) = runtime
+        .block_on(async {
+            mj_core::runtime::spawn_blocking(|| {
+                execute_concurrent_lanes(
+                    || mj_core::runtime::block_on(async { 1 }),
+                    || mj_core::runtime::block_on(async { 2 }),
+                )
+            })
+            .await
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!((first, second), (1, 2));
+}
+
 #[test]
 fn a_lane_failure_is_reported_in_lane_order_and_never_abandons_the_other_lane() {
     let reached = Mutex::new(Vec::new());
@@ -1636,6 +1664,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
                 local: Some(data_directory.join("host-clone-that-no-longer-exists")),
                 destination: "project".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -2054,6 +2083,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
             local: Some(repository.path().canonicalize().unwrap()),
             destination: PathBuf::from("accepted/layout"),
             git_ref: None,
+            mbx_namespace: None,
         }],
     };
     session.bundle_id = "bifrost".into();

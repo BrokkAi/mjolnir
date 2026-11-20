@@ -2460,6 +2460,7 @@ async fn remove_project_rpc_removes_missing_directory_from_config_and_runtime_fe
             local: Some(missing.clone()),
             destination: PathBuf::from(bundle_id),
             git_ref: None,
+            mbx_namespace: None,
         }],
     };
     mj_core::config::Config::update(|config| {

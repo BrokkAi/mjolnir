@@ -102,6 +102,7 @@ fn podman_controller(state: SessionState) -> Controller {
                 local: None,
                 destination: "project".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -2798,6 +2799,55 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
     }
 }
 
+struct FailingPullExecutor {
+    failing_image: String,
+    commands: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+}
+
+impl CommandExecutor for FailingPullExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands
+            .lock()
+            .unwrap()
+            .push((command.program.clone(), command.args.clone()));
+        if command.purpose == format!("refresh container image {}", self.failing_image) {
+            return Ok(CommandOutput {
+                status: 125,
+                stdout: Vec::new(),
+                stderr: b"short-name resolution failed".to_vec(),
+            });
+        }
+        Ok(CommandOutput {
+            status: 0,
+            stdout: b"sha256:1111\n".to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
 /// A background refresh is a chore, not a launch. One host that cannot
 /// reach its registry must not cost the other hosts their pull, and the
 /// failure has to say which host, which image, and what the engine
@@ -2805,57 +2855,6 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
 /// reason.
 #[test]
 fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
-    struct FailingPullExecutor {
-        failing_image: String,
-        commands: std::sync::Mutex<Vec<(String, Vec<String>)>>,
-    }
-
-    impl CommandExecutor for FailingPullExecutor {
-        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-            mj_core::targets::DeadlinePause::none()
-        }
-
-        fn cancellation_requested_without_deadline(&self) -> bool {
-            self.cancellation_requested()
-        }
-
-        fn execute_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-            self.execute(command)
-        }
-
-        fn execute_with_stdin_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-            input: &mut (dyn std::io::Read + Send),
-        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-            self.execute_with_stdin(command, input)
-        }
-
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands
-                .lock()
-                .unwrap()
-                .push((command.program.clone(), command.args.clone()));
-            if command.args.contains(&"pull".to_owned())
-                && command.args.contains(&self.failing_image)
-            {
-                return Ok(CommandOutput {
-                    status: 125,
-                    stdout: Vec::new(),
-                    stderr: b"short-name resolution failed".to_vec(),
-                });
-            }
-            Ok(CommandOutput {
-                status: 0,
-                stdout: b"sha256:1111\n".to_vec(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-
     let failing_image = "ghcr.io/example/broken:latest";
     let broken = mj_controller::targets::image_refresh(
         mj_controller::targets::ImageHost::LocalPodman,
@@ -2936,6 +2935,79 @@ fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
         "{commands:?}"
     );
     assert!(ran("docker", &["image", "prune", "-f"]), "{commands:?}");
+}
+
+#[test]
+fn nitro_maintenance_keeps_all_targets_images_after_successful_and_failed_pulls() {
+    use mj_core::config::Config;
+    let config: Config = toml::from_str(
+        r#"
+version = 23
+
+[machines.nitro]
+kind = "ssh"
+host = "nitro.example.test"
+
+[targets.first]
+kind = "nitro"
+machine = "nitro"
+platform = "linux/amd64"
+image = "ghcr.io/example/base:latest"
+
+[targets.second]
+kind = "nitro"
+machine = "nitro"
+platform = "linux/amd64"
+image = "ghcr.io/example/offline:1"
+pull_policy = "never"
+
+[bundles.app]
+primary_repo = "app"
+
+[[bundles.app.repositories]]
+id = "app"
+github = "example/app"
+destination = "app"
+
+[images.bundles.app]
+"linux/amd64" = "ghcr.io/example/bundle:latest"
+"#,
+    )
+    .unwrap();
+    let (host, _) = config.targets["first"].image_host().unwrap();
+    for failed_image in ["ghcr.io/example/bundle:latest", ""] {
+        let plan = mj_controller::targets::image_refresh_plan(&config, ["first", "second"], None);
+        let executor = FailingPullExecutor {
+            failing_image: failed_image.into(),
+            commands: Default::default(),
+        };
+        let results = refresh_host_images(&host, plan, &executor, &|_| {});
+        let commands = executor.commands.into_inner().unwrap();
+        let maintenance: Vec<_> = commands
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, args))| {
+                let command = args.last()?;
+                command.contains("'maintain'").then_some((index, command))
+            })
+            .collect();
+        let [(index, command)] = maintenance.as_slice() else {
+            panic!("expected one maintain command, got {commands:?}");
+        };
+        assert_eq!(*index, commands.len() - 1);
+        for image in ["base:latest", "bundle:latest", "offline:1"] {
+            assert!(
+                command.contains(&format!("'--keep-image' 'ghcr.io/example/{image}'")),
+                "{command}"
+            );
+        }
+        assert_eq!(
+            results
+                .iter()
+                .find_map(|(_, image, error)| { error.as_ref().map(|_| image.as_str()) }),
+            (!failed_image.is_empty()).then_some(failed_image)
+        );
+    }
 }
 
 /// The pre-pull's whole point: an image the host does not have is downloaded
@@ -3368,33 +3440,20 @@ async fn a_remote_handle_exists_exactly_while_the_daemon_publishes_its_view() {
 // Hard-won: c2d74db67: the refresher's first look could run while daemon startup was still starting Apple's container service, read it as stopped, and skip a whole interval.
 #[tokio::test(start_paused = true)]
 async fn only_the_apple_container_refresh_waits_for_its_startup() {
-    let refresh = |host| {
-        mj_controller::targets::image_refresh(
-            host,
-            "ghcr.io/example/dev:latest",
-            None,
-            mj_core::config::ImagePullPolicy::Auto,
-        )
-        .expect("a remote latest image is refreshed")
-    };
     let settled = tokio_util::sync::CancellationToken::new();
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let ran = |name: &'static str| move |_| Some((name.to_owned(), String::new(), None));
+    let ran = |name| move || name;
     let apple = mj_core::runtime::spawn(refresh_host_after_startup(
-        refresh(mj_controller::targets::ImageHost::AppleContainer),
+        true,
         settled.clone(),
         cancellation.clone(),
         ran("apple"),
     ));
     // A slow Apple start holds no other host's refresh.
-    let docker = refresh_host_after_startup(
-        refresh(mj_controller::targets::ImageHost::LocalDocker),
-        settled.clone(),
-        cancellation.clone(),
-        ran("docker"),
-    )
-    .await;
-    assert_eq!(docker.map(|(host, ..)| host).as_deref(), Some("docker"));
+    let docker =
+        refresh_host_after_startup(false, settled.clone(), cancellation.clone(), ran("docker"))
+            .await;
+    assert_eq!(docker, Some("docker"));
 
     tokio::time::sleep(Duration::from_secs(600)).await;
     assert!(
@@ -3403,7 +3462,7 @@ async fn only_the_apple_container_refresh_waits_for_its_startup() {
     );
     settled.cancel();
     let apple = apple.await.unwrap();
-    assert_eq!(apple.map(|(host, ..)| host).as_deref(), Some("apple"));
+    assert_eq!(apple, Some("apple"));
 }
 
 #[test]
