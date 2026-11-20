@@ -9,7 +9,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/BrokkAi/mjolnir/go/internal/core/config"
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/spf13/cobra"
 )
 
@@ -99,7 +99,7 @@ func NewRoot(args []string) *cobra.Command {
 			if cmd.Flags().Changed("instance") {
 				flag = &options.instance
 			}
-			return config.ApplyInstanceFlag(flag)
+			return core.ApplyInstanceFlag(flag)
 		},
 		RunE: func(*cobra.Command, []string) error {
 			return fmt.Errorf("the dashboard: %w", errNotPorted)
@@ -114,7 +114,7 @@ func NewRoot(args []string) *cobra.Command {
 		writeHelp(cmd.OutOrStdout(), target, true)
 	}})
 	persistent := root.PersistentFlags()
-	stringFlag(persistent, &options.instance, flagSpec{Name: "instance", Short: "i", ValueName: "NAME", Env: config.InstanceEnv, Order: 0,
+	stringFlag(persistent, &options.instance, flagSpec{Name: "instance", Short: "i", ValueName: "NAME", Env: core.InstanceEnv, Order: 0,
 		Help: "Isolate configuration, database, daemon, and logs under `instances/<name>`. This is a different `mj` world, not a harness profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence"})
 	boolFlag(persistent, &options.noSplash, flagSpec{Name: "no-splash", Env: "MJ_NO_SPLASH", Order: 1,
 		Help: "Start the dashboard without the animated startup splash, for example over a slow remote connection"})

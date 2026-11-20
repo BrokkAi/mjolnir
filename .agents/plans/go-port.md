@@ -38,7 +38,10 @@ User-visible output must match the Rust build. Prove it with golden files captur
 ## Progress
 
 - [x] (2026-11-20) Milestone 1 slice: Go module, `go/internal/core/config` instance and directory resolution, ID validation and atomic writes (port of `mj-core/src/config/loading.rs`) with its Rust tests; `go/cmd/mj` root command tree with clap-identical top-level help, version and usage errors, proven by golden files.
-- [ ] Owner confirms the approach before the work fans out across agents.
+- [x] (2026-11-20) Owner confirmed the approach and chose the crate-by-crate fan-out.
+- [x] (2026-11-20) First slice moved into package `core`; `go/scripts/sync-assets.sh` copies mj-core/assets for `//go:embed`.
+- [ ] mj-core declarations phase (ten groups) merged and compiling.
+- [ ] mj-core bodies and tests phase merged; `go test ./internal/core/` passes.
 - [ ] Milestone 1 rest: all of `mj-core` (config, state, relay protocol, transcript, subprocess, targets, credentials, harness install/runtime, acp on acp-go).
 - [ ] Milestone 2: leaf crates `mj-transcript`, `mj-checkpoint`, `mj-review`, `mj-session-types`, `mj-targets`, `mj-client`.
 - [ ] Milestone 3: `mj-worker` and `mj-worker-bin` (the data plane: harness process, ACP connection, relay journal).
@@ -60,6 +63,14 @@ User-visible output must match the Rust build. Prove it with golden files captur
 
 - Decision: the Go build is a separate program in `go/`, not a component the Rust daemon drives.
   Rationale: the owner asked for a replacement; mixing the two was never asked for.
+  Date/Author: 2026-11-20, agent.
+
+- Decision: all of mj-core becomes one Go package, `go/internal/core`, with one file per Rust module (`config_loading.go` for `config/loading.rs`). Rules for agents are in `.agents/docs/go-port/core-brief.md`.
+  Rationale: 42 of mj-core's modules (71k of 84k lines) form one dependency cycle, which Go packages cannot express. Only 30 top-level names collide across modules; the brief settles them with a module prefix.
+  Date/Author: 2026-11-20, agent.
+
+- Decision: mj-core is ported in two fan-out phases over ten module groups: declarations (every type, constant and signature) so the package compiles, then bodies and tests against those declarations. Each agent works in its own git worktree and the results are merged.
+  Rationale: parallel agents in one package need each other's signatures; declaring first means the bodies phase compiles against the real shapes instead of guesses.
   Date/Author: 2026-11-20, agent.
 
 - Decision: parse with cobra but render help and usage errors with a small clap-layout renderer.

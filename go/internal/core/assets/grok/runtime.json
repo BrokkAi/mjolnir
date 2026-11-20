@@ -1,0 +1,9 @@
+{
+  "version": "1.0.89",
+  "platforms": {
+    "linux-x86_64": {"target":"linux-x86_64","sha256":"927f99241c1ba09dd42f2b917a0d4fd736d3cacd5f32e18db602164b0571867a"},
+    "linux-aarch64": {"target":"linux-aarch64","sha256":"0a3d1a9b656ece4976c1307afe70a4b0db40ff23f846a24d2fca60fa3d79e744"},
+    "macos-x86_64": {"target":"macos-x86_64","sha256":"69b5834b2b7b96c88f8e73dba935a457be37696bf6427a65507c778d3e97d46d"},
+    "macos-aarch64": {"target":"macos-aarch64","sha256":"17880ae836f24860e2bca2f1004ad4ac46576e5ae6479df5225fb9fed89e78ec"}
+  }
+}
