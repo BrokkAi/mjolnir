@@ -19,6 +19,11 @@ use agent_client_protocol::v1::schema::{
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+/// Earlier transcript evidence was lost when the daemon adopted a live worker.
+/// Until the archive carries native-use proof, this marker prevents an empty
+/// native capture from claiming that missing history proves an unused session.
+pub const ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID: &str = "system:adoption-history-unavailable";
+
 pub const SESSION_RESTART_TEXT: &str = "[session restarted]";
 pub const SESSION_RESTART_ITEM_PREFIX: &str = "system:session-restarted:";
 pub const WORK_INTERRUPTED_ITEM_PREFIX: &str = "system:work-interrupted:";

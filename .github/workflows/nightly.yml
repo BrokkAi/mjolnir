@@ -96,7 +96,9 @@ jobs:
     # The version commits and merges this job pushes get no CI run of their
     # own, so the newest commit on master's first-parent line that a person
     # made is the one whose CI decides, and whether a release already holds
-    # it decides whether there is anything to release.
+    # it decides whether there is anything to release. awk reads the whole
+    # log: exiting at the first match kills git log with SIGPIPE once the
+    # history outgrows the pipe buffer, and pipefail fails the step on it.
     - name: Check that there is a green change to release
       id: check
       env:
@@ -104,7 +106,7 @@ jobs:
       run: |
         set -euo pipefail
         source="$(git log --first-parent --format='%H%x09%an' HEAD |
-          awk -F '\t' '$2 != "github-actions[bot]" { print $1; exit }')"
+          awk -F '\t' '!found && $2 != "github-actions[bot]" { print $1; found = 1 }')"
         latest="$(gh release view --json tagName --jq .tagName)"
         if git merge-base --is-ancestor "$source" "$latest"; then
           printf 'Not releasing: %s already contains %s.\n' "$latest" "$source" | tee -a "$GITHUB_STEP_SUMMARY"

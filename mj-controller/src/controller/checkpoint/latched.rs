@@ -89,16 +89,7 @@ impl Controller {
         held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
-        if let Some(operation) = crate::database::load_move_operation(session_id)?
-            && operation.queue_admission_started
-            && !operation.queue_admission_finished
-        {
-            // Advancing the recovery floor can prune terminal command IDs.
-            // Keep them until a retained Move queue has been fully admitted.
-            bail!(
-                "move queue admission is incomplete; retry Move before checkpointing this destination"
-            );
-        }
+        let pending_legacy_queue = crate::database::load_move_operation(session_id)?.is_some_and(|operation| operation.queue_admission_started && !operation.queue_admission_finished);
         let session = self
             .state
             .sessions
@@ -290,6 +281,10 @@ impl Controller {
                 held_relay,
             )
             .await?;
+        if pending_legacy_queue && relay.connection_mut().protocol_version() < mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL {
+            // Older workers have no operation pins; retain their existing floor gate.
+            bail!("move queue admission is incomplete; retry Move before checkpointing this destination");
+        }
         if let Some(captured) = &prestaged_capture {
             record_checkpoint_report_notice(&mut relay, session_id, captured).await;
         }
@@ -535,13 +530,13 @@ impl Controller {
             .or_else(|| session.native_session_id.clone())
             .context("harness did not report its native session ID")?;
 
+        let relay_protocol = relay.connection_mut().protocol_version();
         // The latch holds: this projection sits exactly at the barrier's ready
         // cursor. Exporting and transferring the archive needs the barrier, not
         // the connection, so hand it back and let the dashboard keep syncing
         // and submitting while the slow phase runs.
         if exclusivity == LatchExclusivity::ReleaseAfterLatch {
             relay.end_latch();
-            admission.narrow_copy()?;
         }
 
         // Reuse before exporting: verifying an installed archive costs far less
@@ -563,6 +558,7 @@ impl Controller {
             )
         {
             return Ok(LatchedCheckpoint {
+                relay_protocol,
                 admission: admission.clone(),
                 _worker_owner: crate::worker_lifecycle::require(session_id)?,
                 artifact,
@@ -845,6 +841,7 @@ impl Controller {
             }
         };
         Ok(LatchedCheckpoint {
+                relay_protocol,
                 admission: admission.clone(),
                 _worker_owner: crate::worker_lifecycle::require(session_id)?,
             artifact,

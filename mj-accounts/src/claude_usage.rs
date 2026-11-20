@@ -71,6 +71,26 @@ impl fmt::Display for ClaudeUsageError {
     }
 }
 
+/// Whether the usage query asks the CLI directly: macOS, where the login lives
+/// in the Keychain.
+const fn queries_through_cli() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// Whether a usage query or grant renewal for the profile at `home` can
+/// resolve the `claude` program: always where the query goes through the CLI,
+/// otherwise only with a stored login that has a refresh token (the one
+/// renewal that needs the CLI; without one, `query_with_runtime` and
+/// `refresh_grant_if_due` finish without it). Reads the login file.
+#[cfg(unix)]
+pub(crate) fn runs_cli(home: &std::path::Path) -> bool {
+    queries_through_cli()
+        || std::fs::read(home.join(".credentials.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|credentials| oauth_has_refresh_token(&credentials))
+}
+
 /// Query the same OAuth usage endpoint as Claude Code's interactive `/usage`,
 /// except on macOS, where Claude Code is asked directly.
 ///
@@ -83,7 +103,7 @@ pub async fn query(
     home: PathBuf,
     environment: HashMap<String, String>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    if cfg!(target_os = "macos") {
+    if queries_through_cli() {
         let program = ClaudeLauncher::Managed.locate(&environment).await?;
         let executor = Arc::new(CancellableProcessExecutor::with_timeout(CLI_USAGE_TIMEOUT));
         let _cancel = executor.cancel_on_drop();

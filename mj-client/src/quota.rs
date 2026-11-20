@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+pub use mj_core::config::AntigravityQuotaPool;
 use mj_core::config::HarnessKind;
 
 /// Label used when a harness is billed by API usage rather than a subscription.
@@ -13,42 +14,16 @@ pub const API_LABEL: &str = "API";
 /// is no reading to take and none is missing.
 pub const NOT_REPORTED_LABEL: &str = "n/a";
 
-/// The independent subscription pools returned by Antigravity's `/usage`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AntigravityQuotaPool {
-    Gemini,
-    Claude,
-}
+/// Label used when the subscription is active but no usage window is open and
+/// the provider reports no usage at all until the next request opens one, so
+/// even the long window is unknown. Muse's quota endpoint does this.
+pub const IDLE_LABEL: &str = "idle";
 
-impl AntigravityQuotaPool {
-    pub const ALL: [Self; 2] = [Self::Gemini, Self::Claude];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Gemini => "Ge",
-            Self::Claude => "Cl",
-        }
-    }
-
-    pub const fn bucket_prefix(self) -> &'static str {
-        match self {
-            Self::Gemini => "gemini-",
-            Self::Claude => "3p-",
-        }
-    }
-
-    pub const fn model_scope(self) -> &'static str {
-        match self {
-            Self::Gemini => "gemini",
-            Self::Claude => "claude,gpt",
-        }
-    }
-
-    pub fn of_window(window: &QuotaWindow) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|pool| window.model_scope.as_deref() == Some(pool.model_scope()))
-    }
+pub fn antigravity_pool_of_window(window: &QuotaWindow) -> Option<AntigravityQuotaPool> {
+    window
+        .model_scope
+        .as_deref()
+        .and_then(AntigravityQuotaPool::of_scope)
 }
 
 /// A quota window reported by a harness.
@@ -59,7 +34,8 @@ pub struct QuotaWindow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// Model-name fragments sharing this allowance, separated by commas.
+    /// Model-name fragments sharing this allowance, separated by commas. A
+    /// fragment written with a leading `!` leaves out models containing it.
     pub model_scope: Option<String>,
     pub used: Option<i64>,
     pub limit: Option<i64>,
@@ -70,13 +46,9 @@ pub struct QuotaWindow {
 
 impl QuotaWindow {
     pub fn applies_to_model(&self, model: &str) -> bool {
-        self.model_scope.as_deref().is_none_or(|scope| {
-            let model = model.to_ascii_lowercase();
-            scope.split(',').any(|fragment| {
-                let fragment = fragment.trim();
-                !fragment.is_empty() && model.contains(&fragment.to_ascii_lowercase())
-            })
-        })
+        self.model_scope
+            .as_deref()
+            .is_none_or(|scope| mj_core::config::model_matches_scope(model, scope))
     }
 
     /// Whether this allowance spans a week or longer, including model-scoped labels.
@@ -166,17 +138,39 @@ pub fn refused_login_message(profile_id: &str) -> String {
 }
 
 impl ProfileQuota {
+    /// What people see of an Antigravity report: only the windows of `pools`,
+    /// the pools the profile uses. The stored report keeps every pool for
+    /// selection and quota recovery. Other harnesses are unchanged.
+    pub fn retain_antigravity_pools(&mut self, pools: &[AntigravityQuotaPool]) {
+        if self.harness == HarnessKind::Antigravity {
+            self.windows.retain(|window| {
+                antigravity_pool_of_window(window).is_none_or(|pool| pools.contains(&pool))
+            });
+        }
+    }
+
     /// A display projection of one pool; the original report retains all scopes
     /// for model selection and quota recovery.
     pub fn for_antigravity_pool(&self, pool: AntigravityQuotaPool) -> Self {
         let mut report = self.clone();
         report
             .windows
-            .retain(|window| window.model_scope.as_deref() == Some(pool.model_scope()));
+            .retain(|window| antigravity_pool_of_window(window) == Some(pool));
         for window in &mut report.windows {
             window.model_scope = None;
         }
         report
+    }
+
+    /// A window's name in text that lists a whole report: an Antigravity
+    /// window also names its pool, as in `Week (Ge)`.
+    pub fn window_label(&self, window: &QuotaWindow) -> String {
+        match antigravity_pool_of_window(window) {
+            Some(pool) if self.harness == HarnessKind::Antigravity => {
+                format!("{} ({})", window.label, pool.label())
+            }
+            _ => window.label.clone(),
+        }
     }
 
     /// Billing mode inferred from the daemon's cached report.
@@ -282,13 +276,23 @@ impl ProfileQuota {
             && self.extra.as_deref() == Some(NOT_REPORTED_LABEL)
     }
 
+    /// Whether the report says the subscription is idle with nothing to read:
+    /// no window is open, and the provider withholds every window until the
+    /// next request opens one.
+    pub fn is_idle_without_reading(&self) -> bool {
+        self.error.is_none() && self.windows.is_empty() && self.extra.as_deref() == Some(IDLE_LABEL)
+    }
+
     /// What a report without windows shows in place of a reading: `API` for a
-    /// usage-priced profile, `n/a` for a harness that never shares its quota.
+    /// usage-priced profile, `n/a` for a harness that never shares its quota,
+    /// `idle` for a subscription whose provider reports nothing while idle.
     pub fn windowless_label(&self) -> Option<&'static str> {
         if self.is_usage_priced() {
             Some(API_LABEL)
         } else if self.is_not_reported() {
             Some(NOT_REPORTED_LABEL)
+        } else if self.is_idle_without_reading() {
+            Some(IDLE_LABEL)
         } else {
             None
         }
@@ -323,13 +327,7 @@ impl ProfileQuota {
                     (_, Some(used), Some(limit)) => format!("{used}/{limit}"),
                     _ => "available".to_string(),
                 };
-                let label = if self.harness == HarnessKind::Antigravity {
-                    AntigravityQuotaPool::of_window(window)
-                        .map(|pool| format!("{} ({})", window.label, pool.label()))
-                        .unwrap_or_else(|| window.label.clone())
-                } else {
-                    window.label.clone()
-                };
+                let label = self.window_label(window);
                 match window
                     .resets
                     .as_ref()
@@ -554,14 +552,18 @@ pub fn five_hour_quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) ->
     }
 }
 
-/// Fill only missing reset data; fresh usage values always win.
+/// Fill only missing reset data; fresh usage values always win. An
+/// Antigravity pool is the same allowance whichever of its scopes a reading
+/// carries, so a cached reading never returns beside a fresh one.
 pub fn merge_reset_windows(windows: &mut Vec<QuotaWindow>, cached: &[QuotaWindow]) -> bool {
     let mut restored = false;
     for old in cached {
-        if let Some(window) = windows
-            .iter_mut()
-            .find(|w| w.label.eq_ignore_ascii_case(&old.label) && w.model_scope == old.model_scope)
-        {
+        let old_pool = antigravity_pool_of_window(old);
+        if let Some(window) = windows.iter_mut().find(|w| {
+            w.label.eq_ignore_ascii_case(&old.label)
+                && (w.model_scope == old.model_scope
+                    || old_pool.is_some() && antigravity_pool_of_window(w) == old_pool)
+        }) {
             if window.resets_at_epoch_seconds.is_none() && old.resets_at_epoch_seconds.is_some() {
                 window.resets_at_epoch_seconds = old.resets_at_epoch_seconds;
                 window.resets = old.resets.clone();

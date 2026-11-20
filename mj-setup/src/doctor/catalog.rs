@@ -170,6 +170,7 @@ mod tests {
 
     fn profile(models: &[&str]) -> HarnessProfile {
         HarnessProfile {
+            third_party_models: true,
             enabled: true,
             kind: HarnessKind::OpenCode,
             home: "/profiles/ds8bit".into(),

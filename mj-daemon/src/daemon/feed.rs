@@ -503,23 +503,23 @@ mod tests {
     // Hard-won: 6b12ea8ea: transcript-only revisions repeatedly submitted notification writes.
     // Hard-won: eb00602a0: notification observations could queue writes after handoff drained.
     #[tokio::test]
-    async fn alert_events_cross_the_protocol_108_feed_and_resume_after_restart() {
+    async fn alert_events_cross_the_protocol_109_feed_and_resume_after_restart() {
         const CHILD: &str = "MJ_TEST_ALERT_EVENTS_FEED";
-        const TEST: &str = "alert_events_cross_the_protocol_108_feed_and_resume_after_restart";
+        const TEST: &str = "alert_events_cross_the_protocol_109_feed_and_resume_after_restart";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
             mj_controller::controller::test_support::IsolatedTest::new(
                 mj_controller::controller::test_support::test_name(module_path!(), TEST),
             )
             .env(CHILD, "1")
-            .env("MJ_INSTANCE", "alert-events-108")
+            .env("MJ_INSTANCE", "alert-events-109")
             .isolated_store(root.path())
             .run();
             return;
         }
-        assert_eq!(
-            mj_client::daemon::PROTOCOL_VERSION,
-            mj_client::daemon::ALERT_EVENTS_PROTOCOL
+        assert!(
+            (mj_client::daemon::ALERT_EVENTS_PROTOCOL..)
+                .contains(&mj_client::daemon::PROTOCOL_VERSION)
         );
         let log = mj_controller::test_log::CapturedLog::default();
         tracing::subscriber::set_global_default(log.clone())

@@ -430,7 +430,7 @@ impl ExportRuntime for RuntimeState {
         &self,
         session_id: String,
     ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
-        Box::pin(async move { self.checkpoint_session_now(&session_id).await })
+        Box::pin(async move { self.checkpoint_for_bundle_export(&session_id).await })
     }
 
     fn spawn_subagent(
@@ -3919,8 +3919,8 @@ impl SubagentBackend for ApiBackend {
                     .await?;
                     let selected = choices.model.clone();
                     choices.model = default;
-                    let allowed = self.profile_catalog.allowed_models(&profile);
-                    choices = choices.restricted_to(&allowed);
+                    let offer = self.profile_catalog.model_offer(&profile);
+                    choices = choices.restricted_to(&offer);
                     choices.model = selected;
                     Ok(choices)
                 }

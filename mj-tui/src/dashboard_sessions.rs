@@ -4,7 +4,6 @@ use mj_chat::text_input::EditOutcome;
 use ratatui::style::Style;
 
 use mj_client::daemon::SessionTextMatchKind;
-use mj_client::quota::AntigravityQuotaPool;
 
 use crate::render::{headroom_color, quota_remaining_percent, weekly_quota_exhausted};
 
@@ -1371,19 +1370,24 @@ impl DashboardState {
         if quota.harness == HarnessKind::Antigravity {
             let pool_cell = |weekly: bool| {
                 PickerCell::text(
-                    AntigravityQuotaPool::ALL
+                    self.config
+                        .enabled_profile(id)
+                        .map(|profile| profile.antigravity_pools())
+                        .unwrap_or_default()
                         .into_iter()
-                        .map(|pool| {
+                        // A pool without this allowance has nothing to show:
+                        // Argon reports no five-hour limit, and only plans
+                        // that keep Argon apart report its pool at all.
+                        .filter_map(|pool| {
                             let report = quota.for_antigravity_pool(pool);
                             let window = if weekly {
                                 report.weekly_window()
                             } else {
                                 report.five_hour_window()
-                            };
-                            let value = window
-                                .and_then(quota_remaining_percent)
+                            }?;
+                            let value = quota_remaining_percent(window)
                                 .map_or_else(|| "?".into(), |value| format!("{value}%"));
-                            format!("{} {value}", pool.label())
+                            Some(format!("{} {value}", pool.label()))
                         })
                         .collect::<Vec<_>>()
                         .join(" / "),

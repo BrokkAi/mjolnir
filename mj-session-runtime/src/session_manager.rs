@@ -8,10 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::database::{
-    ProjectionApplyOutcome, ProjectionIntegrityError, apply_projection_page,
-    save_materialized_session,
-};
+use crate::database::{ProjectionApplyOutcome, ProjectionIntegrityError, apply_projection_page};
 use crate::worker_client::{RelayClient, RelayEventPage, RelayRejected, RelayTransportDead};
 use mj_checkpoint::archive::verify_archive_streaming;
 use mj_core::credentials::{

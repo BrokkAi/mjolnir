@@ -159,7 +159,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         let copy = gate
             .try_start(
                 LEASED_RELAY_SESSION,
-                crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+                crate::recovery_gate::BackgroundWork::DelegationDelivery,
             )
             .unwrap();
         std::fs::write(
@@ -326,7 +326,10 @@ async fn model_policy_refilters_the_same_actor_and_preserves_raw_observations() 
             LEASED_RELAY_SESSION.into(),
             SessionModelPolicy {
                 profile: "gateway".into(),
-                models: models.iter().map(|model| (*model).into()).collect(),
+                offer: mj_core::config::ModelOffer {
+                    models: models.iter().map(|model| (*model).into()).collect(),
+                    ..Default::default()
+                },
             },
         )])
     };

@@ -85,31 +85,35 @@ impl TurnContext {
     /// person's latest request, and Jev scored those turns better without it
     /// (.agents/docs/jev-still-open-20261106.md).
     pub fn reset(&self, command_id: Option<&str>, prompt: &str) {
-        self.reset_request(command_id, prompt);
+        self.reset_request(command_id, Some(prompt));
     }
 
     /// Returns whether this delivery establishes a request in the context.
-    fn reset_request(&self, command_id: Option<&str>, prompt: &str) -> bool {
+    fn reset_request(&self, command_id: Option<&str>, prompt: Option<&str>) -> bool {
         let recovery = command_id.is_some_and(mj_core::continuation::is_restart_continuation);
-        let user_prompt_tail =
+        let user_prompt_tail = prompt.map(|prompt| {
             if recovery || mj_core::continuation::is_user_authored_message(command_id, prompt) {
                 tail(prompt, USER_PROMPT_BYTES)
             } else {
                 String::new()
-            };
+            }
+        });
         let mut state = self.0.lock().expect("turn context lock poisoned");
         let generation = state.generation.wrapping_add(1);
         if recovery {
-            if state.user_prompt_tail.is_none() {
+            if state.user_prompt_tail.is_none()
+                && let (Some(user_prompt_tail), Some(prompt)) = (user_prompt_tail, prompt)
+            {
                 state.user_prompt_tail = Some(user_prompt_tail);
                 // The carried request precedes the retained replay suffix.
                 // Preserve that suffix and its partially observed answer.
                 state.summary.push_user(prompt);
                 state.summary.entries.rotate_right(1);
             }
-            // Recovery continues the same request and partial answer. Advance
-            // generation to reject stale classifier replies without erasing
-            // the latest user correction or the evidence from before restart.
+            // Recovery keeps the request, but delivery closes the interrupted
+            // message just as the transcript does. An unlabelled chunk from
+            // the new harness must not inherit the old message ID.
+            complete_message(&mut state);
             state.generation = generation;
             state.parent_activity = Some(std::time::Instant::now());
             return false;
@@ -119,7 +123,7 @@ impl TurnContext {
             parent_activity: Some(std::time::Instant::now()),
             decision_log: state.decision_log.clone(),
             authorization: state.authorization.clone(),
-            user_prompt_tail: Some(user_prompt_tail),
+            user_prompt_tail,
             background_commands: state.background_commands,
             queued_commands: state.queued_commands,
             background_inventory: std::mem::take(&mut state.background_inventory),
@@ -129,6 +133,28 @@ impl TurnContext {
             ..Default::default()
         };
         true
+    }
+
+    /// A known prompt delivery whose body may no longer be retained.
+    pub fn observe_prompt_delivery(&self, command_id: Option<&str>, prompt: Option<&str>) {
+        if self.reset_request(command_id, prompt)
+            && let Some(prompt) = prompt
+        {
+            self.0
+                .lock()
+                .expect("turn context lock poisoned")
+                .summary
+                .push_user(prompt);
+        }
+    }
+
+    /// Begin a turn the relay owner has identified as autonomous.
+    pub fn observe_autonomous_turn_start(&self) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        state.assistant_text_tail.clear();
+        state.last_completed_message.clear();
+        state.message_id = None;
+        state.generation = state.generation.wrapping_add(1);
     }
 
     /// Record durable transcript observations through the same path during live work and replay.
@@ -147,15 +173,31 @@ impl TurnContext {
             | RelayObservation::MailboxEventsDelivered {
                 steering: Some(_), ..
             } => {
-                if let Some(prompt) = prompt
-                    && self.reset_request(delivered_prompt_command_id(observation), prompt)
+                // A steering confirmation proves delivery even after its
+                // queue body was collected. Keep the reply boundary without
+                // inventing the missing prompt text.
+                if prompt.is_some()
+                    || !matches!(observation, RelayObservation::CommandStarted { .. })
                 {
-                    self.0
-                        .lock()
-                        .expect("turn context lock poisoned")
-                        .summary
-                        .push_user(prompt);
+                    self.observe_prompt_delivery(delivered_prompt_command_id(observation), prompt);
                 }
+            }
+            // ACP completion may precede native execution's actual end.
+            // Deliveries, autonomous starts and these durable bridge/native
+            // boundaries own the reply stream instead.
+            RelayObservation::SessionRestarted
+            | RelayObservation::HarnessTurnSettled {
+                prompt_in_flight: false,
+                ..
+            } => {
+                complete_message(&mut self.0.lock().expect("turn context lock poisoned"));
+            }
+            RelayObservation::ElicitationResolved {
+                reply: Some(_),
+                action,
+                ..
+            } if action != mj_core::elicitation::OPERATOR_AWAY_ACTION => {
+                complete_message(&mut self.0.lock().expect("turn context lock poisoned"));
             }
             RelayObservation::SessionUpdate { update } => self.observe(update),
             RelayObservation::TerminalOutput {
@@ -238,6 +280,21 @@ impl TurnContext {
         }
     }
 
+    /// Restore the latest human instructions without changing replayed reply boundaries.
+    pub fn restore_user_prompt_tail(&self, history: &mj_core::assessment::ContextHistory) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        state.user_prompt_tail = Some(
+            history
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "user")
+                .map(|message| tail(&message.text, USER_PROMPT_BYTES))
+                .unwrap_or_default(),
+        );
+        state.generation = state.generation.wrapping_add(1);
+    }
+
     pub fn authorization_context(&self) -> Option<mj_core::assessment::ContextHistory> {
         self.0
             .lock()
@@ -277,7 +334,13 @@ impl TurnContext {
         state.summary.observe(update);
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
-                let id = chunk.message_id.as_ref().map(ToString::to_string);
+                // Like authorization history, an omitted ID continues the
+                // current message; explicit IDs establish a new boundary.
+                let id = chunk
+                    .message_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .or_else(|| state.message_id.clone());
                 if id != state.message_id {
                     complete_message(&mut state);
                     state.message_id = id;

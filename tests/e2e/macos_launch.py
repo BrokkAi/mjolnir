@@ -223,7 +223,6 @@ kind = "bare"
         # A second startup must reuse the winning daemon.
         self.run("api-info", "--json")
         assert self.metadata()["pid"] == after["pid"], "repeated startup replaced the daemon"
-        self.run("checkpoint", "--session", self.session)
         self.run("suspend", "--session", self.session, "--acknowledge-unpublished-work")
         self.until(self.session_state, lambda value: value["state"] == "suspended",
                    "suspension completion")
@@ -232,7 +231,7 @@ kind = "bare"
                    "resumed worker readiness")
         self.run("message", "--session", self.session, "Reply exactly MAC_RESUME_OK.")
         self.wait_reply("MAC_RESUME_OK")
-        self.check("checkpoint, suspend and resume with a space-containing data path", True)
+        self.check("suspend and resume with a space-containing data path", True)
         worker_root = self.data / "workers" / self.session
         launch = json.loads(worker_root.joinpath("launch.json").read_text())
         staged_home = Path(launch["harness_home"])

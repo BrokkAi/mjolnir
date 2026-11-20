@@ -9,18 +9,39 @@ use anyhow::{Context, Result, bail};
 
 use crate::session_manager::StandaloneSession;
 use mj_core::config::{AwsAddressSource, SshConnection, TargetTemplate};
-use mj_core::state::{
-    PodmanWorkspaceLocator, SessionRecord, SessionState, TargetLocator, normalize_session_title,
-};
+use mj_core::state::{PodmanWorkspaceLocator, SessionRecord, SessionState, TargetLocator};
 
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec, SshTarget};
 use mj_core::worker_launch::WorkerOwnership;
 
 use super::backend::{ContainerOverrides, backend_locator, backend_target};
-use super::readiness::wait_for_native_session;
 use super::{Controller, now};
 
 pub use mj_core::state::{RecoveryCandidate, RecoveryScan};
+
+pub struct AdoptionControl {
+    pub cancelled: tokio_util::sync::CancellationToken,
+    pub progress: Option<tokio::sync::watch::Sender<Option<Vec<String>>>>,
+    pub installed: Option<tokio::sync::oneshot::Sender<AdoptionPublication>>,
+    pub lifecycle_gate: std::sync::Arc<crate::recovery_gate::RecoveryGate>,
+}
+
+pub struct AdoptionPublication {
+    pub admission: AdoptionInstall,
+    pub acknowledged: tokio::sync::oneshot::Sender<()>,
+}
+
+pub struct AdoptionOutcome {
+    pub result: Result<()>,
+    /// Bounded failure or connected-state publication owns the final reply.
+    /// Earlier installation transfers its holders with AdoptionPublication.
+    pub admission: Option<AdoptionInstall>,
+}
+
+pub struct AdoptionInstall {
+    _session: crate::recovery_gate::ForegroundAdmission,
+    _handoff: crate::upgrade::Work,
+}
 
 impl Controller {
     /// Find managed resources which are not represented by the controller's
@@ -124,6 +145,7 @@ impl Controller {
         })
     }
 
+    #[cfg(test)]
     pub async fn adopt_orphan_worker(
         &mut self,
         session_id: &str,
@@ -131,204 +153,566 @@ impl Controller {
         profile_override: Option<&str>,
         bundle_override: Option<&str>,
         all_instances: bool,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        let (record, newly_adopted) = match self.state.sessions.get(session_id).cloned() {
-            // Adoption records its session before the handshake, so a failed
-            // handshake leaves a tracked session that never connected. That
-            // record is the one to finish, not a reason to refuse the retry.
-            Some(existing) if adoption_unfinished(&existing, target_id) => {
-                for (flag, requested, adopted) in [
-                    ("profile", profile_override, existing.last_profile.as_str()),
-                    ("bundle", bundle_override, existing.bundle_id.as_str()),
-                ] {
-                    if let Some(requested) = requested
-                        && requested != adopted
-                    {
-                        bail!(
-                            "session {session_id} was already adopted with {flag} {adopted:?}; retry without --{flag}"
-                        );
+        let request = mj_client::daemon::RecoveryAdoptionRequest {
+            session_id: session_id.to_owned(),
+            target_id: target_id.to_owned(),
+            profile: profile_override.map(str::to_owned),
+            bundle: bundle_override.map(str::to_owned),
+            all_instances,
+        };
+        self.adopt_orphan_worker_controlled(
+            &request,
+            executor,
+            AdoptionControl {
+                cancelled: tokio_util::sync::CancellationToken::new(),
+                progress: None,
+                installed: None,
+                lifecycle_gate: std::sync::Arc::new(crate::recovery_gate::RecoveryGate::default()),
+            },
+        )
+        .await
+        .result
+    }
+
+    pub async fn adopt_orphan_worker_controlled(
+        &mut self,
+        request: &mj_client::daemon::RecoveryAdoptionRequest,
+        executor: &(impl CommandExecutor + Sync),
+        mut control: AdoptionControl,
+    ) -> AdoptionOutcome {
+        let session_id = request.session_id.as_str();
+        let mut admission = None;
+        let mut failure_owner = None;
+        let mut result = self
+            .adopt_orphan_worker_inner(
+                request,
+                executor,
+                &mut control,
+                &mut admission,
+                &mut failure_owner,
+            )
+            .await;
+        if result.is_err()
+            && admission.is_none()
+            && !control.cancelled.is_cancelled()
+            && !crate::upgrade::is_draining()
+            && let Some(expected) = failure_owner.as_ref()
+        {
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let owner = tokio::select! {
+                biased;
+                _ = control.cancelled.cancelled() => None,
+                _ = crate::upgrade::gate().wait_until_draining() => None,
+                owner = control.lifecycle_gate.enter_foreground(session_id, "adoption failure", crate::recovery_gate::LifecycleOrigin::Person, &cancelled, executor) => Some(owner),
+            };
+            if let Some(owner) = owner {
+                match owner.and_then(|owner| {
+                    crate::upgrade::activity_unless_draining("adoption install")
+                        .map(|work| (owner, work))
+                }) {
+                    Ok((owner, work)) => {
+                        admission = Some(AdoptionInstall {
+                            _session: owner,
+                            _handoff: work,
+                        });
+                        result = Err(mj_core::runtime::off_async_worker(|| {
+                            self.record_adoption_failure(expected, result.err().unwrap())
+                        }));
+                    }
+                    Err(error) => {
+                        result = result.map_err(|failure| {
+                            failure.context(format!("could not retain adoption failure: {error:#}"))
+                        })
                     }
                 }
-                (existing, false)
             }
-            // A leftover resource whose session id is still taken cannot be
-            // adopted: the id would have to name two sessions. Destroying it
-            // is the whole of what recovery can offer for such a resource.
-            Some(existing) => bail!(
-                "session {session_id} is already tracked in state {}; use `recover destroy` to remove a resource it left behind",
-                existing.state.as_str()
-            ),
-            None => {
-                let scan = self.scan_orphan_workers(executor, true);
-                let candidate = scan
-                    .candidates
-                    .into_iter()
-                    .find(|candidate| {
-                        candidate.session_id == session_id
-                            && candidate.target_template_id == target_id
-                    })
-                    .with_context(|| {
-                        format!("no managed orphan {session_id} was found on target {target_id:?}")
-                    })?;
-                require_instance_access(&candidate, &scan.instance_id, all_instances)?;
-                let profile_id = profile_override
-                    .map(str::to_owned)
-                    .or_else(|| {
-                        candidate
-                            .ownership
-                            .as_ref()
-                            .map(|marker| marker.profile_id.clone())
-                    })
-                    .context("orphan has no ownership marker; pass --profile")?;
-                let bundle_id = bundle_override
-                    .map(str::to_owned)
-                    .or_else(|| {
-                        candidate
-                            .ownership
-                            .as_ref()
-                            .map(|marker| marker.bundle_id.clone())
-                    })
-                    .context("orphan has no ownership marker; pass --bundle")?;
-                let profile = self
-                    .config
-                    .profiles
-                    .get(&profile_id)
-                    .with_context(|| format!("unknown profile {profile_id:?}"))?;
-                let (bundle_id, project) =
-                    if let Some(saved) = crate::database::saved_project(&bundle_id)? {
-                        saved
-                    } else {
-                        let bundle = self
-                            .config
-                            .bundles
-                            .get(&bundle_id)
-                            .with_context(|| format!("unknown project {bundle_id:?}"))?;
-                        (
-                            bundle_id,
-                            crate::project_catalog::snapshot(bundle, executor, false)?,
-                        )
-                    };
-                let workspace_id = resolve_recovery_workspace_id(
-                    candidate
+        }
+        AdoptionOutcome { result, admission }
+    }
+
+    async fn adopt_orphan_worker_inner(
+        &mut self,
+        request: &mj_client::daemon::RecoveryAdoptionRequest,
+        executor: &(impl CommandExecutor + Sync),
+        control: &mut AdoptionControl,
+        install_admission: &mut Option<AdoptionInstall>,
+        failure_owner: &mut Option<SessionRecord>,
+    ) -> Result<()> {
+        let session_id = request.session_id.as_str();
+        let target_id = request.target_id.as_str();
+        let profile_override = request.profile.as_deref();
+        let bundle_override = request.bundle.as_deref();
+        let all_instances = request.all_instances;
+        let (record, newly_adopted) = mj_core::runtime::off_async_worker(|| -> Result<_> {
+            Ok(match self.state.sessions.get(session_id).cloned() {
+                // Adoption records its session before projection attachment, so a
+                // failed attachment leaves a tracked session that never connected. That
+                // record is the one to finish, not a reason to refuse the retry.
+                Some(existing) if adoption_unfinished(&existing, target_id) => {
+                    for (flag, requested, adopted) in [
+                        ("profile", profile_override, existing.last_profile.as_str()),
+                        ("bundle", bundle_override, existing.bundle_id.as_str()),
+                    ] {
+                        if let Some(requested) = requested
+                            && requested != adopted
+                        {
+                            bail!(
+                                "session {session_id} was already adopted with {flag} {adopted:?}; retry without --{flag}"
+                            );
+                        }
+                    }
+                    // Only a request that passed the target/profile/bundle checks
+                    // can publish a diagnostic on this provisional resource owner.
+                    *failure_owner = Some(existing.clone());
+                    (existing, false)
+                }
+                // A leftover resource whose session id is still taken cannot be
+                // adopted: the id would have to name two sessions. Destroying it
+                // is the whole of what recovery can offer for such a resource.
+                Some(existing) => bail!(
+                    "session {session_id} is already tracked in state {}; use `recover destroy` to remove a resource it left behind",
+                    existing.state.as_str()
+                ),
+                None => {
+                    let scan = self.scan_orphan_workers(executor, true);
+                    let candidate = scan
+                        .candidates
+                        .into_iter()
+                        .find(|candidate| {
+                            candidate.session_id == session_id
+                                && candidate.target_template_id == target_id
+                        })
+                        .with_context(|| {
+                            format!(
+                                "no managed orphan {session_id} was found on target {target_id:?}"
+                            )
+                        })?;
+                    require_instance_access(&candidate, &scan.instance_id, all_instances)?;
+                    let profile_id = profile_override
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            candidate
+                                .ownership
+                                .as_ref()
+                                .map(|marker| marker.profile_id.clone())
+                        })
+                        .context("orphan has no ownership marker; pass --profile")?;
+                    let bundle_id = bundle_override
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            candidate
+                                .ownership
+                                .as_ref()
+                                .map(|marker| marker.bundle_id.clone())
+                        })
+                        .context("orphan has no ownership marker; pass --bundle")?;
+                    let profile = self
+                        .config
+                        .profiles
+                        .get(&profile_id)
+                        .with_context(|| format!("unknown profile {profile_id:?}"))?;
+                    let (bundle_id, project) =
+                        if let Some(saved) = crate::database::saved_project(&bundle_id)? {
+                            saved
+                        } else {
+                            let bundle = self
+                                .config
+                                .bundles
+                                .get(&bundle_id)
+                                .with_context(|| format!("unknown project {bundle_id:?}"))?;
+                            (
+                                bundle_id,
+                                crate::project_catalog::snapshot(bundle, executor, false)?,
+                            )
+                        };
+                    let workspace_id = candidate
                         .ownership
                         .as_ref()
-                        .map(|ownership| ownership.workspace_id.as_str())
-                        .unwrap_or(mj_core::workspace::DEFAULT_WORKSPACE_ID),
-                )?;
-                let container_workspace = self
-                    .config
-                    .targets
-                    .get(target_id)
-                    .and_then(|template| {
-                        recovery_backend_locator(template, &candidate.locator, session_id).ok()
-                    })
-                    .and_then(|backend| {
-                        adopted_container_workspace(&backend, session_id, executor)
-                    });
-                let no_github_credentials = candidate
-                    .ownership
-                    .as_ref()
-                    .map_or(!self.config.github.session_credentials, |ownership| {
-                        ownership.no_github_credentials
-                    });
-                let mut record = adopted_session_record(
-                    session_id,
-                    target_id,
-                    profile_id,
-                    profile.kind,
-                    bundle_id,
-                    workspace_id,
-                    candidate.locator,
-                );
-                record.target_runtime = Some(
-                    record
-                        .target_runtime_settings(&self.config)?
-                        .into_owned()
-                        .into(),
-                );
-                record.no_github_credentials = no_github_credentials;
-                record.container_workspace = container_workspace;
-                record.project = Some(project.into());
-                (record, true)
-            }
-        };
+                        .map(|ownership| ownership.workspace_id.clone())
+                        .unwrap_or_else(|| mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned());
+                    let container_workspace = self
+                        .config
+                        .targets
+                        .get(target_id)
+                        .and_then(|template| {
+                            recovery_backend_locator(template, &candidate.locator, session_id).ok()
+                        })
+                        .and_then(|backend| {
+                            adopted_container_workspace(&backend, session_id, executor)
+                        });
+                    let no_github_credentials = candidate
+                        .ownership
+                        .as_ref()
+                        .map_or(!self.config.github.session_credentials, |ownership| {
+                            ownership.no_github_credentials
+                        });
+                    let mut record = adopted_session_record(
+                        session_id,
+                        target_id,
+                        profile_id,
+                        profile.kind,
+                        bundle_id,
+                        workspace_id,
+                        candidate.locator,
+                    );
+                    record.target_runtime = Some(
+                        record
+                            .target_runtime_settings(&self.config)?
+                            .into_owned()
+                            .into(),
+                    );
+                    record.no_github_credentials = no_github_credentials;
+                    record.container_workspace = container_workspace;
+                    record.project = Some(project.into());
+                    (record, true)
+                }
+            })
+        })?;
+        // Capture the definition used to discover/build this record. A built-in
+        // name can reappear with a different implicit definition after rename.
+        let target_definition = self.config.targets.get(&record.target_template_id).cloned();
         let locator = record
             .target
             .as_ref()
             .context("adopted session has no target locator")?;
-        let backend = backend_locator(locator, &record, &self.config)?;
-        let spec = targets::reconnect_plan(&backend, session_id)?
-            .commands
-            .into_iter()
-            .next()
-            .context("reconnect plan is empty")?;
-        if newly_adopted {
-            // Adoption authors the whole record for a session Hel has never
-            // tracked, so it writes the whole row, and it writes it before the
-            // handshake: a crash in between must not orphan the worker again.
-            // The record reaches memory only once it is durable.
-            crate::database::save_session(&record)?;
-            self.state.sessions.insert(session_id.to_owned(), record);
+        let spec = mj_core::runtime::off_async_worker(|| -> Result<_> {
+            let backend = backend_locator(locator, &record, &self.config)?;
+            targets::reconnect_plan(&backend, session_id)?
+                .commands
+                .into_iter()
+                .next()
+                .context("reconnect plan is empty")
+        })?;
+        let mut client = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("adoption cancelled; the worker continues running; rerun recover adopt"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("adoption cancelled for daemon handoff; rerun recover adopt"),
+            client = StandaloneSession::prepare_adoption(&spec, session_id) => client.context("orphan relay could not attach")?,
+        };
+        let operational = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("adoption cancelled; the worker continues running"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("adoption cancelled for daemon handoff"),
+            state = client.status() => state?,
+        };
+        ensure_adoptable_worker(&operational)?;
+        client.set_adoption_wait_progress(control.progress.clone());
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let needs_cut = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("adoption cancelled; worker continues running"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("adoption cancelled for daemon handoff; rerun recover adopt"),
+            result = StandaloneSession::adoption_needs_cut(&mut client, session_id) => result,
+        };
+        let baseline = match needs_cut {
+            Ok(false) => None,
+            Ok(true) => Some(tokio::select! {
+                biased;
+                _ = control.cancelled.cancelled() => bail!("adoption cancelled while waiting; the worker continues running; rerun recover adopt"),
+                _ = crate::upgrade::gate().wait_until_draining() => bail!("adoption cancelled for daemon handoff while waiting; rerun recover adopt"),
+                result = client.live_session_baseline() => result?,
+            }),
+            Err(error) => {
+                if error.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<crate::worker_client::LiveBaselineUnsupported>()
+                        .is_some()
+                }) {
+                    let needs_all_instances = mj_core::runtime::off_async_worker(|| {
+                        self.config
+                            .targets
+                            .get(target_id)
+                            .and_then(|template| {
+                                scan_target_workers(target_id, template, executor).ok()
+                            })
+                            .and_then(|candidates| {
+                                candidates
+                                    .into_iter()
+                                    .find(|candidate| same_resource(locator, &candidate.locator))
+                            })
+                            .and_then(|candidate| candidate.instance_id)
+                            .as_deref()
+                            != Some(mj_core::config::instance_identity().as_str())
+                    });
+                    let error =
+                        unsupported_orphan_adoption(session_id, target_id, needs_all_instances);
+                    if !newly_adopted {
+                        let owner = tokio::select! {
+                            biased;
+                            _ = control.cancelled.cancelled() => bail!("adoption cancelled"),
+                            _ = crate::upgrade::gate().wait_until_draining() => bail!("adoption cancelled for daemon handoff"),
+                            owner = control.lifecycle_gate.enter_foreground(session_id, "adoption refusal", crate::recovery_gate::LifecycleOrigin::Person, &cancelled, executor) => owner?,
+                        };
+                        *install_admission = Some(AdoptionInstall {
+                            _session: owner,
+                            _handoff: crate::upgrade::activity_unless_draining("adoption install")?,
+                        });
+                        mj_core::runtime::off_async_worker(|| {
+                            self.revalidate_adoption_resource(&record)
+                        })?;
+                        let current = mj_core::runtime::off_async_worker(|| {
+                            crate::database::refuse_adoption_if_current(
+                                &record,
+                                &format!("orphan adoption failed: {error:#}"),
+                                &now(),
+                            )
+                        })?;
+                        self.state.sessions.insert(session_id.to_owned(), current);
+                    }
+                    return Err(error);
+                }
+                return Err(error);
+            }
+        };
+        let cut = if let Some(baseline) = baseline {
+            tokio::select! {
+                biased;
+                _ = control.cancelled.cancelled() => bail!("adoption cancelled; cut discarded"),
+                _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began; cut discarded; rerun recover adopt"),
+                result = StandaloneSession::cache_baseline_attachments(&mut client, &baseline) => result?,
+            }
+            let projection =
+                mj_transcript::projection::materialized_session_from_live_baseline(&baseline)?;
+            Some((projection, baseline))
+        } else {
+            None
+        };
+        #[cfg(any(test, feature = "test-hooks", feature = "test-support"))]
+        mj_core::runtime::spawn_blocking(|| {
+            mj_core::test_hooks::reach_test_hook("adoption_cut_before_install")
+        })
+        .await
+        .context("adoption install hook failed")??;
+        // The wait owns no handoff admission. The cut is discarded if a drain
+        // or another lifecycle won before this single install decision.
+        let install_owner = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("adoption cancelled before install; cut discarded"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began before adoption install; cut discarded; rerun recover adopt"),
+            owner = control.lifecycle_gate.enter_foreground(session_id, "adoption install", crate::recovery_gate::LifecycleOrigin::Person, &cancelled, executor) => owner?,
+        };
+        mj_core::runtime::off_async_worker(|| self.revalidate_adoption_resource(&record))?;
+        let operational = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("adoption cancelled before install; cut discarded"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began during the worker probe; cut discarded; rerun recover adopt"),
+            status = client.status() => status.context("worker disappeared before adoption install; cut discarded")?,
+        };
+        ensure_adoptable_worker(&operational)?;
+        // No remote work runs under this owner. A rename either sees this new
+        // row in its migration, or completes first and invalidates this lookup.
+        let (current_config, config_owner) = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("adoption cancelled before configuration validation"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began before configuration validation"),
+            config = mj_core::runtime::spawn_blocking(mj_core::config::Config::load_locked) => config.context("read current adoption configuration")??,
+        };
+        let durable_id = session_id.to_owned();
+        let already_installed = mj_core::runtime::spawn_blocking(move || {
+            crate::database::read_durable_session_record(&durable_id)
+        })
+        .await
+        .context("read durable adoption owner")??
+        .is_some();
+        // The lifecycle holder protects row ownership, and the config owner
+        // serializes renames through installation. A tracked retry already has
+        // its harness/access metadata and must not depend on deleted templates.
+        if !already_installed {
+            anyhow::ensure!(
+                current_config.profiles.contains_key(&record.last_profile),
+                "profile {:?} is no longer configured; worker continues running; retry recover adopt with --profile selecting a configured profile",
+                record.last_profile
+            );
+            anyhow::ensure!(
+                target_definition.as_ref().is_some_and(|expected| {
+                    current_config.targets.get(&record.target_template_id) == Some(expected)
+                }),
+                "target template {:?} changed or is no longer configured; worker continues running; retry recover adopt selecting its current target template",
+                record.target_template_id
+            );
         }
-        match self.complete_adoption(session_id, &spec, executor).await {
-            Ok(()) => Ok(()),
-            // Provisioning leaves its failure on the session it failed for.
-            // Adoption owes the same: the record it already committed is all
-            // the user has to see why the worker never connected.
-            Err(error) => Err(self.record_adoption_failure(session_id, error)),
-        }
-    }
-
-    /// Connect the adopted worker's relay and promote the session to running.
-    async fn complete_adoption(
-        &mut self,
-        session_id: &str,
-        spec: &CommandSpec,
-        executor: &impl CommandExecutor,
-    ) -> Result<()> {
-        let mut relay = StandaloneSession::connect_command(spec, session_id)
-            .await
-            .context("orphan relay did not complete the v1 handshake")?;
-        let harness = self
-            .state
+        let guard = AdoptionInstall {
+            _session: install_owner,
+            _handoff: crate::upgrade::activity_unless_draining("adoption install")?,
+        };
+        let accepted = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("adoption cancelled before writer acceptance; cut discarded"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began before writer acceptance; cut discarded; rerun recover adopt"),
+            accepted = crate::database::enqueue_adopted_session(record.clone(), cut, now(), (guard, config_owner)) => accepted?,
+        };
+        let (result, (guard, config_owner)) = accepted.finish().await?;
+        drop(config_owner);
+        let current = match result {
+            Ok(current) => current,
+            Err(error) => {
+                *install_admission = Some(guard);
+                return Err(error);
+            }
+        };
+        self.state
             .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown adopted session {session_id}"))?
-            .harness_kind;
-        let native_session_id = wait_for_native_session(&mut relay, executor, harness).await?;
-        self.mark_worker_connected(session_id, Some(native_session_id))?;
-        if let Some(title) = relay
-            .snapshot()
-            .materialized
-            .session_title
-            .as_deref()
-            .and_then(normalize_session_title)
-        {
-            crate::database::set_session_acp_title(session_id, Some(&title))?;
-            self.state
-                .sessions
-                .get_mut(session_id)
-                .expect("adopted session disappeared while saving its ACP title")
-                .acp_session_title = Some(title);
-        }
+            .insert(session_id.to_owned(), current.clone());
+        *failure_owner = Some(current.clone());
+        self.finish_adoption_attachment(
+            (&spec, client),
+            current,
+            guard,
+            executor,
+            control,
+            install_admission,
+        )
+        .await
+        .context("worker adopted; reattaching failed")?;
         Ok(())
     }
 
-    /// Leave a failed adoption on the session itself. The state stays
-    /// `Disconnected`, which is the truth — the target exists and no worker is
-    /// connected — and keeps the record adoptable so the handshake can be
-    /// retried once the worker is reachable again.
-    fn record_adoption_failure(&mut self, session_id: &str, error: anyhow::Error) -> anyhow::Error {
-        let Some(record) = self.state.sessions.get_mut(session_id) else {
-            return error;
+    async fn finish_adoption_attachment(
+        &mut self,
+        prepared: (&CommandSpec, crate::worker_client::RelayClient),
+        expected: SessionRecord,
+        guard: AdoptionInstall,
+        executor: &(impl CommandExecutor + Sync),
+        control: &mut AdoptionControl,
+        publication_admission: &mut Option<AdoptionInstall>,
+    ) -> Result<()> {
+        let (spec, client) = prepared;
+        let session_id = expected.id.clone();
+        let installed = control.installed.take();
+        if let Some(installed) = installed {
+            let (acknowledged, notice) = tokio::sync::oneshot::channel();
+            if let Err(publication) = installed.send(AdoptionPublication {
+                admission: guard,
+                acknowledged,
+            }) {
+                drop(publication);
+                bail!("worker adopted; reattaching interrupted before installed notice");
+            }
+            notice
+                .await
+                .context("worker adopted; reattaching interrupted before installed notice")?;
+        } else {
+            drop(guard);
+        }
+        client
+            .detach()
+            .await
+            .context("worker adopted; could not close preparation connection")?;
+        let attach = async {
+            let ready = async {
+                let mut connection = StandaloneSession::connect_command(spec, &session_id).await?;
+                ensure_adoptable_worker(connection.operational())?;
+                // This shared wait retains the controller-owned startup deadline
+                // for pre-66 workers; current workers decide their own expiry.
+                super::readiness::wait_for_native_session(
+                    &mut connection,
+                    executor,
+                    expected.harness_kind,
+                )
+                .await?;
+                ensure_adoptable_worker(connection.operational())?;
+                Ok::<_, anyhow::Error>(connection)
+            };
+            tokio::select! {
+                biased;
+                _ = control.cancelled.cancelled() => bail!("attachment interrupted"),
+                _ = crate::upgrade::gate().wait_until_draining() => bail!("attachment interrupted for daemon handoff"),
+                connection = ready => connection,
+            }
         };
-        record.updated_at = now();
-        record.last_error = Some(format!("orphan adoption failed: {error:#}"));
-        match self.persist_session_state(session_id) {
-            Ok(()) => error,
+        let connection = attach.await.context("worker adopted; reattaching failed")?;
+        let native = connection.operational().native_session_id.clone();
+        // Close this ordinary connection before another actor attaches.
+        connection
+            .detach()
+            .await
+            .context("worker adopted; detaching attachment probe failed")?;
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let owner = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("worker adopted; reattaching interrupted before publication"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("worker adopted; reattaching interrupted for daemon handoff"),
+            owner = control.lifecycle_gate.enter_foreground(&session_id, "adoption connected publication", crate::recovery_gate::LifecycleOrigin::Person, &cancelled, executor) => owner?,
+        };
+        let guard = AdoptionInstall {
+            _session: owner,
+            _handoff: crate::upgrade::activity_unless_draining("adoption connected publication")?,
+        };
+        let accepted = tokio::select! {
+            biased;
+            _ = control.cancelled.cancelled() => bail!("worker adopted; reattaching interrupted before publication"),
+            _ = crate::upgrade::gate().wait_until_draining() => bail!("worker adopted; reattaching interrupted for daemon handoff"),
+            accepted = crate::database::enqueue_adoption_connected(expected, native, now(), guard) => accepted?,
+        };
+        let (result, guard) = accepted.finish().await?;
+        // Acceptance owns the definitive reply even when its writer rejects a
+        // stale publication. Handoff cannot race a second admission attempt.
+        *publication_admission = Some(guard);
+        let current = result?;
+        self.state.sessions.insert(session_id.to_owned(), current);
+        // The short connected-publication holder spans runtime refresh and
+        // the final reply; ordinary catch-up above owns no lifecycle holder.
+        Ok(())
+    }
+
+    fn revalidate_adoption_resource(&mut self, expected: &SessionRecord) -> Result<()> {
+        let state = crate::database::load_state()?;
+        let locator = expected
+            .target
+            .as_ref()
+            .context("adoption has no worker locator")?;
+        for current in state.sessions.values() {
+            if current
+                .target
+                .as_ref()
+                .is_some_and(|target| same_resource(target, locator))
+            {
+                anyhow::ensure!(
+                    current.id == expected.id
+                        && adoption_unfinished(current, &expected.target_template_id)
+                        && current.target == expected.target
+                        && current.last_profile == expected.last_profile
+                        && current.bundle_id == expected.bundle_id,
+                    "worker is already named by session {} in state {}; adoption cut discarded",
+                    current.id,
+                    current.state.as_str()
+                );
+            }
+        }
+        if let Some(current) = state.sessions.get(&expected.id) {
+            anyhow::ensure!(
+                adoption_unfinished(current, &expected.target_template_id)
+                    && current.target == expected.target,
+                "session {} changed before adoption; cut discarded",
+                expected.id
+            );
+        }
+        self.state = state;
+        Ok(())
+    }
+
+    fn record_adoption_failure(
+        &mut self,
+        expected: &SessionRecord,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        match crate::database::record_adoption_failure_if_current(
+            expected,
+            &format!("orphan adoption failed: {error:#}"),
+            &now(),
+        ) {
+            Ok(Some(current)) => {
+                self.state.sessions.insert(expected.id.clone(), current);
+                error
+            }
+            Ok(None) => {
+                self.state.sessions.remove(&expected.id);
+                error
+            }
             Err(persist_error) => error.context(format!(
-                "recorded the adoption failure in memory, but failed to persist it: {persist_error:#}"
+                "could not record the adoption failure: {persist_error:#}"
             )),
         }
     }
@@ -400,6 +784,57 @@ impl Controller {
     }
 }
 
+fn unsupported_orphan_adoption(
+    session_id: &str,
+    target: &str,
+    all_instances: bool,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "the worker's history no longer reaches its start, and it predates live-cut recovery, so it cannot be adopted. The agent's work continues on the worker, and its harness session files remain on the target. When you are done, run: {}",
+        recovery_destroy_command(session_id, target, all_instances)
+    )
+}
+
+/// Choose advice from the current durable owner, including provisional retries.
+pub fn adoption_destroy_command(
+    session_id: &str,
+    target: &str,
+    all_instances: bool,
+) -> Result<String> {
+    if crate::database::read_durable_session_record(session_id)?
+        .is_some_and(|record| record.target.is_some() && record.target_template_id == target)
+    {
+        Ok(format!(
+            "{} destroy --session {}",
+            recovery_cli_prefix(),
+            mj_core::targets::posix_quote(session_id)
+        ))
+    } else {
+        Ok(recovery_destroy_command(session_id, target, all_instances))
+    }
+}
+
+fn recovery_cli_prefix() -> String {
+    let instance = mj_core::config::instance_name()
+        .map(|name| format!(" --instance {}", mj_core::targets::posix_quote(&name)))
+        .unwrap_or_default();
+    format!("mj{instance}")
+}
+
+pub fn recovery_destroy_command(session_id: &str, target: &str, all_instances: bool) -> String {
+    let id = mj_core::targets::posix_quote(session_id);
+    let target = mj_core::targets::posix_quote(target);
+    let scope = if all_instances {
+        " --all-instances"
+    } else {
+        ""
+    };
+    format!(
+        "{} recover destroy --session {id} --target {target} --confirm {id}{scope}",
+        recovery_cli_prefix()
+    )
+}
+
 /// States in which the controller is itself writing the session's locator.
 /// The record cannot be read as settled evidence about its resource then.
 const fn locator_in_flight(state: SessionState) -> bool {
@@ -451,9 +886,29 @@ fn require_instance_access(
     }
 }
 
+fn ensure_adoptable_worker(state: &mj_core::relay::RelayOperationalState) -> Result<()> {
+    if let Some(mj_core::relay::HarnessPreparation::Failed { step, error, .. }) =
+        &state.harness_preparation
+    {
+        bail!("worker has no runnable harness: preparation failed at {step}: {error}");
+    }
+    anyhow::ensure!(
+        !state.checkpoint_only
+            && !matches!(
+                state.execution,
+                mj_core::relay::RelayExecutionState::Closing
+                    | mj_core::relay::RelayExecutionState::Closed
+            ),
+        "worker has no runnable harness (checkpoint-only or closed relay); recover its saved checkpoint or destroy the leftover worker"
+    );
+    // A preparing worker may acquire its native identity after attachment.
+    Ok(())
+}
+
 /// Worker markers can outlive the controller database that created them. Keep
 /// a workspace marker only when this controller knows its identity; otherwise
 /// group the adopted worker under one durable recovery workspace.
+#[cfg(test)]
 fn resolve_recovery_workspace_id(marked_workspace_id: &str) -> Result<String> {
     if marked_workspace_id == mj_core::workspace::DEFAULT_WORKSPACE_ID {
         return Ok(marked_workspace_id.to_owned());
@@ -1305,7 +1760,7 @@ mod tests {
         let workers = tempfile::tempdir().unwrap();
         // Exactly what an adoption commits before its handshake, on a worker
         // root that holds no worker binary, so the handshake cannot succeed.
-        let record = adopted_session_record(
+        let mut record = adopted_session_record(
             session_id,
             "local-bare",
             "codex".into(),
@@ -1320,6 +1775,7 @@ mod tests {
             adoption_unfinished(&record, "local-bare"),
             "the record adoption commits must be the record adoption can retry"
         );
+        record.last_error = Some("the original worker failure".into());
         crate::database::save_session(&record).unwrap();
         let mut config = Config::default();
         config
@@ -1328,6 +1784,28 @@ mod tests {
         let mut state = State::default();
         state.sessions.insert(session_id.to_owned(), record);
         let mut controller = Controller { config, state };
+
+        // Hard-won: 3210bf3: validation failures overwrote a session the request never owned.
+        let unchanged = crate::database::read_durable_session_record(session_id)
+            .unwrap()
+            .unwrap();
+        for (target, profile, bundle) in [
+            ("different-target", None, None),
+            ("local-bare", Some("different-profile"), None),
+            ("local-bare", None, Some("different-bundle")),
+        ] {
+            controller
+                .adopt_orphan_worker(session_id, target, profile, bundle, false, &ProcessExecutor)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                crate::database::read_durable_session_record(session_id)
+                    .unwrap()
+                    .unwrap(),
+                unchanged
+            );
+            assert!(crate::upgrade::active_labels().is_empty());
+        }
 
         let failure = controller
             .adopt_orphan_worker(

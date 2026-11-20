@@ -496,6 +496,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             resumed,
             replaced_unused_native_session_id,
         } => {
+            // This bridge may have opened live forms before session/open
+            // completed. Bridge exit/restart retires old responders, not open.
             snapshot.continuation.suppressed = true;
             if *native_continuity_lost {
                 snapshot.continuation.quota_recovery = None;
@@ -516,12 +518,40 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if *resumed {
                 snapshot.native_session_used = true;
             }
+            let usage = if *resumed {
+                NativeSessionUse::Used
+            } else if let Some(evidence) =
+                snapshot.native_use_evidence.as_ref().filter(|evidence| {
+                    evidence.version == 1 && evidence.native_session_id == *native_session_id
+                })
+            {
+                evidence.usage
+            } else if snapshot.native_session_used {
+                NativeSessionUse::Unknown
+            } else {
+                NativeSessionUse::Unused
+            };
+            snapshot.record_native_use(usage);
         }
         RelayObservation::SessionConfigured { config_options } => {
             snapshot.config_options = std::sync::Arc::new(config_options.clone());
+            record_catalogue_mode(snapshot);
         }
         RelayObservation::SessionModesConfigured { modes } => {
             snapshot.modes = modes.clone();
+            if let Some(mode) =
+                crate::acp::surface::config_current_value(&snapshot.config_options, "mode").or_else(
+                    || {
+                        modes
+                            .as_ref()
+                            .map(|modes| modes.current_mode_id.to_string())
+                    },
+                )
+            {
+                // Initial negotiation prefers the ACP option over legacy modes,
+                // as the live runtime does. Later CurrentModeUpdate is ordered.
+                snapshot.config.insert("mode".into(), mode);
+            }
         }
         RelayObservation::CommandQueued {
             command_id,
@@ -1288,6 +1318,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.native_session_id = Some(native_session_id.clone());
                     snapshot.native_session_opened_ordinal = Some(event.ordinal);
                     snapshot.native_session_used = false;
+                    snapshot.record_native_use(NativeSessionUse::Unused);
                     snapshot.native_continuity_lost = false;
                     snapshot.replaced_unused_native_session_id = None;
                     snapshot.pending_prompt_context = memory
@@ -1758,6 +1789,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         // harness had started on its own no longer exists. Both callers record
         // this with no prompt in flight.
         RelayObservation::SessionRestarted => {
+            snapshot.assessment_questions.clear();
+            snapshot.pending_elicitations.clear();
             snapshot.goal.restart();
             if snapshot.harness_turn.take().is_some()
                 && snapshot.active_prompt.is_none()
@@ -1790,6 +1823,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             SessionUpdate::ConfigOptionUpdate(update) => {
                 snapshot.config_options = std::sync::Arc::new(update.config_options.clone());
+                record_catalogue_mode(snapshot);
             }
             SessionUpdate::CurrentModeUpdate(update) => {
                 if let Some(modes) = snapshot.modes.as_mut() {
@@ -2094,6 +2128,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
     }
     apply_assessment_context(snapshot, event);
     snapshot.compact_terminal_commands()?;
+    if matches!(
+        &event.observation,
+        RelayObservation::CommandCompleted {
+            outcome: RelayCommandOutcome::Prompt { .. } | RelayCommandOutcome::Steered { .. },
+            ..
+        }
+    ) {
+        snapshot.native_session_used = true;
+        snapshot.record_native_use(NativeSessionUse::Used);
+    }
     snapshot.latest_ordinal = event.ordinal;
     snapshot.latest_digest = event.digest.clone();
     Ok(())
@@ -2128,9 +2172,8 @@ impl RelaySnapshot {
     }
 }
 
-/// Whether finishing this relay-local command can let journal GC drop history.
-/// Only a recovery-floor move does; releasing a barrier deliberately leaves the
-/// floor where an installed archive left it.
+/// Legacy archive completions also retry collection of an acknowledged prefix.
+/// Their coverage marker no longer determines current journal retention.
 pub fn releases_history(command: &RelayCommand) -> bool {
     matches!(
         command,
@@ -2312,6 +2355,9 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
     match &event.observation {
         RelayObservation::ElicitationRequested { request } => {
             snapshot.assessment_questions.insert(request.id.clone());
+            snapshot
+                .pending_elicitations
+                .insert(request.id.clone(), Some(request.clone()));
         }
         RelayObservation::ElicitationResolved {
             elicitation_id,
@@ -2330,6 +2376,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                     .as_ref()
                     .map(|prompt| prompt.command_id.clone());
             }
+            snapshot.pending_elicitations.remove(elicitation_id);
             if reply.is_some() {
                 clear_notifications(snapshot, event.ordinal);
                 if let Some(context) = &mut snapshot.assessment_context {
@@ -2339,6 +2386,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         }
         RelayObservation::ElicitationsCleared => {
             snapshot.assessment_questions.clear();
+            snapshot.pending_elicitations.clear();
         }
         RelayObservation::SessionUpdate { update } => {
             if let SessionUpdate::AgentMessageChunk(chunk) = update.as_ref()
@@ -2406,11 +2454,14 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 );
             }
             snapshot.assessment = Some(std::sync::Arc::new(a));
-            if let Some(context) = &mut snapshot.assessment_context {
+            if !snapshot.goal.running()
+                && let Some(context) = &mut snapshot.assessment_context
+            {
                 Arc::make_mut(context).open_assistant_id = None;
             }
         }
-        RelayObservation::HarnessTurnSettled {
+        RelayObservation::SessionRestarted
+        | RelayObservation::HarnessTurnSettled {
             prompt_in_flight: false,
             ..
         } => {
@@ -2708,5 +2759,14 @@ mod work_liveness_tests {
             named.minimum_protocol(),
             crate::relay::RELAY_WORK_LIVENESS_PROTOCOL
         );
+    }
+}
+
+// A catalogue and a legacy CurrentModeUpdate are both ordered relay facts.
+// Keep one effective value so a later recovery cut need not guess precedence.
+fn record_catalogue_mode(snapshot: &mut RelaySnapshot) {
+    if let Some(mode) = crate::acp::surface::config_current_value(&snapshot.config_options, "mode")
+    {
+        snapshot.config.insert("mode".into(), mode);
     }
 }

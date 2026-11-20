@@ -1596,6 +1596,50 @@ fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start(
             message: "transport failed".into()
         }
     );
+
+    apply_observation(&mut session, agent_chunk("partial output", "answer"));
+    assert!(matches!(
+        session.execution,
+        MaterializedExecutionState::Running { .. }
+    ));
+    assert!(session.transcript.iter().any(|item| {
+        matches!(
+            &item.body,
+            TranscriptBody::Agent {
+                streaming: true,
+                ..
+            }
+        )
+    }));
+    // A store projected before revision 28 has a user row but no active turn.
+    session.active_turn = None;
+    assert!(
+        session
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == "user:running")
+    );
+
+    // Hard-won: 566f76395: rejecting a prompt started before upgrade left execution running.
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandRejected {
+            reason: None,
+            command_id: "running".into(),
+            command: RelayCommandKind::Prompt,
+            message: "transport failed".into(),
+        },
+    );
+    assert_eq!(session.execution, MaterializedExecutionState::Idle);
+    assert!(!session.transcript.iter().any(|item| {
+        matches!(
+            &item.body,
+            TranscriptBody::Agent {
+                streaming: true,
+                ..
+            }
+        )
+    }));
 }
 
 #[test]
@@ -2118,74 +2162,153 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
 // Hard-won: d2f26b4c6: a recovery note broke slash-command presentation.
 #[test]
 fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
-    for original in ["go", "/compact"] {
-        let recovery_id = mj_core::continuation::restart_continuation_id("prompt");
-        let mut session = MaterializedSession::empty("session");
-        apply_observation(
-            &mut session,
-            RelayObservation::CommandQueued {
-                command_id: "prompt".into(),
-                command: RelayCommand::Prompt {
-                    prompt: vec![ContentBlock::from(original)],
+    for restart_first in [false, true] {
+        for (original, native_running) in [
+            ("go", false),
+            ("/compact", false),
+            ("go", true),
+            ("/compact", true),
+        ] {
+            let recovery_id = mj_core::continuation::restart_continuation_id("prompt");
+            let mut session = MaterializedSession::empty("session");
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandQueued {
+                    command_id: "prompt".into(),
+                    command: RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::from(original)],
+                    },
+                    created_at_ms: 10,
                 },
-                created_at_ms: 10,
-            },
-        );
-        apply_observation(
-            &mut session,
-            RelayObservation::CommandStarted {
-                command_id: "prompt".into(),
-                started_at_ms: 20,
-            },
-        );
-        apply_observation(
-            &mut session,
-            RelayObservation::CommandInterrupted {
-                continuation_id: Some(recovery_id.clone()),
-                reason: None,
-                command_id: "prompt".into(),
-                command: mj_core::relay::RelayCommandKind::Prompt,
-                message: "worker restarted".into(),
-            },
-        );
-        assert_eq!(session.queued_prompts[0].accepted_ordinal, Some(1));
-        let interrupted_at = session.applied_event_ordinal;
-        apply_observation(&mut session, RelayObservation::SessionRestarted);
-        assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
-        assert_eq!(session.unread_interruptions_after(interrupted_at), 0);
-        apply_observation(&mut session, RelayObservation::SessionRestarted);
-        assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
-        apply_observation(
-            &mut session,
-            RelayObservation::CommandStarted {
-                command_id: recovery_id.clone(),
-                started_at_ms: 30,
-            },
-        );
-        assert_eq!(
-            session.active_turn.as_ref().unwrap().accepted_ordinal,
-            Some(1)
-        );
-        let item = session
-            .transcript
-            .iter()
-            .find(|item| item.stable_id == format!("user:{recovery_id}"))
-            .unwrap();
-        let TranscriptBody::User { content } = &item.body else {
-            panic!("missing recovery prompt");
-        };
-        if original.starts_with('/') {
-            assert_eq!(content.len(), 1);
-            assert_eq!(content[0]["text"], original);
-        } else {
-            assert_eq!(
-                content[0]["text"],
-                mj_core::continuation::RESTART_RECOVERY_NOTE
             );
-            assert_eq!(content[1]["text"], original);
-            assert_eq!(content.len(), 2);
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandStarted {
+                    command_id: "prompt".into(),
+                    started_at_ms: 20,
+                },
+            );
+            // Hard-won: 243c9ecff: a native running update kept an interrupted prompt running.
+            if native_running {
+                apply_observation(&mut session, RelayObservation::SessionUpdate {
+                    update: Box::new(serde_json::from_value(serde_json::json!({
+                        "sessionUpdate":"session_info_update",
+                        "_meta":{"execution":{"version":1,"status":"running","turnId":"prompt"}}
+                    })).unwrap())
+                });
+                apply_observation(
+                    &mut session,
+                    RelayObservation::HarnessTurnStarted { started_at_ms: 21 },
+                );
+                assert!(session.configuration.goal.as_ref().unwrap().running());
+            }
+            if restart_first {
+                // Hard-won: b8acf76: a restart before its prompt interruption emitted two rows.
+                apply_observation(&mut session, RelayObservation::SessionRestarted);
+            }
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandInterrupted {
+                    continuation_id: Some(recovery_id.clone()),
+                    reason: Some(mj_core::event_outcome::OutcomeReason::WorkerRestarted),
+                    command_id: "prompt".into(),
+                    command: mj_core::relay::RelayCommandKind::Prompt,
+                    message: "worker restarted".into(),
+                },
+            );
+            assert_eq!(session.queued_prompts[0].accepted_ordinal, Some(1));
+            let interrupted_at = session.applied_event_ordinal;
+            assert_eq!(session.execution, MaterializedExecutionState::Idle);
+            apply_observation(&mut session, RelayObservation::SessionRestarted);
+            assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
+            assert_eq!(session.unread_interruptions_after(interrupted_at), 0);
+            apply_observation(&mut session, RelayObservation::SessionRestarted);
+            assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandStarted {
+                    command_id: recovery_id.clone(),
+                    started_at_ms: 30,
+                },
+            );
+            assert_eq!(
+                session.active_turn.as_ref().unwrap().accepted_ordinal,
+                Some(1)
+            );
+            let item = session
+                .transcript
+                .iter()
+                .find(|item| item.stable_id == format!("user:{recovery_id}"))
+                .unwrap();
+            let TranscriptBody::User { content } = &item.body else {
+                panic!("missing recovery prompt");
+            };
+            if original.starts_with('/') {
+                assert_eq!(content.len(), 1);
+                assert_eq!(content[0]["text"], original);
+            } else {
+                assert_eq!(
+                    content[0]["text"],
+                    mj_core::continuation::RESTART_RECOVERY_NOTE
+                );
+                assert_eq!(content[1]["text"], original);
+                assert_eq!(content.len(), 2);
+            }
         }
     }
+}
+
+// Hard-won: d8947861e: interrupting a mailbox wake left the projected session running.
+#[test]
+fn interrupted_mailbox_wake_with_continuation_returns_to_idle() {
+    use mj_core::event_outcome::OutcomeReason;
+    use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+
+    let mut session = MaterializedSession::empty("session");
+    let command_id = "mailbox-wake";
+    let continuation_id = mj_core::continuation::restart_continuation_id(command_id);
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: command_id.into(),
+            command: RelayCommand::MailboxWake {
+                events: vec![MailboxEvent {
+                    key: "parent:message:1".into(),
+                    source: "parent".into(),
+                    wake: true,
+                    created_at_ms: 10,
+                    body: MailboxEventBody::ParentMessage {
+                        text: "Check the review.".into(),
+                    },
+                }],
+            },
+            created_at_ms: 10,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: command_id.into(),
+            started_at_ms: 20,
+        },
+    );
+    assert!(matches!(
+        session.execution,
+        MaterializedExecutionState::Running { .. }
+    ));
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandInterrupted {
+            continuation_id: Some(continuation_id.clone()),
+            reason: Some(OutcomeReason::WorkerRestarted),
+            command_id: command_id.into(),
+            command: RelayCommandKind::Prompt,
+            message: "worker restarted".into(),
+        },
+    );
+    assert_eq!(session.execution, MaterializedExecutionState::Idle);
+    assert!(session.active_turn.is_none());
+    assert_eq!(session.queued_prompts[0].command_id, continuation_id);
 }
 
 /// I1-17: a turn the user cancelled ends with an "Interrupted" row, so a
@@ -3908,4 +4031,131 @@ fn an_autonomous_turn_settlement_carries_its_work_facts_into_the_outcome() {
     );
     let outcome = session.last_turn_outcome.as_ref().unwrap();
     assert_eq!(outcome.work_facts.as_ref(), Some(&facts));
+}
+
+// Hard-won: 5c9e20e: live recovery replaced a provider's selectable replacement with a withdrawn accepted model.
+#[test]
+fn live_recovery_prefers_a_selectable_provider_model_over_the_previous_selection() {
+    use mj_core::relay::{LiveSessionBaseline, RelaySnapshot, apply_relay_event};
+    for (current, offered, expected) in [
+        ("replacement", vec!["replacement"], "replacement"),
+        (
+            "replacement",
+            vec!["previous", "replacement"],
+            "replacement",
+        ),
+        ("unselectable-transcript-id", vec!["previous"], "previous"),
+    ] {
+        let mut replay = MaterializedSession::empty("model-recovery");
+        replay
+            .configuration
+            .values
+            .insert("model".into(), json!("previous"));
+        let mut worker = RelaySnapshot::new("model-recovery".into());
+        worker.config.insert("model".into(), "previous".into());
+        let next = event(&replay, RelayObservation::SessionUpdate {
+            update: Box::new(serde_json::from_value(json!({
+                "sessionUpdate":"config_option_update", "configOptions":[{
+                    "id":"model", "name":"Model", "type":"select", "currentValue":current,
+                    "options":offered.iter().map(|value| json!({"value":value,"name":value})).collect::<Vec<_>>()
+                }]
+            })).unwrap()),
+        });
+        apply_relay_event(&mut worker, &next).unwrap();
+        apply(&mut replay, next);
+        let baseline = LiveSessionBaseline {
+            state: worker.operational_state(),
+            queue: vec![],
+            questions: vec![],
+            unavailable_questions: 0,
+            native_agent_replay: None,
+            native_use_evidence: None,
+            delivered_initial_prompts: vec![],
+        };
+        let recovered = materialized_session_from_live_baseline(&baseline).unwrap();
+        assert_eq!(recovered.configuration.values["model"], json!(expected));
+        if current == "replacement" {
+            assert_eq!(
+                recovered.configuration.values["model"],
+                replay.configuration.values["model"]
+            );
+        }
+        let canonical = canonical_session_from_materialized(&recovered).unwrap();
+        let restored = materialized_session_from_canonical("model-recovery", &canonical).unwrap();
+        assert_eq!(restored.configuration.values["model"], json!(expected));
+    }
+}
+
+// Hard-won: e06c07a69: mailbox wakes have an active owner but no user row to mark their interruption.
+#[test]
+fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
+    for restart_first in [false, true] {
+        for native_running in [false, true] {
+            let mut session = MaterializedSession::empty("session");
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandQueued {
+                    command_id: "mailbox-wake".into(),
+                    command: RelayCommand::MailboxWake {
+                        events: vec![mj_core::mailbox::MailboxEvent {
+                            key: "parent-message".into(),
+                            source: "parent".into(),
+                            wake: true,
+                            created_at_ms: 1,
+                            body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                                text: "continue".into(),
+                            },
+                        }],
+                    },
+                    created_at_ms: 10,
+                },
+            );
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandStarted {
+                    command_id: "mailbox-wake".into(),
+                    started_at_ms: 20,
+                },
+            );
+            assert!(
+                session
+                    .active_turn
+                    .as_ref()
+                    .unwrap()
+                    .belongs_to("mailbox-wake")
+            );
+            assert!(
+                !session
+                    .transcript
+                    .iter()
+                    .any(|item| item.stable_id == "user:mailbox-wake")
+            );
+            if native_running {
+                apply_observation(&mut session, RelayObservation::SessionUpdate {
+                    update: Box::new(serde_json::from_value(serde_json::json!({
+                        "sessionUpdate":"session_info_update", "_meta":{"execution":{"version":1,"status":"running","turnId":"wake"}}
+                    })).unwrap())
+                });
+            }
+            if restart_first {
+                apply_observation(&mut session, RelayObservation::SessionRestarted);
+            }
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandInterrupted {
+                    continuation_id: Some(mj_core::continuation::restart_continuation_id(
+                        "mailbox-wake",
+                    )),
+                    reason: Some(mj_core::event_outcome::OutcomeReason::WorkerRestarted),
+                    command_id: "mailbox-wake".into(),
+                    command: RelayCommandKind::Prompt,
+                    message: "bridge restarted".into(),
+                },
+            );
+            let interrupted_at = session.applied_event_ordinal;
+            assert_eq!(session.execution, MaterializedExecutionState::Idle);
+            apply_observation(&mut session, RelayObservation::SessionRestarted);
+            assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
+        }
+    }
 }

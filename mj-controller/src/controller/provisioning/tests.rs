@@ -489,7 +489,10 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
         let directory = tempfile::tempdir().unwrap();
         let test = "failed_ssh_docker_preflight_retains_durable_error_record";
         IsolatedTest::new(test_name(module_path!(), test))
-            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::worker_build::test_worker_executable(),
+            )
             .env(SSH_DOCKER_FAILURE_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
             .env("MJ_CONFIG_DIR", directory.path())
@@ -808,7 +811,10 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
         let directory = tempfile::tempdir().unwrap();
         IsolatedTest::new(test_name(module_path!(), name))
             .env(MARKER, "1")
-            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::worker_build::test_worker_executable(),
+            )
             .isolated_store(directory.path())
             .run();
         return;
@@ -934,7 +940,10 @@ fn failed_node_preflight_retains_error_before_provisioning() {
         let directory = tempfile::tempdir().unwrap();
         let test = "failed_node_preflight_retains_error_before_provisioning";
         IsolatedTest::new(test_name(module_path!(), test))
-            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::worker_build::test_worker_executable(),
+            )
             .env(SSH_DOCKER_FAILURE_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
             .env("MJ_CONFIG_DIR", directory.path())

@@ -6,7 +6,6 @@
 //! carry no process, network, or worker-runtime behaviour, so both sides of
 //! the relay can depend on them without depending on each other.
 
-use crate::hex::lower_hex;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -595,26 +594,10 @@ impl WorkerLaunchConfig {
 ///
 /// One definition, because both sides of the upgrade decision compare it: the
 /// worker reports the digest of the file serving it, and the controller
-/// computes the digest of the file it would install. Streamed, because a
-/// worker binary is tens of megabytes.
+/// computes the digest of the file it would install. The digest and build
+/// stamp share a streaming read and are memoized by executable identity on Unix.
 pub fn worker_executable_digest(path: &Path) -> Result<String> {
-    use sha2::Digest;
-    use std::io::Read as _;
-
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("open worker executable {}", path.display()))?;
-    let mut digest = sha2::Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| format!("hash worker executable {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(lower_hex(digest.finalize()))
+    crate::worker_build::executable_digest(path)
 }
 
 /// Content address of the executable running this process, or `None` when it
@@ -680,15 +663,17 @@ pub struct ProfileConfig {
 }
 
 impl ProfileConfig {
-    /// The catalogue as Mjolnir offers it under a profile's `models`
-    /// allow-list: the listed models plus the profile's current model, which
-    /// stays so a session never runs a model its picker hides. An empty list
-    /// offers everything.
-    pub fn restricted_to(mut self, allowed: &[String]) -> Self {
-        if !allowed.is_empty() {
+    /// The catalogue as Mjolnir offers it under a profile's [`ModelOffer`]:
+    /// the listed models outside excluded scopes, plus the profile's current
+    /// model, which stays so a session never runs a model its picker hides.
+    /// An empty list with no excluded scope offers everything.
+    ///
+    /// [`ModelOffer`]: crate::config::ModelOffer
+    pub fn restricted_to(mut self, offer: &crate::config::ModelOffer) -> Self {
+        if !offer.is_unrestricted() {
             let current = self.model.clone();
             self.models.retain(|choice| {
-                allowed.contains(&choice.value) || current.as_ref() == Some(&choice.value)
+                offer.allows(&choice.value) || current.as_ref() == Some(&choice.value)
             });
         }
         self

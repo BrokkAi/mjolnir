@@ -10,6 +10,83 @@ pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshReques
         .collect()
 }
 
+/// The enabled profiles whose harness kind can need a managed quota harness
+/// (not OpenCode and the rest), copied cheaply under the controller lock. Building
+/// requests from them reads credential and provider files, so that happens off
+/// the lock ([`quota_requests_from`]).
+#[cfg(unix)]
+pub fn enabled_quota_profiles(
+    config: &mj_core::config::Config,
+) -> Vec<(String, mj_core::config::HarnessProfile)> {
+    config
+        .enabled_profiles()
+        .filter(|(_, profile)| {
+            mj_controller::quota::kind_may_need_managed_quota_harness(profile.kind)
+        })
+        .map(|(id, profile)| (id.to_owned(), profile.clone()))
+        .collect()
+}
+
+#[cfg(unix)]
+fn quota_requests_from(
+    profiles: Vec<(String, mj_core::config::HarnessProfile)>,
+) -> Vec<QuotaRefreshRequest> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    profiles
+        .iter()
+        .map(|(id, profile)| QuotaRefreshRequest::for_profile(id, profile, cwd.clone()))
+        .filter(QuotaRefreshRequest::runs_host_harness)
+        .collect()
+}
+
+/// Install, in the background, the pinned harnesses the quota checks would
+/// otherwise install inline on their first run (#1595), so that wait is
+/// usually over before a check needs it. It holds no handoff admission and
+/// the next daemon prepares again, so it is safe to stop. Cancellation
+/// reaches the installers, which stop their process groups and their archive
+/// extraction (between entries) and release the cache lock and staging only
+/// once their writers have stopped; this task awaits them. A failure is
+/// logged and not retried; the next check that needs the harness installs it.
+#[cfg(unix)]
+pub fn spawn_quota_harness_prewarm(
+    profiles: Vec<(String, mj_core::config::HarnessProfile)>,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    mj_core::runtime::spawn(async move {
+        // Building requests reads credential and provider files, which a
+        // stalled filesystem can hang. Shutdown must not wait for that, so the
+        // read races cancellation. Abandoning it is safe: it only reads, and
+        // deletes and publishes nothing.
+        let read = mj_core::runtime::spawn_blocking(move || quota_requests_from(profiles));
+        let requests = tokio::select! {
+            () = cancellation.cancelled() => return,
+            read = read => match read {
+                Ok(requests) => requests,
+                Err(error) => {
+                    tracing::warn!(%error, "could not read quota profiles to prepare their harnesses");
+                    return;
+                }
+            },
+        };
+        // The scope cancels its token when it ends, so it gets a child.
+        let failures = mj_core::subprocess::with_preparation_cancellation(
+            cancellation.child_token(),
+            mj_controller::quota::prepare_managed(&requests),
+        )
+        .await;
+        if cancellation.is_cancelled() {
+            return;
+        }
+        for (harness, error) in failures {
+            tracing::warn!(
+                harness = harness.id(),
+                error = %format!("{error:#}"),
+                "could not prepare the pinned harness ahead of quota checks; the next check retries"
+            );
+        }
+    })
+}
+
 /// The disabled Claude profiles whose sessions are live, from the credential
 /// sync's published targets (the one owner of which sessions hold which
 /// profile's copy). A session copy holds no refresh token, so the profile's
@@ -295,16 +372,18 @@ pub(super) fn spawn_claude_grant_refresher(
     });
 }
 
-/// One profile's renewal loop. Nothing is cached between wakes: each one reads
-/// the login file again through [`mj_controller::quota::refresh_claude_grant`]. It
-/// ends when the profile leaves the batch or is configured differently.
-async fn renew_claude_grant_when_due(
+/// One profile's renewal loop. Each wake reads the login file again through
+/// [`mj_controller::quota::refresh_claude_grant`], remembering its previous due
+/// time to detect a login changed by another process. It ends when the profile
+/// leaves the batch or is configured differently.
+pub(super) async fn renew_claude_grant_when_due(
     request: QuotaRefreshRequest,
     mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
     recheck: Duration,
     renewal: GrantRenewal,
     updates: Option<tokio::sync::mpsc::Sender<QuotaUpdate>>,
 ) {
+    let mut previous_due_at_ms = None;
     loop {
         let (current, rejected_logins) = {
             let batch = batches.borrow_and_update();
@@ -335,6 +414,17 @@ async fn renew_claude_grant_when_due(
             &rejected_logins,
         )
         .await;
+        let due_at_ms = match check {
+            mj_controller::quota::ClaudeGrantCheck::Waiting { due_at_ms }
+            | mj_controller::quota::ClaudeGrantCheck::Renewed { due_at_ms } => due_at_ms,
+            _ => None,
+        };
+        let login_changed = due_at_ms
+            .zip(previous_due_at_ms)
+            .is_some_and(|(current, previous)| current != previous);
+        if due_at_ms.is_some() {
+            previous_due_at_ms = due_at_ms;
+        }
         if let Some(updates) = &updates
             && !matches!(
                 check,
@@ -342,6 +432,7 @@ async fn renew_claude_grant_when_due(
                     | mj_controller::quota::ClaudeGrantCheck::Deferred
             )
             && (!rejected_logins.is_empty()
+                || login_changed
                 || matches!(
                     check,
                     mj_controller::quota::ClaudeGrantCheck::Renewed { .. }
@@ -350,6 +441,7 @@ async fn renew_claude_grant_when_due(
                 .send(QuotaUpdate::ClaudeGrant {
                     request: request.clone(),
                     check,
+                    login_changed,
                     rejected_logins: rejected_logins.clone(),
                 })
                 .await

@@ -230,10 +230,10 @@ impl Inner {
         }
     }
 
-    /// The `models` allow-list of the profile `identity` names: the live
+    /// The model offer of the profile `identity` names: the live
     /// configuration's when it has that profile, else the latest draft's.
     /// Read at publication, so an edit applies without rediscovery.
-    fn allowed_models(&self, identity: &str) -> Vec<String> {
+    fn model_offer(&self, identity: &str) -> mj_core::config::ModelOffer {
         self.live
             .iter()
             .flat_map(|config| {
@@ -243,7 +243,7 @@ impl Inner {
                     .map(|(id, profile)| (id.as_str(), profile))
             })
             .find(|(id, profile)| profile.capabilities_key(id) == identity)
-            .map(|(_, profile)| profile.models.clone())
+            .map(|(_, profile)| profile.model_offer())
             .or_else(|| {
                 let definition = self.definitions.get(identity)?;
                 Some(
@@ -251,8 +251,7 @@ impl Inner {
                         .config
                         .profiles
                         .get(&definition.id)?
-                        .models
-                        .clone(),
+                        .model_offer(),
                 )
             })
             .unwrap_or_default()
@@ -385,7 +384,7 @@ impl ProfileCatalog {
                 .definitions
                 .keys()
                 .map(|identity| {
-                    let allowed = inner.allowed_models(identity);
+                    let allowed = inner.model_offer(identity);
                     let choices = match inner
                         .entries
                         .get(&(identity.clone(), None))
@@ -442,7 +441,7 @@ impl ProfileCatalog {
                 config
                     .profiles
                     .iter()
-                    .map(|(id, profile)| (id.clone(), profile.models.clone()))
+                    .map(|(id, profile)| (id.clone(), profile.model_offer()))
                     .collect::<BTreeMap<_, _>>()
             };
             if inner.live.as_ref().map(models) != Some(models(config)) {
@@ -731,8 +730,8 @@ impl ProfileCatalog {
                             .config
                             .profiles
                             .get(&definition.id)
-                            .map(|old| &old.models)
-                            != Some(&profile.models);
+                            .map(|old| old.model_offer())
+                            != Some(profile.model_offer());
                         definition.config = config.clone();
                         let definition = definition.clone();
                         if models_changed {
@@ -1502,8 +1501,8 @@ impl ProfileCatalog {
         // the default probe can grant the default-model exemption.
         let specific = model.is_some();
         let mut choices = self.fetch_unrestricted(config, id, model).await?;
-        let allowed = self.lock().allowed_models(&identity);
-        if allowed.is_empty() {
+        let allowed = self.lock().model_offer(&identity);
+        if allowed.is_unrestricted() {
             return Ok(choices);
         }
         let selected = choices.model.clone();
@@ -1529,7 +1528,7 @@ impl ProfileCatalog {
         };
         choices.model = default;
         // The list may have changed during the probes; apply the current one.
-        let allowed = self.lock().allowed_models(&identity);
+        let allowed = self.lock().model_offer(&identity);
         choices = choices.restricted_to(&allowed);
         choices.model = selected;
         Ok(choices)
@@ -1716,13 +1715,13 @@ impl ProfileCatalog {
             .context("the profile catalogue has not adopted a configuration")
     }
 
-    /// The live `models` allow-list of profile `id`; empty offers everything.
-    pub fn allowed_models(&self, id: &str) -> Vec<String> {
+    /// The live model offer of profile `id`.
+    pub fn model_offer(&self, id: &str) -> mj_core::config::ModelOffer {
         self.lock()
             .live
             .as_ref()
             .and_then(|config| config.named_profile(id).ok())
-            .map(|profile| profile.models.clone())
+            .map(|profile| profile.model_offer())
             .unwrap_or_default()
     }
 
@@ -1955,7 +1954,7 @@ impl ProfileCatalog {
 /// capability key, and its `models` list. The key leaves `models` out, so
 /// the save also compares the list: a profile that stopped offering a
 /// chosen model must not get it saved as a reviewer.
-type UpgradeDefinition = (String, String, Vec<String>);
+type UpgradeDefinition = (String, String, mj_core::config::ModelOffer);
 
 fn upgrade_definitions(config: &Config) -> Vec<UpgradeDefinition> {
     config
@@ -1964,7 +1963,7 @@ fn upgrade_definitions(config: &Config) -> Vec<UpgradeDefinition> {
             (
                 id.to_owned(),
                 profile.capabilities_key(id),
-                profile.models.clone(),
+                profile.model_offer(),
             )
         })
         .collect()
@@ -4350,6 +4349,15 @@ mod tests {
                         name: format!("m{index}"),
                         description: None,
                     }));
+                choices
+                    .models
+                    .extend(["claude-opus", "gpt-5", "gemini-3"].map(|value| {
+                        mj_core::acp::SessionConfigChoice {
+                            value: value.into(),
+                            name: value.into(),
+                            description: None,
+                        }
+                    }));
                 Ok(choices)
             })
         }));
@@ -4360,7 +4368,7 @@ mod tests {
                 .map(|choice| choice.value.clone())
                 .collect::<Vec<_>>()
         };
-        let mut config = test_config(&[("p", HarnessKind::Codex)]);
+        let mut config = test_config(&[("p", HarnessKind::Antigravity)]);
         let key = config.profiles["p"].capabilities_key("p");
         let snapshot_models =
             |catalog: &Arc<ProfileCatalog>| match &catalog.snapshot().profiles[&key].choices {
@@ -4368,7 +4376,18 @@ mod tests {
                 other => panic!("not ready: {other:?}"),
             };
         catalog.sync_now(&config).await;
-        assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
+        assert_eq!(
+            snapshot_models(&catalog),
+            [
+                "p-model",
+                "m1",
+                "m2",
+                "m3",
+                "claude-opus",
+                "gpt-5",
+                "gemini-3"
+            ]
+        );
 
         // The current model stays offered although the list omits it.
         config.profiles.get_mut("p").unwrap().models = vec!["m2".into(), "unadvertised".into()];
@@ -4388,8 +4407,19 @@ mod tests {
             .unwrap();
         assert_eq!(values(&model_read), ["p-model", "m2"]);
         let unrestricted = catalog.unrestricted_capabilities("p").await.unwrap();
-        assert_eq!(values(&unrestricted), ["p-model", "m1", "m2", "m3"]);
-        assert_eq!(catalog.allowed_models("p"), ["m2", "unadvertised"]);
+        assert_eq!(
+            values(&unrestricted),
+            [
+                "p-model",
+                "m1",
+                "m2",
+                "m3",
+                "claude-opus",
+                "gpt-5",
+                "gemini-3"
+            ]
+        );
+        assert_eq!(catalog.model_offer("p").models, ["m2", "unadvertised"]);
         assert_eq!(
             probes.load(Ordering::SeqCst),
             probed,
@@ -4400,11 +4430,29 @@ mod tests {
         catalog.sync_now(&config).await;
         let read = catalog.capabilities(&["p".into()]).await.unwrap();
         assert_eq!(values(&read[0]), ["p-model", "m2"]);
-        assert_eq!(catalog.allowed_models("p"), ["m2", "unadvertised"]);
+        assert_eq!(catalog.model_offer("p").models, ["m2", "unadvertised"]);
         config.profiles.get_mut("p").unwrap().models.clear();
         catalog.sync_now(&config).await;
         let read = catalog.capabilities(&["p".into()]).await.unwrap();
-        assert_eq!(values(&read[0]), ["p-model", "m1", "m2", "m3"]);
+        assert_eq!(
+            values(&read[0]),
+            [
+                "p-model",
+                "m1",
+                "m2",
+                "m3",
+                "claude-opus",
+                "gpt-5",
+                "gemini-3"
+            ]
+        );
+        config.profiles.get_mut("p").unwrap().enabled = true;
+        config.profiles.get_mut("p").unwrap().third_party_models = false;
+        catalog.sync_now(&config).await;
+        assert_eq!(
+            snapshot_models(&catalog),
+            ["p-model", "m1", "m2", "m3", "gemini-3"]
+        );
     }
     // Hard-won: 9d1f70d2b: refreshing Muse retired an admission waiter.
     #[tokio::test]

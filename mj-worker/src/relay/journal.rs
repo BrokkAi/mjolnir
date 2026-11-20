@@ -33,6 +33,14 @@ use super::{
     RELAY_STATE_FILE, RestoredRelaySeed, restored_relay_seed_path,
 };
 
+fn nonempty_journal_file(path: &Path) -> Result<bool> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len() > 0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
 /// Journal segments hold the full session transcript; create them owner-only
 /// the way credentials and checkpoint archives are created.
 fn owner_only_create_options() -> OpenOptions {
@@ -141,7 +149,10 @@ pub(crate) fn open_relay_journal(
         .iter()
         .map(|file| file.file_last_ordinal)
         .max()
-        .unwrap_or(retained_through);
+        .unwrap_or(retained_through)
+        // A crash can leave old sealed files after the durable ACK and the
+        // replacement active file were installed. They cannot lower the cut.
+        .max(retained_through);
     let mut previous_ordinal = retained_through;
     let mut spans = Vec::new();
 
@@ -783,6 +794,13 @@ impl DurableRelay {
         if self.classifies_turns() && self.snapshot.assessment != previous_assessment {
             self.publish_assessment_diagnostic();
         }
+        if matches!(
+            event.observation,
+            RelayObservation::HarnessTurnStarted { .. }
+        ) && self.snapshot.autonomous_harness_turn().is_some()
+        {
+            self.turn_context.observe_autonomous_turn_start();
+        }
         self.turn_context
             .observe_relay(&event.observation, summary_prompt.as_deref());
         let authorization_changed = match &event.observation {
@@ -843,6 +861,7 @@ impl DurableRelay {
             self.persist_snapshot()?;
         }
         self.suppress_child_assessment()?;
+        self.service_live_baselines();
         Ok(ordinal)
     }
 
@@ -925,78 +944,117 @@ impl DurableRelay {
         self.journal_generation = self.journal_generation.wrapping_add(1);
     }
 
-    fn rewrite_relay_journal(&mut self, retain_after: u64) -> Result<()> {
-        // Rewriting replaces the active segment and deletes every sealed one.
-        self.invalidate_replay_plans();
+    fn collect_acknowledged_journal_files(
+        &mut self,
+        through: u64,
+        include_redundant: bool,
+    ) -> Result<()> {
+        // Keep the boundary segment until its last event is acknowledged.
+        // Segments rotate at RELAY_SEGMENT_BYTE_LIMIT; never copy a live suffix
+        // whose size grows independently while the controller replays.
         let journal = self.root.join(RELAY_JOURNAL_DIR);
-        mj_core::config::create_owner_only_directory(&journal)?;
-        let replacement = journal.join("active.jsonl.new");
-        let mut file = owner_only_create_options()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&replacement)?;
-        let mut first: Option<RelayEvent> = None;
-        let mut last: Option<RelayEvent> = None;
-        let mut written_through = retain_after;
-        for span in &self.journal_spans {
-            visit_relay_journal_file(&span.path, JournalReadMode::Strict, |event, _| {
-                if event.ordinal <= span.after_ordinal || event.ordinal <= written_through {
-                    return Ok(ControlFlow::Continue(()));
-                }
-                if event.ordinal <= retain_after {
-                    written_through = event.ordinal;
-                    return Ok(ControlFlow::Continue(()));
-                }
-                let expected = written_through
-                    .checked_add(1)
-                    .ok_or_else(|| anyhow!("relay event ordinal exhausted"))?;
-                if event.ordinal != expected {
-                    bail!(
-                        "relay journal rewrite has a gap: expected {expected}, found {}",
-                        event.ordinal
-                    );
-                }
-                serde_json::to_writer(&mut file, &event)?;
-                file.write_all(b"\n")?;
-                if first.is_none() {
-                    first = Some(event.clone());
-                }
-                written_through = event.ordinal;
-                last = Some(event);
-                Ok(ControlFlow::Continue(()))
-            })?;
-        }
-        file.sync_all()?;
         let active = journal.join(RELAY_ACTIVE_SEGMENT);
-        let next_spans = match (first, last) {
-            (Some(first), Some(last)) => vec![RelayJournalSpan {
-                path: active.clone(),
-                file_first_ordinal: first.ordinal,
-                file_first_previous_digest: span_previous_digest(&first),
-                file_last_ordinal: last.ordinal,
-                file_last_digest: Some(last.digest),
-                after_ordinal: retain_after,
-            }],
-            (None, None) => Vec::new(),
-            _ => unreachable!("relay journal rewrite recorded only one boundary"),
-        };
-        fs::rename(&replacement, &active)?;
-        // Publish the new canonical path immediately after the atomic rename.
-        // If directory sync or redundant-copy cleanup fails, the live relay
-        // must not retain paths that no longer contain its canonical events.
-        self.journal_spans = next_spans;
-        // Make the replacement durable before removing any segment that may
-        // contain the same unacknowledged observations.
-        sync_directory(&journal)?;
-        for entry in fs::read_dir(&journal)? {
-            let path = entry?.path();
-            if path.extension().is_some_and(|extension| extension == "gz") {
-                fs::remove_file(path)?;
+        let mut paths: std::collections::BTreeSet<_> = self
+            .journal_spans
+            .iter()
+            .take_while(|span| span.file_last_ordinal <= through)
+            .map(|span| span.path.clone())
+            .collect();
+        if include_redundant && journal.exists() {
+            // Startup or a failed cleanup can leave redundant physical copies.
+            // Their names suffice; acknowledged files need no decompression.
+            for entry in fs::read_dir(&journal)? {
+                let path = entry?.path();
+                if path.extension().is_some_and(|extension| extension == "gz")
+                    && sealed_relay_journal_metadata(&path)?.file_last_ordinal <= through
+                {
+                    paths.insert(path);
+                }
+            }
+            if !self.journal_spans.iter().any(|span| span.path == active)
+                && nonempty_journal_file(&active)?
+            {
+                paths.insert(active.clone());
             }
         }
-        sync_directory(&journal)?;
-        Ok(())
+        if paths.is_empty() {
+            return Ok(());
+        }
+        self.invalidate_replay_plans();
+        let mut removed = std::collections::BTreeSet::new();
+        let result = (|| -> Result<()> {
+            for path in paths {
+                if path == active {
+                    let replacement = journal.join("active.jsonl.new");
+                    let file = owner_only_create_options()
+                        .create(true)
+                        .truncate(true)
+                        .write(true)
+                        .open(&replacement)?;
+                    file.sync_all()?;
+                    fs::rename(replacement, &active)?;
+                } else {
+                    fs::remove_file(&path)?;
+                }
+                removed.insert(path);
+            }
+            Ok(())
+        })();
+        // Even partial failure must leave memory naming only existing canonical
+        // files. No other reader can observe this decision until the owner unlocks.
+        self.journal_spans
+            .retain(|span| !removed.contains(&span.path));
+        result?;
+        sync_directory(&journal)
+    }
+
+    fn has_collectable_journal_files(&self, through: u64) -> Result<bool> {
+        if self
+            .journal_spans
+            .first()
+            .is_some_and(|span| span.file_last_ordinal <= through)
+        {
+            return Ok(true);
+        }
+        if !self.journal_cleanup_pending {
+            return Ok(false);
+        }
+        let journal = self.root.join(RELAY_JOURNAL_DIR);
+        if journal.exists() {
+            for entry in fs::read_dir(&journal)? {
+                let path = entry?.path();
+                if path.extension().is_some_and(|extension| extension == "gz")
+                    && sealed_relay_journal_metadata(&path)?.file_last_ordinal <= through
+                {
+                    return Ok(true);
+                }
+            }
+            let active = journal.join(RELAY_ACTIVE_SEGMENT);
+            if !self.journal_spans.iter().any(|span| span.path == active)
+                && nonempty_journal_file(&active)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn has_redundant_journal_files(&self) -> Result<bool> {
+        let journal = self.root.join(RELAY_JOURNAL_DIR);
+        if !journal.exists() {
+            return Ok(false);
+        }
+        let canonical: std::collections::BTreeSet<_> =
+            self.journal_spans.iter().map(|span| &span.path).collect();
+        for entry in fs::read_dir(journal)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|extension| extension == "gz")
+                && !canonical.contains(&path)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(crate) fn garbage_collect_relay_history(&mut self) -> Result<()> {
@@ -1005,23 +1063,39 @@ impl DurableRelay {
             .journal_spans
             .first()
             .map_or(self.snapshot.latest_ordinal, |span| span.after_ordinal);
-        let rewrites_journal = through > journal_floor;
+        let advances_floor = through > journal_floor;
+        let collects_journal = self.has_collectable_journal_files(through)?;
+        let include_redundant = self.journal_cleanup_pending;
 
         // The retained frontier this collection acts on has to be durable
         // before the journal loses the events below it: recovery reads that
         // frontier from the snapshot and replays forward from there.
-        if rewrites_journal && self.unpersisted_journal_bytes > 0 {
+        if (advances_floor || collects_journal) && self.unpersisted_journal_bytes > 0 {
             self.persist_snapshot()?;
         }
-        // With the ACK and recovery frontiers durable, either the old or the
-        // rewritten journal is valid after a crash.
-        if rewrites_journal {
-            self.rewrite_relay_journal(through)?;
+        if advances_floor {
+            // A prepared replay must not serve the prefix after its logical
+            // collection, even while a boundary file still contains those bytes.
+            self.invalidate_replay_plans();
         }
+        // Durable ACK authorizes unlinking fully covered files. A crash can
+        // leave redundant acknowledged bytes, never discard unacknowledged work.
+        if collects_journal {
+            self.journal_cleanup_pending = true;
+            self.collect_acknowledged_journal_files(through, include_redundant)?;
+        }
+        if let Some(first) = self.journal_spans.first_mut()
+            && first.file_last_ordinal > through
+        {
+            first.after_ordinal = first.after_ordinal.max(through);
+        }
+        // A legacy rewrite can leave noncanonical sealed copies whose end
+        // is still above this ACK. Keep considering them as later ACKs advance.
+        self.journal_cleanup_pending = include_redundant && self.has_redundant_journal_files()?;
         // The pruned ledger reaches memory only after its own durable write
         // succeeds, so a transient failure cannot forget command IDs while the
         // daemon keeps serving retries. A catch-up ACK usually prunes nothing
-        // and rewrites nothing, and its own persist already made this snapshot
+        // and collects no files, and its own persist already made this snapshot
         // durable; writing it again would cost two more fsyncs for a file that
         // would not change.
         let prunable = Self::prunable_command_ids(&self.snapshot, through);
@@ -1038,7 +1112,7 @@ impl DurableRelay {
     }
 
     /// Ledger entries whose command is terminal at or below `through`, except
-    /// for the newest `RETAINED_TERMINAL_COMMANDS` of them.
+    /// for the newest `RETAINED_TERMINAL_COMMANDS` and owner-pinned receipts.
     ///
     /// Their events are no longer retained, but a controller that lost the
     /// reply to a submit may still retry it with the same command id after
@@ -1046,10 +1120,20 @@ impl DurableRelay {
     /// ids lets that retry be answered with the original acceptance instead
     /// of running the command twice.
     fn prunable_command_ids(snapshot: &RelaySnapshot, through: u64) -> Vec<String> {
+        // Protect legacy receipts in place until the daemon attributes them;
+        // copying their IDs could overflow an already full persisted snapshot.
+        if snapshot.legacy_command_retention {
+            return Vec::new();
+        }
+        let pinned: std::collections::BTreeSet<&String> =
+            snapshot.command_retention.values().flatten().collect();
         let mut terminal: Vec<(u64, &String)> = snapshot
             .handled_commands
             .iter()
             .filter_map(|(command_id, handled)| {
+                if pinned.contains(command_id) {
+                    return None;
+                }
                 handled
                     .terminal_ordinal
                     .filter(|terminal| *terminal <= through)
@@ -1060,6 +1144,17 @@ impl DurableRelay {
         terminal
             .into_iter()
             .skip(RETAINED_TERMINAL_COMMANDS)
+            // Work tracking and login recovery still own the latest turn's
+            // receipt even when controls have pushed it beyond the retry tail.
+            .filter(|(_, command_id)| {
+                snapshot
+                    .turn_completion
+                    .as_ref()
+                    .is_none_or(|turn| &turn.command_id != *command_id)
+                    // Startup still consumes these receipts after /clear resets
+                    // native-use evidence; selector failures are consumed too.
+                    && !snapshot.initial_command_ids.contains(*command_id)
+            })
             .map(|(_, command_id)| command_id.clone())
             .collect()
     }
@@ -1180,6 +1275,14 @@ impl DurableRelay {
                     },
                 )?;
                 continue;
+            }
+            if super::native_history::prompt_may_have_reached_agent(
+                &self.snapshot.dispatches[&command_id],
+            ) {
+                // The prompt may have reached ACP before the runtime's use
+                // notification was persisted. Save that evidence before the
+                // interruption is journaled and discards the dispatch claim.
+                self.mark_native_session_used()?;
             }
             self.record_command_interrupted(
                 &command_id,

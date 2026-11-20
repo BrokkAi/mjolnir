@@ -183,13 +183,11 @@ pub(super) async fn run_daemon_runtime(
     let manager_updates = manager.updates;
     let manager_control = manager.control.clone();
     let manager_shutdown = manager.shutdown;
-    let mut recovery = crate::recovery::RecoveryCoordinator::spawn(manager_control.clone());
-    let recovery_observer = recovery.observer();
-    // Shares the recovery gate, so a recovery copy and a worker upgrade never
-    // act on one session at the same time.
+    let session_gate = manager_control.session_gate.clone();
+    // Worker upgrades share admission with foreground lifecycle operations.
     let mut worker_upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
         manager_control.clone(),
-        &recovery_observer,
+        &session_gate,
     );
     let state = Arc::new(RuntimeState::new(
         manager_control.clone(),
@@ -197,7 +195,7 @@ pub(super) async fn run_daemon_runtime(
             config: controller.config.clone(),
             state: controller.state.clone(),
         },
-        recovery_observer.clone(),
+        session_gate.clone(),
         worker_upgrades.observer(),
         workspaces,
     ));
@@ -321,11 +319,6 @@ pub(super) async fn run_daemon_runtime(
             );
             record_daemon_cleanup(
                 &mut outcome,
-                "shut down bootstrap recovery coordinator",
-                recovery.shutdown().await,
-            );
-            record_daemon_cleanup(
-                &mut outcome,
                 "shut down code review host after bootstrap failure",
                 state
                     .review_host()
@@ -438,6 +431,12 @@ pub(super) async fn run_daemon_runtime(
         state.clone(),
     );
     let compatibility_watch = spawn_store_compatibility_watch(cancellation.clone());
+    // Holds no admission: handoff cancels it (see the spawn's own comment).
+    #[cfg(unix)]
+    let quota_harness_prewarm = crate::pollers::spawn_quota_harness_prewarm(
+        state.with_config(crate::pollers::enabled_quota_profiles),
+        cancellation.clone(),
+    );
     let image_refresh = spawn_image_refresher(
         {
             let state = state.clone();
@@ -753,7 +752,6 @@ pub(super) async fn run_daemon_runtime(
                     progress.phase(ServingPhase::Recovery);
                     publish_background_results(
                         &state,
-                        std::iter::from_fn(|| recovery.try_result()),
                         std::iter::from_fn(|| worker_upgrades.try_result()),
                     );
                 }
@@ -939,18 +937,13 @@ pub(super) async fn run_daemon_runtime(
                 .and_then(|result| result),
         },
     );
-    // Recovery copies and worker upgrades do not hold up a handoff, so some
-    // may still be running. Stop them first: the next daemon starts them again.
-    // The coordinators share one gate, and dropping either cancels both.
+    // Worker upgrade preparation does not hold up a handoff and may still be
+    // running. Stop it first; the next daemon starts it again.
+    // Closing the shared gate also cancels other background holders.
     epilogue.record(
         &mut outcome,
         "shut down worker upgrade coordinator",
         worker_upgrades.shutdown().await,
-    );
-    epilogue.record(
-        &mut outcome,
-        "shut down recovery coordinator",
-        recovery.shutdown().await,
     );
     epilogue.record(
         &mut outcome,
@@ -1007,6 +1000,12 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join reviewer prewarm",
         reviewer_prewarm.await.map_err(anyhow::Error::new),
+    );
+    #[cfg(unix)]
+    epilogue.record(
+        &mut outcome,
+        "join quota harness prewarm",
+        quota_harness_prewarm.await.map_err(anyhow::Error::new),
     );
     epilogue.record(
         &mut outcome,
@@ -1428,7 +1427,7 @@ pub(super) fn spawn_manager_target_refresher(
                     &closing,
                     prepared,
                     &state.credential_targets,
-                    Some(&state.worker_background_gate()),
+                    Some(&state.session_manager.credential_wakes),
                 ) {
                     continue;
                 }

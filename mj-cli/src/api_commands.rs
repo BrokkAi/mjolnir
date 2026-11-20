@@ -3140,10 +3140,11 @@ fn quota_row(
                         };
                         let reset =
                             window.reset_display(now, report.banked_resets_for_window(window));
+                        let label = report.window_label(window);
                         if reset.is_empty() {
-                            format!("{} {usage}", window.label)
+                            format!("{label} {usage}")
                         } else {
-                            format!("{} {usage}, resets {reset}", window.label)
+                            format!("{label} {usage}, resets {reset}")
                         }
                     })
                     .collect::<Vec<_>>()
@@ -5202,6 +5203,7 @@ mod tests {
         };
         let mut config = mj_core::config::Config::default();
         for (id, kind, enabled) in [
+            ("agy", HarnessKind::Antigravity, true),
             ("claude", HarnessKind::Claude, true),
             ("codex", HarnessKind::Codex, true),
             ("kimi", HarnessKind::Kimi, true),
@@ -5235,6 +5237,31 @@ mod tests {
             240,
         );
         claude.monthly_price_usd = Some(100);
+        // A Pro plan reports Argon apart, and an unused pool has no reset.
+        let pool_window = |pool: mj_core::config::AntigravityQuotaPool,
+                           label: &str,
+                           remaining: u8,
+                           resets_in: Option<u64>| QuotaWindow {
+            model_scope: Some(pool.reported_scope(true).into()),
+            ..window(label, Some(remaining), None, None, resets_in)
+        };
+        let agy = {
+            use mj_core::config::AntigravityQuotaPool::{Argon, Claude, Gemini};
+            report(
+                "agy",
+                HarnessKind::Antigravity,
+                vec![
+                    pool_window(Gemini, "Week", 73, Some(6 * 24 * 3600)),
+                    pool_window(Gemini, "5H", 100, Some(5 * 3600)),
+                    pool_window(Claude, "Week", 100, None),
+                    pool_window(Claude, "5H", 100, None),
+                    pool_window(Argon, "Week", 40, Some(6 * 24 * 3600 + 23 * 3600)),
+                ],
+                None,
+                None,
+                90,
+            )
+        };
         let mut codex = report(
             "codex",
             HarnessKind::Codex,
@@ -5265,6 +5292,7 @@ mod tests {
         );
         let snapshot = QuotaSnapshot {
             reports: [
+                ("agy".to_owned(), agy),
                 ("claude".to_owned(), claude),
                 ("codex".to_owned(), codex),
                 ("kimi".to_owned(), kimi),

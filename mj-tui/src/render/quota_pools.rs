@@ -2,8 +2,8 @@
 use std::collections::BTreeMap;
 use std::thread::JoinHandle;
 
-use mj_client::quota::{AntigravityQuotaPool, ProfileQuota, QuotaWindow};
-use mj_core::config::{Config, HarnessKind, HarnessProfile, QuotaProvider};
+use mj_client::quota::{ProfileQuota, QuotaWindow};
+use mj_core::config::{AntigravityQuotaPool, Config, HarnessKind, HarnessProfile, QuotaProvider};
 
 use super::quota_remaining_percent;
 
@@ -336,9 +336,26 @@ pub(crate) struct QuotaPool {
 }
 
 impl QuotaPool {
+    pub(super) fn reported_members(&self) -> impl Iterator<Item = &PoolMember> {
+        self.members
+            .iter()
+            .filter(|member| !member.awaiting_reading)
+    }
+
+    pub(super) fn reported_weight(&self) -> f64 {
+        self.reported_members().map(|member| member.weight).sum()
+    }
+
+    // Capacity is measured in weighted percentage points.
+    pub(super) fn available_capacity(&self) -> f64 {
+        self.reported_members()
+            .map(|member| member.weight * f64::from(member.remaining))
+            .sum()
+    }
+
     pub(crate) fn percentage(&self) -> String {
         // With every reading past its reset, nothing is known to remain.
-        let known = self.members.iter().any(|member| !member.awaiting_reading);
+        let known = self.reported_members().next().is_some();
         format!(
             "{}{}%{}",
             if self.unweighted { "avg " } else { "" },
@@ -425,6 +442,8 @@ pub(crate) fn provider_pools(
             Some("pay-per-use".into())
         } else if quota.is_not_reported() || quota.extra.as_deref() == Some("n/a") {
             Some("not reported".into())
+        } else if quota.is_idle_without_reading() {
+            Some("idle; usage shows after the next request".into())
         } else if quota.error.is_some() {
             Some(
                 quota
@@ -439,14 +458,17 @@ pub(crate) fn provider_pools(
             group.text.push((
                 id.into(),
                 match &quota.extra {
-                    Some(extra) if !quota.is_usage_priced() => format!("{label} · {extra}"),
+                    Some(extra) if !quota.is_usage_priced() && !quota.is_idle_without_reading() => {
+                        format!("{label} · {extra}")
+                    }
                     _ => label,
                 },
             ));
             continue;
         }
         let reports = if profile.kind == HarnessKind::Antigravity {
-            AntigravityQuotaPool::ALL
+            profile
+                .antigravity_pools()
                 .into_iter()
                 .map(|pool| {
                     (
@@ -478,11 +500,11 @@ pub(crate) fn provider_pools(
                     .unwrap_or_else(|| {
                         group.pools.push(QuotaPool {
                             key,
-                            label: match scope.as_deref() {
-                                Some("gemini") => "Gemini".into(),
-                                Some("claude,gpt") => "Claude & GPT".into(),
-                                _ => String::new(),
-                            },
+                            label: scope
+                                .as_deref()
+                                .and_then(AntigravityQuotaPool::of_scope)
+                                .map(|pool| pool.name().to_owned())
+                                .unwrap_or_default(),
                             members: Vec::new(),
                             remaining: 0,
                             unweighted: false,
@@ -528,9 +550,10 @@ pub(crate) fn provider_pools(
                                 && quota.refreshed_at_epoch_seconds < reset as u64
                         })
                     }),
-                    // Claude omits the short window until first use; other adapters
-                    // do not define an absent window as idle.
-                    five_hour_idle: profile.kind == HarnessKind::Claude,
+                    // Claude omits the short window until first use, and Muse
+                    // while none is open; other adapters do not define an
+                    // absent window as idle.
+                    five_hour_idle: matches!(profile.kind, HarnessKind::Claude | HarnessKind::Muse),
                     fable: quota
                         .fable_weekly_window()
                         .and_then(quota_remaining_percent),
@@ -600,8 +623,11 @@ pub(crate) fn provider_pools(
                     {
                         return false;
                     }
-                    let eligible =
-                        pool.key.scope.is_none() || profile.kind == HarnessKind::Antigravity;
+                    // An Antigravity profile belongs only to the pools it uses.
+                    let eligible = pool.key.scope.is_none()
+                        || profile.antigravity_pools().into_iter().any(|candidate| {
+                            Some(candidate.model_scope()) == pool.key.scope.as_deref()
+                        });
                     let Some(report) = quotas.get(*id) else {
                         return eligible;
                     };
@@ -616,7 +642,8 @@ pub(crate) fn provider_pools(
                         return eligible;
                     }
                     let scoped = if profile.kind == HarnessKind::Antigravity {
-                        AntigravityQuotaPool::ALL
+                        profile
+                            .antigravity_pools()
                             .into_iter()
                             .find(|candidate| {
                                 Some(candidate.model_scope()) == pool.key.scope.as_deref()
@@ -658,21 +685,9 @@ pub(crate) fn provider_pools(
                     member.weight = 1.0;
                 }
             }
-            let total: f64 = pool
-                .members
-                .iter()
-                .filter(|member| !member.awaiting_reading)
-                .map(|member| member.weight)
-                .sum();
+            let total = pool.reported_weight();
             pool.remaining = if total > 0.0 {
-                (pool
-                    .members
-                    .iter()
-                    .filter(|member| !member.awaiting_reading)
-                    .map(|member| member.weight * f64::from(member.remaining))
-                    .sum::<f64>()
-                    / total)
-                    .round() as u8
+                (pool.available_capacity() / total).round() as u8
             } else {
                 0
             };
@@ -681,33 +696,51 @@ pub(crate) fn provider_pools(
     grouped.into_values().collect()
 }
 
-/// Largest-remainder apportionment, with one cell per member whenever they fit.
-pub(crate) fn segment_widths(members: &[PoolMember], cells: usize) -> Vec<usize> {
-    let mut widths = vec![0; members.len()];
-    if cells < members.len() {
-        widths.iter_mut().take(cells).for_each(|width| *width = 1);
-        return widths;
-    }
-    let weight: f64 = members.iter().map(|member| member.weight).sum();
+/// Largest-remainder apportionment for the available quota and refill chunks.
+/// Give every positive segment a cell when they all fit, taking cells only
+/// from other refills. On narrower bars, keep positive availability visible
+/// and let the caller list omitted refills.
+pub(super) fn refill_widths(
+    available: f64,
+    refills: impl Iterator<Item = f64>,
+    total: f64,
+    cells: usize,
+) -> Vec<usize> {
+    let capacities: Vec<_> = std::iter::once(available).chain(refills).collect();
+    let mut widths = Vec::new();
     let mut fractions = Vec::new();
-    for (index, member) in members.iter().enumerate() {
-        let exact = cells as f64 * member.weight / weight;
-        widths[index] = (exact.floor() as usize).max(1);
+    for (index, &capacity) in capacities.iter().enumerate() {
+        let exact = cells as f64 * capacity / total;
+        widths.push(exact.floor() as usize);
         fractions.push((index, exact.fract()));
-    }
-    while widths.iter().sum::<usize>() > cells {
-        let index = widths
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, width)| **width)
-            .map(|(index, _)| index)
-            .expect("nonempty widths");
-        widths[index] -= 1;
     }
     fractions.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let leftover = cells - widths.iter().sum::<usize>();
     for (index, _) in fractions.into_iter().take(leftover) {
         widths[index] += 1;
+    }
+    let all_fit = capacities
+        .iter()
+        .filter(|&&capacity| capacity > 0.0)
+        .count()
+        <= cells;
+    // Minimum cells come only from refill chunks, never from the available
+    // fill, so the fill stays proportional to the percentage printed in it.
+    // A refill that cannot get a cell is listed under the bar instead.
+    for (index, capacity) in capacities.into_iter().enumerate() {
+        if capacity > 0.0 && widths[index] == 0 && (all_fit || index == 0) {
+            // A refill only takes a cell from a refill that keeps one.
+            let spare = if index == 0 { 0 } else { 1 };
+            if let Some(donor) = widths
+                .iter_mut()
+                .skip(1)
+                .filter(|width| **width > spare)
+                .max_by_key(|width| **width)
+            {
+                *donor -= 1;
+                widths[index] = 1;
+            }
+        }
     }
     widths
 }

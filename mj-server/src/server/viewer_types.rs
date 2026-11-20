@@ -453,7 +453,8 @@ impl ViewerSnapshot {
                 id: id.to_owned(),
                 harness_kind: profile.kind.id().into(),
                 quota_pools: if profile.kind == mj_core::config::HarnessKind::Antigravity {
-                    mj_client::quota::AntigravityQuotaPool::ALL
+                    profile
+                        .antigravity_pools()
                         .into_iter()
                         .map(|pool| pool.label().to_owned())
                         .collect()
