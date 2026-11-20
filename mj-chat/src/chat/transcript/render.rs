@@ -877,10 +877,11 @@ pub(super) fn entry_logical_lines(
         && entry.role == ChatRole::Tool
         && (entry.tool_input.is_some() || entry.tool_error.is_some())
     {
+        let title = tool_display_title(&entry.text);
         let title = if entry.leading_omitted {
-            format!("[… earlier content omitted …]\n{}", entry.text)
+            format!("[… earlier content omitted …]\n{title}")
         } else {
-            entry.text.clone()
+            title.into_owned()
         };
         let mut lines = markdown_lines(&title, visual.body_style, visual.header_style, width);
         if let Some(input) = &entry.tool_input {
