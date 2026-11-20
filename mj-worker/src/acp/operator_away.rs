@@ -12,7 +12,23 @@ struct OperatorAwayState {
     next_bridge: u64,
     bridges: BTreeSet<u64>,
     pending: Vec<PendingElicitation>,
+    /// Mjolnir guardian reviews in flight. They are outstanding tool
+    /// permission requests like the forms in `pending`, so the same lock
+    /// decides what is outstanding and withdraws both at once.
+    reviews: Vec<PendingReview>,
+    next_review: u64,
+    /// Bridges whose current turn's tool permission requests were withdrawn.
+    /// A request that arrives later in that turn is answered `cancelled` too,
+    /// until the turn ends.
+    withdrawn_turns: BTreeSet<u64>,
     changed: tokio::sync::watch::Sender<()>,
+}
+
+#[derive(Debug)]
+struct PendingReview {
+    bridge: u64,
+    id: u64,
+    withdrawn: tokio_util::sync::CancellationToken,
 }
 
 impl Default for OperatorAwayState {
@@ -23,6 +39,9 @@ impl Default for OperatorAwayState {
             next_bridge: 0,
             bridges: Default::default(),
             pending: Default::default(),
+            reviews: Default::default(),
+            next_review: 0,
+            withdrawn_turns: Default::default(),
             changed: tokio::sync::watch::channel(()).0,
         }
     }
@@ -30,14 +49,33 @@ impl Default for OperatorAwayState {
 
 impl OperatorAwayState {
     fn answer_away(&mut self, entry: PendingElicitation) {
-        let question =
-            (entry.identity.1 == AwayRequest::Question).then(|| question_evidence(&entry.question));
-        if entry.answer.send(PendingAnswer::OperatorAway).is_ok() {
-            let history = self.refused.entry(entry.identity).or_default();
-            if let Some(question) = question {
-                history.push(question);
-                self.changed.send_replace(());
+        // A turn withdrawal marks the turn before sending session/cancel and
+        // removes its forms after. AFK must not slip an answer through that
+        // gap. Leave the form for the withdrawal to remove.
+        if self.withdrawn_turns.contains(&entry.bridge)
+            && entry.question.id.starts_with(TOOL_PERMISSION_ID_PREFIX)
+        {
+            self.pending.push(entry);
+            return;
+        }
+        match entry {
+            PendingElicitation {
+                question,
+                responder: PendingResponder::Acp { identity, answer },
+                ..
+            } => {
+                let evidence =
+                    (identity.1 == AwayRequest::Question).then(|| question_evidence(&question));
+                if answer.send(PendingAnswer::OperatorAway).is_ok() {
+                    let history = self.refused.entry(identity).or_default();
+                    if let Some(evidence) = evidence {
+                        history.push(evidence);
+                        self.changed.send_replace(());
+                    }
+                }
             }
+            // Command-loop recovery choices are never answered by AFK policy.
+            entry => self.pending.push(entry),
         }
     }
 }
@@ -81,6 +119,26 @@ pub(super) enum AwayRequest {
 }
 
 impl OperatorAway {
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn keep_fixture_question_live(&self, question: ElicitationRequest) -> Box<dyn Send> {
+        let bridge = self.pending_for_bridge_with_source(Some(VerdictSource::Disabled), None);
+        let answer = bridge.register(question, String::new(), AwayRequest::Question);
+        Box::new((bridge, answer))
+    }
+
+    pub(crate) fn live_questions(&self) -> BTreeMap<String, ElicitationRequest> {
+        // Recovery calls this with the relay held: Relay -> OperatorAway is
+        // the lock order. This owner never takes the relay lock while held;
+        // answering only wakes a responder, whose FIFO work runs afterwards.
+        let state = self.0.lock().expect("operator-away state lock poisoned");
+        state
+            .pending
+            .iter()
+            .filter(|entry| state.bridges.contains(&entry.bridge) && entry.responder.is_alive())
+            .map(|entry| (entry.question.id.clone(), entry.question.clone()))
+            .collect()
+    }
+
     // Only the Unix worker runtime receives SetOperatorAway. Other targets
     // carry the default state so ACP request handling has one type.
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -93,7 +151,11 @@ impl OperatorAway {
                 // Vec order is registration order, including across bridge scopes.
                 let pending = std::mem::take(&mut state.pending);
                 for entry in pending {
-                    if !state.refused.contains_key(&entry.identity) {
+                    if entry
+                        .responder
+                        .acp_identity()
+                        .is_some_and(|identity| !state.refused.contains_key(identity))
+                    {
                         state.answer_away(entry);
                     } else {
                         state.pending.push(entry);
@@ -148,10 +210,105 @@ impl Drop for PendingBridge {
             .expect("operator-away state lock poisoned");
         state.bridges.remove(&self.id);
         state.pending.retain(|entry| entry.bridge != self.id);
+        state.forget_reviews(self.id);
+    }
+}
+
+impl OperatorAwayState {
+    /// Withdraw a bridge's reviews in flight and forget its turn.
+    fn forget_reviews(&mut self, bridge: u64) {
+        self.reviews.retain(|review| {
+            let keep = review.bridge != bridge;
+            if !keep {
+                review.withdrawn.cancel();
+            }
+            keep
+        });
+        self.withdrawn_turns.remove(&bridge);
+    }
+}
+
+/// A Mjolnir guardian review registered as an outstanding tool permission
+/// request. Dropping it, when the review ends, unregisters it.
+pub(super) struct PendingReviewTicket {
+    owner: OperatorAway,
+    bridge: u64,
+    id: u64,
+    withdrawn: tokio_util::sync::CancellationToken,
+}
+
+impl PendingReviewTicket {
+    /// Resolves when the turn's tool permission requests are withdrawn.
+    pub(super) async fn withdrawn(&self) {
+        self.withdrawn.cancelled().await;
+    }
+
+    /// Answer the request under the lock that withdraws turns: `answer` learns
+    /// whether the turn was withdrawn, so no verdict is sent after a cancel
+    /// the agent has already been told about. `answer` must not take that
+    /// lock itself; an ACP responder only queues a message.
+    pub(super) fn settle<T>(self, answer: impl FnOnce(bool) -> T) -> T {
+        let state = self
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned");
+        let withdrawn = self.withdrawn.is_cancelled()
+            || state.withdrawn_turns.contains(&self.bridge)
+            || !state.reviews.iter().any(|review| review.id == self.id);
+        answer(withdrawn)
+    }
+}
+
+impl Drop for PendingReviewTicket {
+    fn drop(&mut self) {
+        self.owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned")
+            .reviews
+            .retain(|review| review.id != self.id);
+    }
+}
+
+/// The connection, rather than its cloned responder tasks, owns bridge life.
+/// Dropping a cancelled driver retires responders before terminal teardown.
+pub(super) struct PendingBridgeLifetime(PendingElicitations);
+
+impl Drop for PendingBridgeLifetime {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }
 
 impl PendingElicitations {
+    pub(super) fn bridge_lifetime(&self) -> PendingBridgeLifetime {
+        PendingBridgeLifetime(self.clone())
+    }
+
+    pub(super) fn register_command_loop(&self, request: ElicitationRequest) -> CommandLoopQuestion {
+        let lifetime = Arc::new(());
+        let mut state = self
+            .0
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned");
+        if state.bridges.contains(&self.0.id) {
+            state.pending.push(PendingElicitation {
+                bridge: self.0.id,
+                question: request.clone(),
+                responder: PendingResponder::CommandLoop(Arc::downgrade(&lifetime)),
+            });
+        }
+        CommandLoopQuestion {
+            request,
+            owner: self.0.owner.clone(),
+            bridge: self.0.id,
+            lifetime,
+        }
+    }
+
     /// Both immediate and later AFK decisions reach the same responder task.
     /// It publishes Requested before receiving this answer, so AFK cannot
     /// resolve a form before the relay has observed the question.
@@ -168,7 +325,11 @@ impl PendingElicitations {
             .0
             .lock()
             .expect("operator-away state lock poisoned");
-        if !state.bridges.contains(&self.0.id) {
+        if !state.bridges.contains(&self.0.id)
+            || (state.withdrawn_turns.contains(&self.0.id)
+                && question.id.starts_with(TOOL_PERMISSION_ID_PREFIX))
+        {
+            // Dropping the answer channel answers the request `cancelled`.
             return received;
         }
         let identity = (agent, request);
@@ -176,15 +337,13 @@ impl PendingElicitations {
             state.answer_away(PendingElicitation {
                 bridge: self.0.id,
                 question,
-                identity,
-                answer,
+                responder: PendingResponder::Acp { identity, answer },
             });
         } else {
             state.pending.push(PendingElicitation {
                 bridge: self.0.id,
                 question,
-                identity,
-                answer,
+                responder: PendingResponder::Acp { identity, answer },
             });
         }
         received
@@ -218,19 +377,18 @@ impl PendingElicitations {
                 else {
                     return;
                 };
-                if entry.identity.1 != AwayRequest::Question {
+                let Some(identity) = entry.responder.acp_identity() else {
+                    return;
+                };
+                if identity.1 != AwayRequest::Question {
                     return;
                 }
                 state.presence.away.then(|| {
                     (
                         state.presence.revision,
-                        entry.identity.0.clone(),
+                        identity.0.clone(),
                         question_evidence(&entry.question),
-                        state
-                            .refused
-                            .get(&entry.identity)
-                            .cloned()
-                            .unwrap_or_default(),
+                        state.refused.get(identity).cloned().unwrap_or_default(),
                     )
                 })
             };
@@ -277,7 +435,9 @@ impl PendingElicitations {
                                 .get(&(agent, AwayRequest::Question))
                                 .is_some_and(|current| *current == history)
                             && let Some(index) = state.pending.iter().position(|entry| {
-                                entry.bridge == self.0.id && entry.question.id == id
+                                entry.bridge == self.0.id
+                                    && entry.question.id == id
+                                    && entry.responder.acp_identity().is_some()
                             })
                         {
                             let entry = state.pending.remove(index);
@@ -308,10 +468,11 @@ impl PendingElicitations {
             .0
             .lock()
             .expect("operator-away state lock poisoned");
-        let index = state
-            .pending
-            .iter()
-            .position(|entry| entry.bridge == self.0.id && entry.question.id == id)?;
+        let index = state.pending.iter().position(|entry| {
+            entry.bridge == self.0.id
+                && entry.question.id == id
+                && entry.responder.acp_identity().is_some()
+        })?;
         let entry = state.pending.remove(index);
         Some(entry)
     }
@@ -329,6 +490,106 @@ impl PendingElicitations {
         self.remove(id)
     }
 
+    /// Register a Mjolnir guardian review of a tool permission request, so the
+    /// turn's withdrawal reaches it as it reaches an open form. `None` when the
+    /// bridge is gone or its turn was already withdrawn: answer `cancelled`.
+    pub(super) fn begin_review(&self) -> Option<PendingReviewTicket> {
+        let mut state = self
+            .0
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned");
+        if !state.bridges.contains(&self.0.id) || state.withdrawn_turns.contains(&self.0.id) {
+            return None;
+        }
+        let id = state.next_review;
+        state.next_review = id
+            .checked_add(1)
+            .expect("guardian review identity exhausted");
+        let withdrawn = tokio_util::sync::CancellationToken::new();
+        state.reviews.push(PendingReview {
+            bridge: self.0.id,
+            id,
+            withdrawn: withdrawn.clone(),
+        });
+        Some(PendingReviewTicket {
+            owner: self.0.owner.clone(),
+            bridge: self.0.id,
+            id,
+            withdrawn,
+        })
+    }
+
+    /// Mark the turn withdrawn before the agent is told of the cancel, so a
+    /// guardian review that settles in between answers `cancelled`, and no
+    /// request arriving later in the turn is reviewed or shown.
+    pub(super) fn begin_withdrawal(&self) {
+        self.0
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned")
+            .withdrawn_turns
+            .insert(self.0.id);
+    }
+
+    /// Withdraw the turn's tool permission requests in one decision: drop the
+    /// answer channel of every open form (its task answers the agent
+    /// `cancelled` and closes the form), cancel every guardian review in
+    /// flight, and answer any that arrives later in this turn `cancelled`.
+    pub(super) fn withdraw_tool_permissions(&self) {
+        let mut state = self
+            .0
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned");
+        state.pending.retain(|entry| {
+            entry.bridge != self.0.id
+                || entry.responder.acp_identity().is_none()
+                || !entry.question.id.starts_with(TOOL_PERMISSION_ID_PREFIX)
+        });
+        state.reviews.retain(|review| {
+            let keep = review.bridge != self.0.id;
+            if !keep {
+                review.withdrawn.cancel();
+            }
+            keep
+        });
+        state.withdrawn_turns.insert(self.0.id);
+    }
+
+    /// The withdrawn turn is over: its prompt answered, or a new one began.
+    pub(super) fn end_withdrawal(&self) {
+        self.0
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned")
+            .withdrawn_turns
+            .remove(&self.0.id);
+    }
+
+    /// Whether the only outstanding requests are guardian reviews, which end
+    /// on their own within the review deadline.
+    pub(super) fn only_reviews(&self) -> bool {
+        let state = self
+            .0
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned");
+        state
+            .reviews
+            .iter()
+            .any(|review| review.bridge == self.0.id)
+            && !state
+                .pending
+                .iter()
+                .any(|entry| entry.bridge == self.0.id && entry.responder.acp_identity().is_some())
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         let state = self
             .0
@@ -336,7 +597,14 @@ impl PendingElicitations {
             .0
             .lock()
             .expect("operator-away state lock poisoned");
-        !state.pending.iter().any(|entry| entry.bridge == self.0.id)
+        !state
+            .pending
+            .iter()
+            .any(|entry| entry.bridge == self.0.id && entry.responder.acp_identity().is_some())
+            && !state
+                .reviews
+                .iter()
+                .any(|review| review.bridge == self.0.id)
     }
 
     pub(super) fn close(&self) {
@@ -348,18 +616,7 @@ impl PendingElicitations {
             .expect("operator-away state lock poisoned");
         state.bridges.remove(&self.0.id);
         state.pending.retain(|entry| entry.bridge != self.0.id);
-    }
-
-    pub(super) fn retain(&self, keep: impl Fn(&str) -> bool) {
-        let mut state = self
-            .0
-            .owner
-            .0
-            .lock()
-            .expect("operator-away state lock poisoned");
-        state
-            .pending
-            .retain(|entry| entry.bridge != self.0.id || keep(&entry.question.id));
+        state.forget_reviews(self.0.id);
     }
 
     pub(super) fn resolve(
@@ -376,14 +633,22 @@ impl PendingElicitations {
         let index = state
             .pending
             .iter()
-            .position(|entry| entry.bridge == self.0.id && entry.question.id == id)
+            .position(|entry| {
+                entry.bridge == self.0.id
+                    && entry.question.id == id
+                    && entry.responder.acp_identity().is_some()
+            })
             .ok_or_else(|| format!("elicitation {id:?} is no longer pending"))?;
         let response = state.pending[index].question.harness_response(response)?;
         let entry = state.pending.remove(index);
-        entry
-            .answer
-            .send(PendingAnswer::Human(response))
-            .map_err(|_| format!("elicitation {id:?} was cancelled before it was answered"))
+        match entry.responder {
+            PendingResponder::Acp { answer, .. } => answer
+                .send(PendingAnswer::Human(response))
+                .map_err(|_| format!("elicitation {id:?} was cancelled before it was answered")),
+            PendingResponder::CommandLoop(_) => {
+                Err(format!("elicitation {id:?} belongs to the command loop"))
+            }
+        }
     }
 }
 
@@ -398,17 +663,73 @@ impl Default for PendingElicitations {
 pub(super) struct PendingElicitation {
     bridge: u64,
     question: ElicitationRequest,
-    identity: (String, AwayRequest),
-    answer: oneshot::Sender<PendingAnswer>,
+    responder: PendingResponder,
+}
+
+#[derive(Debug)]
+enum PendingResponder {
+    Acp {
+        identity: (String, AwayRequest),
+        answer: oneshot::Sender<PendingAnswer>,
+    },
+    CommandLoop(std::sync::Weak<()>),
+}
+
+impl PendingResponder {
+    fn acp_identity(&self) -> Option<&(String, AwayRequest)> {
+        match self {
+            Self::Acp { identity, .. } => Some(identity),
+            Self::CommandLoop(_) => None,
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        match self {
+            Self::Acp { answer, .. } => !answer.is_closed(),
+            Self::CommandLoop(lifetime) => lifetime.upgrade().is_some(),
+        }
+    }
+}
+
+/// A recovery choice is answered by the command loop, not ACP or AFK policy.
+/// Its actual local owner keeps this wrapper until resolution or cancellation.
+pub(super) struct CommandLoopQuestion {
+    request: ElicitationRequest,
+    owner: OperatorAway,
+    bridge: u64,
+    lifetime: Arc<()>,
+}
+
+impl std::ops::Deref for CommandLoopQuestion {
+    type Target = ElicitationRequest;
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+impl Drop for CommandLoopQuestion {
+    fn drop(&mut self) {
+        let lifetime = Arc::downgrade(&self.lifetime);
+        let mut state = self
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned");
+        state.pending.retain(|entry| {
+            entry.bridge != self.bridge
+                || !matches!(&entry.responder,
+                PendingResponder::CommandLoop(token) if token.ptr_eq(&lifetime))
+        });
+    }
 }
 
 impl PendingElicitation {
     /// Preserve explicit user intent instead of conflating it with a dropped bridge.
     pub(super) fn cancel(self) {
-        if self
-            .answer
-            .send(PendingAnswer::Human(ElicitationResponse::Cancel))
-            .is_err()
+        if let PendingResponder::Acp { answer, .. } = self.responder
+            && answer
+                .send(PendingAnswer::Human(ElicitationResponse::Cancel))
+                .is_err()
         {
             tracing::debug!(elicitation_id = %self.question.id, "permission responder closed before cancellation was answered");
         }
@@ -464,6 +785,109 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{TcpListener, TcpStream};
+
+    // Hard-won: c1da39f: the last terminal closed before a dead bridge's form-resolution event.
+    #[cfg(unix)]
+    #[test]
+    fn recovery_cut_asks_responder_owner_before_terminal_close_releases_it() {
+        use mj_core::relay::{ActiveAgentTerminal, RelayObservation};
+        let root = tempfile::tempdir().unwrap();
+        let relay = Arc::new(crate::relay::RelayCell::new(
+            crate::relay::DurableRelay::open(root.path(), "question-cut", "test").unwrap(),
+        ));
+        let owner = relay.lock().unwrap().operator_away.clone();
+        let old = owner.pending_for_bridge();
+        let old_lifetime = old.bridge_lifetime();
+        let replacement = owner.pending_for_bridge();
+        let _replacement_lifetime = replacement.bridge_lifetime();
+        let old_question = question("old", "Old bridge question");
+        let live_question = question("live", "Replacement bridge question");
+        let abandoned = question("abandoned", "Responder disappeared");
+        let old_reused_question = question("reused", "Previous bridge's form");
+        let current_reused_question = question("reused", "Replacement bridge's different form");
+        let _reused_answer = replacement.register(
+            current_reused_question.clone(),
+            String::new(),
+            AwayRequest::Question,
+        );
+
+        let _old_answer = old.register(old_question.clone(), String::new(), AwayRequest::Question);
+        let _live_answer =
+            replacement.register(live_question.clone(), String::new(), AwayRequest::Question);
+        drop(replacement.register(abandoned.clone(), String::new(), AwayRequest::Question));
+        {
+            let mut state = relay.lock().unwrap();
+            for request in [
+                old_question.clone(),
+                live_question.clone(),
+                abandoned,
+                old_reused_question,
+            ] {
+                state
+                    .record_observation(RelayObservation::ElicitationRequested { request })
+                    .unwrap();
+            }
+            assert_eq!(
+                state.live_session_baseline().unwrap().questions,
+                vec![live_question.clone(), old_question]
+            );
+            state
+                .agent_terminal_started(ActiveAgentTerminal {
+                    terminal_id: "old-terminal".into(),
+                    command: "sleep 30".into(),
+                    started_at_ms: 1,
+                })
+                .unwrap();
+        }
+        let mut cut = relay.lock().unwrap().reserve_live_baseline();
+        assert!(cut.try_recv().is_err());
+        // Responder clones and their resolution tasks still exist. The actual
+        // bridge lifetime owner is decisive even without HarnessRestarting.
+        drop(old_lifetime);
+        crate::worker_runtime::record_runtime_event(
+            &relay,
+            &mut BTreeMap::new(),
+            RuntimeEvent::TerminalClosed {
+                terminal_id: "old-terminal".into(),
+                output: String::new(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            cut.try_recv().unwrap().unwrap().questions,
+            vec![live_question.clone()]
+        );
+        // A restarted bridge can reuse IDs. Its live responder cannot bless
+        // the old body before the new Requested event reaches the frontier.
+        relay
+            .lock()
+            .unwrap()
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: current_reused_question.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            relay
+                .lock()
+                .unwrap()
+                .live_session_baseline()
+                .unwrap()
+                .questions,
+            vec![live_question, current_reused_question]
+        );
+        let history = relay
+            .lock()
+            .unwrap()
+            .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap();
+        assert!(!history.iter().any(|event| matches!(
+            event.observation,
+            RelayObservation::ElicitationResolved { .. }
+        )));
+    }
 
     struct Classifier {
         listener: TcpListener,

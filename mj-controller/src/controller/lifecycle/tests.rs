@@ -34,6 +34,7 @@ fn a_close_whose_restart_left_no_worker_records_error_and_keeps_the_target() {
         &previous,
         &error,
         "2026-08-14T12:00:00Z".into(),
+        None,
     );
 
     assert_eq!(session.state, SessionState::Error);
@@ -60,6 +61,7 @@ fn a_close_whose_checkpoint_failed_with_a_live_worker_returns_to_its_previous_st
         &previous,
         &error,
         "2026-08-14T12:00:00Z".into(),
+        None,
     );
 
     assert_eq!(session.state, SessionState::Running);
@@ -1862,6 +1864,10 @@ fn force_destroy_tolerates_a_missing_archive() {
 // Hard-won: 7bcfe409: unusable harness left a live session without an actionable failure reason
 #[test]
 fn a_session_whose_harness_never_became_usable_is_failed_with_its_reason() {
+    if !in_isolated_store("a_session_whose_harness_never_became_usable_is_failed_with_its_reason") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Running;
@@ -1873,36 +1879,36 @@ fn a_session_whose_harness_never_became_usable_is_failed_with_its_reason() {
             ..State::default()
         },
     };
-    let persisted = RefCell::new(Vec::new());
-    let persist = |record: &mj_core::state::SessionRecord| {
-        persisted
-            .borrow_mut()
-            .push((record.state, record.last_error.clone()));
-        Ok(())
-    };
+    persist_controller_fixture(&controller);
     let cause = "the harness never advertised its configuration within 300s";
 
     assert!(
         !controller
-            .fail_unready_session_with(session_id, cause, "2026-09-18T15:20:00Z", persist)
+            .fail_unready_session(session_id, cause, "2026-09-18T15:20:00Z")
             .unwrap(),
         "a record that has moved since the observation belongs to whatever moved it"
     );
-    assert!(persisted.borrow().is_empty());
+    assert_eq!(
+        crate::database::read_durable_session_record(session_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        SessionState::Running
+    );
 
     assert!(
         controller
-            .fail_unready_session_with(session_id, cause, "2026-09-18T15:28:35Z", persist)
+            .fail_unready_session(session_id, cause, "2026-09-18T15:28:35Z")
             .unwrap()
-    );
-    assert_eq!(
-        persisted.borrow().as_slice(),
-        &[(SessionState::Error, Some(cause.to_owned()))],
-        "the reason reaches the store, not just memory"
     );
     let failed = &controller.state.sessions[session_id];
     assert_eq!(failed.state, SessionState::Error);
     assert_eq!(failed.last_error.as_deref(), Some(cause));
+    let durable = crate::database::read_durable_session_record(session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(durable.state, failed.state);
+    assert_eq!(durable.last_error, failed.last_error);
     assert_ne!(
         failed.updated_at, "2026-09-18T15:28:35Z",
         "the failure is a state change of its own"

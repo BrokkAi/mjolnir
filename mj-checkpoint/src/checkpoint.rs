@@ -398,7 +398,12 @@ pub fn repair_origin_refs(git: &dyn GitCommandRunner, path: &Path, id: &str) -> 
 pub fn current_native_session_received_prompt(snapshot: &CanonicalSessionSnapshot) -> bool {
     let start = snapshot.current_context_start();
     snapshot.transcript.iter().any(|item| {
-        item.position >= start && matches!(&item.body, CanonicalTranscriptBody::User { .. })
+        item.position >= start
+            && (matches!(&item.body, CanonicalTranscriptBody::User { .. })
+                // The shipped canonical format rejects unknown fields. Keep
+                // adoption conservative until its native-use proof can be
+                // carried by the planned archive schema revision.
+                || item.stable_id == mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID)
     })
 }
 

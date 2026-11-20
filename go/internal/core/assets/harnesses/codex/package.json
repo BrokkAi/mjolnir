@@ -1,0 +1,9 @@
+{
+  "name": "mjolnir-managed-codex",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@brokkai/codex-acp": "1.15.0",
+    "@openai/codex": "0.170.0"
+  }
+}

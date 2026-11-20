@@ -12,7 +12,7 @@ fn top_level_failure_is_written_to_a_private_per_run_log() {
     let root_path = storage.path().to_path_buf();
     let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
     common::own_test_daemons(&mut command)
-        .args(["checkpoint", "--session", "definitely-missing"])
+        .args(["upgrade-container", "--session", "definitely-missing"])
         .env("MJ_DATA_DIR", &data)
         .env("MJ_CONFIG_DIR", config);
 
@@ -22,7 +22,7 @@ fn top_level_failure_is_written_to_a_private_per_run_log() {
         serde_json::from_slice(&fs::read(data.join("daemon.json")).unwrap()).unwrap();
     let daemon_pid = metadata["pid"].as_u64().unwrap() as u32;
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown session definitely-missing"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("session is missing"));
     let logs = fs::read_dir(data.join("logs"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -41,13 +41,13 @@ fn top_level_failure_is_written_to_a_private_per_run_log() {
     let (command_log, _) = logs
         .iter()
         .map(|path| (path, fs::read_to_string(path).unwrap()))
-        .find(|(_, contents)| contents.contains("command=\"checkpoint\""))
-        .expect("one log belongs to the checkpoint client");
+        .find(|(_, contents)| contents.contains("command=\"upgrade-container\""))
+        .expect("one log belongs to the upgrade-container client");
     let contents = fs::read_to_string(command_log).unwrap();
     assert!(contents.contains("Mjolnir started"));
-    assert!(contents.contains("command=\"checkpoint\""));
+    assert!(contents.contains("command=\"upgrade-container\""));
     assert!(contents.contains("Mjolnir exited with an error"));
-    assert!(contents.contains("unknown session definitely-missing"));
+    assert!(contents.contains("session is missing"));
 
     #[cfg(unix)]
     {
@@ -77,7 +77,7 @@ fn assert_daemon_gone(pid: u32) {
 }
 
 #[test]
-fn a_panicking_checkpoint_fixture_stops_its_daemon_before_removing_storage() {
+fn a_panicking_client_fixture_stops_its_daemon_before_removing_storage() {
     let root = tempfile::tempdir().unwrap();
     let root_path = root.path().to_path_buf();
     let data = root.path().join("data");
@@ -86,7 +86,7 @@ fn a_panicking_checkpoint_fixture_stops_its_daemon_before_removing_storage() {
     let output = mj_core::subprocess::run_with_input(
         common::own_test_daemons(
             Command::new(env!("CARGO_BIN_EXE_mj"))
-                .args(["checkpoint", "--session", "definitely-missing"])
+                .args(["upgrade-container", "--session", "definitely-missing"])
                 .env("MJ_DATA_DIR", &data)
                 .env("MJ_CONFIG_DIR", &config),
         ),

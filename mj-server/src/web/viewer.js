@@ -1459,9 +1459,8 @@ const inboxNodes = (() => {
   const open = button('Go to Session', '', { inboxAction: 'open' });
   const clear = button('Clear & Next', 'secondary', { inboxAction: 'clear' });
   const skip = button('Skip', 'secondary', { inboxAction: 'skip' });
-  const clearAll = button('Clear all !', 'secondary', { inboxAction: 'clear-all' });
-  for (const control of [open, clear, skip, clearAll]) control.type = 'button';
-  actions.append(open, clear, skip, clearAll);
+  for (const control of [open, clear, skip]) control.type = 'button';
+  actions.append(open, clear, skip);
   const cardError = el('p', 'error');
   cardError.setAttribute('role', 'alert');
   const card = el('div', 'card inbox-card');
@@ -1470,7 +1469,7 @@ const inboxNodes = (() => {
   const empty = el('p', 'dim', 'No notifications.');
   container.append(card, empty);
   return { card, empty, glyph, headerText, body, pager, previous, position, next, retry,
-    input, send, open, clear, skip, clearAll, cardError, reply };
+    input, send, open, clear, skip, cardError, reply };
 })();
 
 /// The persistent buttons outlive the card they show, so a gesture acts on the
@@ -1523,24 +1522,6 @@ async function inboxClearNext(card) {
     inboxError = { key: card.key, text: error.message };
   }
   inboxBusy = false;
-  renderInbox();
-  await refresh();
-}
-
-/// Dismiss every `!` card the control showed. A `?` dismissal sets the ask
-/// aside for the turn classifier, so a bulk clear leaves questions alone.
-async function inboxClearAll(cards) {
-  if (inboxBusy || !cards.length) return;
-  const identities = cards.map(card => ({ session_id: card.id, target: card.dismissal }));
-  inboxBusy = true;
-  inboxError = null;
-  renderInbox();
-  const failures = [];
-  await Promise.all(identities.map(identity => inboxDismiss(identity).catch(error => {
-    failures.push(`${sessionById(identity.session_id)?.title || identity.session_id}: ${error.message}`);
-  })));
-  inboxBusy = false;
-  document.querySelector('#inbox-error').textContent = failures.join('\n');
   renderInbox();
   await refresh();
 }
@@ -1787,7 +1768,6 @@ async function inboxSend(card) {
 bindInboxControl(inboxNodes.open, inboxOpen);
 bindInboxControl(inboxNodes.clear, inboxClearNext);
 bindInboxControl(inboxNodes.skip, inboxSkip);
-bindInboxControl(inboxNodes.clearAll, inboxClearAll);
 bindInboxControl(inboxNodes.retry, key => {
   if (key !== inboxShownKey) return;
   inboxTexts.delete(key);
@@ -1832,9 +1812,7 @@ function renderInbox() {
   nodes.empty.hidden = Boolean(entry);
   if (!entry) { inboxShown = null; inboxShownKey = null; inboxSelection = null; return; }
   const card = inboxCard(entry);
-  const cards = entries.filter(item => inboxBadge(item) === 'important').map(inboxCard).filter(item => item.dismissal);
   for (const control of [nodes.open, nodes.clear, nodes.skip, nodes.send]) control._binding = card;
-  nodes.clearAll._binding = cards;
   const launchFailure = entry.launchFailure;
   const failure = !card.canReply;
   const waiting = card.badge === 'needs_input';
@@ -1858,6 +1836,8 @@ function renderInbox() {
   else if (retained < 0) inboxSelection = { sessionId: entry.id, itemId: itemIds[index] };
   nodes.pager.hidden = !count;
   setInboxText(nodes.position, count ? `${index + 1} of ${count}` : '');
+  // One message has nowhere to go, so the buttons would only be noise.
+  nodes.previous.hidden = nodes.next.hidden = count < 2;
   nodes.previous.disabled = index <= 0;
   nodes.next.disabled = index === count - 1;
   nodes.previous._binding = nodes.previous.disabled ? null : { selection: inboxSelection, itemId: itemIds[index - 1] };
@@ -1899,9 +1879,6 @@ function renderInbox() {
   nodes.open.hidden = !card.destination;
   nodes.clear.disabled = inboxBusy || (!launchFailure && !card.dismissal);
   nodes.skip.disabled = inboxBusy || entries.length < 2;
-  nodes.clearAll.hidden = !cards.length;
-  nodes.clearAll.disabled = inboxBusy;
-  setInboxText(nodes.clearAll, `Clear all ! (${cards.length})`);
 }
 
 function renderSessions() {

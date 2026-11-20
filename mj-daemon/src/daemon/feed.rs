@@ -517,9 +517,9 @@ mod tests {
             .run();
             return;
         }
-        assert_eq!(
-            mj_client::daemon::PROTOCOL_VERSION,
-            mj_client::daemon::ALERT_EVENTS_PROTOCOL
+        assert!(
+            (mj_client::daemon::ALERT_EVENTS_PROTOCOL..)
+                .contains(&mj_client::daemon::PROTOCOL_VERSION)
         );
         let log = mj_controller::test_log::CapturedLog::default();
         tracing::subscriber::set_global_default(log.clone())

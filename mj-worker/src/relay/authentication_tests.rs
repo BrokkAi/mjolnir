@@ -32,6 +32,7 @@ fn auth_failure(relay: &mut DurableRelay, id: &str, login: &str) {
 
 // Hard-won: #1515: a refreshed login left an auth-failed turn idle forever.
 // Hard-won: #1547: a spawned sub-agent's model configure set quota_suppressed, so #1515 never retried its auth-failed turn.
+// Hard-won: b62fe3b: a control-command flood evicted the still-owned auth receipt.
 #[test]
 fn authentication_recovery_survives_restart_and_never_retries_the_same_login() {
     for original in ["user-request", "subagent-spawn-auth-regression"] {
@@ -59,6 +60,23 @@ fn authentication_recovery_survives_restart_and_never_retries_the_same_login() {
         relay.claim_pending_commands(true).unwrap();
         let authorization = relay.snapshot.continuation.user_command_id.clone();
         auth_failure(&mut relay, original, "old-access-hash");
+        for index in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+            submit_relay(
+                &mut relay,
+                &format!("auth-notice-{index}"),
+                RelayCommand::RecordNotice {
+                    text: "later notice".into(),
+                },
+            );
+        }
+        let through = relay.latest_ordinal();
+        acknowledge_relay(&mut relay, "ack-auth-notices", through);
+        assert!(
+            !relay
+                .snapshot
+                .handled_commands
+                .contains_key("auth-notice-0")
+        );
         let (ordinal, _) = relay
             .authentication_retry_intent()
             .expect("auth failure is recoverable");

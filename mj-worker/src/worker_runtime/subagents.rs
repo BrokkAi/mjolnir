@@ -28,12 +28,15 @@ use crate::subagent_mcp::DaemonContact;
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
 
+/// The worker root directory holding the OpenCode mailbox plugin.
+pub(super) const OPENCODE_MAILBOX_PLUGIN: &str = "opencode-mailbox";
+
 /// Register a worker-owned OpenCode 2 plugin without editing the user's home.
 pub(super) fn configure_opencode_mailbox_hook(
     root: &Path,
     environment: &mut BTreeMap<String, String>,
 ) -> Result<()> {
-    let directory = root.join("opencode-mailbox");
+    let directory = root.join(OPENCODE_MAILBOX_PLUGIN);
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("create OpenCode plugin directory {}", directory.display()))?;
     let worker = std::env::current_exe().context("locate worker for OpenCode mailbox transport")?;
@@ -457,7 +460,10 @@ pub(super) fn configure_claude_mailbox_hook(
 /// against Claude Code 2.1.326 with claude-agent-acp 0.108.0). The bridge asks
 /// for predicted next prompts, which can spend an extra model request on a
 /// turn; claude.ai connectors are enumerated, connected and listed at startup
-/// on an eligible login. Project instructions, skills, plugins and configured
+/// on an eligible login. The built-in Concise output style replaces the
+/// default prompt's opening narration and closing recaps, and any inherited
+/// Explanatory or Learning style, while keeping outcomes and decisions in the
+/// child's reports. Project instructions, skills, plugins and configured
 /// MCP servers do not depend on either. A child overrides the inherited user
 /// settings, which still apply to top-level sessions; an explicitly exported
 /// `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` is a deliberate choice and still
@@ -474,6 +480,7 @@ pub(super) fn configure_claude_subagent_settings(
     edit_profile_json(&path, "staged Claude settings", |settings| {
         settings.insert("promptSuggestionEnabled".into(), false.into());
         settings.insert("disableClaudeAiConnectors".into(), true.into());
+        settings.insert("outputStyle".into(), "Concise".into());
         Ok(())
     })
 }
@@ -1800,7 +1807,7 @@ console.log("OpenCode durable mailbox bridge passed");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
             home.join("settings.json"),
-            br#"{"model":"opus","claudeMdExcludes":["/work/CLAUDE.md"],"promptSuggestionEnabled":true}"#,
+            br#"{"model":"opus","claudeMdExcludes":["/work/CLAUDE.md"],"promptSuggestionEnabled":true,"outputStyle":"Explanatory"}"#,
         )
         .unwrap();
 
@@ -1822,6 +1829,7 @@ console.log("OpenCode durable mailbox bridge passed");
                 // The child overrides the person's explicit setting.
                 "promptSuggestionEnabled": false,
                 "disableClaudeAiConnectors": true,
+                "outputStyle": "Concise",
             })
         );
 

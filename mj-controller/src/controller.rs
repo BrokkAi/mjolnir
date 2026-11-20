@@ -30,6 +30,10 @@ pub(crate) use mj_session_runtime::readiness;
 pub use readiness::HarnessPreparationFailure;
 pub use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
+pub use recovery_scan::{
+    AdoptionControl, AdoptionInstall, AdoptionOutcome, AdoptionPublication,
+    adoption_destroy_command, recovery_destroy_command,
+};
 pub mod resume;
 mod reviewer;
 mod subagent_park;
@@ -1235,13 +1239,15 @@ impl Controller {
             );
             return Ok(());
         }
+        // Serialize config replacement and row migration with dependent installs.
+        let (_, config_owner) = Config::load_locked()?;
         let journal = ConfigRenameJournal {
             kind: ConfigRenameKind::Profile,
             old_id: old_id.to_owned(),
             new_id: new_id.to_owned(),
         };
         write_config_rename_journal(&journal)?;
-        let (config, ()) = match Config::update(|config| {
+        let (config, ()) = match Config::update_locked(&config_owner, |config| {
             ensure!(
                 config.profiles.contains_key(old_id),
                 "unknown profile {old_id:?}"
@@ -1267,7 +1273,7 @@ impl Controller {
         self.config = config;
         mj_core::test_hooks::reach_test_hook("config_replacement_before_reference_migration")?;
         if let Err(error) = crate::database::rename_profile_references(old_id, new_id) {
-            let restore = Config::update(|config| {
+            let restore = Config::update_locked(&config_owner, |config| {
                 let profile = config
                     .profiles
                     .remove(new_id)
@@ -1332,13 +1338,14 @@ impl Controller {
             );
             return Ok(());
         }
+        let (_, config_owner) = Config::load_locked()?;
         let journal = ConfigRenameJournal {
             kind: ConfigRenameKind::Target,
             old_id: old_id.to_owned(),
             new_id: new_id.to_owned(),
         };
         write_config_rename_journal(&journal)?;
-        let (config, ()) = match Config::update(|config| {
+        let (config, ()) = match Config::update_locked(&config_owner, |config| {
             ensure!(
                 config.targets.contains_key(old_id),
                 "unknown target {old_id:?}"
@@ -1368,7 +1375,7 @@ impl Controller {
         self.config = config;
         mj_core::test_hooks::reach_test_hook("config_replacement_before_reference_migration")?;
         if let Err(error) = crate::database::rename_target_references(old_id, new_id) {
-            let restore = Config::update(|config| {
+            let restore = Config::update_locked(&config_owner, |config| {
                 let target = config
                     .targets
                     .remove(new_id)

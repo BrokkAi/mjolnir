@@ -15,17 +15,89 @@ pub(super) const RAPID_BRIDGE_RESTART_LIMIT: u32 = 3;
 
 pub(super) const RAPID_BRIDGE_WINDOW: Duration = Duration::from_secs(5);
 
-pub(super) async fn drive<T>(
+// Tests own their connection registry here; production holds it through process teardown.
+#[cfg(test)]
+pub(super) async fn drive<T: ConnectTo<Client>>(
     transport: T,
     spec: LaunchSpec,
     requests: &mut mpsc::Receiver<CommandRequest>,
     events: mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     replacing_previous_bridge: bool,
+) -> Result<Option<SessionRestart>> {
+    let replace_unused_codex_thread = should_replace_unused_codex_thread(&spec);
+    drive_bridge(
+        transport,
+        spec,
+        requests,
+        events,
+        opened,
+        BridgeSessionOpen {
+            replacing_previous_bridge,
+            replace_unused_codex_thread,
+            first_replaced_unused_native_session_id: &mut None,
+        },
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(super) async fn drive_bridge<T>(
+    transport: T,
+    spec: LaunchSpec,
+    requests: &mut mpsc::Receiver<CommandRequest>,
+    events: mpsc::Sender<RuntimeEvent>,
+    opened: Arc<Mutex<Option<OpenedSession>>>,
+    session_open: BridgeSessionOpen<'_>,
 ) -> Result<Option<SessionRestart>>
 where
     T: ConnectTo<Client>,
 {
+    let guardian = guardian::Guardian::for_launch(&spec);
+    let result = drive_with_terminals(
+        transport,
+        spec,
+        requests,
+        events,
+        opened,
+        session_open,
+        BridgeOwned {
+            terminals: TerminalRegistry::new()?,
+            guardian: guardian.clone(),
+        },
+    )
+    .await;
+    if let Some(guardian) = guardian {
+        guardian.shutdown().await;
+    }
+    result
+}
+
+/// What a bridge's protocol driver uses but `run_bridge` owns, because it
+/// must outlive the driver until the bridge's process teardown: the
+/// connection's terminals, and the guardian whose reviewer is stopped after
+/// the bridge on every exit path.
+pub(super) struct BridgeOwned {
+    pub(super) terminals: TerminalRegistry,
+    pub(super) guardian: Option<Arc<guardian::Guardian>>,
+}
+
+pub(super) async fn drive_with_terminals<T>(
+    transport: T,
+    spec: LaunchSpec,
+    requests: &mut mpsc::Receiver<CommandRequest>,
+    events: mpsc::Sender<RuntimeEvent>,
+    opened: Arc<Mutex<Option<OpenedSession>>>,
+    session_open: BridgeSessionOpen<'_>,
+    owned: BridgeOwned,
+) -> Result<Option<SessionRestart>>
+where
+    T: ConnectTo<Client>,
+{
+    let BridgeOwned {
+        terminals,
+        guardian,
+    } = owned;
     // How many updates the agent produced by working, over the whole
     // connection. A turn reads it before and after to learn whether the
     // harness answered the prompt at all (#970).
@@ -42,15 +114,9 @@ where
     let notification_activity = spec.acp_activity.clone();
     let notification_step_clock = spec.step_clock.clone();
     let notification_agent_output_count = agent_output_count.clone();
-    let resume_required = Arc::new(AtomicBool::new(
-        spec.resume_session.is_some() || spec.harness != HarnessKind::Codex,
-    ));
-    let notification_resume_required = resume_required.clone();
-    // Evidence about the thread itself, as opposed to `resume_required`'s
-    // policy about reloading it: false until this thread holds something only
-    // it can replay. Codex writes a thread's rollout, and Claude Code a
-    // session's transcript, only when a model turn runs, so the evidence is a
-    // prompt sent (`session.rs`) or a Claude Code result. Agent output alone
+    // Codex writes a thread's rollout, and Claude Code a session's transcript,
+    // only when a model turn runs, so the evidence is a prompt sent
+    // (`session.rs`) or a Claude Code result. Agent output alone
     // is not: the Claude adapter publishes notices as agent text while it
     // answers a configuration request, and no turn runs for them (R4-3).
     let native_session_used = Arc::new(AtomicBool::new(false));
@@ -96,6 +162,7 @@ where
     let pending_elicitations = spec
         .operator_away
         .pending_for_bridge_with_source(spec.verdict.clone(), Some(spec.turn_context.clone()));
+    let _pending_bridge_lifetime = pending_elicitations.bridge_lifetime();
     let handler_elicitations = pending_elicitations.clone();
     let permission_elicitations = pending_elicitations.clone();
     // A bridge-local counter alone repeats after reload (and worker restart).
@@ -115,8 +182,8 @@ where
     let permission_owned_mcp = OwnedMcpApprovals::for_launch(&spec);
     let plan_implementation_slot = PlanImplementationSlot::default();
     let permission_implementation_slot = plan_implementation_slot.clone();
-    let terminals = TerminalRegistry::new()?;
     let create_terminals = terminals.clone();
+    let create_terminal_owner = spec.terminal_owner.clone();
     let output_terminals = terminals.clone();
     let wait_terminals = terminals.clone();
     let kill_terminals = terminals.clone();
@@ -158,7 +225,8 @@ where
     let kill_parent_router = native_agents.clone();
     let release_parent_router = native_agents.clone();
     let ext_parent_router = native_agents.clone();
-    Client
+    let permission_guardian = guardian;
+    let connected = Client
         .v1()
         .on_receive_notification(
             async move |notification: RawSessionNotification, _cx| {
@@ -248,9 +316,6 @@ where
                 notification_goal.lock().expect("goal lock poisoned").state.apply(&update)
                     .map_err(|e| agent_client_protocol::Error::invalid_params().data(serde_json::json!(e.to_string())))?;
                 notification_step_clock.observe(&update);
-                if !session_update_is_session_state(&update) {
-                    notification_resume_required.store(true, Ordering::Release);
-                }
                 notification_tool_content.observe(&update);
                 if !session_update_is_relay_visible(
                     &update,
@@ -351,6 +416,7 @@ where
                 let permission_review_ids = permission_review_ids.clone();
                 let permission_id_prefix = permission_id_prefix.clone();
                 let permission_owned_mcp = permission_owned_mcp.clone();
+                let permission_guardian = permission_guardian.clone();
                 let permission_tool_content = permission_tool_content.clone();
                 cx.spawn(async move {
                     permission_activity.mark();
@@ -420,6 +486,71 @@ where
                             "automatically approved a gh invocation"
                         );
                         return responder.respond(response);
+                    }
+                    // A harness without its own guardian: the Mjolnir guardian
+                    // answers the request, or hands it to the person's form.
+                    let mut guardian_preface = None;
+                    if !plan_permission
+                        && !claude_plan_approval
+                        && let Some(guardian) = permission_guardian
+                    {
+                        let input = permission_tool_input(&request.tool_call, &permission_tool_content);
+                        let native_child = permission_native_agents.lock().expect("native agent router poisoned")
+                            .is_child(&request.session_id.to_string());
+                        // Registered like an open form, so withdrawing the turn
+                        // reaches the review too; a turn already withdrawn
+                        // answers `cancelled` without one.
+                        let Some(ticket) = permission_elicitations.begin_review() else {
+                            return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+                        };
+                        let cancellation = responder.cancellation();
+                        let decision = tokio::select! {
+                            biased;
+                            () = ticket.withdrawn() => None,
+                            () = cancellation.cancelled() => None,
+                            decision = guardian.review(&request, input.as_ref(), native_child) => Some(decision),
+                        };
+                        let title = request.tool_call.fields.title.as_deref().map(str::trim)
+                            .filter(|title| !title.is_empty()).unwrap_or("a tool call");
+                        let subject = permission_title_with_command(title, input.as_ref());
+                        match decision {
+                            None => {
+                                return responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+                            }
+                            // Once only: an allow the harness remembers would let
+                            // later calls skip review.
+                            Some(guardian::GuardianDecision::Allow) => match guardian::allow_once_response(&request) {
+                                // Settled under the withdrawal lock: a verdict
+                                // never follows a cancel the agent was told of.
+                                Some(response) => return ticket.settle(|withdrawn| responder.respond(if withdrawn {
+                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+                                } else {
+                                    response
+                                })),
+                                None => guardian_preface = Some(guardian::ask_person_preface(
+                                    "the guardian allowed it, but the harness offered no way to allow it once",
+                                )),
+                            },
+                            Some(guardian::GuardianDecision::Deny { rationale }) => {
+                                let (withdrawn, answered) = ticket.settle(|withdrawn| (withdrawn, responder.respond(if withdrawn {
+                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+                                } else {
+                                    guardian::rejection_response(&request)
+                                })));
+                                if !withdrawn {
+                                    permission_events
+                                        .send(RuntimeEvent::Notice { message: guardian::denial_notice(&subject, &rationale) })
+                                        .await
+                                        .map_err(|_| relay_event_channel_error())?;
+                                }
+                                return answered;
+                            }
+                            // A turn withdrawn from here on still reaches the
+                            // form: registering it answers `cancelled`.
+                            Some(guardian::GuardianDecision::AskPerson { reason }) => {
+                                guardian_preface = Some(guardian::ask_person_preface(&reason));
+                            }
+                        }
                     }
                     // Preserve Muse's Guardian forms; YOLO plans use plan review.
                     let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
@@ -576,7 +707,8 @@ where
                     let mut form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
                         "mode": "form", "sessionId": request.session_id.to_string(),
                         "message": format!(
-                            "{} requests permission:\n{message}",
+                            "{}{} requests permission:\n{message}",
+                            guardian_preface.unwrap_or_default(),
                             permission_harness.display_name()
                         ),
                         "requestedSchema": {"type":"object", "required":["choice"], "properties":{
@@ -667,26 +799,50 @@ where
                         .unwrap_or(DEFAULT_TERMINAL_OUTPUT_BYTES),
                 };
                 let command = spawn.display_command();
-                match create_terminals.create(spawn, create_events.clone()) {
+                let terminal_id = create_terminals.allocate_id();
+                let owner = create_terminal_owner.as_ref().map(|owner| owner.upgrade().ok_or_else(|| anyhow::anyhow!("the relay owner is gone; refusing to spawn an unregistered terminal"))).transpose();
+                let mut registered = false;
+                let mut announced = false;
+                let spawned = async {
+                    if let Some(owner) = owner.as_ref().map_err(|error| anyhow::anyhow!("{error:#}"))? {
+                        registered = true;
+                        owner.lock().expect("relay state lock poisoned").agent_terminal_started(mj_core::relay::ActiveAgentTerminal {
+                            terminal_id: terminal_id.clone(), command: command.clone(), started_at_ms,
+                        })?;
+                    }
+                    create_events.send(RuntimeEvent::TerminalStarted {
+                        terminal_id: terminal_id.clone(), command, started_at_ms,
+                    }).await.map_err(|_| relay_event_channel_error())?;
+                    announced = true;
+                    if registered {
+                        mj_core::test_hooks::reach_test_hook("adoption_terminal_admitted_before_spawn")?;
+                    }
+                    create_terminals.create_with_id(terminal_id.clone(), spawn, create_events.clone())
+                }.await;
+                match spawned {
                     Ok(terminal_id) => {
-                        create_events
-                            .send(RuntimeEvent::TerminalStarted {
-                                terminal_id: terminal_id.clone(),
-                                command,
-                                started_at_ms,
-                            })
-                            .await
-                            .map_err(|_| relay_event_channel_error())?;
-                        responder
-                            .respond(CreateTerminalResponse::new(TerminalId::from(terminal_id)))
+                        responder.respond(CreateTerminalResponse::new(TerminalId::from(terminal_id)))
                     }
                     Err(error) => {
+                        // Keep ordinary failure behind the same FIFO as the start
+                        // card. A closed FIFO cannot apply it, so withdraw only
+                        // the inventory then; no process was created.
+                        let failure_queued = if announced {
+                            create_events.send(RuntimeEvent::TerminalStartFailed { terminal_id: terminal_id.clone() }).await.is_ok()
+                        } else { false };
+                        let error = if registered && !failure_queued && let Ok(Some(owner)) = &owner {
+                            match owner.lock().expect("relay state lock poisoned").agent_terminal_closed(&terminal_id) {
+                                Ok(()) => error,
+                                Err(cleanup) => error.context(format!("could not withdraw failed terminal inventory: {cleanup:#}")),
+                            }
+                        } else { error };
+
                         create_events
                             .send(RuntimeEvent::Warning {
                                 message: format!("a client terminal failed to start: {error:#}"),
                             })
                             .await
-                            .map_err(|_| relay_event_channel_error())?;
+                            .map_err(|_| relay_event_channel_error().data(format!("terminal spawn failed: {error:#}; worker event channel closed")))?;
                         responder.respond_with_error(
                             agent_client_protocol::Error::internal_error()
                                 .data(serde_json::Value::String(format!("{error:#}"))),
@@ -1020,9 +1176,8 @@ where
                 agent_output_count,
                 last_agent_message,
                 live_history_enabled,
-                resume_required,
                 native_session_used,
-                replacing_previous_bridge,
+                session_open,
                 grok_usage,
             )
             .await
@@ -1039,8 +1194,8 @@ where
                 }
             }
         })
-        .await
-        .map_err(|error| protocol_failure(error, !session_failed.load(Ordering::Acquire)))?;
+        .await;
+    connected.map_err(|error| protocol_failure(error, !session_failed.load(Ordering::Acquire)))?;
     Ok(restart
         .lock()
         .expect("ACP restart slot lock poisoned")
@@ -1178,6 +1333,7 @@ pub(super) fn cancel_prompt_turn(
     pending: &PendingElicitations,
 ) -> std::result::Result<(), agent_client_protocol::Error> {
     terminals.kill_live();
+    pending.begin_withdrawal();
     let sent = connection.send_notification(CancelNotification::new(session_id.clone()));
     // Some agents (Kimi, I2-15) never withdraw the request themselves, which
     // left the form open on an idle session.
@@ -1185,11 +1341,12 @@ pub(super) fn cancel_prompt_turn(
     sent
 }
 
-/// Drops the answer channel of every pending tool permission request. Each
-/// request's task then answers the agent with `cancelled` and reports the
-/// elicitation resolved, which closes its form.
+/// Withdraws the turn's tool permission requests: every open form and every
+/// Mjolnir guardian review in flight is answered `cancelled`, and so is one
+/// that arrives later in the same turn (see
+/// [`PendingElicitations::withdraw_tool_permissions`]).
 pub(super) fn withdraw_tool_permissions(pending: &PendingElicitations) {
-    pending.retain(|id| !id.starts_with(TOOL_PERMISSION_ID_PREFIX));
+    pending.withdraw_tool_permissions();
 }
 
 /// The id prefix of a permission request shown as a form.
@@ -1613,9 +1770,8 @@ pub(super) async fn drive_connection(
     agent_output_count: AgentOutputCount,
     last_agent_message: LastAgentMessage,
     live_history_enabled: Arc<AtomicBool>,
-    resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
-    replacing_previous_bridge: bool,
+    session_open: BridgeSessionOpen<'_>,
     grok_usage: grok_usage::Collector,
 ) -> Result<Option<SessionRestart>> {
     // Terminals belong to the connection. However the session ends — closed,
@@ -1633,9 +1789,8 @@ pub(super) async fn drive_connection(
         &agent_output_count,
         &last_agent_message,
         &live_history_enabled,
-        resume_required,
         native_session_used,
-        replacing_previous_bridge,
+        session_open,
         &grok_usage,
     )
     .await;

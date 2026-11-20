@@ -61,6 +61,7 @@ tracing.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 mj-targets = { workspace = true, features = ["test-support"] }
 mj-store = { workspace = true, features = ["test-support"] }
@@ -77,3 +78,6 @@ mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime", featur
 http-body-util = "0.1"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

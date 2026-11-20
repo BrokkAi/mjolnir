@@ -707,8 +707,7 @@ impl RuntimeState {
                             executor.begin_resumable_work()?;
                         }
                         operation_state
-                            .recovery_observer
-                            .gate
+                            .session_gate
                             .enter_foreground(
                                 &operation_id,
                                 if kind == LifecycleKind::Move

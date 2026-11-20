@@ -1042,15 +1042,13 @@ impl RuntimeState {
         controller: Controller,
         manager: SessionManagerControl,
     ) -> Arc<RuntimeState> {
-        let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.clone());
-        let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-            manager.clone(),
-            &recovery.observer(),
-        );
+        let recovery = manager.session_gate.clone();
+        let upgrades =
+            crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(manager.clone(), &recovery);
         let state = Arc::new(RuntimeState::new_with_controller_loader(
             manager,
             controller,
-            recovery.observer(),
+            recovery.clone(),
             upgrades.observer(),
             Vec::new(),
             Controller::load,

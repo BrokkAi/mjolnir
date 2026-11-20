@@ -339,15 +339,13 @@ where
         .await;
     // The daemon's close loads its own controller from the store.
     controller.config.save().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        channels.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = channels.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(channels.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         channels.control.clone(),
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -1179,15 +1177,13 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
 
 pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         controller,
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         || {
@@ -1202,19 +1198,17 @@ pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeStat
 #[cfg(unix)]
 fn test_runtime_state_loading_the_store_with_live_recovery() -> (
     Arc<RuntimeState>,
-    crate::recovery::RecoveryCoordinator,
+    Arc<RecoveryGate>,
     crate::worker_upgrade::WorkerUpgradeCoordinator,
 ) {
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -1602,18 +1596,16 @@ impl TestRemoteManager {
 }
 
 pub(super) fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeState> {
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        manager.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = manager.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(manager.control.clone(), &recovery);
     let mut runtime = RuntimeState::new_with_controller_loader(
         manager.control.clone(),
         Controller {
             config: Config::default(),
             state: mj_core::state::State::default(),
         },
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         || {
@@ -1927,15 +1919,13 @@ async fn missing_target_retry_completes_a_committed_transition() {
     }
     RELOADS.store(0, Ordering::SeqCst);
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         fail_first_reload,
@@ -4075,8 +4065,7 @@ async fn a_stalled_unpark_stream_releases_admission_and_can_retry() {
     ))
     .unwrap();
     parked_child(root.path(), child, parent, &workspace.id);
-    let (state, mut recovery, mut upgrades) =
-        test_runtime_state_loading_the_store_with_live_recovery();
+    let (state, recovery, mut upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
 
     let (admitted, started) = tokio::sync::oneshot::channel();
     let (cancel_seen, mut cancelled) = tokio::sync::oneshot::channel();
@@ -4178,7 +4167,7 @@ async fn a_stalled_unpark_stream_releases_admission_and_can_retry() {
         .await
         .unwrap();
     RuntimeState::wait_lifecycle_result(retry).await.unwrap();
-    recovery.shutdown().await.unwrap();
+    recovery.close();
     upgrades.shutdown().await.unwrap();
 }
 
@@ -4430,156 +4419,6 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
         connected: true,
         error: None,
     }
-}
-
-#[tokio::test]
-async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
-    let mut state = test_runtime_state();
-    let (observations, mut observed) = mj_controller::recovery_gate::observation_channel();
-    Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
-        observations,
-        gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
-    };
-    let mut session = runtime_test_session("session-1", "workspace", SessionState::Running);
-    session.harness_kind = mj_core::config::HarnessKind::Claude;
-    state.owner().edit_sessions(|sessions| {
-        sessions.insert(session.id.clone(), session);
-    });
-    state
-        .owner()
-        .install_relay_sessions(["session-1".to_owned()].into());
-    let mut view = ready_startup_view();
-    let snapshot = view.snapshot.as_mut().unwrap();
-    snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
-    snapshot.window.latest_turn_start_position = Some(9);
-    state
-        .publish_session("session-1".into(), view)
-        .await
-        .unwrap();
-    let first = observed.try_recv().unwrap().observation;
-    assert_eq!(first.checkpoint_wait, None);
-    assert_eq!(first.latest_completed_turn_ordinal, Some(9));
-    let revision = state.revisions.current();
-
-    // A retry must pick up the current record, not a retained copy from the
-    // original worker event. No new worker event or UI publication is needed.
-    state.owner().edit_sessions(|sessions| {
-        sessions.get_mut("session-1").unwrap().title = "renamed".into();
-    });
-    state.refresh_background_policies();
-    let retry = observed.try_recv().unwrap().observation;
-    assert_eq!(retry.session.title, "renamed");
-    assert_eq!(retry.latest_completed_turn_ordinal, Some(9));
-    assert_eq!(retry.checkpoint_wait, None);
-    assert_eq!(state.revisions.current(), revision);
-
-    state.owner().edit_sessions(|sessions| {
-        sessions.get_mut("session-1").unwrap().state = SessionState::Parked;
-    });
-    state.refresh_background_policies();
-    assert!(observed.try_recv().is_none());
-    state.owner().edit_sessions(|sessions| {
-        sessions.get_mut("session-1").unwrap().state = SessionState::Running;
-    });
-    state.refresh_background_policies();
-    assert!(
-        observed.try_recv().is_none(),
-        "resumed sessions need a fresh worker view"
-    );
-}
-
-/// A recovery copy is due only when checkpoint admission would let it start.
-/// A Claude session whose projection is idle but whose agent left background
-/// shells running is still working as far as the barrier is concerned, so the
-/// observation has to say so too. When it did not, the coordinator started a
-/// copy every second that the barrier then deferred, for hours.
-// Hard-won: 670a5bb7: a live Claude session copied 260 MB every few seconds while shell work blocked recovery for hours.
-#[tokio::test]
-async fn a_session_with_background_commands_is_not_ready_for_a_recovery_copy() {
-    let mut state = test_runtime_state();
-    let (observations, mut observed) = mj_controller::recovery_gate::observation_channel();
-    Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
-        observations,
-        gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
-    };
-    let mut session = runtime_test_session("session-1", "workspace", SessionState::Running);
-    session.harness_kind = mj_core::config::HarnessKind::Claude;
-    state.owner().edit_sessions(|sessions| {
-        sessions.insert(session.id.clone(), session);
-    });
-    state
-        .owner()
-        .install_relay_sessions(["session-1".to_owned()].into());
-    let mut view = ready_startup_view();
-    let snapshot = view.snapshot.as_mut().unwrap();
-    snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
-    snapshot.window.latest_turn_start_position = Some(9);
-    snapshot.operational.background_commands = vec![mj_core::relay::BackgroundCommand {
-        id: "shell-1".into(),
-        started_at_ms: 1,
-        command: "cargo test".into(),
-        can_stop: true,
-    }];
-    assert!(snapshot.operational.has_work_in_flight());
-    state
-        .publish_session("session-1".into(), view)
-        .await
-        .unwrap();
-
-    let observation = observed.try_recv().unwrap().observation;
-    assert_eq!(
-        observation.checkpoint_wait,
-        Some(mj_core::activity::CheckpointWait::WorkInFlight),
-        "a session the checkpoint barrier would defer was observed as ready for a copy"
-    );
-    // The retry tick re-sends the same answer rather than recomputing it.
-    state.refresh_background_policies();
-    assert_eq!(
-        observed.try_recv().unwrap().observation.checkpoint_wait,
-        Some(mj_core::activity::CheckpointWait::WorkInFlight)
-    );
-}
-
-#[tokio::test]
-async fn disconnected_and_removed_sessions_stop_background_retries() {
-    let mut state = test_runtime_state();
-    let (observations, mut observed) = mj_controller::recovery_gate::observation_channel();
-    Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
-        observations,
-        gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
-    };
-    let session = runtime_test_session("session-1", "workspace", SessionState::Running);
-    state.owner().edit_sessions(|sessions| {
-        sessions.insert(session.id.clone(), session);
-    });
-    state
-        .owner()
-        .install_relay_sessions(["session-1".to_owned()].into());
-    state
-        .publish_session("session-1".into(), ready_startup_view())
-        .await
-        .unwrap();
-    observed.try_recv().unwrap();
-    let mut disconnected = ready_startup_view();
-    disconnected.connected = false;
-    state
-        .publish_session("session-1".into(), disconnected)
-        .await
-        .unwrap();
-    state.refresh_background_policies();
-    assert!(observed.try_recv().is_none());
-
-    state
-        .publish_session("session-1".into(), ready_startup_view())
-        .await
-        .unwrap();
-    observed.try_recv().unwrap();
-    state.owner().edit_sessions(|sessions| {
-        sessions.remove("session-1");
-    });
-    state.refresh_background_policies();
-    assert!(observed.try_recv().is_none());
-    assert!(state.owner().background_policies.is_empty());
 }
 
 /// Put `session-1` into the daemon's in-memory controller as a session that
@@ -6944,15 +6783,13 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
 /// exercise a daemon operation end to end in an isolated data directory.
 pub(super) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -7203,7 +7040,7 @@ async fn a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive
     locked_rx.await.unwrap();
     let checkpoint = mj_core::runtime::spawn({
         let state = state.clone();
-        async move { state.checkpoint_session_now("checkpoint-io").await }
+        async move { state.checkpoint_for_bundle_export("checkpoint-io").await }
     });
     let started = std::time::Instant::now();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -9453,14 +9290,36 @@ impl LiveParent {
         std::fs::read_to_string(self.relay_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap()
     }
 
-    fn journal(&self) -> String {
-        std::fs::read_to_string(
-            self.relay_root
-                .join(mj_core::relay::RELAY_JOURNAL_DIR)
-                .join("active.jsonl"),
+    /// The daemon's projected transcript. The worker collects journal files
+    /// once the daemon acknowledges them (b370417ba), so the store is where
+    /// a journaled notice lasts.
+    fn transcript(&self) -> String {
+        use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
+        serde_json::to_string(
+            &mj_controller::database::load_materialized_session(LATCH_RELAY_SESSION)
+                .unwrap()
+                .expect("the daemon keeps the parent's projection")
+                .transcript,
         )
         .unwrap()
     }
+}
+
+/// Whether a close sealed the relay at `relay_root`: its own snapshot is
+/// closing or closed. A refused or interrupted close returns it to idle. The
+/// journal cannot answer this, because acknowledged files are collected.
+#[cfg(unix)]
+fn relay_sealed(relay_root: &Path) -> bool {
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(relay_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    [
+        mj_core::relay::RelayExecutionState::Closing,
+        mj_core::relay::RelayExecutionState::Closed,
+    ]
+    .iter()
+    .any(|sealed| state["execution"] == serde_json::to_value(sealed).unwrap())
 }
 
 /// A live parent with one Mjolnir sub-agent at work ("Review the docs"),
@@ -9624,15 +9483,13 @@ async fn serve_live_session(
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
         .await
         .unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        channels.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = channels.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(channels.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         channels.control.clone(),
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -9678,22 +9535,7 @@ struct LiveClone {
 impl LiveClone {
     /// Whether the session's relay was sealed by a close.
     fn sealed(&self) -> bool {
-        let journal = std::fs::read_to_string(
-            self.relay_root
-                .join(mj_core::relay::RELAY_JOURNAL_DIR)
-                .join("active.jsonl"),
-        )
-        .unwrap();
-        journal.lines().any(|line| {
-            let event: mj_core::relay::RelayEvent = serde_json::from_str(line).unwrap();
-            matches!(
-                event.observation,
-                mj_core::relay::RelayObservation::CommandQueued {
-                    command: RelayCommand::Close { .. },
-                    ..
-                }
-            )
-        })
+        relay_sealed(&self.relay_root)
     }
 }
 
@@ -9954,7 +9796,7 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
             .is_empty()
     );
     assert!(!parent.relay_state().contains("<mj-stopped-subagents>"));
-    assert!(!parent.journal().contains("Suspend stopped"));
+    assert!(!parent.transcript().contains("Suspend stopped"));
     parent.channels.shutdown.shutdown().await.unwrap();
 }
 
@@ -10042,17 +9884,7 @@ async fn a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified(
     );
 
     // The parent went through a checkpointed close: its relay was sealed.
-    let sealed = parent.journal().lines().any(|line| {
-        let event: mj_core::relay::RelayEvent = serde_json::from_str(line).unwrap();
-        matches!(
-            event.observation,
-            mj_core::relay::RelayObservation::CommandQueued {
-                command: RelayCommand::Close { .. },
-                ..
-            }
-        )
-    });
-    assert!(sealed, "{}", parent.journal());
+    assert!(relay_sealed(&parent.relay_root), "{}", parent.relay_state());
     parent.channels.shutdown.shutdown().await.unwrap();
 }
 
@@ -10319,15 +10151,15 @@ async fn discard_intent_recovers_without_checkpointing_and_reconciles_children()
     );
     assert!(interrupted_suspend_session_ids(&durable).contains(&LATCH_RELAY_SESSION.to_owned()));
     assert!(durable.state.sessions.contains_key(WORKING_CHILD));
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(parent.channels.control.clone());
+    let recovery = parent.channels.control.session_gate.clone();
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
         parent.channels.control.clone(),
-        &recovery.observer(),
+        &recovery,
     );
     let restarted = Arc::new(RuntimeState::new_with_controller_loader(
         parent.channels.control.clone(),
         durable,
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -10403,10 +10235,10 @@ async fn a_failed_suspend_tells_a_live_parent_at_once_which_sub_agents_were_stop
     );
     assert!(
         parent
-            .journal()
+            .transcript()
             .contains("Suspend stopped 1 working sub-agent: \\\"Fix the parser\\\"."),
         "{}",
-        parent.journal()
+        parent.transcript()
     );
     assert!(
         mj_controller::database::load_stopped_subagents(LATCH_RELAY_SESSION)
@@ -10457,16 +10289,14 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     )
     .unwrap();
 
-    let (state, mut recovery, _upgrades) =
-        test_runtime_state_loading_the_store_with_live_recovery();
+    let (state, recovery, _upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
     // A recovery copy in flight holds the child's stop at its start, where
     // the operation is already visible.
     let recovery_attempt = state
-        .recovery_observer
-        .gate
+        .session_gate
         .try_start(
             WORKING_CHILD,
-            mj_controller::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+            mj_controller::recovery_gate::BackgroundWork::WorkerReplacement,
         )
         .unwrap();
     let suspend = mj_core::runtime::spawn({
@@ -10506,7 +10336,7 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
             .sessions
             .contains_key(WORKING_CHILD)
     );
-    recovery.shutdown().await.unwrap();
+    recovery.close();
 }
 
 #[cfg(unix)]
@@ -10548,22 +10378,19 @@ async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_pare
         .unwrap();
     }
 
-    let (state, mut recovery, _upgrades) =
-        test_runtime_state_loading_the_store_with_live_recovery();
+    let (state, recovery, _upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
     let attempt_a = state
-        .recovery_observer
-        .gate
+        .session_gate
         .try_start(
             child_a,
-            mj_controller::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+            mj_controller::recovery_gate::BackgroundWork::WorkerReplacement,
         )
         .unwrap();
     let attempt_b = state
-        .recovery_observer
-        .gate
+        .session_gate
         .try_start(
             child_b,
-            mj_controller::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+            mj_controller::recovery_gate::BackgroundWork::WorkerReplacement,
         )
         .unwrap();
 
@@ -10624,7 +10451,7 @@ async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_pare
     let stored = mj_controller::database::load_state().unwrap();
     assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
     assert!(!stored.sessions.contains_key(child_b));
-    recovery.shutdown().await.unwrap();
+    recovery.close();
 }
 
 /// Run the named test alone, with a store and a SessionWiki index of its own
@@ -10908,15 +10735,15 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
                 project_memory: None,
             }])
             .unwrap();
-        let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
+        let recovery = channels.control.session_gate.clone();
         let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
             channels.control.clone(),
-            &recovery.observer(),
+            &recovery,
         );
         let state = Arc::new(RuntimeState::new_with_controller_loader(
             channels.control.clone(),
             Controller::load().unwrap(),
-            recovery.observer(),
+            recovery.clone(),
             upgrades.observer(),
             Vec::new(),
             Controller::load,
@@ -11523,15 +11350,13 @@ async fn dead_child_close_recovers_journal_without_recreating_its_cwd() {
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
         .await
         .unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        channels.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = channels.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(channels.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         channels.control.clone(),
         controller,
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -12519,7 +12344,7 @@ async fn resumable_lifecycles_release_admission_and_reacquire_named_control() {
         ),
     ] {
         let state = test_runtime_state();
-        let review = state.recovery_observer.gate.reserve_when_idle(id).await;
+        let review = state.session_gate.reserve_when_idle(id).await;
         let release = Arc::new(tokio::sync::Notify::new());
         let started = Arc::new(tokio::sync::Notify::new());
         let result = state
@@ -12575,11 +12400,10 @@ async fn resumable_lifecycles_release_admission_and_reacquire_named_control() {
         RuntimeState::wait_lifecycle_result(result).await.unwrap();
         assert!(
             state
-                .recovery_observer
-                .gate
+                .session_gate
                 .try_start(
                     id,
-                    mj_controller::recovery_gate::BackgroundWork::RecoveryCopyCapturing
+                    mj_controller::recovery_gate::BackgroundWork::WorkerReplacement
                 )
                 .is_err(),
             "the review continues across foreground work"
@@ -12775,18 +12599,16 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
 
 pub(super) fn test_runtime_state_holding(state: mj_core::state::State) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         Controller {
             config: Config::default(),
             state,
         },
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         || {
@@ -14258,15 +14080,13 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
     mj_controller::database::save_session(&parent).unwrap();
 
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         failing_controller_loader,
@@ -14438,15 +14258,13 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
         )
         .await;
     controller.config.save().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        channels.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = channels.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(channels.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         channels.control.clone(),
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -14701,8 +14519,25 @@ async fn daemon_api_exchange() {
             style: mj_core::config::SpinnerStyle::Wave,
         },
     ];
+    let actions = actions
+        .into_iter()
+        .map(|action| (PROTOCOL_VERSION, action))
+        .chain([
+            (
+                PROTOCOL_VERSION,
+                DaemonAction::CheckpointSession {
+                    session_id: "removed".into(),
+                },
+            ),
+            (
+                PROTOCOL_VERSION - 1,
+                DaemonAction::CheckpointSession {
+                    session_id: "removed".into(),
+                },
+            ),
+        ]);
     let mut exchange = Vec::new();
-    for (index, action) in actions.into_iter().enumerate() {
+    for (index, (protocol_version, action)) in actions.enumerate() {
         let server_state = state.clone();
         let server_metadata = metadata.clone();
         let server_listener = &listener;
@@ -14724,7 +14559,7 @@ async fn daemon_api_exchange() {
         write_frame(
             &mut stream,
             &RequestEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version,
                 request_id: index as u64,
                 token: metadata.token.clone(),
                 action,
@@ -15454,18 +15289,16 @@ async fn dismiss_notification_clears_the_served_question_attention() {
     mj_controller::database::save_materialized_session(&applied).unwrap();
 
     let mut manager = TestRemoteManager::new().await;
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        manager.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = manager.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(manager.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new(
         manager.control.clone(),
         Controller {
             config: runtime_test_config(),
             state: Default::default(),
         },
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
     ));
@@ -16281,6 +16114,350 @@ async fn cancelling_resume_retires_its_workspace_wait_without_admission() {
         "{error:#}"
     );
     assert!(state.owner().lifecycle.is_empty());
+}
+
+#[cfg(unix)]
+// Hard-won: d5c0c25: adoption closed the server socket although the client retained it for reuse.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adoption_refusal_keeps_the_daemon_connection_reusable() {
+    let Some(_writer) =
+        startup_prompt_test_store("adoption_refusal_keeps_the_daemon_connection_reusable")
+    else {
+        return;
+    };
+    let session = runtime_test_session(
+        "already-adopted",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    mj_controller::database::save_session(&session).unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let server = mj_core::runtime::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(
+            stream,
+            server_metadata,
+            test_runtime_state(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(metadata)
+        .await
+        .unwrap();
+    let error = client
+        .adopt_recovery(
+            mj_client::daemon::RecoveryAdoptionRequest {
+                session_id: session.id,
+                target_id: "unused".into(),
+                profile: None,
+                bundle: None,
+                all_instances: false,
+            },
+            |_| panic!("tracked session must refuse without progress"),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("already tracked"));
+    client
+        .request(DaemonAction::Ping)
+        .await
+        .expect("same connection remains usable after adoption's final reply");
+    drop(client);
+    server.await.unwrap();
+}
+
+#[cfg(unix)]
+// Hard-won: d5c0c25: a blocked discovery command prevented the adoption connection from observing EOF or drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adoption_discovery_stops_its_subprocess_on_disconnect_and_handoff() {
+    use mj_controller::controller::move_session::test_fixtures::TestProxyGroupGuard;
+    const NAME: &str = "adoption_discovery_stops_its_subprocess_on_disconnect_and_handoff";
+    const ROOT: &str = "MJ_ADOPTION_SCAN_TEST_ROOT";
+    if std::env::var_os(ROOT).is_none() {
+        for mode in ["disconnect", "handoff"] {
+            let root = tempfile::tempdir().unwrap();
+            let bin = root.path().join("bin");
+            fs::create_dir(&bin).unwrap();
+            let groups = TestProxyGroupGuard::new(root.path());
+            let script = format!(
+                "#!/bin/sh\n{}head -c 131072 /dev/zero >&2\nprintf ready > {}\n/bin/sleep 600 &\nwait\n",
+                groups.registration_script(),
+                mj_core::targets::posix_quote(&root.path().join("scan-started").to_string_lossy())
+            );
+            mj_core::test_hooks::install_fake_command(&bin, "podman", &script);
+            let path = std::env::join_paths(
+                std::iter::once(bin)
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            mj_controller::controller::test_support::IsolatedTest::new(
+                mj_controller::controller::test_support::test_name(module_path!(), NAME),
+            )
+            .env(ROOT, root.path())
+            .env("MJ_ADOPTION_SCAN_MODE", mode)
+            .env("PATH", path)
+            .isolated_store(root.path())
+            .run();
+            drop(groups);
+        }
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
+    let mut config = Config::default();
+    config.targets.clear();
+    config.targets.insert(
+        "blocked".into(),
+        mj_core::config::TargetTemplate::LocalPodman {
+            container: serde_json::from_value(serde_json::json!({"image":"unused-test-image"}))
+                .unwrap(),
+        },
+    );
+    config.save().unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let server = mj_core::runtime::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(
+            stream,
+            server_metadata,
+            test_runtime_state(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut stream = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut stream,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: metadata.token,
+            action: DaemonAction::AdoptRecovery(mj_client::daemon::RecoveryAdoptionRequest {
+                session_id: "missing-orphan".into(),
+                target_id: "blocked".into(),
+                profile: None,
+                bundle: None,
+                all_instances: false,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !root.join("scan-started").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("discovery reaches the real blocking subprocess without blocking EOF supervision");
+    let group: i32 = fs::read_dir(root.join("proxy-groups"))
+        .unwrap()
+        .find_map(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse().ok())
+        })
+        .unwrap();
+    if std::env::var("MJ_ADOPTION_SCAN_MODE").unwrap() == "handoff" {
+        mj_controller::upgrade::gate().begin_draining();
+        let response: ResponseEnvelope =
+            tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(response.result.is_err());
+    }
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("cancelled discovery must stop and reap its subprocess")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while TestProxyGroupGuard::group_exists(group).unwrap() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("no process in the discovery group may survive cancellation");
+    assert!(
+        mj_controller::database::read_durable_session_record("missing-orphan")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(unix)]
+// Hard-won: d9dcf7c: a backpressured adoption frame stopped polling daemon drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adoption_backpressured_response_releases_admission_on_handoff() {
+    use std::os::fd::AsRawFd;
+    const NAME: &str = "adoption_backpressured_response_releases_admission_on_handoff";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = tokio::net::TcpSocket::new_v4().unwrap();
+    // These fixture capacities force the peer to stop accepting a frame much
+    // larger than a pipe buffer. They do not constrain production sockets.
+    client.set_recv_buffer_size(4096).unwrap();
+    let client = client
+        .connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let capacity: libc::c_int = 4096;
+    // SAFETY: a live socket descriptor and an initialized integer of the
+    // documented SO_SNDBUF size; setsockopt copies it before returning.
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&capacity as *const libc::c_int).cast(),
+                std::mem::size_of_val(&capacity) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    let admission = mj_controller::upgrade::activity_unless_draining("adoption install").unwrap();
+    let server = mj_core::runtime::spawn(async move {
+        let result = super::serve::write_adoption_response(
+            &mut stream,
+            ResponseEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: 1,
+                result: Ok(DaemonReply::AdoptionWaiting {
+                    blockers: vec!["x".repeat(256 * 1024)],
+                    destroy_command: None,
+                }),
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+        drop(admission);
+        result
+    });
+    tokio::time::timeout(Duration::from_secs(5), client.readable())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        !server.is_finished(),
+        "the peer is not consuming the blocked progress frame"
+    );
+    mj_controller::upgrade::gate().begin_draining();
+    let error = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("socket backpressure must not retain adoption admission")
+        .unwrap()
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("handoff"));
+    assert!(mj_controller::upgrade::active_labels().is_empty());
+    drop(client);
+}
+
+// Hard-won: 1f0ee89: a retry's orphan-destroy command could not reach its tracked worker.
+#[test]
+fn adoption_destroy_advice_follows_durable_worker_ownership() {
+    const NAME: &str = "adoption_destroy_advice_follows_durable_worker_ownership";
+    if std::env::var_os("MJ_ADOPTION_ADVICE_CHILD").is_none() {
+        let root = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env("MJ_ADOPTION_ADVICE_CHILD", "1")
+        .env("MJ_INSTANCE", "adoption-advice-test")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let mut record = runtime_test_session(
+        "owned-adoption",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Disconnected,
+    );
+    record.native_session_id = None;
+    record.target_template_id = "bare".into();
+    record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(&record.id),
+    }));
+    mj_controller::database::save_session(&record).unwrap();
+    assert_eq!(
+        mj_controller::controller::adoption_destroy_command(&record.id, "bare", true).unwrap(),
+        "mj --instance 'adoption-advice-test' destroy --session 'owned-adoption'"
+    );
+    // The row alone is not ownership: a lost session without a locator remains an orphan.
+    record.state = SessionState::Lost;
+    record.target = None;
+    mj_controller::database::save_session(&record).unwrap();
+    assert_eq!(
+        mj_controller::controller::adoption_destroy_command(&record.id, "bare", true).unwrap(),
+        "mj --instance 'adoption-advice-test' recover destroy --session 'owned-adoption' --target 'bare' --confirm 'owned-adoption' --all-instances"
+    );
+}
+
+// Hard-won: b370417: concurrent adoption waits exhausted the daemon blocking pool.
+#[test]
+fn adoption_waits_leave_the_blocking_pool_available() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let release = CancellationToken::new();
+        let mut waits = Vec::new();
+        for _ in 0..3 {
+            let cancelled = release.clone();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            waits.push(super::serve::spawn_adoption_operation(async move {
+                entered.send(()).unwrap();
+                cancelled.cancelled().await;
+                Ok(())
+            }));
+            // Make every operation enter its wait before asking for the next.
+            // Cancellation below also releases waits if the regression returns.
+            if tokio::time::timeout(Duration::from_secs(5), started)
+                .await
+                .is_err()
+            {
+                release.cancel();
+                for wait in waits {
+                    let _ = wait.await;
+                }
+                panic!("adoption waits occupied the blocking pool");
+            }
+        }
+        let progress = tokio::time::timeout(
+            Duration::from_secs(5),
+            mj_core::runtime::spawn_blocking(|| 42),
+        )
+        .await;
+        release.cancel();
+        for wait in waits {
+            wait.await.unwrap().unwrap();
+        }
+        assert_eq!(
+            progress
+                .expect("blocking pool remains available for controller loads and progress")
+                .unwrap(),
+            42
+        );
+    });
 }
 
 pub(super) fn isolate_runtime_feed_test(module: &str, name: &str) -> bool {

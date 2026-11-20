@@ -2705,7 +2705,7 @@ impl Controller {
     ) -> Result<()> {
         let timing_id = operation.selection.session_id.clone();
         let _timing = MovePhaseTimer::new(&timing_id, "queue admission");
-        let id = &operation.selection.session_id;
+        let id = &timing_id;
         let mut relay = {
             let _checking_destination =
                 ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
@@ -2717,18 +2717,31 @@ impl Controller {
                 "cannot prove the same ready destination; refusing to replay potentially executed work"
             );
             let spec = self.reconnect_command(id)?;
+            let pin_store = |operation: &mut MoveOperation,
+                             store_id: Option<String>|
+             -> Result<()> {
+                let store_id = store_id.context("destination worker does not expose its durable store identity; upgrade the worker before admitting queued work")?;
+                if let Some(expected) = &operation.destination_store_id {
+                    ensure!(
+                        *expected == store_id,
+                        "destination relay storage was replaced; refusing to replay potentially executed work"
+                    );
+                } else {
+                    // No command can be admitted until this identity is durable.
+                    operation.destination_store_id = Some(store_id);
+                    crate::database::save_move_operation(operation)?;
+                }
+                Ok(())
+            };
+            // Prove the store before the session connection syncs the
+            // projection: a replaced store's older frontier is refused by
+            // projection repair (ba25f8468), which would hide this cause.
+            let mut probe = crate::worker_client::RelayClient::connect(&spec, id).await?;
+            let probed = probe.status().await;
+            probe.detach().await?;
+            pin_store(operation, probed?.store_id)?;
             let relay = Box::pin(StandaloneSession::connect_command(&spec, id)).await?;
-            let store_id = relay.snapshot().operational.store_id.clone().context("destination worker does not expose its durable store identity; upgrade the worker before admitting queued work")?;
-            if let Some(expected) = &operation.destination_store_id {
-                ensure!(
-                    *expected == store_id,
-                    "destination relay storage was replaced; refusing to replay potentially executed work"
-                );
-            } else {
-                // No command can be admitted until this identity is durable.
-                operation.destination_store_id = Some(store_id);
-                crate::database::save_move_operation(operation)?;
-            }
+            pin_store(operation, relay.snapshot().operational.store_id.clone())?;
             ensure!(
                 relay.snapshot().operational.native_session_id
                     == operation.destination_native_session_id,
@@ -2736,7 +2749,7 @@ impl Controller {
             );
             relay
         };
-        if operation.queue == ResumeQueueDisposition::Start {
+        if !operation.queue_admission_finished && operation.queue == ResumeQueueDisposition::Start {
             let _starting_queue = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
             executor.notify_notice("Starting queued work");
             let checkpoint = operation
@@ -2747,6 +2760,13 @@ impl Controller {
                 verified.archive_sha256 == checkpoint.sha256 && verified.manifest.session.id == *id,
                 "move queue checkpoint verification failed"
             );
+            relay
+                .update_command_retention(
+                    Some(operation.operation_id.clone()),
+                    operation.queue_command_ids(&verified.canonical_session),
+                    false,
+                )
+                .await?;
             if operation.quota_stop_reason.is_some() && !operation.queue_admission_finished {
                 ensure!(
                     !executor.cancellation_requested(),
@@ -2832,6 +2852,19 @@ impl Controller {
                 RelayCommand::RecordNotice { text },
             )
             .await?;
+        // Queue completion is already durable. Pin release is cleanup, retried
+        // by ordinary attachment from this operation's finished record.
+        if let Err(error) = relay
+            .update_command_retention(
+                Some(operation.operation_id.clone()),
+                Default::default(),
+                false,
+            )
+            .await
+        {
+            tracing::warn!(operation_id = operation.operation_id, session_id = operation.selection.session_id,
+                %error, "Move completed; receipt-pin cleanup will retry on attachment");
+        }
         Ok(())
     }
 

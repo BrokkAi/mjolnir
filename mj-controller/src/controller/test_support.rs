@@ -45,8 +45,13 @@ pub fn write_checkpoint_gate_archive(
 
 /// The same archive for a session whose harness is not Codex. Whether a resume
 /// keeps native continuity is decided by the archived harness kind, so a test
-/// about a same-harness move has to be able to name it. Its only caller is the
-/// Unix-gated in-place move fixture, so on Windows it would be dead code.
+/// about a same-harness move has to be able to name it. Its only callers are
+/// Unix-gated, so on Windows it would be dead code.
+///
+/// With `native_history`, the archive also holds a conversation file of its
+/// native session where that harness keeps one, so a restore asks the harness
+/// to load the archived session. Without it, the archive is that of a session
+/// that never received a prompt.
 #[cfg(unix)]
 pub(super) fn write_checkpoint_gate_archive_for_harness(
     directory: &Path,
@@ -54,8 +59,20 @@ pub(super) fn write_checkpoint_gate_archive_for_harness(
     event_frontier: u64,
     harness_kind: mj_core::config::HarnessKind,
     profile_id: &str,
+    native_history: bool,
 ) -> CheckpointMetadata {
-    let mut input = checkpoint_archive_input(session_id, event_frontier, Vec::new(), Vec::new());
+    let native_artifacts = if native_history {
+        vec![mj_checkpoint::archive::NativeArtifact {
+            relative_path: Path::new(harness_kind.native_session_dirs()[0])
+                .join("native-session.jsonl"),
+            data: (b"{\"type\":\"message\"}\n".to_vec()).into(),
+            mode: 0o600,
+        }]
+    } else {
+        Vec::new()
+    };
+    let mut input =
+        checkpoint_archive_input(session_id, event_frontier, Vec::new(), native_artifacts);
     input.session.harness_kind = harness_kind;
     input.session.profile_id = profile_id.to_owned();
     write_checkpoint_archive_input(directory, session_id, &input)

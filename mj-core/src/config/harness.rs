@@ -272,6 +272,16 @@ impl PermissionMode {
     }
 }
 
+/// Who answers a harness's tool approvals on a target that keeps configured
+/// approvals. See [`HarnessKind::guardian`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardianReviewer {
+    /// The harness's own reviewer (Codex's guardian, Claude's Auto mode, …).
+    Harness,
+    /// The Mjolnir worker reviews each permission request the harness sends.
+    Mjolnir,
+}
+
 /// The Claude Code permission mode a Claude profile's sessions run in on
 /// targets that keep configured approvals (localhost, guardian SSH).
 /// Unconstrained targets always run Claude in bypassPermissions.
@@ -1316,28 +1326,22 @@ impl HarnessKind {
         Ok(())
     }
 
-    /// Whether this harness confines what it runs and reviews an action that
-    /// would leave that confinement before running it. Only such a harness is
-    /// fit for a raw target, where nothing else contains it.
+    /// Who reviews this harness's tool approvals under configured approvals
+    /// (a raw target), so the person is not asked about every action.
     ///
-    /// A permission prompt alone is not a guardian. OpenCode asks before
-    /// tools according to its permission rules, but runs every command
-    /// directly on the host; its own `SECURITY.md` says its permission system
-    /// is not a sandbox.
-    pub const fn supports_guardian_approvals(self) -> bool {
-        matches!(self, Self::Codex | Self::Claude | Self::Grok | Self::Muse)
-    }
-
-    /// Shared warning for selecting a harness without guardian approvals on a
-    /// raw target. Containers and remote instances run unconstrained by design
-    /// and rely on target isolation instead.
-    pub fn unsandboxed_guardian_warning(self) -> Option<String> {
-        (!self.supports_guardian_approvals()).then(|| {
-            format!(
-                "DANGER: {} has no guardian approval mode. Do not run it on a raw, unsandboxed target.",
-                self.display_name()
-            )
-        })
+    /// Codex, Claude Code, Grok Build, Muse Code and Antigravity ship their
+    /// own reviewer, selected through [`Self::execution_enforcement`]. Kimi
+    /// Code, OpenCode and DSH ship none: they only ask, and a permission
+    /// prompt alone is not a guardian. The Mjolnir worker answers their
+    /// permission requests with Codex's guardian policy instead, on a
+    /// read-only session of the same harness and model.
+    pub const fn guardian(self) -> GuardianReviewer {
+        match self {
+            Self::Codex | Self::Claude | Self::Grok | Self::Muse | Self::Antigravity => {
+                GuardianReviewer::Harness
+            }
+            Self::Kimi | Self::OpenCode | Self::Dsh => GuardianReviewer::Mjolnir,
+        }
     }
 
     /// The launch flag the bridge command line carries, if any.
@@ -2110,13 +2114,6 @@ impl HarnessProfile {
             | AuthScheme::NativeLoginStore => None,
             AuthScheme::NativeLogin => crate::credentials::credential_expiry(self.kind, bytes),
         }
-    }
-
-    /// Whether this profile can review actions that leave the sandbox before
-    /// running them. Codex runs its Guardian reviewer against whatever provider
-    /// the profile names, so the answer depends only on the harness kind.
-    pub fn supports_guardian_approvals(&self) -> bool {
-        self.kind.supports_guardian_approvals()
     }
 
     pub(super) fn validate(&self, id: &str) -> Result<()> {

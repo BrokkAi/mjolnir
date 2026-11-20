@@ -23,12 +23,13 @@ permission checks like OpenCode. Every other harness's control approves every ca
 mode is named `auto` but is not a guardian policy that approves only low-risk
 calls.
 
-Bare localhost sessions preserve configured approvals for supported harnesses.
-Codex, Claude Code, Grok Build, and Muse Code expose guardian modes. Kimi Code
-does not, and neither do OpenCode and DSH: they ask before tools
-(DSH before every write, command, and MCP tool call), but run every command
-directly on the host without a sandbox. The dashboard warns against running
-any of these on a raw, unsandboxed target.
+Bare localhost sessions preserve configured approvals. Codex, Claude Code,
+Grok Build, Muse Code, and Antigravity expose guardian modes. Kimi Code,
+OpenCode, and DSH do not: they ask before tools (OpenCode under a hook
+Mjolnir adds, DSH before every write, command, and MCP tool call) and run
+every command directly on the host without
+a sandbox, so the [Mjolnir guardian](/security/#the-mjolnir-guardian) answers
+those requests.
 
 A container session's repository content always comes from a network clone. A
 local session that runs the agent in a directory on this machine can still move

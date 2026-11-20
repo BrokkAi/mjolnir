@@ -225,26 +225,6 @@ fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
     assert!(directory.path().join(imported_name).exists());
     assert!(directory.path().join("notes.hel.zip").exists());
 }
-#[test]
-fn recovery_artifact_final_verification_checks_the_archive_digest() {
-    let directory = tempfile::tempdir().unwrap();
-    let session_id = "1123456789abcdef0123456789abcdef";
-    let metadata = write_checkpoint_gate_archive(directory.path(), session_id, 7);
-    let mut artifact = CheckpointArtifact {
-        metadata,
-        native_session_id: "native-session".into(),
-        event_frontier_digest: "a".repeat(64),
-    };
-
-    verify_checkpoint_artifact(session_id, &artifact).unwrap();
-    artifact.metadata.sha256 = "b".repeat(64);
-    assert!(
-        verify_checkpoint_artifact(session_id, &artifact)
-            .unwrap_err()
-            .to_string()
-            .contains("checkpoint SHA changed")
-    );
-}
 /// A snapshot of a session whose checkpoint barrier is open but not yet
 /// ready, projected exactly at `cursor`.
 fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
@@ -1748,17 +1728,17 @@ async fn ending_the_checkpoint_latch_returns_the_connection_to_its_actor() {
     );
 }
 /// The archive is complete once the export returns, so the harness stops
-/// waiting there: the barrier ends, ACP dispatch resumes, and only the
-/// recovery floor waits for the installed archive.
+/// waiting there: the barrier ends and ACP dispatch resumes. ACK-only workers
+/// need no delayed archive-coverage update after installation.
 #[cfg(unix)]
 #[tokio::test]
-async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
+async fn releasing_a_checkpoint_after_capture_needs_no_floor_move_on_ack_only_workers() {
     // MJ_DATA_DIR is process-global, so run the database-backed half in an
     // exact child test instead of racing unrelated tests in this process.
     if std::env::var_os(RELEASE_TEST_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let test_name = format!(
-            "{}::releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor",
+            "{}::releasing_a_checkpoint_after_capture_needs_no_floor_move_on_ack_only_workers",
             module_path!()
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
@@ -1803,7 +1783,7 @@ async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
     assert_eq!(released.operational.checkpoint_ready, None);
     assert_eq!(
         released.operational.recovery_floor_ordinal, 0,
-        "an exported archive that is not installed may not release journal history"
+        "capture release leaves the legacy archive-coverage marker alone"
     );
 
     // The transfer is still running, and the harness is already working
@@ -1829,8 +1809,7 @@ async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
     }
     assert!(dispatched.is_some());
 
-    // The archive is installed, so the relay may finally forget the history
-    // it covers.
+    // Installation has no additional journal-retention work on current workers.
     latched_checkpoint(
         relay,
         barrier_command_id,
@@ -1844,9 +1823,12 @@ async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
     let installed = handle
         .view()
         .snapshot
-        .expect("the actor published the advanced recovery floor");
-    assert_eq!(installed.operational.recovery_floor_ordinal, cursor.ordinal);
-    assert_eq!(installed.operational.recovery_floor_digest, cursor.digest);
+        .expect("the actor remains attached after archive installation");
+    assert_eq!(installed.operational.recovery_floor_ordinal, 0);
+    assert_eq!(
+        installed.operational.recovery_floor_digest,
+        mj_core::relay::RELAY_EVENT_GENESIS_DIGEST
+    );
 }
 /// A target still running a worker that predates the early release keeps
 /// its barrier through the transfer and ends it the way it always did.
@@ -2649,6 +2631,7 @@ fn latched_checkpoint(
     completion: CheckpointCompletion,
 ) -> LatchedCheckpoint {
     LatchedCheckpoint {
+        relay_protocol: mj_core::relay::RELAY_PROTOCOL_VERSION,
         admission: crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
         _worker_owner: crate::controller::test_support::worker_test_permit(
             LATCH_RELAY_SESSION,
@@ -2758,7 +2741,6 @@ fn an_installed_archive_is_reused_when_only_relay_bookkeeping_moved() {
         archived.event_frontier_digest
     );
     // The reused archive is still the gate close destroys through.
-    verify_checkpoint_artifact(session_id, &artifact).unwrap();
     verify_installed_checkpoint_gate(session_id, &artifact.metadata).unwrap();
 }
 #[test]
@@ -3975,7 +3957,7 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
         state: State::default(),
     };
     let admission = crate::controller::test_support::session_admission("session-1");
-    let entry = controller.checkpoint_session(&admission, "session-1");
+    let entry = controller.checkpoint_for_bundle_export(&admission, "session-1");
     let entry_size = std::mem::size_of_val(&entry);
     drop(entry);
     let executor = RefusingExecutor("not used");
@@ -3994,7 +3976,7 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
     drop(latched);
     assert!(
         entry_size < ENTRY_LIMIT_BYTES && latched_size < WRAPPER_LIMIT_BYTES,
-        "checkpoint_session future is {entry_size} bytes (limit {ENTRY_LIMIT_BYTES}) and the \
+        "checkpoint_for_bundle_export future is {entry_size} bytes (limit {ENTRY_LIMIT_BYTES}) and the \
          latched wrapper future is {latched_size} bytes (limit {WRAPPER_LIMIT_BYTES}); box the \
          capture future so the wrappers stay small"
     );

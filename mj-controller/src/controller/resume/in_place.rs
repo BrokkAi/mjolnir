@@ -252,7 +252,6 @@ impl Controller {
                 previous_profile_root,
             } = plan;
 
-            let archive_manifest = &verified_archive.manifest;
             let canonical_session = std::sync::Arc::clone(&verified_archive.canonical_session);
             let include_in_place_subagents = mode == InPlaceRestoreMode::Move
                 && previous
@@ -338,8 +337,9 @@ impl Controller {
                     .as_ref()
                     .and_then(|runtime| runtime.container_settings.clone());
                 record.target_runtime = Some(runtime.into());
-                record.native_session_id =
-                    native_continuity.then(|| archive_manifest.session.native_session_id.clone());
+                record.native_session_id = verified_archive
+                    .native_session_to_load(native_continuity)
+                    .map(str::to_owned);
                 record.state = SessionState::Provisioning;
                 record.updated_at = now();
                 record.last_error = None;
