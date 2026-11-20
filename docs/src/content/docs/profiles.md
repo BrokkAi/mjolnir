@@ -155,11 +155,11 @@ the model mix and quota charging stay comparable.
 | --- | --- | --- | --- | --- | --- |
 | Codex | `codex` | `CODEX_HOME` | `~/.codex` | `auth.json`, or `config.toml` for an API-key provider | yes |
 | Claude Code | `claude` | `CLAUDE_CONFIG_DIR` | `~/.claude` | `.credentials.json` | yes |
-| Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | no |
+| Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | yes (Mjolnir guardian) |
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
-| Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
-| OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | no |
-| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` saved in DSH, or in the environment | no |
+| Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | yes |
+| OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | yes (Mjolnir guardian) |
+| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` saved in DSH, or in the environment | yes (Mjolnir guardian) |
 
 There are seven harness kinds. A profile whose `kind` is `mimo`, for the
 removed MiMo Code harness, is ignored with a warning when the configuration
@@ -180,12 +180,15 @@ no login, such as `DEEPSEEK_API_KEY` for DSH. A detected home becomes the
 explicit `home` path in `config.toml`; subsequent sessions use that configured
 path.
 
-Kimi Code does not expose a guardian approval mode. OpenCode asks before tools
-according to its permission rules, and DSH asks before every write, command,
-and MCP tool call other than Mjolnir's own, but both run commands on the host
-without a sandbox, so they have no guardian either. The dashboard's
-new-session and resume wizards warn before using any of them on a raw target. Muse's guardian is muse-acp's auto-review; see
-[Harness limitations](#harness-limitations).
+Kimi Code, OpenCode, and DSH have no guardian of their own. Kimi Code asks
+before tools according to its permission rules, OpenCode asks before every
+tool but reads, searches, planning, and edits inside the workspace (rules
+Mjolnir adds under configured approvals, since OpenCode's own default asks for
+nothing), and DSH asks before every write, command, and MCP tool call other
+than Mjolnir's own, but all three run commands on the host without a sandbox. On a raw target the
+[Mjolnir guardian](/security/#the-mjolnir-guardian) answers those requests with
+a review on the same harness and the session's model. Muse's guardian is
+muse-acp's auto-review; see [Harness limitations](#harness-limitations).
 Container runtimes and EC2
 machines instead run every harness unconstrained inside the isolation
 boundary. See
@@ -941,7 +944,9 @@ Mjolnir then adds its own files to the staged home:
   ordinary tools named `mj-agents_spawn` and so on instead of reachable only
   through scripts, and, unless the session uses OpenCode's own delegation
   (Native), its own `subagent` tool, and that carry the GitHub CLI approval
-  under configured approvals. OpenCode names a tool
+  and the rules that make OpenCode ask for the
+  [Mjolnir guardian](/security/#the-mjolnir-guardian) under configured
+  approvals. OpenCode names a tool
   `<server>_<tool>`, so another server can carry the same name as a Mjolnir
   tool; the worker therefore never answers OpenCode's permission requests,
   and under configured approvals the person approves Mjolnir's tools too;
@@ -1248,9 +1253,10 @@ without them. Muse Spark can also supply utility inference for cross-harness
 handoffs; see
 [Durability and recovery](/durability/).
 
-- Kimi Code, OpenCode, and DSH have no guardian approval mode.
-  Prefer an isolated [container target](/containers/) or EC2 rather than raw
-  execution.
+- Kimi Code, OpenCode, and DSH have no guardian approval mode of their own;
+  on raw targets the [Mjolnir guardian](/security/#the-mjolnir-guardian)
+  reviews their tool requests. It is not a sandbox, so prefer an isolated
+  [container target](/containers/) or EC2 for untrusted work.
 - OpenCode talks to third-party providers through its own gateway, so it
   publishes no quota endpoint and its profile shows quota as unavailable. It
   reads permission rules from `opencode.json`. Its sessions live in a SQLite

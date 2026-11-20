@@ -45,14 +45,6 @@ impl PickerCell {
         Self::text("")
     }
 
-    /// The warning mark on a row the picker footnote explains.
-    pub(crate) fn warning_marker() -> Self {
-        Self::styled(
-            theme::glyphs().warning,
-            Style::default().fg(theme::palette().warning),
-        )
-    }
-
     pub(crate) fn width(&self) -> usize {
         Line::raw(self.text.as_str()).width()
     }
@@ -172,7 +164,7 @@ pub(crate) fn profile_headings() -> PickerChoice {
 
 /// The target tables of the new-session and resume wizards: the column
 /// headings followed by `rows`. The blank first column indents the table as
-/// the profile table's marker column does.
+/// it indents the profile table.
 pub(crate) fn target_table(rows: Vec<PickerChoice>) -> Vec<PickerChoice> {
     let style = theme::muted().add_modifier(Modifier::BOLD);
     let mut table = Vec::with_capacity(rows.len() + 1);
@@ -186,37 +178,6 @@ pub(crate) fn target_table(rows: Vec<PickerChoice>) -> Vec<PickerChoice> {
     ]));
     table.extend(rows);
     table
-}
-
-/// Profiles whose harness cannot guard risky actions carry a warning triangle
-/// in the table and the footnote `guardian_footnote` draws below it.
-pub(crate) fn needs_guardian_warning(harness: HarnessKind) -> bool {
-    !harness.supports_guardian_approvals()
-}
-
-/// The marker cell of a profile row: the warning triangle for a harness that
-/// cannot guard risky actions, and a blank cell that keeps the columns aligned
-/// for one that can.
-pub(crate) fn guardian_warning_marker(harness: HarnessKind) -> PickerCell {
-    if needs_guardian_warning(harness) {
-        PickerCell::warning_marker()
-    } else {
-        PickerCell::blank()
-    }
-}
-
-/// The row below a profile table that explains its warning marks.
-pub(crate) fn guardian_footnote() -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("{}  ", theme::glyphs().warning),
-            Style::default().fg(theme::palette().warning),
-        ),
-        Span::styled(
-            "No guardian approval mode; do not run on a raw, unsandboxed target.",
-            theme::muted(),
-        ),
-    ])
 }
 
 /// The profile tables of the new-session and resume wizards: the column

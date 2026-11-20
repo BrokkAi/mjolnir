@@ -3,7 +3,7 @@ use super::*;
 /// The name the worker gives an agent as its ACP client. It is the name of
 /// the package that ships the worker program, which this library was once
 /// part of; agents and their logs have always seen this name.
-const CLIENT_NAME: &str = "brokk-mj-worker";
+pub(super) const CLIENT_NAME: &str = "brokk-mj-worker";
 
 /// Record possible native history only when the prompt is ready to be sent.
 async fn record_prompt_use(

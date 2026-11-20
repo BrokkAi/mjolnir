@@ -6,6 +6,7 @@
 
 mod air_tasks;
 pub(crate) mod drive;
+mod guardian;
 mod instructions;
 mod launch;
 pub use instructions::InstructionRole;

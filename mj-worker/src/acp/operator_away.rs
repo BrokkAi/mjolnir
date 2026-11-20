@@ -123,6 +123,7 @@ impl OperatorAway {
             id,
             source,
             turn_context,
+            reviews: Mutex::new(tokio_util::sync::CancellationToken::new()),
         }))
     }
 }
@@ -137,6 +138,9 @@ struct PendingBridge {
     source: Option<VerdictSource>,
     /// Owns the session id and the decision log the AFK check records into.
     turn_context: Option<mj_transcript::turn_context::TurnContext>,
+    /// Cancelled with the turn's tool permission forms, so a Mjolnir guardian
+    /// review in flight answers its request `cancelled` too.
+    reviews: Mutex<tokio_util::sync::CancellationToken>,
 }
 
 impl Drop for PendingBridge {
@@ -327,6 +331,26 @@ impl PendingElicitations {
             return None;
         }
         self.remove(id)
+    }
+
+    /// What a guardian review started now watches for its turn's withdrawal.
+    pub(super) fn review_cancellation(&self) -> tokio_util::sync::CancellationToken {
+        self.0
+            .reviews
+            .lock()
+            .expect("guardian review token lock poisoned")
+            .clone()
+    }
+
+    /// Withdraw every guardian review in flight; later reviews get a new token.
+    pub(super) fn withdraw_reviews(&self) {
+        let mut reviews = self
+            .0
+            .reviews
+            .lock()
+            .expect("guardian review token lock poisoned");
+        reviews.cancel();
+        *reviews = tokio_util::sync::CancellationToken::new();
     }
 
     pub(super) fn is_empty(&self) -> bool {

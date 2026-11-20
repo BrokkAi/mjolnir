@@ -21,7 +21,24 @@ struct TurnContextState {
     background_inventory: Vec<mj_core::relay::BackgroundCommand>,
     native_agent_ids: Vec<String>,
     session_id: String,
+    /// Mjolnir guardian reviews in this request. A new request starts with
+    /// none; a recovery continues the same request and keeps them.
+    guardian_reviews: GuardianReviews,
 }
+
+/// Codex's per-turn guardian denial circuit breaker
+/// (`ext/guardian-reviewer/src/circuit_breaker.rs`): it trips once per request
+/// on 3 consecutive denials or 10 denials among the last 50 reviews.
+#[derive(Debug, Default)]
+struct GuardianReviews {
+    consecutive_denials: u32,
+    recent: std::collections::VecDeque<bool>,
+    tripped: bool,
+}
+
+const MAX_CONSECUTIVE_GUARDIAN_DENIALS: u32 = 3;
+const MAX_RECENT_GUARDIAN_DENIALS: usize = 10;
+const GUARDIAN_DENIAL_WINDOW: usize = 50;
 
 /// The prompt that became visible to the harness at this durable observation.
 /// A queued or unconfirmed steering prompt has not been delivered yet.
@@ -305,6 +322,49 @@ impl TurnContext {
         let mut state = self.0.lock().expect("turn context lock poisoned");
         state.summary.observe_terminal(record);
         state.generation = state.generation.wrapping_add(1);
+    }
+
+    /// The retained transcript as the guardian reviewer reads it: recent
+    /// context first, within `limit` bytes.
+    pub fn render_transcript(&self, limit: usize) -> String {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .summary
+            .render(limit)
+    }
+
+    /// Whether the guardian's denials tripped the breaker in this request, so
+    /// its remaining approvals go to the person.
+    pub fn guardian_tripped(&self) -> bool {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .guardian_reviews
+            .tripped
+    }
+
+    /// Record one completed guardian review in this request. Returns whether
+    /// this denial tripped the breaker.
+    pub fn record_guardian_review(&self, denied: bool) -> bool {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        let reviews = &mut state.guardian_reviews;
+        reviews.consecutive_denials = if denied {
+            reviews.consecutive_denials.saturating_add(1)
+        } else {
+            0
+        };
+        reviews.recent.push_back(denied);
+        if reviews.recent.len() > GUARDIAN_DENIAL_WINDOW {
+            reviews.recent.pop_front();
+        }
+        let recent_denials = reviews.recent.iter().filter(|denied| **denied).count();
+        let trips = denied
+            && !reviews.tripped
+            && (reviews.consecutive_denials >= MAX_CONSECUTIVE_GUARDIAN_DENIALS
+                || recent_denials >= MAX_RECENT_GUARDIAN_DENIALS);
+        reviews.tripped |= trips;
+        trips
     }
 
     pub fn mark_earlier_history_omitted(&self) {
