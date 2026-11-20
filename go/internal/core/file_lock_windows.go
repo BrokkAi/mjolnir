@@ -5,8 +5,12 @@
 
 package core
 
-import "os"
+import (
+	"os"
+
+	"golang.org/x/sys/windows"
+)
 
 func fileUnlock(file *os.File) error {
-	panic("unported: mj-core/src/file_lock.rs FileLock unlock on Windows (needs UnlockFileEx)")
+	return windows.UnlockFileEx(windows.Handle(file.Fd()), 0, ^uint32(0), ^uint32(0), new(windows.Overlapped))
 }

@@ -470,7 +470,27 @@ func (s *RestoredRelaySeed) UnmarshalJSON(data []byte) error {
 // Validate applies the same frontier checks a canonical session snapshot
 // carries, so a malformed seed is refused before it can become relay state.
 func (s *RestoredRelaySeed) Validate() error {
-	panic("unported: mj-core/src/relay.rs RestoredRelaySeed::validate")
+	if s.NotificationStack != nil {
+		if err := s.NotificationStack.validateAt(s.EventFrontier); err != nil {
+			return err
+		}
+	}
+	if len(s.AssessmentState) > 0 && string(s.AssessmentState) != "null" {
+		var value any
+		if err := json.Unmarshal(s.AssessmentState, &value); err != nil {
+			return err
+		}
+		if _, err := CheckpointDecode(value); err != nil {
+			return err
+		}
+	}
+	if err := ValidateRelayDigest(s.EventFrontierDigest, "restored relay event frontier digest"); err != nil {
+		return err
+	}
+	if (s.EventFrontier == 0) != (s.EventFrontierDigest == RelayEventGenesisDigest) {
+		return errors.New("restored relay event frontier and genesis digest disagree")
+	}
+	return nil
 }
 
 func RestoredRelaySeedPath(relayRoot string) string {
@@ -620,6 +640,48 @@ func relayVariant[T any, I any](strict bool) func(json.RawMessage) (I, error) {
 		}
 		return any(value).(I), nil
 	}
+}
+
+// relayRequiredVariant is relayVariant(true) that also refuses a body missing
+// a required field, as serde does for every field that is not an Option: a
+// field is required unless it is a pointer or tagged omitempty.
+func relayRequiredVariant[T any, I any]() func(json.RawMessage) (I, error) {
+	decode := relayVariant[T, I](true)
+	return func(body json.RawMessage) (I, error) {
+		if err := relayRequireFields(body, reflect.TypeFor[T]()); err != nil {
+			var zero I
+			return zero, err
+		}
+		return decode(body)
+	}
+}
+
+// relayRequireFields refuses an object (or an absent body, nil or null) that
+// lacks a field structType requires.
+func relayRequireFields(data []byte, structType reflect.Type) error {
+	var object map[string]json.RawMessage
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &object); err != nil {
+			return err
+		}
+	}
+	for i := 0; i < structType.NumField(); i++ {
+		field := structType.Field(i)
+		name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "-" || field.Type.Kind() == reflect.Pointer || strings.Contains(","+options+",", ",omitempty,") {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		if _, ok := object[name]; !ok {
+			if object == nil {
+				return errors.New("missing field `params`")
+			}
+			return fmt.Errorf("missing field `%s`", name)
+		}
+	}
+	return nil
 }
 
 // relayInternalVariant decodes one internally tagged variant into T; the tag
