@@ -4,7 +4,16 @@
 
 package core
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"strings"
+
+	"github.com/BurntSushi/toml"
+)
 
 // DaemonConfig is the [daemon] table, which selects where the daemon runs.
 //
@@ -64,7 +73,48 @@ func (d *DaemonConfig) UnmarshalJSON(data []byte) error {
 // are deliberately not deserialized: profiles and credentials belong to the
 // daemon machine.
 func DaemonConfigLoadPlacement(path string) (DaemonConfig, error) {
-	panic("unported: mj-core/src/config/daemon.rs DaemonConfig::load_placement")
+	contents, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return DefaultDaemonConfig(), nil
+	}
+	if err != nil {
+		return DaemonConfig{}, fmt.Errorf("read placement %s: %w", path, err)
+	}
+	var document map[string]any
+	metadata, err := toml.Decode(string(contents), &document)
+	if err != nil {
+		return DaemonConfig{}, fmt.Errorf("parse placement %s: %w", path, err)
+	}
+	placement := DefaultDaemonConfig()
+	if table, ok := document["daemon"]; ok {
+		data, err := tomlToJSON(table)
+		if err == nil {
+			err = json.Unmarshal(data, &placement)
+		}
+		if err != nil {
+			return DaemonConfig{}, fmt.Errorf("parse placement %s: %w", path, err)
+		}
+	}
+	// The other tables belong to the daemon, so only `[daemon]` keys are
+	// this reader's to refuse; an SSH client reads `[daemon]` nowhere else.
+	var unread []string
+	for _, key := range metadata.Keys() {
+		key := settingPath(key)
+		if len(key) == 2 && key[0] == "daemon" && !daemonConfigKeys[key[1]] {
+			unread = append(unread, strings.Join(key, "."))
+		}
+	}
+	if err := refuseUnreadKeys(path, unread); err != nil {
+		return DaemonConfig{}, err
+	}
+	return placement, nil
+}
+
+// daemonConfigKeys is every key DaemonConfig reads. A deeper key belongs to
+// the value of one of these, which reports a wrong shape itself.
+var daemonConfigKeys = map[string]bool{
+	"runtime": true, "host": true, "instance": true, "ssh_args": true,
+	"remote_command": true, "image": true, "mounts": true,
 }
 
 // RemoteCommandOrDefault is Rust's DaemonConfig::remote_command (renamed: the

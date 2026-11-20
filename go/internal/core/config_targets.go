@@ -6,10 +6,15 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 type ProjectRepository struct {
@@ -60,7 +65,89 @@ func (p *ProjectBundle) UnmarshalJSON(data []byte) error {
 }
 
 func (p ProjectBundle) validate(bundleID string) error {
-	panic("unported: mj-core/src/config/targets.rs ProjectBundle::validate")
+	if err := ValidateID("bundle", bundleID); err != nil {
+		return err
+	}
+	if len(p.Repositories) == 0 {
+		return fmt.Errorf("bundle %s must contain at least one repository", debugString(bundleID))
+	}
+
+	ids := map[string]bool{}
+	var destinations []string
+	for _, repository := range p.Repositories {
+		if err := ValidateID("repository", repository.ID); err != nil {
+			return fmt.Errorf("bundle %s: %w", debugString(bundleID), err)
+		}
+		if ids[repository.ID] {
+			return fmt.Errorf("bundle %s contains duplicate repository id %s", debugString(bundleID), debugString(repository.ID))
+		}
+		ids[repository.ID] = true
+		if (repository.Github != nil) == (repository.Local != nil) {
+			return fmt.Errorf("bundle %s repository %s must declare exactly one of `github` or `local`",
+				debugString(bundleID), debugString(repository.ID))
+		}
+		if repository.Github != nil && !isGithubSource(*repository.Github) {
+			return fmt.Errorf("bundle %s repository %s is not a supported GitHub source",
+				debugString(bundleID), debugString(repository.ID))
+		}
+		if repository.Local != nil && !filepath.IsAbs(*repository.Local) {
+			return fmt.Errorf("bundle %s repository %s local path must be absolute",
+				debugString(bundleID), debugString(repository.ID))
+		}
+		if repository.GitRef != nil {
+			return fmt.Errorf("bundle %s repository %s: git_ref is no longer supported; remove it to start from the remote's default branch",
+				debugString(bundleID), debugString(repository.ID))
+		}
+		if err := ValidateRelativeDestination(repository.Destination); err != nil {
+			return fmt.Errorf("bundle %s repository %s destination: %w", debugString(bundleID), debugString(repository.ID), err)
+		}
+		for _, existing := range destinations {
+			if pathStartsWith(repository.Destination, existing) || pathStartsWith(existing, repository.Destination) {
+				return fmt.Errorf("bundle %s contains overlapping destinations %s and %s",
+					debugString(bundleID), existing, repository.Destination)
+			}
+		}
+		destinations = append(destinations, repository.Destination)
+	}
+	if !ids[p.PrimaryRepo] {
+		return fmt.Errorf("bundle %s primary repository %s does not exist", debugString(bundleID), debugString(p.PrimaryRepo))
+	}
+	return nil
+}
+
+// pathComponents is a path's components as Rust's Path::components yields
+// them: separators collapse, and a `.` counts only at the start.
+func pathComponents(path string) []string {
+	var components []string
+	if volume := filepath.VolumeName(path); volume != "" {
+		components = append(components, volume)
+		path = path[len(volume):]
+	}
+	if path != "" && os.IsPathSeparator(path[0]) {
+		components = append(components, string(filepath.Separator))
+	}
+	for index, part := range strings.FieldsFunc(path, func(r rune) bool { return r < utf8.RuneSelf && os.IsPathSeparator(uint8(r)) }) {
+		if part == "." && (index > 0 || len(components) > 0) {
+			continue
+		}
+		components = append(components, part)
+	}
+	return components
+}
+
+// pathStartsWith is Rust's Path::starts_with: base is a whole-component
+// prefix of path.
+func pathStartsWith(path, base string) bool {
+	pathParts, baseParts := pathComponents(path), pathComponents(base)
+	if len(baseParts) > len(pathParts) {
+		return false
+	}
+	for i, part := range baseParts {
+		if pathParts[i] != part {
+			return false
+		}
+	}
+	return true
 }
 
 func (p ProjectBundle) Primary() *ProjectRepository {
@@ -170,11 +257,73 @@ func (t TargetBuildCache) IsDefault() bool {
 }
 
 func (t TargetBuildCache) validate(templateID string) error {
-	panic("unported: mj-core/src/config/targets.rs TargetBuildCache::validate")
+	if t.ToolsDirectory != nil && !IsAbsolute(*t.ToolsDirectory) {
+		return fmt.Errorf("target template %s build cache tools_directory must be absolute", debugString(templateID))
+	}
+	if t.Directory != nil && !IsAbsolute(*t.Directory) {
+		return fmt.Errorf("target template %s build cache directory must be absolute", debugString(templateID))
+	}
+	if t.MaxTotalSize != nil {
+		if _, ok := ParseBuildCacheSize(*t.MaxTotalSize); !ok {
+			return fmt.Errorf("target template %s build cache size %s is not a size such as 100GiB",
+				debugString(templateID), debugString(*t.MaxTotalSize))
+		}
+	}
+	if cpus := t.Scheduler.CPUs; cpus != nil && (*cpus == 0 || *cpus > math.MaxInt64) {
+		return fmt.Errorf("machine %s build cache scheduler cpus must be a positive integer supported by mbx", debugString(templateID))
+	}
+	if memory := t.Scheduler.Memory; memory != nil && !isBuildCacheSchedulerMemory(*memory) {
+		return fmt.Errorf("machine %s build cache scheduler memory must be an mbx size such as 8GiB or \"none\"", debugString(templateID))
+	}
+	return nil
 }
 
 func isBuildCacheSchedulerMemory(value string) bool {
-	panic("unported: mj-core/src/config/targets.rs is_build_cache_scheduler_memory")
+	value = strings.TrimSpace(value)
+	return configASCIILower(value) == "none" || parseByteSize(value)
+}
+
+// parseByteSize is whether the bytesize crate's FromStr accepts value: a
+// whole byte count, or a number (digits and dots) with an optional space and
+// a decimal or binary unit.
+func parseByteSize(value string) bool {
+	if _, ok := parseRustUnsigned(value); ok {
+		return true
+	}
+	end := 0
+	for end < len(value) && (value[end] >= '0' && value[end] <= '9' || value[end] == '.') {
+		end++
+	}
+	if !parseRustFloat(value[:end]) {
+		return false
+	}
+	suffix := strings.TrimLeftFunc(value[end:], unicode.IsSpace)
+	switch configASCIILower(suffix) {
+	case "b", "k", "kb", "m", "mb", "g", "gb", "t", "tb", "p", "pb", "e", "eb",
+		"ki", "kib", "mi", "mib", "gi", "gib", "ti", "tib", "pi", "pib", "ei", "eib":
+		return true
+	}
+	return false
+}
+
+// parseRustUnsigned is Rust's `str::parse::<u64>`: decimal digits with an
+// optional leading `+`.
+func parseRustUnsigned(text string) (uint64, bool) {
+	text = strings.TrimPrefix(text, "+")
+	if text == "" || text[0] < '0' || text[0] > '9' {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(text, 10, 64)
+	return value, err == nil
+}
+
+// parseRustFloat is whether Rust's `str::parse::<f64>` accepts digits and
+// dots: at least one digit and at most one dot.
+func parseRustFloat(text string) bool {
+	if strings.Count(text, ".") > 1 {
+		return false
+	}
+	return strings.ContainsFunc(text, func(r rune) bool { return r >= '0' && r <= '9' })
 }
 
 // isDefaultTargetBuildCache reports whether a target carries no build cache
@@ -205,7 +354,45 @@ func unmarshalTargetBuildCacheJSON(data []byte) (*TargetBuildCache, error) {
 // optional unit, the same spellings mbx's own bytesize parser accepts. `20GB`
 // and `20GiB` are different numbers, so the unit is kept exactly as written.
 func ParseBuildCacheSize(value string) (uint64, bool) {
-	panic("unported: mj-core/src/config/targets.rs parse_build_cache_size")
+	value = strings.TrimSpace(value)
+	digits := 0
+	for digits < len(value) && value[digits] >= '0' && value[digits] <= '9' {
+		digits++
+	}
+	if digits == 0 {
+		return 0, false
+	}
+	count, err := strconv.ParseUint(value[:digits], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	var multiplier uint64
+	switch strings.TrimLeftFunc(value[digits:], unicode.IsSpace) {
+	case "", "B":
+		multiplier = 1
+	case "KB":
+		multiplier = 1_000
+	case "MB":
+		multiplier = 1_000_000
+	case "GB":
+		multiplier = 1_000_000_000
+	case "TB":
+		multiplier = 1_000_000_000_000
+	case "KiB":
+		multiplier = 1 << 10
+	case "MiB":
+		multiplier = 1 << 20
+	case "GiB":
+		multiplier = 1 << 30
+	case "TiB":
+		multiplier = 1 << 40
+	default:
+		return 0, false
+	}
+	if count != 0 && count > math.MaxUint64/multiplier {
+		return 0, false
+	}
+	return count * multiplier, true
 }
 
 // BuildCacheSizeGigabytes is an mbx size string as a whole number of
@@ -383,7 +570,26 @@ func podmanWorkspaceStorageIsDefault(storage PodmanWorkspaceStorage) bool {
 }
 
 func podmanWorkspaceStorageValidate(storage PodmanWorkspaceStorage, templateID string) error {
-	panic("unported: mj-core/src/config/targets.rs PodmanWorkspaceStorage::validate")
+	helper, ok := storage.(PodmanWorkspaceStorageHostHelper)
+	if !ok {
+		return nil
+	}
+	if !IsAbsolute(helper.Root) {
+		return fmt.Errorf("target template %s workspace storage root must be absolute", debugString(templateID))
+	}
+	if len(helper.Helper) == 0 || slicesContainsEmpty(helper.Helper) {
+		return fmt.Errorf("target template %s workspace storage helper must contain non-empty arguments", debugString(templateID))
+	}
+	return nil
+}
+
+func slicesContainsEmpty(values []string) bool {
+	for _, value := range values {
+		if value == "" {
+			return true
+		}
+	}
+	return false
 }
 
 type ImagePullPolicy string
@@ -409,7 +615,16 @@ func (p *ImagePullPolicy) UnmarshalText(text []byte) error {
 }
 
 func (c ContainerTemplate) validate(templateID string) error {
-	panic("unported: mj-core/src/config/targets.rs ContainerTemplate::validate")
+	if strings.TrimSpace(c.Image) == "" {
+		return fmt.Errorf("target template %s has an empty container image", debugString(templateID))
+	}
+	if err := validateEnvironment(templateID, c.Environment); err != nil {
+		return err
+	}
+	if c.BuildCache != nil {
+		return c.BuildCache.validate(templateID)
+	}
+	return nil
 }
 
 type AwsAddressSource string
@@ -456,7 +671,13 @@ func (s *SshConnection) UnmarshalJSON(data []byte) error {
 }
 
 func (s SshConnection) validate(templateID string) error {
-	panic("unported: mj-core/src/config/targets.rs SshConnection::validate")
+	if strings.TrimSpace(s.Host) == "" || strings.ContainsFunc(s.Host, unicode.IsSpace) {
+		return fmt.Errorf("target template %s has an invalid SSH host", debugString(templateID))
+	}
+	if s.User != nil && (*s.User == "" || strings.ContainsFunc(*s.User, func(r rune) bool { return unicode.IsSpace(r) || r == '@' })) {
+		return fmt.Errorf("target template %s has an invalid SSH user", debugString(templateID))
+	}
+	return nil
 }
 
 // DefaultWorkspacePrefix is where a new SSH machine keeps bare-runtime
@@ -477,7 +698,20 @@ func defaultNamedMachinePrefix() string { return LegacyWorkspacePrefix }
 // escape the login home or name the home itself. Shared by SSH machines and
 // the targets that resolve from them so both report the same rule.
 func validateWorkspacePrefix(id, workspacePrefix string) error {
-	panic("unported: mj-core/src/config/targets.rs validate_workspace_prefix")
+	unsafe := workspacePrefix == ""
+	for _, component := range pathComponents(workspacePrefix) {
+		if component == ".." {
+			unsafe = true
+		}
+	}
+	switch workspacePrefix {
+	case "/", ".", "~", "~/":
+		unsafe = true
+	}
+	if unsafe {
+		return fmt.Errorf("%s has an unsafe workspace prefix", debugString(id))
+	}
+	return nil
 }
 
 // TargetTemplate is a host and a runtime fused together (tag = "kind",
@@ -586,7 +820,14 @@ func targetTemplateLaunchRefusal(t TargetTemplate) (string, bool) {
 }
 
 func targetTemplateEnsureReady(t TargetTemplate, id string) error {
-	panic("unported: mj-core/src/config/targets.rs TargetTemplate::ensure_ready")
+	container := t.Container()
+	if container == nil {
+		return nil
+	}
+	if err := container.Environment.EnsureResolved(); err != nil {
+		return RefusalPrecondition(fmt.Sprintf("target %s: %s", debugString(id), err))
+	}
+	return nil
 }
 
 func targetTemplateContainer(t TargetTemplate) *ContainerTemplate {
@@ -697,7 +938,88 @@ func targetTemplateIsYolo(t TargetTemplate) bool {
 }
 
 func targetTemplateValidate(t TargetTemplate, id string) error {
-	panic("unported: mj-core/src/config/targets.rs TargetTemplate::validate")
+	if err := ValidateID("target template", id); err != nil {
+		return err
+	}
+	onlyPodman := func(container ContainerTemplate) error {
+		if !podmanWorkspaceStorageIsDefault(container.WorkspaceStorage) {
+			return fmt.Errorf("target template %s workspace storage is only supported by Podman", debugString(id))
+		}
+		return nil
+	}
+	switch t := t.(type) {
+	case TargetTemplateLocalBare:
+		return nil
+	case TargetTemplateLocalPodman:
+		if err := t.ContainerTemplate.validate(id); err != nil {
+			return err
+		}
+		return podmanWorkspaceStorageValidate(t.ContainerTemplate.WorkspaceStorage, id)
+	case TargetTemplateLocalDocker:
+		if err := t.ContainerTemplate.validate(id); err != nil {
+			return err
+		}
+		return onlyPodman(t.ContainerTemplate)
+	case TargetTemplateAppleContainer:
+		if err := t.ContainerTemplate.validate(id); err != nil {
+			return err
+		}
+		return onlyPodman(t.ContainerTemplate)
+	case TargetTemplateAwsEc2:
+		if configBlank(t.Region) || configBlank(t.LaunchTemplate) || configBlank(t.SSHUser) {
+			return fmt.Errorf("AWS target template %s requires region, launch_template, and ssh_user", debugString(id))
+		}
+		if t.AWSProfile != nil && *t.AWSProfile == "" || t.LaunchTemplateVersion != nil && *t.LaunchTemplateVersion == "" {
+			return fmt.Errorf("AWS target template %s contains an empty optional value", debugString(id))
+		}
+		return nil
+	case TargetTemplateSshBare:
+		if err := t.SSH.validate(id); err != nil {
+			return err
+		}
+		return validateWorkspacePrefix("target template "+id, t.WorkspacePrefix)
+	case TargetTemplateSshDocker:
+		if err := t.SSH.validate(id); err != nil {
+			return err
+		}
+		if err := t.ContainerTemplate.validate(id); err != nil {
+			return err
+		}
+		return onlyPodman(t.ContainerTemplate)
+	case TargetTemplateSshPodman:
+		if err := t.SSH.validate(id); err != nil {
+			return err
+		}
+		if err := t.ContainerTemplate.validate(id); err != nil {
+			return err
+		}
+		return podmanWorkspaceStorageValidate(t.ContainerTemplate.WorkspaceStorage, id)
+	// A remote Apple container runtime accepts exactly what the local one
+	// does: the engine is the same, only its host differs.
+	case TargetTemplateSshAppleContainer:
+		if err := t.SSH.validate(id); err != nil {
+			return err
+		}
+		if err := t.ContainerTemplate.validate(id); err != nil {
+			return err
+		}
+		return onlyPodman(t.ContainerTemplate)
+	// A Nitro sandbox keeps its workspace on a named volume the engine
+	// creates; no other storage shape exists.
+	case TargetTemplateSshNitro:
+		if err := t.SSH.validate(id); err != nil {
+			return err
+		}
+		if err := t.ContainerTemplate.validate(id); err != nil {
+			return err
+		}
+		if !podmanWorkspaceStorageIsDefault(t.ContainerTemplate.WorkspaceStorage) {
+			return errors.New("target template " + debugString(id) +
+				" workspace storage is only supported by Podman; a Nitro sandbox always uses a volume")
+		}
+		return nil
+	}
+	panic(fmt.Sprintf("unknown target template %T", t))
 }
 
 // marshalTargetTemplateJSON writes the kind tag, then the variant's fields
@@ -828,7 +1150,16 @@ func UnmarshalTargetTemplateJSON(data []byte) (TargetTemplate, error) {
 // ResourceAllocationKindFrom is From<&TargetTemplate> for
 // ResourceAllocationKind.
 func ResourceAllocationKindFrom(template TargetTemplate) ResourceAllocationKind {
-	panic("unported: mj-core/src/config/targets.rs From<&TargetTemplate> for ResourceAllocationKind")
+	switch template.(type) {
+	case TargetTemplateLocalPodman, TargetTemplateLocalDocker, TargetTemplateAppleContainer, TargetTemplateSshPodman,
+		TargetTemplateSshDocker, TargetTemplateSshAppleContainer, TargetTemplateSshNitro:
+		return ResourceAllocationKindContainer
+	case TargetTemplateAwsEc2:
+		return ResourceAllocationKindAwsEc2
+	case TargetTemplateLocalBare, TargetTemplateSshBare:
+		return ResourceAllocationKindFixed
+	}
+	panic(fmt.Sprintf("unknown target template %T", template))
 }
 
 // IsBareProjectTarget reports whether template hosts a raw project checkout
@@ -870,7 +1201,19 @@ func ContainerMemoryIsHardLimit(template TargetTemplate) bool {
 // should be filed under, or false if the target does not support attached
 // mounts.
 func MountHistoryHost(template TargetTemplate) (string, bool) {
-	panic("unported: mj-core/src/config/targets.rs mount_history_host")
+	switch template := template.(type) {
+	case TargetTemplateLocalPodman, TargetTemplateLocalDocker, TargetTemplateAppleContainer, TargetTemplateAwsEc2:
+		return "local", true
+	case TargetTemplateSshPodman:
+		return template.SSH.Host, true
+	case TargetTemplateSshDocker:
+		return template.SSH.Host, true
+	case TargetTemplateSshAppleContainer:
+		return template.SSH.Host, true
+	case TargetTemplateSshNitro:
+		return template.SSH.Host, true
+	}
+	return "", false
 }
 
 // OffersAttachedDirectories reports whether a launch surface should offer
@@ -901,7 +1244,19 @@ func ProjectHistoryHost(template TargetTemplate) (string, bool) {
 // ContainerSizeHost is the stable physical-host key for reusable container
 // CPU and memory defaults.
 func ContainerSizeHost(template TargetTemplate) (string, bool) {
-	panic("unported: mj-core/src/config/targets.rs container_size_host")
+	switch template := template.(type) {
+	case TargetTemplateLocalPodman, TargetTemplateLocalDocker, TargetTemplateAppleContainer:
+		return "local", true
+	case TargetTemplateSshPodman:
+		return template.SSH.Host, true
+	case TargetTemplateSshDocker:
+		return template.SSH.Host, true
+	case TargetTemplateSshAppleContainer:
+		return template.SSH.Host, true
+	case TargetTemplateSshNitro:
+		return template.SSH.Host, true
+	}
+	return "", false
 }
 
 func validateEnvironment(owner string, environment Environment) error {
