@@ -796,37 +796,29 @@ def fetch_output(sid, path):
 
 
 def suspend_session(sid, report=lambda **fields: None):
-    delay, attempt, previous_error = 1, 0, None
+    retry_delay, attempt = 1, 0
     while True:
         attempt += 1
         driver.mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
         # Keep the old confirmation window for each accepted suspension.
-        deadline = time.monotonic() + 900
+        deadline, delay = time.monotonic() + 900, 1
         while True:
             session = driver.session(sid)
             error = session.get("error")
-            # mj can publish a suspension error while its lifecycle operation still owns the
-            # session (lifecycle "suspending"); a suspend sent then would join that same
-            # operation. Read the error only after the operation has released the session.
-            if error is not None and session["lifecycle"] == "suspending":
-                error = None
             if error is not None:
                 if not (error.startswith("the suspension did not finish:") and ". Retry suspension" in error):
                     raise RuntimeError(error)
-                # Retry only when mj itself tells us to retry suspension, and only while the
-                # retries make progress. mj says "retry" for persistent causes too (a full disk,
-                # an unwritable archive); the same error twice in a row means another attempt
-                # needs a change outside the runner, so surface it and stop.
+                # Retry only when mj itself tells us to retry suspension. Its public message is
+                # the same for transient and persistent causes (the cause is in the daemon log
+                # under the attempt's reference), so the runner can't tell them apart: it keeps
+                # retrying, reports every attempt with its error in the run log and on stderr,
+                # and backs off to 10 minutes, so a persistent cause is visible to the operator,
+                # who can stop the run. A suspend sent while the earlier operation still owns the
+                # session just joins it, which is harmless.
                 print(f"suspension of {sid} failed (attempt {attempt}): {error}", file=sys.stderr, flush=True)
                 report(session=sid, attempt=attempt, error=error)
-                # mj appends a per-attempt "Reference lifecycle-<id>." to the error, so compare
-                # the error without it.
-                cause = re.sub(r"\s*Reference lifecycle-[0-9a-f]+\.?", "", error).strip()
-                if cause == previous_error:
-                    raise RuntimeError(f"suspension keeps failing with the same error: {error}")
-                previous_error = cause
-                time.sleep(delay)
-                delay = min(2 * delay, 30)
+                time.sleep(retry_delay)
+                retry_delay = min(2 * retry_delay, 600)
                 break
             if session["lifecycle"] == "suspended":
                 return
