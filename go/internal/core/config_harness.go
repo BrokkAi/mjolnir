@@ -412,10 +412,21 @@ func (m *ClaudePermissionMode) UnmarshalText(text []byte) error {
 // ApprovalChoices is a profile's own choices about how its harness realizes
 // an execution policy. The controller reads them from the profile and the
 // worker from its launch config, and both resolve the enforcement through
-// HarnessKind.ResolveExecutionEnforcement.
+// HarnessKind.ResolveExecutionEnforcement and the reviewer through
+// HarnessKind.MjolnirGuardianReviews. Build one with DefaultApprovalChoices:
+// the zero value turns the Mjolnir guardian off.
 type ApprovalChoices struct {
 	// ClaudePermissionMode: see HarnessProfile.ClaudePermissionMode.
 	ClaudePermissionMode ClaudePermissionMode
+	// MjolnirGuardian: see HarnessProfile.mjolnir_guardian (Rust d8caed8c4;
+	// the profile field is not ported yet, so profiles keep the default).
+	MjolnirGuardian bool
+}
+
+// DefaultApprovalChoices is ApprovalChoices::default(): the default Claude
+// mode, with the Mjolnir guardian on.
+func DefaultApprovalChoices() ApprovalChoices {
+	return ApprovalChoices{ClaudePermissionMode: ClaudePermissionModeAuto, MjolnirGuardian: true}
 }
 
 func (p ExecutionPolicy) IsUnconstrained() bool { return p == ExecutionPolicyUnconstrained }
@@ -1355,6 +1366,17 @@ func (k HarnessKind) Guardian() GuardianReviewer {
 	return GuardianReviewerHarness
 }
 
+// MjolnirGuardianReviews reports whether the Mjolnir worker reviews this
+// harness's tool approvals: the target keeps configured approvals, the
+// harness ships no reviewer of its own, and the profile has not turned the
+// Mjolnir guardian off. When it does not, each approval the harness asks for
+// goes to the person.
+func (k HarnessKind) MjolnirGuardianReviews(policy ExecutionPolicy, choices ApprovalChoices) bool {
+	return policy == ExecutionPolicyConfiguredApprovals &&
+		k.Guardian() == GuardianReviewerMjolnir &&
+		choices.MjolnirGuardian
+}
+
 // LaunchFlagFor is the launch flag the bridge command line carries, if any.
 func (k HarnessKind) LaunchFlagFor(policy ExecutionPolicy) (string, bool) {
 	enforcement, ok := k.ExecutionEnforcement(policy)
@@ -2009,7 +2031,9 @@ func (h HarnessProfile) ApprovalChoices() ApprovalChoices {
 	if h.ClaudePermissionMode != nil {
 		mode = *h.ClaudePermissionMode
 	}
-	return ApprovalChoices{ClaudePermissionMode: mode}
+	// MjolnirGuardian stays on until HarnessProfile.mjolnir_guardian is
+	// ported (Rust d8caed8c4).
+	return ApprovalChoices{ClaudePermissionMode: mode, MjolnirGuardian: true}
 }
 
 // ConfigureExecutionEnvironment applies the launch environment for policy.

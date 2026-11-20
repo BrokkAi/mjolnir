@@ -61,6 +61,9 @@ func (r *ElicitationRequest) UnmarshalJSON(data []byte) error {
 // ToolPermissionForm is what a tool permission form offers beyond the
 // request's own options.
 type ToolPermissionForm struct {
+	// ToolCallID is the raw ACP tool call ID when the call belongs to this
+	// transcript.
+	ToolCallID *string `json:"tool_call_id,omitempty"`
 	// Skip says whether the request has a one-time rejection for Skip to
 	// select. A request without one offers no Skip.
 	Skip bool `json:"skip"`

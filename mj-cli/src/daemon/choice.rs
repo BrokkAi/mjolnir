@@ -86,6 +86,16 @@ enum Answer {
 /// attempt has installed tokio's handler, the default no longer applies, and a
 /// prompt that ignored the signal would leave the user without a way out.
 async fn ask(label: &'static str) -> Result<Answer> {
+    // The listener registers when first polled, and tokio drops a signal that
+    // arrives while none is registered. Poll it once before the question is
+    // on screen, so a Ctrl-C typed as soon as the question appears is kept.
+    let interrupt = interrupted();
+    tokio::pin!(interrupt);
+    tokio::select! {
+        biased;
+        () = &mut interrupt => return Ok(Answer::Interrupted),
+        () = std::future::ready(()) => {}
+    }
     print!("{label}");
     io::stdout().flush()?;
     let read = mj_core::runtime::spawn_blocking(|| {
@@ -100,7 +110,7 @@ async fn ask(label: &'static str) -> Result<Answer> {
             Some(line) => Answer::Text(line),
             None => Answer::Eof,
         }),
-        () = interrupted() => Ok(Answer::Interrupted),
+        () = &mut interrupt => Ok(Answer::Interrupted),
     }
 }
 
@@ -138,13 +148,12 @@ async fn connect_remote() -> Result<Remote> {
             continue;
         }
         let saved = placement.clone();
-        // The file must still hold the default this prompt was shown for: a
+        // The file must still have no `[daemon]` table, as when this prompt was shown: a
         // second first launch that chose another host first is not replaced.
-        let saving = mj_core::runtime::spawn_blocking(move || {
-            saved.replace_placement(&config_path(), &DaemonConfig::default())
-        })
-        .await
-        .context("save daemon placement task failed")?;
+        let saving =
+            mj_core::runtime::spawn_blocking(move || saved.replace_placement(&config_path(), None))
+                .await
+                .context("save daemon placement task failed")?;
         match saving {
             Ok(()) => {
                 println!(

@@ -89,6 +89,12 @@ func (h CompletionHostMachine) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]Machine{"Machine": h.Machine})
 }
 
+// UnmarshalCompletionHostJSON decodes a CompletionHost for other packages
+// (mj-client's DaemonAction::CompletePath carries one).
+func UnmarshalCompletionHostJSON(data []byte) (CompletionHost, error) {
+	return unmarshalCompletionHost(data)
+}
+
 // unmarshalCompletionHost decodes serde's externally tagged form.
 func unmarshalCompletionHost(data []byte) (CompletionHost, error) {
 	var unit string

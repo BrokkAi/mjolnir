@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -918,6 +920,72 @@ func (p *CanonicalQueuedPrompt) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*p = CanonicalQueuedPrompt(v)
+	return nil
+}
+
+// CanonicalMailbox is mail a worker accepted, as its relay held it at a
+// checkpoint cut. The daemon marked each event accepted when the worker took
+// it and will not send it again, so restore must reinstate this for the mail
+// to arrive at all. Unknown fields are refused.
+//
+// Ported from Rust commit 39722ace5 (after this file's base), for
+// mj-worker's relay.
+type CanonicalMailbox struct {
+	// PendingEvents are accepted events not yet handed to the agent, in
+	// delivery order. Events a hook had taken without confirming come first,
+	// where returning its lease puts them.
+	PendingEvents []MailboxEvent `json:"pending_events,omitempty"`
+	// DeliveredEventKeys are recently delivered event keys and the journal
+	// ordinal of their delivery. A producer that retries one is acknowledged
+	// without a second delivery; this is the worker's only deduplication
+	// record for mail.
+	DeliveredEventKeys map[string]uint64 `json:"delivered_event_keys,omitempty"`
+	// PromptContexts is mail already rendered into the hidden context of a
+	// queued prompt, keyed by that prompt's command ID. A worker restart
+	// moves an interrupted prompt's claim to its recovery prompt, which
+	// carries it from then on.
+	PromptContexts map[string]string `json:"prompt_contexts,omitempty"`
+}
+
+func (m *CanonicalMailbox) UnmarshalJSON(data []byte) error {
+	type plain CanonicalMailbox
+	var v plain
+	if err := transcriptStrictDecode(data, &v, true); err != nil {
+		return err
+	}
+	*m = CanonicalMailbox(v)
+	return nil
+}
+
+func (m *CanonicalMailbox) IsEmpty() bool {
+	return len(m.PendingEvents) == 0 && len(m.DeliveredEventKeys) == 0 && len(m.PromptContexts) == 0
+}
+
+// Validate checks the shape the worker's own admission guarantees, again
+// before an archive or seed can become relay state.
+func (m *CanonicalMailbox) Validate() error {
+	pending := map[string]bool{}
+	for i := range m.PendingEvents {
+		event := &m.PendingEvents[i]
+		if strings.TrimSpace(event.Key) == "" || strings.TrimSpace(event.Source) == "" || !event.HasRenderableContent() {
+			return fmt.Errorf("archived mailbox event '%s' has no key, source, or content", event.Key)
+		}
+		if pending[event.Key] {
+			return fmt.Errorf("archived mailbox event '%s' is pending more than once", event.Key)
+		}
+		pending[event.Key] = true
+		if _, delivered := m.DeliveredEventKeys[event.Key]; delivered {
+			return fmt.Errorf("archived mailbox event '%s' is both pending and delivered", event.Key)
+		}
+	}
+	if len(m.DeliveredEventKeys) > RelayRetryIDRetention {
+		return errors.New("archived mailbox retains more delivered keys than a worker keeps")
+	}
+	for _, commandID := range slices.Sorted(maps.Keys(m.PromptContexts)) {
+		if strings.TrimSpace(commandID) == "" || strings.TrimSpace(m.PromptContexts[commandID]) == "" {
+			return fmt.Errorf("archived mailbox prompt context for '%s' is empty", commandID)
+		}
+	}
 	return nil
 }
 

@@ -2097,6 +2097,12 @@ func (v SessionResourceAllocationAwsEc2) MarshalJSON() ([]byte, error) {
 	return stateMarshalTagged("kind", "aws-ec2", plain(v))
 }
 
+// UnmarshalSessionResourceAllocationJSON decodes a SessionResourceAllocation
+// for other packages (mj-client's requests carry one).
+func UnmarshalSessionResourceAllocationJSON(data []byte) (SessionResourceAllocation, error) {
+	return unmarshalSessionResourceAllocation(data)
+}
+
 func unmarshalSessionResourceAllocation(data []byte) (SessionResourceAllocation, error) {
 	tag, err := stateTag(data, "kind")
 	if err != nil {
@@ -3053,7 +3059,7 @@ func (r *SessionRecord) ExecutionEnforcement(config *Config) (ExecutionEnforceme
 	if err != nil {
 		return ExecutionEnforcement{}, false
 	}
-	choices := ApprovalChoices{ClaudePermissionMode: ClaudePermissionModeAuto}
+	choices := DefaultApprovalChoices()
 	if profile, ok := config.Profiles[r.LastProfile]; ok {
 		choices = profile.ApprovalChoices()
 	}
