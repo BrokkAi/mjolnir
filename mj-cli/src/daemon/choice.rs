@@ -7,13 +7,13 @@
 
 use anyhow::{Context, Result};
 use mj_client::daemon::ssh::{self, DiscoveryIntent};
-use mj_controller::readline::{Line, LineReader};
 use mj_core::config::{DaemonConfig, DaemonRuntime, config_path};
+use std::io::{self, Write};
 
 pub(crate) enum PlacementChoice {
     /// A placement is settled; start the dashboard.
     Continue,
-    /// The user ended input (Ctrl-D or Ctrl-C) without choosing.
+    /// The user ended input (Ctrl-D) without choosing.
     Cancelled,
 }
 
@@ -47,12 +47,13 @@ pub(crate) async fn ask_where_daemon_runs() -> Result<PlacementChoice> {
         return Ok(PlacementChoice::Continue);
     }
     loop {
-        eprintln!("No Mjolnir daemon has run on this computer. Where should it run?");
-        eprintln!("  1) Start a daemon on this computer");
-        eprintln!("  2) Connect to a daemon on another computer over SSH");
-        // Ctrl-C leaves instead of taking the default: the default starts a
-        // daemon and a store, which ends this prompt for good.
-        let Line::Text(answer) = ask("Choose 1 or 2 [1]: ").await? else {
+        println!("No Mjolnir daemon has run on this computer. Where should it run?");
+        println!("  1) Start a daemon on this computer");
+        println!("  2) Connect to a daemon on another computer over SSH");
+        // Ctrl-C ends mj here, as it does anywhere else in a plain terminal:
+        // taking the default would start a daemon and a store, which ends this
+        // prompt for good.
+        let Some(answer) = ask("Choose 1 or 2 [1]: ").await? else {
             return Ok(PlacementChoice::Cancelled);
         };
         match answer.as_str() {
@@ -62,33 +63,43 @@ pub(crate) async fn ask_where_daemon_runs() -> Result<PlacementChoice> {
                 Remote::Back => {}
                 Remote::Cancelled => return Ok(PlacementChoice::Cancelled),
             },
-            _ => eprintln!("Enter 1 or 2."),
+            _ => println!("Enter 1 or 2."),
         }
     }
 }
 
-async fn ask(label: &'static str) -> Result<Line> {
-    mj_core::runtime::spawn_blocking(move || LineReader::default().read_line_or_interrupt(label))
-        .await
-        .context("prompt task failed")?
+/// One line from the terminal. The terminal's own line editing is enough for
+/// a choice and a host name, and plain reading needs nothing from the
+/// terminal (no cursor-position reply) and writes to stdout like the
+/// dashboard, so redirecting stderr does not hide the question. `None` is end
+/// of input.
+async fn ask(label: &'static str) -> Result<Option<String>> {
+    mj_core::runtime::spawn_blocking(move || {
+        print!("{label}");
+        io::stdout().flush()?;
+        let mut line = String::new();
+        let read = io::stdin()
+            .read_line(&mut line)
+            .context("read terminal response")?;
+        Ok::<_, anyhow::Error>((read > 0).then(|| line.trim().to_owned()))
+    })
+    .await
+    .context("prompt task failed")?
 }
 
 async fn connect_remote() -> Result<Remote> {
     loop {
-        let host = match ask(
-            "SSH destination (user@host, or a Host from your SSH config; empty to go back): ",
-        )
-        .await?
-        {
-            Line::Text(host) => host,
-            Line::Interrupted => return Ok(Remote::Back),
-            Line::Eof => return Ok(Remote::Cancelled),
+        let Some(host) =
+            ask("SSH destination (user@host, or a Host from your SSH config; empty to go back): ")
+                .await?
+        else {
+            return Ok(Remote::Cancelled);
         };
         if host.is_empty() {
             return Ok(Remote::Back);
         }
         if host.starts_with('-') {
-            eprintln!("An SSH destination cannot start with '-'.");
+            println!("An SSH destination cannot start with '-'.");
             continue;
         }
         let placement = DaemonConfig {
@@ -96,9 +107,9 @@ async fn connect_remote() -> Result<Remote> {
             host: Some(host.clone()),
             ..DaemonConfig::default()
         };
-        eprintln!("Connecting to {host}, starting its daemon if needed... (Ctrl-C to cancel)");
+        println!("Connecting to {host}, starting its daemon if needed... (Ctrl-C to cancel)");
         if let Err(error) = try_connect(&placement).await {
-            eprintln!("Could not use the daemon on {host}: {error:#}\n");
+            println!("Could not use the daemon on {host}: {error:#}\n");
             continue;
         }
         let saved = placement.clone();
@@ -111,7 +122,7 @@ async fn connect_remote() -> Result<Remote> {
         .context("save daemon placement task failed")?;
         match saving {
             Ok(()) => {
-                eprintln!(
+                println!(
                     "This computer will use the daemon on {host}. To change that, edit [daemon] in {}.",
                     config_path().display()
                 );
@@ -119,7 +130,7 @@ async fn connect_remote() -> Result<Remote> {
             }
             // The connection worked; only the saving did not. Report it and
             // leave the menu open so local remains a choice.
-            Err(error) => eprintln!("The connection works, but it could not be saved: {error:#}\n"),
+            Err(error) => println!("The connection works, but it could not be saved: {error:#}\n"),
         }
     }
 }
