@@ -246,6 +246,13 @@ pub(super) fn start_unit(
         ),
         format!("--property=BindPaths={}:{UNIT_CACHE}", cache.display()),
         format!("--property=ReadWritePaths={UNIT_CACHE}"),
+        // systemd-run looks the executable up on the host before the unit's
+        // bind mounts exist, so start a host shell that execs the engine
+        // inside the unit (same PID, so Type=notify still sees it). The `$$`
+        // keeps systemd from expanding the shell's parameters itself.
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        "exec \"$$0\" \"$$@\"".to_owned(),
         UNIT_ENGINE.to_owned(),
         "microvm".to_owned(),
         "mbx-proxy".to_owned(),

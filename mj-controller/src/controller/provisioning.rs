@@ -1018,17 +1018,17 @@ impl Controller {
                 executor,
                 |_| None,
                 |outputs| {
-                    // The creation plan ends with the engine's run command.
-                    if matches!(nitro_cache, NitroBuildCache::Remote(_))
-                        && let Some(output) = outputs.last()
-                    {
+                    // The engine's run command is one step of the creation plan
+                    // (Git installation follows it); its warning names this VM.
+                    if matches!(nitro_cache, NitroBuildCache::Remote(_)) {
                         let warning = format!(
                             "warning: {resource_name} starts without the remote mbx cache: "
                         );
-                        if let Some(reason) = String::from_utf8_lossy(&output.stderr)
-                            .lines()
-                            .find_map(|line| line.strip_prefix(&warning))
-                        {
+                        if let Some(reason) = outputs.iter().find_map(|output| {
+                            String::from_utf8_lossy(&output.stderr)
+                                .lines()
+                                .find_map(|line| line.strip_prefix(&warning).map(str::to_owned))
+                        }) {
                             executor.notify_notice(&format!(
                                 "This Nitro sandbox started without the shared mbx build cache: {reason}. Builds use the cache inside the VM."
                             ));

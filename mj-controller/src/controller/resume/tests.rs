@@ -1100,7 +1100,7 @@ fn both_lanes_can_wait_on_the_runtime() {
     // Lifecycle work runs synchronously on a blocking-pool thread.
     let (first, second) = runtime
         .block_on(async {
-            tokio::task::spawn_blocking(|| {
+            mj_core::runtime::spawn_blocking(|| {
                 execute_concurrent_lanes(
                     || mj_core::runtime::block_on(async { 1 }),
                     || mj_core::runtime::block_on(async { 2 }),
