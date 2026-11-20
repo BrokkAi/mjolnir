@@ -1406,10 +1406,7 @@ mod tests {
             refused("override_review", json!({"reason":"unreasonable"}))
                 .contains("now takes `overrides`")
         );
-        assert!(
-            refused("set_baseline", json!({"commit":" "}))
-                .contains("commit cannot be empty")
-        );
+        assert!(refused("set_baseline", json!({"commit":" "})).contains("commit cannot be empty"));
         assert!(
             refused("set_baseline", json!({"commit":"abc","path":" "}))
                 .contains("path cannot be empty")

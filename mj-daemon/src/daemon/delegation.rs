@@ -672,6 +672,12 @@ async fn settle_child(
     if review_open {
         return Ok(ChildCompletion::AwaitingReview);
     }
+    // As for a reviewer above, the queue owns a handback until the daemon has
+    // executed it. A handback can wait in the queue while the review host
+    // restores reviews, so the ended turn alone does not decide the report.
+    if handback_queued {
+        return Ok(ChildCompletion::AwaitingHandback);
+    }
     // A reminder turn is judged every time: whether its child is held depends
     // on the worker's liveness, which changes without a new turn.
     if relation.noticed_turn != Some(outcome.completed_ordinal)
@@ -1079,7 +1085,6 @@ mod tests {
         }
     }
 
-
     async fn publish_idle_child(
         manager: &crate::daemon::tests::TestRemoteManager,
         turn: &mj_core::state::MaterializedTurnOutcome,
@@ -1323,14 +1328,14 @@ mod tests {
         let stored = mj_controller::database::load_subagent("child")
             .unwrap()
             .unwrap();
-        let settle = |review_open| {
+        let settle = |review_open, handback_queued| {
             settle_child(
                 &state,
                 &backend,
                 mj_controller::upgrade::activity_unless_draining("test completion").unwrap(),
                 stored.clone(),
                 ChildSeen {
-                    handback_queued: false,
+                    handback_queued,
                     in_flight: Vec::new(),
                     liveness: None,
                 },
@@ -1339,8 +1344,14 @@ mod tests {
             )
         };
         assert!(matches!(
-            settle(true).await.unwrap(),
+            settle(true, false).await.unwrap(),
             ChildCompletion::AwaitingReview
+        ));
+        // A handback still in the queue, retried while the review host
+        // restores reviews, decides the report; the ended turn does not.
+        assert!(matches!(
+            settle(false, true).await.unwrap(),
+            ChildCompletion::AwaitingHandback
         ));
         assert_eq!(parks.0.load(Ordering::SeqCst), 1, "no park attempt");
         assert_eq!(
@@ -1366,7 +1377,7 @@ mod tests {
             .unwrap()
         );
         assert!(matches!(
-            settle(false).await.unwrap(),
+            settle(false, false).await.unwrap(),
             ChildCompletion::Settled
         ));
         assert_eq!(parks.0.load(Ordering::SeqCst), 2);

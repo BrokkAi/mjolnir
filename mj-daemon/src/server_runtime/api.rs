@@ -97,10 +97,7 @@ pub trait ExportRuntime: Send + Sync {
 
     /// Whether a child is still waiting for its review's verdict. A child's
     /// handback or ended turn is not final while it is.
-    fn child_review(
-        &self,
-        _child_session_id: String,
-    ) -> BoxFuture<'_, crate::daemon::ChildReview> {
+    fn child_review(&self, _child_session_id: String) -> BoxFuture<'_, crate::daemon::ChildReview> {
         Box::pin(async { crate::daemon::ChildReview::Closed })
     }
 
@@ -352,10 +349,7 @@ impl ExportRuntime for RuntimeState {
         self.with_config(|config| config.quota.prefer.clone())
     }
 
-    fn child_review(
-        &self,
-        child_session_id: String,
-    ) -> BoxFuture<'_, crate::daemon::ChildReview> {
+    fn child_review(&self, child_session_id: String) -> BoxFuture<'_, crate::daemon::ChildReview> {
         Box::pin(async move { RuntimeState::child_review(self, &child_session_id).await })
     }
 
@@ -914,7 +908,9 @@ impl ApiBackend {
         // backoff, and no refusal is stored for a child that may never read it.
         let handback_review = self.handback_review(&parent, &prepared.request).await?;
         if handback_review == Some(crate::daemon::ChildReview::Unknown) {
-            bail!("the review host cannot yet say whether this child's review is open; the handback will be retried");
+            bail!(
+                "the review host cannot yet say whether this child's review is open; the handback will be retried"
+            );
         }
         blocking("mark delegation delivering", {
             let parent = parent.clone();
