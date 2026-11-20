@@ -4,7 +4,11 @@
 
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
 
 // BareTargetFixedResources is the refusal for a resource allocation aimed at
 // a bare target. Callers match on it to add their own remedy (a flag, a
@@ -89,7 +93,16 @@ func (p *RawConversionPreview) UnmarshalJSON(data []byte) error {
 // SummaryLine is the one line every surface shows: what is cloned, where it
 // lands, which branch the session continues on, and where git push goes.
 func (p *RawConversionPreview) SummaryLine() string {
-	panic("unported: mj-core/src/state/session_move.rs RawConversionPreview::summary_line")
+	push := p.FetchURL
+	if len(p.PushURLs) > 0 {
+		push = strings.Join(p.PushURLs, ", ")
+	}
+	branch := "a detached head"
+	if p.Branch != nil {
+		branch = *p.Branch
+	}
+	return fmt.Sprintf("Clone %s (default branch %s) into %s on branch %s; push to %s.",
+		p.FetchURL, p.DefaultBranch, p.Destination, branch, push)
 }
 
 // WarningLines is what a person needs to read before the checkout moves:
@@ -99,7 +112,34 @@ func (p *RawConversionPreview) SummaryLine() string {
 // Every surface renders these in its own warning style, so the wording
 // lives here rather than in each of the TUI, the CLI, and the browser.
 func (p *RawConversionPreview) WarningLines() []string {
-	panic("unported: mj-core/src/state/session_move.rs RawConversionPreview::warning_lines")
+	var lines []string
+	dirty := p.StagedFiles + p.UnstagedFiles + p.UntrackedFiles
+	if dirty > 0 {
+		noun := "files"
+		if dirty == 1 {
+			noun = "file"
+		}
+		lines = append(lines, fmt.Sprintf("%d staged, %d unstaged, and %d untracked %s (%s) will be copied into the container. "+
+			"Ignored files such as build output, .env, and node_modules will not.",
+			p.StagedFiles, p.UnstagedFiles, p.UntrackedFiles, noun, formatConversionBytes(p.UntrackedBytes)))
+	}
+	if p.UnpushedCommits > 0 {
+		noun, verb := "commits", "travel"
+		if p.UnpushedCommits == 1 {
+			noun, verb = "commit", "travels"
+		}
+		line := fmt.Sprintf("%d %s not on %s %s in the checkpoint.", p.UnpushedCommits, noun, p.FetchURL, verb)
+		if p.UnpushedCommits > 200 {
+			line += " That is a large history; consider pushing first."
+		}
+		lines = append(lines, line)
+	}
+	if p.HostCheckoutRetained {
+		lines = append(lines, fmt.Sprintf("%s stays on this machine and will no longer track this session. "+
+			"Edits made in the container do not come back automatically; "+
+			"push the branch or move the session back.", p.Checkout))
+	}
+	return lines
 }
 
 // formatConversionBytes is untracked size as a person reads it. Only KB and
@@ -431,13 +471,32 @@ func (o *MoveOperation) UnmarshalJSON(data []byte) error {
 // QueueCommandIDs is every command a retained Move queue can resubmit,
 // including quota continuation.
 func (o *MoveOperation) QueueCommandIDs(canonical *CanonicalSessionSnapshot) map[string]struct{} {
-	panic("unported: mj-core/src/state/session_move.rs MoveOperation::queue_command_ids")
+	ids := map[string]struct{}{}
+	for _, queued := range canonical.QueuedPrompts {
+		ids[queued.CommandID] = struct{}{}
+	}
+	if o.QuotaStopReason != nil {
+		ids[GeneratedPromptQuotaRetry.CommandID(o.OperationID)] = struct{}{}
+	}
+	return ids
 }
 
 // CaptureContainerSettings captures the two independently owned facts at
 // acceptance of each attempt.
 func (o *MoveOperation) CaptureContainerSettings(source *SessionRecord) {
-	panic("unported: mj-core/src/state/session_move.rs MoveOperation::capture_container_settings")
+	applied := AppliedContainerSettingsOf(source)
+	o.SourceResourceAllocation = applied.ResourceAllocation
+	o.SourceAdditionalMounts = append([]AdditionalMount{}, applied.AdditionalMounts...)
+	if o.Selection.ResourceAllocation == nil && !o.Selection.ClearResourceAllocation {
+		o.InheritedResourceAllocation = source.ResourceAllocation
+	} else {
+		o.InheritedResourceAllocation = nil
+	}
+	if o.Selection.AdditionalMounts == nil {
+		o.InheritedAdditionalMounts = slices.Clone(source.AdditionalMounts)
+	} else {
+		o.InheritedAdditionalMounts = nil
+	}
 }
 
 // IsResolved: explicit Resume resolves a cancelled Move by finishing its

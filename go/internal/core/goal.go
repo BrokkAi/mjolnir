@@ -7,10 +7,12 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/BrokkAi/acp-go/jsonvalue"
 	acp "github.com/BrokkAi/acp-go/schema"
 )
 
@@ -180,17 +182,75 @@ type GoalDecision struct {
 // initialize reply, or a goal snapshot in a session_info_update.
 //
 // An explicit null is returned as (nil, true).
-func GoalMeta(meta map[string]any) (any, bool) {
-	if jetbrains, ok := meta["jetbrains"].(map[string]any); ok {
-		if air, ok := jetbrains["air"].(map[string]any); ok {
-			if goal, ok := air["goal"]; ok {
-				return goal, true
+func GoalMeta(meta jsonvalue.Object) (any, bool) {
+	if jetbrains, ok := meta.Get("jetbrains"); ok {
+		if jetbrains, ok := jetbrains.(jsonvalue.Object); ok {
+			if air, ok := jetbrains.Get("air"); ok {
+				if air, ok := air.(jsonvalue.Object); ok {
+					if goal, ok := air.Get("goal"); ok {
+						return goal, true
+					}
+				}
 			}
 		}
 	}
 	// Read records written by older adapters; current adapters send only AIR.
-	goal, ok := meta["goal"]
-	return goal, ok
+	return meta.Get("goal")
+}
+
+// goalDecode is serde_json::from_value into out. A null decodes only into
+// an Option (a pointer out of a pointer); into a struct it fails as serde
+// fails.
+func goalDecode(value any, out any, nullable bool) error {
+	if value == nil && !nullable {
+		return errors.New("invalid type: null, expected a struct")
+	}
+	encoded, err := jsonvalue.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(encoded, out)
+}
+
+// goalRequireFields fails as serde fails when a required field is absent.
+func goalRequireFields(data []byte, fields ...string) error {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil {
+		return err
+	}
+	if members == nil {
+		return nil
+	}
+	for _, field := range fields {
+		if _, ok := members[field]; !ok {
+			return fmt.Errorf("missing field `%s`", field)
+		}
+	}
+	return nil
+}
+
+func (c *GoalCapability) UnmarshalJSON(data []byte) error {
+	if err := goalRequireFields(data, "version", "controlMethod", "actions"); err != nil {
+		return err
+	}
+	type plain GoalCapability
+	return json.Unmarshal(data, (*plain)(c))
+}
+
+func (e *GoalExecution) UnmarshalJSON(data []byte) error {
+	if err := goalRequireFields(data, "version", "status"); err != nil {
+		return err
+	}
+	type plain GoalExecution
+	return json.Unmarshal(data, (*plain)(e))
+}
+
+func (d *GoalDecision) UnmarshalJSON(data []byte) error {
+	if err := goalRequireFields(data, "goal", "resume"); err != nil {
+		return err
+	}
+	type plain GoalDecision
+	return json.Unmarshal(data, (*plain)(d))
 }
 
 type GoalState struct {
@@ -207,7 +267,22 @@ type GoalState struct {
 
 // GoalStateFromConfiguration is GoalState::from_configuration.
 func GoalStateFromConfiguration(configuration map[string]any) (GoalState, error) {
-	panic("unported: mj-core/src/goal.rs GoalState::from_configuration")
+	value, ok := configuration[ProjectionKey]
+	if !ok {
+		return GoalState{}, nil
+	}
+	if value == nil {
+		return GoalState{}, errors.New("decode projected goal state: invalid type: null, expected struct GoalState")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return GoalState{}, fmt.Errorf("decode projected goal state: %w", err)
+	}
+	var state GoalState
+	if err := json.Unmarshal(encoded, &state); err != nil {
+		return GoalState{}, fmt.Errorf("decode projected goal state: %w", err)
+	}
+	return state, nil
 }
 
 func (s *GoalState) Active() bool { return s.Snapshot != nil && s.Snapshot.Active() }
@@ -268,7 +343,108 @@ func (s *GoalState) Restart() {
 // Apply applies a session update: missing fields are unchanged; explicit
 // null clears a goal. The goal is read with GoalMeta.
 func (s *GoalState) Apply(update *acp.SessionUpdate) (bool, error) {
-	panic("unported: mj-core/src/goal.rs GoalState::apply")
+	if update.Kind != acp.SessionUpdateKindSessionInfoUpdate || update.SessionInfoUpdate == nil {
+		return false, nil
+	}
+	meta := update.SessionInfoUpdate.Meta
+	if meta == nil {
+		return false, nil
+	}
+	changed := false
+	if value, ok := meta.Get("mjGoalCapability"); ok {
+		var capability *GoalCapability
+		if err := goalDecode(value, &capability, true); err != nil {
+			return false, fmt.Errorf("decode goal capability: %w", err)
+		}
+		s.Capability = capability
+		changed = true
+	}
+	if goal, ok := GoalMeta(meta); ok {
+		wasActive := s.Active()
+		var snapshot *GoalSnapshot
+		if err := goalDecode(goal, &snapshot, true); err != nil {
+			return false, fmt.Errorf("decode ACP goal state: %w", err)
+		}
+		s.Snapshot = snapshot
+		// A later pause or replacement supersedes an unacknowledged resume.
+		if decision := s.Decision; decision != nil {
+			current := s.Snapshot
+			stillCurrent := current != nil && current.SameGoal(&decision.Goal) &&
+				(current.Status == "active" || current.Status == "paused")
+			laterPause := decision.Resume && current != nil && current.Status == "paused" &&
+				(wasActive || func() bool {
+					newer, ok := goalDetailI64(current.Details, "updatedAt")
+					older, okOld := goalDetailI64(decision.Goal.Details, "updatedAt")
+					return ok && okOld && newer > older
+				}())
+			if !stillCurrent || laterPause {
+				s.Decision = nil
+			}
+		}
+		s.Known = true
+		changed = true
+	}
+	if value, ok := meta.Get("execution"); ok {
+		var execution GoalExecution
+		if err := goalDecode(value, &execution, false); err != nil {
+			return false, fmt.Errorf("decode ACP execution state: %w", err)
+		}
+		if execution.Version != 1 || (execution.Status != "running" && execution.Status != "idle") {
+			return false, errors.New("unsupported ACP execution state")
+		}
+		if s.Execution != nil && s.Execution.Revision != nil && execution.Revision != nil &&
+			*execution.Revision < *s.Execution.Revision {
+			return changed, nil
+		}
+		// Ignore an old completion that arrived after a newer native turn.
+		var currentTurn *string
+		if s.Execution != nil {
+			currentTurn = s.Execution.TurnID
+		}
+		if execution.Status == "running" || !s.Running() || currentTurn == nil ||
+			execution.TurnID == nil || *currentTurn == *execution.TurnID {
+			s.Execution = &execution
+		}
+		changed = true
+	}
+	if value, ok := meta.Get("mjGoalResumePending"); ok {
+		if request, ok := value.(string); ok {
+			s.PendingResume = &request
+			changed = true
+		}
+	}
+	if value, ok := meta.Get("mjGoalResumeAnswered"); ok {
+		if request, ok := value.(string); ok {
+			s.AnsweredResume = &request
+			s.PendingResume = nil
+			changed = true
+		}
+	}
+	if value, ok := meta.Get("mjGoalDecision"); ok {
+		var decision *GoalDecision
+		if err := goalDecode(value, &decision, true); err != nil {
+			return false, fmt.Errorf("decode goal decision: %w", err)
+		}
+		s.Decision = decision
+		changed = true
+	}
+	return changed, nil
+}
+
+// goalDetailI64 is details.get(key).and_then(Value::as_i64).
+func goalDetailI64(details map[string]any, key string) (int64, bool) {
+	switch value := details[key].(type) {
+	case json.Number:
+		number, err := value.Int64()
+		return number, err == nil
+	case int64:
+		return value, true
+	case uint64:
+		if value <= 1<<63-1 {
+			return int64(value), true
+		}
+	}
+	return 0, false
 }
 
 // GoalJournal persists a recovery decision before sending its native
