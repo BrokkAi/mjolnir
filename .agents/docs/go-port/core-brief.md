@@ -119,3 +119,34 @@ specification. Go test names are the Rust names in PascalCase with a
 - Run `gofmt -w` on your files.
 - Commit your files in your worktree when done (one commit; message
   "go port: <modules>") and report the commit.
+
+## Decisions for the bodies phase (2026-11-20)
+
+The declarations are merged and compile (commit 823be3abb). About 970
+function bodies are `panic("unported: ...")`. These rules settle what the
+declaration agents left open.
+
+- Libraries: zstd `github.com/klauspost/compress/zstd`; Windows APIs
+  `golang.org/x/sys/windows`; YAML `go.yaml.in/yaml/v3`; JSONC
+  `github.com/tailscale/hujson`; HuggingFace tokenizer JSON
+  `github.com/sugarme/tokenizer` (only the `github-history` code uses it).
+  Unified diffs (Rust `similar`): use an established Go diff library only if
+  its output matches the Rust tests byte for byte; otherwise write the Myers
+  diff in the module, which is small.
+- toml_edit (format-preserving edits in config/document.rs): parse with
+  `github.com/pelletier/go-toml/v2/unstable` and splice the edits into the
+  original text by byte range, so comments and layout survive as they do
+  in Rust. Plain TOML decoding and encoding: `github.com/BurntSushi/toml`
+  or go-toml/v2, whichever reproduces the Rust output; the config group
+  decides and uses one.
+- Thread-local state in Rust (the config secret resolver and the
+  sources-only flag) becomes an explicit value passed through decoding, not
+  a process-wide variable.
+- Keep each group's declared conventions (sealed interface or kind struct,
+  decoder names). Do not rename another group's API. Shared helpers that
+  exist in several copies stay as they are until the final cleanup.
+- JSON: nil Go slices and maps must serialize as Rust does (`[]`/`{}` for a
+  present empty Vec/map, absent or `null` exactly as serde writes it), and
+  required fields must be required, exactly as serde decodes.
+- Fields holding a sealed interface must decode through the owner's
+  decoder; plain encoding/json cannot fill an interface.
