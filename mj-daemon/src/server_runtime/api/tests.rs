@@ -2982,10 +2982,16 @@ impl ParkingExports {
 }
 
 impl ExportRuntime for ParkingExports {
-    fn child_awaits_review(&self, _: String) -> BoxFuture<'_, bool> {
+    fn child_review(&self, _: String) -> BoxFuture<'_, crate::daemon::ChildReview> {
         Box::pin(async {
-            self.awaiting_review
+            if self
+                .awaiting_review
                 .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                crate::daemon::ChildReview::Open
+            } else {
+                crate::daemon::ChildReview::Closed
+            }
         })
     }
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {

@@ -553,7 +553,7 @@ async fn complete_child(
     // before anything is decided about the ended turn, and before taking the
     // handoff admission: during startup the host defers the answer until its
     // interrupted-review sweep ends, and a handoff must not wait on reviews.
-    let review_open = state.child_awaits_review(&child_id).await;
+    let review_open = state.child_review(&child_id).await.holds();
     // A handback the daemon already executed is no longer the queue's: its
     // durable result says what happened (a rejected one recorded no report),
     // even while the worker still lists it until the result is delivered.
