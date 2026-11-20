@@ -8,3 +8,7 @@
 // The crate's `github-history` feature has no Go counterpart: the history
 // evidence functions it gates are always built.
 package transcript
+
+// ToolItemID is the stable transcript item identity for a raw ACP tool call
+// ID.
+func ToolItemID(callID string) string { return "tool:" + callID }
