@@ -5,6 +5,7 @@ Writes audit.json in each run directory and prints a summary. A hit is not a
 verdict: every hit is read by hand before a run is accepted or excluded.
 """
 import ast
+import itertools
 import json
 import os
 import pathlib
@@ -443,13 +444,295 @@ def git_hits(args, own_workspace, commits, single_commit):
                 yield "git-revision-outside-pin", operand
 
 
-# sed substitutions are data unless their flags can run a command or write a
-# file. Restrict recognition to a single substitution or numeric print ranges.
-SED_PRINT = re.compile(r"\d+(?:,\d+)?p(?:;\s*\d+(?:,\d+)?p)*;?")
-SED_SUBSTITUTE = re.compile(
-    r"s(?P<delim>[/|#@])(?:\\[^\n]|(?![\\\n]|(?P=delim)).)*(?P=delim)"
-    r"(?:\\[^\n]|(?![\\\n]|(?P=delim)).)*(?P=delim)[giIp0-9]*"
+AWK = {"awk", "gawk", "mawk"}
+FILTER_PROGRAM_FILES = {"-f", "--file"}
+FILTER_PROGRAM_TEXT = {"-e", "--expression", "--source", "-ne", "-pe"}
+FILTER_VALUE_OPTIONS = {"-F", "--field-separator", "-v", "--assign"}
+FILTER_FLAGS = {"-n", "-E", "-r", "-i", "--quiet", "--silent", "--regexp-extended", "--in-place"}
+FILTER_TOKEN = re.compile(
+    r"""(?P<quote>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)"""
+    r"|(?P<comment>#[^\n]*)|\w+|\|[|&]|&&|>>|[!<>=]=|!~|[^ \t\r]", re.S
 )
+FILTER_REGEX = re.compile(r"/(?:\\[^\n]|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n])*/")
+REGEX_PRECEDERS = {"", "\n", ";", "{", "}", "(", "[", "=", "!", "~", "!~", "&&", "||", ",", "?", ":", "if"}
+
+
+def filter_arguments(program, args):
+    sources, paths, source_paths = [], [], []
+    options = True
+    operands = iter(args)
+    for arg in operands:
+        if options and arg == "--":
+            options = False
+            continue
+        if options and arg.startswith("-") and arg != "-":
+            option, equals, value = arg.partition("=")
+            if option in FILTER_PROGRAM_FILES | FILTER_PROGRAM_TEXT or program in AWK and option in FILTER_VALUE_OPTIONS:
+                value = value if equals else next(operands, None)
+                if value is None:
+                    raise InspectionRequired(f"missing value for {program} {option}")
+                if option in FILTER_PROGRAM_FILES:
+                    source_paths.append(value)
+                elif option in FILTER_PROGRAM_TEXT:
+                    sources.append(value)
+            elif arg.startswith(("-e", "-ne", "-pe")) and len(arg) > 2:
+                prefix = "-e" if arg.startswith("-e") else arg[:3]
+                if len(arg) == len(prefix):
+                    raise InspectionRequired(f"missing value for {program} {prefix}")
+                sources.append(arg[len(prefix):])
+            elif arg.startswith("-f") and len(arg) > 2:
+                source_paths.append(arg[2:])
+            elif program in AWK and arg.startswith(("-F", "-v")) and len(arg) > 2:
+                continue
+            elif program == "sed" and (option in FILTER_FLAGS or re.fullmatch(r"-[niEr]+", option)
+                                      or arg.startswith("-i.")):
+                continue
+            else:
+                raise InspectionRequired(f"unsupported {program} option {option}")
+        elif not (sources or source_paths) and program != "perl":
+            sources.append(arg)
+        else:
+            paths.append(arg)
+    if not (sources or source_paths):
+        raise InspectionRequired(f"missing {program} program")
+    return sources, source_paths, paths
+
+
+def filter_tokens(source, *, perl=False):
+    if perl and re.search(r"\(\?\??\{", source):
+        raise InspectionRequired("perl regular expression can execute code")
+    tokens = []
+    offset = 0
+    while offset < len(source):
+        if source[offset] == "/" and (not tokens or tokens[-1] in REGEX_PRECEDERS):
+            regex = FILTER_REGEX.match(source, offset)
+            if regex:
+                tokens.append(regex[0])
+                offset = regex.end()
+                continue
+        if perl and (not tokens or tokens[-1] not in {"$", "@", "%"}) and (
+            operator := re.match(r"(tr|qq|qw|qx|qr|[mysq])(?=[^\w\s])", source[offset:])
+        ):
+            name = operator[1]
+            field_start = offset + operator.end()
+            if name == "qx" or source[field_start] != "/":
+                raise InspectionRequired(f"unsupported perl quote operator {name}")
+            tail = sed_field(source[field_start + 1:], "/")
+            if name in {"s", "y", "tr"}:
+                tail = sed_field(tail, "/")
+            flags = re.match(r"[a-zA-Z]*", tail)[0]
+            if name == "s" and "e" in flags:
+                raise InspectionRequired("perl substitution can execute code")
+            tokens.append("/")  # Pattern and replacement text are data.
+            offset = len(source) - len(tail) + len(flags)
+            continue
+        match = FILTER_TOKEN.match(source, offset)
+        if match:
+            if not match["comment"]:
+                tokens.append(match[0])
+            offset = match.end()
+        else:
+            offset += 1
+    return tokens
+
+
+def filter_literal(token, *, perl=False):
+    if len(token) < 2 or token[0] not in {'"', "'"} or token[-1] != token[0]:
+        return None
+    value = token[1:-1]
+    if "\\" in value or perl and token[0] == '"' and re.search(r"[$@]", value):
+        return None
+    return value
+
+
+def filter_effect(kind, argument, program):
+    if argument is None:
+        raise InspectionRequired(f"computed {program} {kind} operand")
+    return kind, argument
+
+
+def awk_effects(source):
+    tokens = filter_tokens(source)
+    for index, token in enumerate(tokens):
+        if token not in {"@", "ARGV", "system", "|", "|&", "print", "printf", "getline"}:
+            continue
+        after = tokens[index + 1:]
+        before = tokens[index - 1] if index else ""
+        if token == "@" or token == "ARGV":
+            raise InspectionRequired("awk can load a program or change its input files")
+        if token == "system":
+            literal = filter_literal(after[1]) if len(after) >= 3 and after[0] == "(" and after[2] == ")" else None
+            yield filter_effect("command", literal, "awk system")
+        elif token in {"|", "|&"}:
+            if after[:1] == ["getline"]:
+                literal = filter_literal(before)
+                if index >= 2 and tokens[index - 2] not in {"{", ";", "\n", "}", "("}:
+                    literal = None
+            else:
+                literal = filter_literal(after[0]) if after and after[1:2] in ([], [";"], ["\n"], ["}"]) else None
+            yield filter_effect("command", literal, "awk pipe")
+        elif token in {"print", "printf", "getline"}:
+            depth = 0
+            operators = {"<"} if token == "getline" else {">", ">>"}
+            for offset, operand in enumerate(after):
+                if depth == 0 and operand in {";", "\n", "}"}:
+                    break
+                if depth == 0 and operand in operators:
+                    tail = after[offset + 1:]
+                    terminators = {";", "\n", "}"}
+                    if token == "getline":
+                        terminators.add(")")
+                    literal = filter_literal(tail[0]) if tail and (len(tail) == 1 or tail[1] in terminators) else None
+                    yield filter_effect("read" if token == "getline" else "write", literal, f"awk {token}")
+                    break
+                depth += (operand in {"(", "["}) - (operand in {")", "]"})
+
+
+def sed_field(source, delimiter):
+    field = re.match(rf"(?:\\[\s\S]|[^{re.escape(delimiter)}\\\n])*{re.escape(delimiter)}", source)
+    if field is None:
+        raise InspectionRequired("unterminated sed expression")
+    return source[field.end():]
+
+
+def sed_effects(source):
+    address = r"(?:[+~]?\d+(?:~\d+)?|\$)"
+    while source := source.lstrip(" \t\r\n;"):
+        if source.startswith("#"):
+            source = source.partition("\n")[2]
+            continue
+        # Strip addresses before examining the command letter. Escaped regex
+        # delimiters are consumed by the same scanner as substitutions.
+        for _ in range(2):
+            if source.startswith("/"):
+                source = sed_field(source[1:], "/")
+            elif match := re.match(address, source):
+                source = source[match.end():]
+            else:
+                break
+            source = source.lstrip(" \t")
+            if not source.startswith(","):
+                break
+            source = source[1:].lstrip(" \t")
+        source = source.lstrip("! \t")
+        if not source:
+            raise InspectionRequired("sed address missing its command")
+        command, source = source[0], source[1:]
+        if command in "{}":
+            continue
+        if command in "sy":
+            if not source or source[0] in "\\\n":
+                raise InspectionRequired("unsupported sed delimiter")
+            delimiter, source = source[0], source[1:]
+            source = sed_field(sed_field(source, delimiter), delimiter)
+            flags = re.match(r"[gipImM0-9 \t]*", source)[0] if command == "s" else ""
+            source = source[len(flags):]
+            if command == "s" and source.startswith("e"):
+                raise InspectionRequired("sed replacement computes a command")
+            if command == "s" and source.startswith("w"):
+                path, _, source = source[1:].partition("\n")
+                yield filter_effect("write", path.strip() or None, "sed write")
+            elif source and source[0] not in ";\n} \t\r":
+                raise InspectionRequired("unsupported sed substitution flags")
+        elif command in "eRrWw":
+            argument, _, source = source.partition("\n")
+            effect = "command" if command == "e" else "read" if command in "rR" else "write"
+            yield filter_effect(effect, argument.strip() or None, f"sed {command}")
+        elif command in "acibBtT:":
+            # Text arguments and labels occupy the rest of this command.
+            if command in "aci" and re.search(r"\\\n", source):
+                raise InspectionRequired("multiline sed text command")
+            separator = r"\n" if command in "aci" else r"[;\n]"
+            if end := re.search(separator, source):
+                source = source[end.end():]
+            else:
+                source = ""
+        elif command in "dDpPxgGhHnNl=zqQ":
+            if command in "lqQ":
+                source = re.sub(r"^[ \t]*\d+", "", source)
+            if source and source.lstrip(" \t")[:1] not in {"", ";", "\n", "}"}:
+                raise InspectionRequired(f"unsupported arguments to sed {command}")
+        else:
+            raise InspectionRequired(f"unsupported sed command {command}")
+
+
+def perl_open_operand(value):
+    value = value.strip()
+    if value.startswith("|") or value.endswith("|"):
+        return "command", value.strip("|").strip()
+    mode = re.match(r"^(?:[+<>]+)\s*", value)
+    if mode:
+        return ("write" if ">" in mode[0] or "+" in mode[0] else "read"), value[mode.end():]
+    return "read", value
+
+
+def perl_effects(source):
+    tokens = filter_tokens(source, perl=True)
+    for index, token in enumerate(tokens):
+        if token.startswith("`"):
+            command = token[1:-1]
+            yield filter_effect("command", command if not re.search(r"[$@\\]", command) else None, "perl backticks")
+        elif token in {"system", "exec", "open", "sysopen"}:
+            after = tokens[index + 1:]
+            if after[:1] == ["("]:
+                after = after[1:]
+            args = []
+            while after and after[0] not in {")", ";", "\n", "}"}:
+                args.append(after.pop(0))
+            if token in {"system", "exec"}:
+                parts = [filter_literal(arg, perl=True) for arg in args if arg != ","]
+                if not parts or any(part is None for part in parts):
+                    raise InspectionRequired(f"computed perl {token} operand")
+                yield "command", parts if len(parts) > 1 else parts[0]
+                continue
+            # The handle may be a variable or bareword. Every later operand
+            # must be a literal to determine a filename or pipe command.
+            if "," not in args:
+                raise InspectionRequired(f"implicit perl {token} operand")
+            args = args[args.index(",") + 1:]
+            parts = [filter_literal(arg, perl=True) for arg in args if arg != ","]
+            if any(part is None for part in parts[:2 if token == "open" else 1]) or not parts:
+                raise InspectionRequired(f"computed perl {token} operand")
+            if len(parts) == 1 and token == "open":
+                yield perl_open_operand(parts[0])
+            elif token == "open" and "|" in parts[0]:
+                if any(part is None for part in parts[1:]):
+                    raise InspectionRequired("computed perl open command")
+                yield "command", parts[1:] if len(parts) > 2 else parts[1]
+            elif token == "open":
+                yield ("read" if parts[0] == "<" else "write"), parts[1]
+            else:
+                yield "write", parts[0]  # sysopen carries numeric or symbolic flags.
+        elif token in {"eval", "qx", "require", "do", "readpipe", "glob", "ARGV",
+                       "unlink", "rename", "link", "symlink", "chdir", "opendir", "truncate"}:
+            raise InspectionRequired(f"unsupported perl {token} operation")
+
+
+def text_filter_hits(program, args, own_workspace, commits, single_commit, scripts, cwd):
+    sources, program_files, paths = filter_arguments(program, args)
+    for path in program_files:
+        yield from path_hits(path, own_workspace)
+    effects = awk_effects if program in AWK else sed_effects if program == "sed" else perl_effects
+    operations = (effect for source in sources for effect in effects(source))
+    # Perl -n/-p uses the diamond operator. Its argv accepts the same pipe
+    # and mode syntax as two-argument open.
+    for kind, argument in itertools.chain(
+        (perl_open_operand(path) if program == "perl" else ("read", path)
+         for path in paths if program not in AWK or not re.fullmatch(r"[a-zA-Z_]\w*=.*", path, re.S)),
+        operations,
+    ):
+        if kind == "command":
+            if not argument:
+                raise InspectionRequired(f"empty {program} shell command")
+            if scripts is not None:
+                scripts.clear()
+            yield from subprocess_hits(argument, own_workspace, commits, single_commit)
+        else:
+            yield from path_hits(argument, own_workspace)
+            if kind == "write" and scripts is not None:
+                forget_script(scripts, argument, cwd)
+    if program_files:
+        raise InspectionRequired(f"{program} program file contents are opaque")
 
 
 PYTHON = {"python", "python2", "python3"}
@@ -601,6 +884,8 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
     elif program in {"bash", "sh"} and len(args) == 2 and args[0] in {"-c", "-lc"}:
         yield from shell_hits(args[1], own_workspace, commits, single_commit, scripts=scripts, cwd=cwd, home=home,
                               running_scripts=running_scripts)
+    elif program in AWK | {"sed"} or program == "perl" and args and args[0].startswith(("-ne", "-pe")):
+        yield from text_filter_hits(program, args, own_workspace, commits, single_commit, scripts, cwd)
     elif program in INLINE_OPTIONS and len(inline) >= 2 and inline[0] == INLINE_OPTIONS[program]:
         for arg in inline[2:]:
             yield from source_literal_hits(arg, own_workspace)
@@ -613,15 +898,6 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
             yield from path_hits(path, own_workspace)
     elif program == "find":
         for path in find_paths(args):
-            yield from path_hits(path, own_workspace)
-    elif program == "sed":
-        while args and args[0] in {"-n", "-i", "-e", "--in-place", "--"}:
-            args = args[1:]
-        if not args or not (SED_PRINT.fullmatch(args[0]) or SED_SUBSTITUTE.fullmatch(args[0])):
-            raise InspectionRequired("unsupported sed script")
-        for path in args[1:]:
-            if path.startswith("-") and path != "-":
-                raise InspectionRequired("additional sed options after the script")
             yield from path_hits(path, own_workspace)
     elif program in {"echo", "printf", "true", "false", "tr"}:
         if program == "printf" and args and args[0].startswith("-v"):
@@ -688,7 +964,8 @@ def record_script_write(scripts, words, redirections, source, cwd):
         scripts.clear()  # A destination can name a directory or be a symlink.
     elif program == "sed" or program == "sort":
         # Known in-place options, and any options whose destination form is opaque.
-        if any(word.startswith(("-i", "--in-place", "-o", "--output")) for word in words[1:]):
+        if any(word.startswith(("-i", "--in-place", "-o", "--output")) or re.fullmatch(r"-[nEr]+i[niEr]*", word)
+               for word in words[1:]):
             scripts.clear()
     elif program == "tee":
         for path in words[1:]:

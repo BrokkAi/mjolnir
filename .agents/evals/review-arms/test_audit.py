@@ -241,3 +241,17 @@ def test_recursively_invoked_script_requires_inspection(tmp_path):
     ])
     assert not report["passed"]
     assert "needs-inspection" in {hit["kind"] for hit in report["hits"]}
+
+
+# Hard-won: b9ceb96: live engine query voided for awk line slice
+def test_live_engine_awk_line_slice_is_a_read(tmp_path):
+    command = "awk 'NR>=102 && NR<=110' src/hel_database/events.rs"
+    report = audit_call(tmp_path, {"kind": "execute", "rawInput": {"command": command}})
+    assert report["passed"], report["hits"]
+
+
+def test_awk_system_call_still_flags_network_access(tmp_path):
+    command = """awk 'BEGIN { system("curl https://example.invalid") }' src/hel_database/events.rs"""
+    report = audit_call(tmp_path, {"kind": "execute", "rawInput": {"command": command}})
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"github-or-web"}
