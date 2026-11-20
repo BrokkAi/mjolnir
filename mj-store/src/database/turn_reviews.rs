@@ -66,7 +66,10 @@ pub fn active_review_groups() -> Result<Vec<(String, TurnReviewState)>> {
 pub(super) fn active_review_groups_in(path: &Path) -> Result<Vec<(String, TurnReviewState)>> {
     let connection = open_reader(path)?;
     let mut statement = connection.prepare(
-        "SELECT session_id FROM turn_review_state WHERE active_group IS NOT NULL ORDER BY session_id",
+        "SELECT session_id FROM turn_review_state
+             WHERE EXISTS(SELECT 1 FROM json_each(open_reviews)
+                          WHERE json_extract(value, '$.group') IS NOT NULL)
+             ORDER BY session_id",
     )?;
     let ids = statement
         .query_map([], |row| row.get::<_, String>(0))?
@@ -78,29 +81,77 @@ pub(super) fn active_review_groups_in(path: &Path) -> Result<Vec<(String, TurnRe
 
 pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<TurnReviewState> {
     let connection = open_reader(path)?;
-    let row = connection.query_row(
-        "SELECT active, push_findings, active_group, declined_findings FROM turn_review_state WHERE session_id = ?1", [session_id],
-        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?))
-    ).optional()?;
-    let Some((active, push_findings, active_group, declined_findings)) = row else {
+    let row = connection
+        .query_row(
+            "SELECT open_reviews, push_findings, declined_findings FROM turn_review_state WHERE session_id = ?1",
+            [session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((open_reviews, push_findings, declined_findings)) = row else {
         return Ok(TurnReviewState::default());
     };
+    let open = single(
+        serde_json::from_str::<Vec<StoredOpenReview>>(&open_reviews)
+            .context("parse stored open reviews")?,
+        "open review",
+    )?;
+    let push_findings = push_findings
+        .map(|value| serde_json::from_str::<Vec<PushFindingsRecord>>(&value))
+        .transpose()
+        .context("parse stored push findings")?
+        .unwrap_or_default();
     Ok(TurnReviewState {
-        active,
-        push_findings: push_findings
-            .map(|v| serde_json::from_str(&v))
-            .transpose()
-            .context("parse stored push findings")?,
-        active_group: active_group
-            .map(|v| serde_json::from_str(&v))
-            .transpose()
-            .context("parse stored active review group")?,
+        active: open.as_ref().and_then(|open| open.active.clone()),
+        active_group: open.and_then(|open| open.group),
+        push_findings: single(push_findings, "findings record")?,
         declined_findings: declined_findings
             .map(|v| serde_json::from_str(&v))
             .transpose()
             .context("parse stored declined findings")?
             .unwrap_or_default(),
     })
+}
+
+/// One open review as the store keeps it in `turn_review_state.open_reviews`:
+/// the marker of a review that was running when the daemon stopped, and its
+/// reviewer group once it has one.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredOpenReview {
+    #[serde(default)]
+    active: Option<String>,
+    #[serde(default)]
+    group: Option<ActiveReviewGroup>,
+}
+
+/// The stored lists hold one review per session until the review host runs
+/// several; a longer list was written by a newer build, which the schema
+/// floor keeps out, so it is refused rather than truncated.
+fn single<T>(mut items: Vec<T>, what: &str) -> Result<Option<T>> {
+    anyhow::ensure!(
+        items.len() <= 1,
+        "the stored review state holds {} of {what}s; this build runs one review per session",
+        items.len()
+    );
+    Ok(items.pop())
+}
+
+/// The stored `open_reviews` list for `state`.
+fn stored_open_reviews(state: &TurnReviewState) -> Result<String> {
+    let open: Vec<StoredOpenReview> = (state.active.is_some() || state.active_group.is_some())
+        .then(|| StoredOpenReview {
+            active: state.active.clone(),
+            group: state.active_group.clone(),
+        })
+        .into_iter()
+        .collect();
+    Ok(serde_json::to_string(&open)?)
 }
 
 /// Records review state and atomically queues newly settled findings while
@@ -240,16 +291,20 @@ fn previous_active_group(
 ) -> Result<Option<ActiveReviewGroup>> {
     let previous: Option<String> = connection
         .query_row(
-            "SELECT active_group FROM turn_review_state WHERE session_id=?1",
+            "SELECT open_reviews FROM turn_review_state WHERE session_id=?1",
             [session_id],
             |row| row.get(0),
         )
-        .optional()?
-        .flatten();
-    previous
-        .map(|json| serde_json::from_str(&json))
-        .transpose()
-        .context("parse previous active review group")
+        .optional()?;
+    let Some(previous) = previous else {
+        return Ok(None);
+    };
+    let open = single(
+        serde_json::from_str::<Vec<StoredOpenReview>>(&previous)
+            .context("parse previous open reviews")?,
+        "open review",
+    )?;
+    Ok(open.and_then(|open| open.group))
 }
 
 /// Keeps the durable per-role report in step with review state.
@@ -550,18 +605,17 @@ fn save_turn_review_state_with(
 ) -> Result<()> {
     connection.execute(
         "INSERT INTO turn_review_state(
-             session_id, baselines, reviewed_through_ordinal, active,
-             pending_forward, child_session_id, push_findings, active_group, pending_followup, forward_attempts,
+             session_id, baselines, reviewed_through_ordinal, open_reviews,
+             pending_forward, child_session_id, push_findings, pending_followup, forward_attempts,
              declined_findings
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(session_id) DO UPDATE SET
              baselines = excluded.baselines,
              reviewed_through_ordinal = excluded.reviewed_through_ordinal,
-             active = excluded.active,
+             open_reviews = excluded.open_reviews,
              pending_forward = excluded.pending_forward,
              child_session_id = excluded.child_session_id,
              push_findings = excluded.push_findings,
-             active_group = excluded.active_group,
              pending_followup = 0,
              forward_attempts = excluded.forward_attempts,
              declined_findings = excluded.declined_findings",
@@ -569,18 +623,13 @@ fn save_turn_review_state_with(
             session_id,
             "{}",
             0,
-            state.active,
+            stored_open_reviews(state)?,
             Option::<String>::None,
             Option::<String>::None,
             state
                 .push_findings
                 .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?,
-            state
-                .active_group
-                .as_ref()
-                .map(serde_json::to_string)
+                .map(|record| serde_json::to_string(&[record]))
                 .transpose()?,
             0,
             0,
@@ -607,8 +656,9 @@ pub(super) fn clear_interrupted_turn_reviews_in(path: &Path) -> Result<Vec<Strin
     let interrupted = {
         let mut statement = connection.prepare(
             "SELECT session_id FROM turn_review_state
-                 WHERE active_group IS NULL
-                   AND (active IS NOT NULL OR pending_forward IS NOT NULL)",
+                 WHERE pending_forward IS NOT NULL
+                    OR EXISTS(SELECT 1 FROM json_each(open_reviews)
+                              WHERE json_extract(value, '$.group') IS NULL)",
         )?;
         let mut rows = statement.query([])?;
         let mut interrupted = Vec::new();
@@ -618,8 +668,11 @@ pub(super) fn clear_interrupted_turn_reviews_in(path: &Path) -> Result<Vec<Strin
         interrupted
     };
     connection.execute(
-        "UPDATE turn_review_state SET active = NULL
-         WHERE active IS NOT NULL AND active_group IS NULL",
+        "UPDATE turn_review_state
+             SET open_reviews = (SELECT json_group_array(json(value)) FROM json_each(open_reviews)
+                                 WHERE json_extract(value, '$.group') IS NOT NULL)
+             WHERE EXISTS(SELECT 1 FROM json_each(open_reviews)
+                          WHERE json_extract(value, '$.group') IS NULL)",
         [],
     )?;
     Ok(interrupted)
