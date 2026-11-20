@@ -41,7 +41,7 @@ To see it working:
 - [x] (2026-11-20 16:08Z) Milestone 5: five focused test filters passed one test each, and all 11 touched Rust crates passed Clippy with all targets and warnings denied.
 - [x] (2026-11-20) Integrated Milestones 1-5 on local master; the two `maintain` halves are one verb (reconcile when `--keep-image` is given, always trim).
 - [x] (2026-11-20 18:10Z) Milestone 6: live EC2 validation and measurements; four live-only defects fixed; tool cache not built (see Decision Log and Outcomes).
-- [ ] Integrated review, commit, push; update #1495; close it.
+- [x] (2026-11-20 18:40Z) Integrated review (six rounds; declined findings recorded), merged upstream, pushed 819cec481, updated and closed #1495.
 
 ## Surprises & Discoveries
 
