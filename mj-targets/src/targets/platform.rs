@@ -49,6 +49,63 @@ pub fn platform_probe(locator: &TargetLocator) -> CommandSpec {
     .purpose("detect target platform")
 }
 
+/// OCI platform of a container target, before its container exists.
+pub fn session_image_platform(
+    template: &mj_core::config::TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Result<String> {
+    let (host, container) = template
+        .image_host()
+        .context("image operation requires a container target")?;
+    let architecture = if let Some(platform) = &container.platform {
+        platform
+            .split('/')
+            .find_map(|part| normalize_architecture(part).ok())
+            .context("unsupported container platform")?
+    } else if matches!(
+        host,
+        ImageHost::AppleContainer | ImageHost::SshAppleContainer(_)
+    ) {
+        "aarch64"
+    } else {
+        // The engine owns its native architecture, including Docker Desktop
+        // on a Windows daemon host where uname is not available.
+        let args = match host.engine() {
+            "podman" => vec![
+                "podman".into(),
+                "info".into(),
+                "--format".into(),
+                "{{.Host.Arch}}".into(),
+            ],
+            "docker" => vec![
+                "docker".into(),
+                "info".into(),
+                "--format".into(),
+                "{{.Architecture}}".into(),
+            ],
+            _ => vec!["uname".into(), "-sm".into()], // Nitro hosts run Linux.
+        };
+        let output = crate::command_checks::execute_checked(
+            executor,
+            host.command(args, "detect image platform".into()),
+        )?;
+        let output = std::str::from_utf8(&output.stdout)?;
+        if matches!(host, ImageHost::SshNitro(_)) {
+            TargetPlatform::parse(output)?.architecture
+        } else {
+            normalize_architecture(output.trim())?
+        }
+    };
+    Ok(format!(
+        "linux/{}",
+        match architecture {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            _ => unreachable!(),
+        }
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

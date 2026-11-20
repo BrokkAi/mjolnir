@@ -618,7 +618,7 @@ pub enum ImageRefreshReport {
 /// ones that track a moving tag current, away from any session launch.
 ///
 /// The first pass runs shortly after the daemon starts, which is what spares
-/// the person's first session a multi-gigabyte download. `plan` is called on
+/// the person's first session a multi-gigabyte download. Config is read on
 /// every tick rather than once, so a config reload changes what gets
 /// downloaded without a daemon restart. Hosts refresh concurrently; each host
 /// runs its own commands in order.
@@ -626,7 +626,7 @@ pub enum ImageRefreshReport {
 /// `report` is how the daemon speaks: it is called from the blocking download
 /// threads as well as from this task, so it must be cheap and must not block.
 pub fn spawn_image_refresher(
-    plan: impl Fn() -> Vec<ImageRefresh> + Send + 'static,
+    config: impl Fn() -> mj_core::config::Config + Send + 'static,
     report: impl Fn(ImageRefreshReport) + Send + Sync + 'static,
     apple_container_settled: tokio_util::sync::CancellationToken,
     cancellation: tokio_util::sync::CancellationToken,
@@ -651,7 +651,7 @@ pub fn spawn_image_refresher(
                 _ = cancellation.cancelled() => return,
                 _ = interval.tick() => {
                     refresh_images(
-                        plan(),
+                        config(),
                         &report,
                         &mut last_failures,
                         &apple_container_settled,
@@ -743,7 +743,7 @@ pub(super) fn refresh_one_host(
         if !running {
             return Ok(None);
         }
-        refresh_host_image(&refresh, executor, report).map(Some)
+        refresh_prepared_host_image(&refresh, executor, report).map(Some)
     });
     let error = match outcome {
         Ok(Some(_)) => None,
@@ -779,42 +779,108 @@ pub(super) fn refresh_one_host(
     Some((host, refresh.image, error))
 }
 
+/// Finish the host's pull batch before reconciling the Nitro tag store. A
+/// failed or cancelled pull leaves all existing references in place.
+pub(super) fn refresh_host_images(
+    host: &ImageHost,
+    plan: mj_controller::targets::ImageRefreshPlan,
+    executor: &impl CommandExecutor,
+    report: &dyn Fn(ImageRefreshReport),
+) -> Vec<(String, String, Option<String>)> {
+    let complete = plan.pulls.len();
+    let results: Vec<_> = plan
+        .pulls
+        .into_iter()
+        .take_while(|_| !executor.cancellation_requested())
+        .filter_map(|refresh| refresh_one_host(refresh, executor, report))
+        .collect();
+    if matches!(host, ImageHost::SshNitro(_))
+        && results.len() == complete
+        && results.iter().all(|(_, _, failure)| failure.is_none())
+        && !executor.cancellation_requested()
+    {
+        let mut args = vec![host.engine().into(), "maintain".into()];
+        for image in plan.keep_images {
+            args.extend(["--keep-image".into(), image]);
+        }
+        let command = host.command(args, "reconcile Nitro sandbox images".into());
+        if let Err(error) = run_refresh_command(&command, executor)
+            && !executor.cancellation_requested()
+        {
+            tracing::warn!(
+                host = host.label(),
+                error = format!("{error:#}"),
+                "could not reconcile Nitro sandbox images"
+            );
+        }
+    }
+    results
+}
+
 pub(super) async fn refresh_images(
-    plan: Vec<ImageRefresh>,
+    config: mj_core::config::Config,
     report: &Arc<dyn Fn(ImageRefreshReport) + Send + Sync>,
     last_failures: &mut BTreeMap<String, String>,
     apple_container_settled: &tokio_util::sync::CancellationToken,
     cancellation: &tokio_util::sync::CancellationToken,
 ) {
-    if plan.is_empty() {
-        return;
-    }
     // Pulls are restartable preparation. Shutdown cancels their subprocesses;
     // the next daemon discovers any image still missing or out of date.
-    // One flag for every host, so quitting kills the pulls in flight instead of
-    // waiting out a multi-gigabyte download.
     let cancelled = Arc::new(AtomicBool::new(false));
     let mut hosts = tokio::task::JoinSet::new();
-    for refresh in plan {
-        // The default configuration names a podman, a docker, and on macOS an
-        // Apple container target whether or not the engine is installed. An
-        // engine that is not on this machine is not a failed download, and it
-        // must not become a notice on every start.
-        if !local_engine_installed(&refresh.host, std::env::var_os("PATH").as_deref()) {
+    let mut groups: Vec<(ImageHost, Vec<String>)> = Vec::new();
+    for (id, target) in &config.targets {
+        let Some((host, _)) = target.image_host() else {
+            continue;
+        };
+        if let Some((_, targets)) = groups.iter_mut().find(|(existing, _)| *existing == host) {
+            targets.push(id.clone());
+        } else {
+            groups.push((host, vec![id.clone()]));
+        }
+    }
+    let config = Arc::new(config);
+    for (host, targets) in groups {
+        // The default configuration may name engines that are not installed.
+        if !local_engine_installed(&host, std::env::var_os("PATH").as_deref()) {
             tracing::debug!(
-                host = refresh.host.label(),
-                image = refresh.image,
+                host = host.label(),
                 "container engine is not installed; skipping the image refresh"
             );
             continue;
         }
         let executor = CancellableProcessExecutor::new(cancelled.clone());
         let report = report.clone();
+        let config = config.clone();
         hosts.spawn(refresh_host_after_startup(
-            refresh,
+            matches!(host, ImageHost::AppleContainer),
             apple_container_settled.clone(),
             cancellation.clone(),
-            move |refresh| refresh_one_host(refresh, &executor, &*report),
+            move || {
+                let result = plan_host_refresh(&config, &host, &targets, &executor);
+                match result {
+                    Ok(plan) => refresh_host_images(&host, plan, &executor, &*report),
+                    Err(error) if !executor.cancellation_requested() => {
+                        tracing::warn!(
+                            host = host.label(),
+                            error = format!("{error:#}"),
+                            "could not prepare the host image refresh"
+                        );
+                        targets
+                            .iter()
+                            .map(|target| {
+                                let image = config.targets[target]
+                                    .container()
+                                    .expect("a container target")
+                                    .image
+                                    .clone();
+                                (host.label(), image, Some(format!("{error:#}")))
+                            })
+                            .collect()
+                    }
+                    Err(_) => Vec::new(),
+                }
+            },
         ));
     }
     let mut cancelling = false;
@@ -828,8 +894,10 @@ pub(super) async fn refresh_images(
             joined = hosts.join_next() => match joined {
                 None => return,
                 Some(Ok(None)) => {}
-                Some(Ok(Some((host, image, error)))) => {
-                    record_refresh_result(last_failures, &host, &image, error, &**report);
+                Some(Ok(Some(results))) => {
+                    for (host, image, error) in results {
+                        record_refresh_result(last_failures, &host, &image, error, &**report);
+                    }
                 }
                 Some(Err(error)) => {
                     tracing::warn!(%error, "container image refresh task failed");
@@ -839,18 +907,45 @@ pub(super) async fn refresh_images(
     }
 }
 
-/// One host's refresh task. The local Apple container refresh first waits
-/// for daemon startup's start of the service to finish: the refresh only looks
-/// at the service and never starts it, and a look mid-start would read
-/// "stopped" and skip the whole interval. Every other host starts at once, so
-/// a slow Apple start holds no other host's refresh.
-pub(super) async fn refresh_host_after_startup(
-    refresh: ImageRefresh,
+fn plan_host_refresh(
+    config: &mj_core::config::Config,
+    host: &ImageHost,
+    target_ids: &[String],
+    executor: &impl CommandExecutor,
+) -> Result<mj_controller::targets::ImageRefreshPlan> {
+    let mut native_platform = None;
+    if let ImageHost::SshNitro(ssh) = host {
+        if let Some(target) = target_ids
+            .iter()
+            .map(|id| &config.targets[id])
+            .find(|target| {
+                target
+                    .container()
+                    .is_some_and(|container| container.platform.is_none())
+            })
+        {
+            native_platform = Some(mj_controller::targets::session_image_platform(
+                target, executor,
+            )?);
+        }
+        mj_controller::controller::ensure_microvm_engine(ssh, executor)?;
+    }
+    Ok(mj_controller::targets::image_refresh_plan(
+        config,
+        target_ids.iter().map(String::as_str),
+        native_platform.as_deref(),
+    ))
+}
+
+/// The local Apple container refresh waits for daemon startup's start of the
+/// service to finish. Every other host starts at once.
+pub(super) async fn refresh_host_after_startup<T: Send + 'static>(
+    waits_for_apple: bool,
     apple_container_settled: tokio_util::sync::CancellationToken,
     cancellation: tokio_util::sync::CancellationToken,
-    run: impl FnOnce(ImageRefresh) -> Option<(String, String, Option<String>)> + Send + 'static,
-) -> Option<(String, String, Option<String>)> {
-    if matches!(refresh.host, ImageHost::AppleContainer) {
+    run: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    if waits_for_apple {
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => return None,
@@ -859,8 +954,8 @@ pub(super) async fn refresh_host_after_startup(
     }
     // ProcessExecutor is synchronous, and a pull is long: it belongs on a
     // blocking thread, never on the runtime.
-    match mj_core::runtime::spawn_blocking(move || run(refresh)).await {
-        Ok(result) => result,
+    match mj_core::runtime::spawn_blocking(run).await {
+        Ok(result) => Some(result),
         Err(error) => {
             tracing::warn!(%error, "container image refresh task failed");
             None
@@ -892,11 +987,8 @@ pub enum ImageRefreshOutcome {
 /// than about every hourly check. The same gate covers background refreshes,
 /// explicit preloads, and session launches, including other mj processes.
 ///
-/// A Nitro host's engine is the worker binary, which is not there until mj
-/// puts it there, and a host created for sandboxes is registered and its image
-/// preloaded before any session exists. Every refresh path comes through here,
-/// so this installs the engine before the first engine command; the install
-/// is idempotent and only writes under the SSH user's home.
+/// A Nitro host's engine is the worker binary. Explicit preloads install it
+/// here, while the poller installs it once for the whole host.
 pub fn refresh_host_image(
     refresh: &ImageRefresh,
     executor: &impl CommandExecutor,
@@ -905,6 +997,14 @@ pub fn refresh_host_image(
     if let ImageHost::SshNitro(ssh) = &refresh.host {
         mj_controller::controller::ensure_microvm_engine(ssh, executor)?;
     }
+    refresh_prepared_host_image(refresh, executor, report)
+}
+
+fn refresh_prepared_host_image(
+    refresh: &ImageRefresh,
+    executor: &impl CommandExecutor,
+    report: &dyn Fn(ImageRefreshReport),
+) -> Result<ImageRefreshOutcome> {
     let lock = mj_controller::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
     let _guard = mj_controller::image_pull_gate::hold_image_pull(
         &lock,
@@ -953,7 +1053,9 @@ pub fn refresh_host_image(
         );
         ImageRefreshOutcome::Unchanged
     };
-    run_refresh_command(&refresh.prune, executor)?;
+    if !matches!(refresh.host, ImageHost::SshNitro(_)) {
+        run_refresh_command(&refresh.prune, executor)?;
+    }
     Ok(outcome)
 }
 

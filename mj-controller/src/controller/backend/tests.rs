@@ -508,7 +508,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
         },
     );
 
-    let plan = image_refresh_plan(&config);
+    let plan = image_refresh_plan(&config, config.targets.keys().map(String::as_str), None).pulls;
     assert_eq!(
         plan.len(),
         7,
@@ -640,7 +640,10 @@ fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
         },
     );
 
-    let refresh = image_refresh_plan(&config).pop().expect("refresh plan");
+    let refresh = image_refresh_plan(&config, config.targets.keys().map(String::as_str), None)
+        .pulls
+        .pop()
+        .expect("refresh plan");
     assert_eq!(
         refresh.host,
         ImageHost::SshDocker(SshTarget::from(

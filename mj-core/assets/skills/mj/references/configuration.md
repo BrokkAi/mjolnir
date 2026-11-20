@@ -1262,6 +1262,15 @@ directories or share the host's mbx build cache: a session that asks for them
 starts without and says so. RAM is a hard limit, taken from the memory pool the
 host reserved at boot.
 
+Build Nitro images for the host's architecture. The session runs as root in
+the guest. The host pulls with crane as root. For a private registry, sign in
+with `ssh host sudo crane auth login <registry> -u <user> -p <token>`, replacing
+the host, registry, and credentials.
+
+`mj ec2 create` warms the base image plus bundle images assigned for the
+host's platform. After a successful refresh, the Nitro host reclaims obsolete
+images and keeps disks used by retained sandboxes and staged root replacements.
+
 ### Files written before version 12
 
 Before version 12 one `[targets.<id>]` table fused the machine and the runtime,

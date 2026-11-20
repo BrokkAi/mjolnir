@@ -101,16 +101,27 @@ go back to the target's image.
 Options: `--target` chooses the target whose image is the base and whose host
 builds, `--bundle` the project to record it for, `--name` the image name
 (default: the project id), and `--print` prints the generated Containerfile
-without building. A Nitro target has no engine of its own, so mj builds on a
-configured container target of the same platform and says which one.
+without building. For Nitro, mj builds on a configured container target for
+the same platform and reports which builder it chose. Build every Nitro
+image for the host's architecture. Sessions run as root inside the guest.
 
 Pushing and pulling use the engine's own registry login on that host. If the
 registry refuses, the error shows the login command to run there, for example
-`podman login ghcr.io` or `ssh host podman login ghcr.io`.
+`podman login ghcr.io` or `ssh host podman login ghcr.io`. Nitro pulls with
+crane as root on the host. For a private registry, run
+`ssh host sudo crane auth login ghcr.io -u <user> -p <token>`, replacing the
+host, registry, and credentials.
+
+`mj ec2 create` warms the base image and the bundle images assigned for the new
+host's platform. The refresh poller reclaims obsolete images on Nitro after
+all pulls for that host succeed. Images in use by retained sandboxes or staged
+root replacements stay available.
 
 `mj image status` reports, for each recorded platform, whether the image still
 matches the current recipe (`current` or `recipe changed`), or `unknown` when
-no target identifies the base; pass `--target` to resolve it.
+no target identifies the base. Pass `--target` to resolve it. When a Nitro target
+has no available builder for the platform, status still lists its assignments
+with freshness `unknown (no builder for <platform>)`.
 
 ## Shared build cache on Nitro
 

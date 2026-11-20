@@ -30,6 +30,9 @@ pub struct NitroEngineInfo {
     pub engine_version: String,
     pub state_format: u32,
     pub firecracker_version: String,
+    pub crane_path: Option<String>,
+    pub crane_version: Option<String>,
+    pub architecture: Option<String>,
     pub kernel_version: String,
     /// Memory the host reserved for sandboxes at boot, in MiB.
     pub memory_pool_total_mib: u64,

@@ -20,10 +20,10 @@ use crate::targets::{
     CommandTimedOut, ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable,
     MICROVM_ENGINE, PODMAN_DOCUMENTATION_URL, PodmanPostcondition, ProcessExecutor,
     SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate,
-    failed_podman_postcondition, local_docker_vm_share, podman_probe_observation,
-    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_engine_command,
-    ssh_validation_command, verify_local_docker, verify_local_podman, verify_ssh_apple_container,
-    verify_ssh_docker, verify_ssh_nitro, verify_ssh_podman,
+    effective_target_images, failed_podman_postcondition, local_docker_vm_share,
+    podman_probe_observation, run_setup_smoke_test, ssh_command, ssh_connectivity_probe,
+    ssh_engine_command, ssh_validation_command, verify_local_docker, verify_local_podman,
+    verify_ssh_apple_container, verify_ssh_docker, verify_ssh_nitro, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
@@ -3115,10 +3115,10 @@ fn ssh_nitro_checks(
         .targets
         .iter()
         .filter_map(|(id, target)| match target {
-            TargetTemplate::SshNitro { ssh, container } => Some(ssh_nitro_check(
+            TargetTemplate::SshNitro { ssh, .. } => Some(ssh_nitro_check(
+                config,
                 id,
                 &RuntimeSshTarget::from(ssh),
-                &container.image,
                 executor,
                 smoke,
             )),
@@ -3128,9 +3128,9 @@ fn ssh_nitro_checks(
 }
 
 fn ssh_nitro_check(
+    config: &Config,
     id: &str,
     ssh: &RuntimeSshTarget,
-    image: &str,
     executor: &impl CommandExecutor,
     smoke: bool,
 ) -> DoctorCheck {
@@ -3159,7 +3159,20 @@ fn ssh_nitro_check(
             return DoctorCheck::fixable(check_id, title, format!("{error:#}"), remediation);
         }
     };
+    let crane = match (&preflight.info.crane_path, &preflight.info.crane_version) {
+        (Some(path), Some(version)) => format!("crane {version} at {path}"),
+        (Some(path), None) => format!("crane at {path} (version unavailable)"),
+        (None, _) => "crane is missing".to_owned(),
+    };
+    let mut detail = vec![preflight.summary(), crane];
+    let platform = preflight
+        .info
+        .architecture
+        .as_deref()
+        .map(mj_core::config::canonical_image_platform);
+    let images = effective_target_images(config, id, platform);
     if smoke {
+        let image = images[0];
         let target = RuntimeTargetTemplate::SshNitro {
             ssh: ssh.clone(),
             container: RuntimeContainerTemplate {
@@ -3170,16 +3183,8 @@ fn ssh_nitro_check(
                 workspace_storage: Default::default(),
             },
         };
-        return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
-            Ok(()) => DoctorCheck::ready(
-                check_id,
-                title,
-                format!(
-                    "{}; disposable run/exec/remove smoke test passed for image {image}.",
-                    preflight.summary()
-                ),
-            ),
-            Err(error) => DoctorCheck::fixable(
+        if let Err(error) = run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
+            return DoctorCheck::fixable(
                 check_id,
                 title,
                 format!(
@@ -3188,41 +3193,73 @@ fn ssh_nitro_check(
                 format!(
                     "Fix the configured image or the sandbox engine on {destination}, then run `mj doctor --json --smoke` again."
                 ),
-            ),
-        };
+            );
+        }
+        detail.push(format!(
+            "disposable run/exec/remove smoke test passed for image {image}"
+        ));
     }
-    let image_command = ssh_engine_command(
-        SshTrafficClass::Control,
-        ssh,
-        MICROVM_ENGINE,
-        ["image", "inspect", "--format", "{{.Id}}", image],
-    )
-    .purpose("check remote Nitro sandbox image presence");
-    match executor.execute(&image_command) {
-        Ok(output) if output.status == 0 => DoctorCheck::ready(
+    let mut missing = false;
+    for image in &images {
+        let image_command = ssh_engine_command(
+            SshTrafficClass::Control,
+            ssh,
+            MICROVM_ENGINE,
+            ["image", "inspect", "--format", "{{.Id}}", *image],
+        )
+        .purpose("check remote Nitro sandbox image presence");
+        match executor.execute(&image_command) {
+            Ok(output) if output.status == 0 => detail.push(format!("image {image} is present")),
+            Ok(output)
+                if output.status != 255
+                    && String::from_utf8_lossy(&output.stderr).contains("image not known") =>
+            {
+                missing = true;
+                detail.push(format!("image {image} will download on first use"));
+            }
+            Ok(output) => {
+                return DoctorCheck::fixable(
+                    check_id,
+                    title,
+                    format!(
+                        "Could not inspect Nitro sandbox image {image} on {destination}: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                    format!("Verify `ssh {destination}` succeeds, then run `mj doctor` again."),
+                );
+            }
+            Err(error) => {
+                return DoctorCheck::fixable(
+                    check_id,
+                    title,
+                    format!(
+                        "Could not inspect Nitro sandbox image {image} on {destination}: {error}"
+                    ),
+                    format!("Verify `ssh {destination}` succeeds, then run `mj doctor` again."),
+                );
+            }
+        }
+    }
+    if !smoke {
+        detail.push("run `mj doctor --json --smoke` to verify a disposable sandbox".into());
+    }
+    let detail = format!("{}.", detail.join("; "));
+    if preflight.info.crane_path.is_none() {
+        DoctorCheck::fixable(
             check_id,
             title,
-            format!(
-                "{}; image {image} is present. Run `mj doctor --json --smoke` to verify a disposable sandbox.",
-                preflight.summary()
-            ),
-        ),
-        Ok(output) => DoctorCheck::fixable(
+            detail,
+            format!("Install crane on {destination}."),
+        )
+    } else if missing {
+        DoctorCheck::warning(
             check_id,
             title,
-            format!(
-                "Image {image} is not present on {destination}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            "The first session pulls it, or run `mj doctor --json --smoke` to pull it now."
-                .to_owned(),
-        ),
-        Err(error) => DoctorCheck::fixable(
-            check_id,
-            title,
-            format!("Could not inspect Nitro sandbox image {image} on {destination}: {error}"),
-            format!("Verify `ssh {destination}` succeeds, then run `mj doctor` again."),
-        ),
+            detail,
+            "Start a session for the project to download its image.",
+        )
+    } else {
+        DoctorCheck::ready(check_id, title, detail)
     }
 }
 

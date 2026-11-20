@@ -1067,6 +1067,12 @@ pub fn info(layout: &Layout) -> Result<Value> {
                     .to_owned()
             })
     });
+    let crane = sys::find_tool("crane").ok();
+    let crane_version = crane.as_ref().and_then(|path| {
+        let output = sys::run_checked(path, &["version"]).ok()?;
+        let version = String::from_utf8_lossy(&output.stdout);
+        version.lines().next().map(|line| line.trim().to_owned())
+    });
     let mut running = 0u32;
     let mut committed = 0u64;
     for vm in VmState::list(layout)? {
@@ -1094,7 +1100,8 @@ pub fn info(layout: &Layout) -> Result<Value> {
         "slots_enabled": pool.as_ref().map(|p| p.slots).unwrap_or(0),
         "firecracker_path": tool_path("firecracker"),
         "firecracker_version": firecracker_version,
-        "crane_path": tool_path("crane"),
+        "crane_path": crane,
+        "crane_version": crane_version,
         "jailer_path": tool_path("jailer"),
         "notes": [
             "--cap-add, --cap-drop and --security-opt are accepted and have no effect: the VM is the isolation boundary",

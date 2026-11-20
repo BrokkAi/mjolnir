@@ -32,7 +32,8 @@ To see it working:
 
 - [x] (2026-11-20 10:40Z) Claimed #1495 (assignee + `agent-in-progress`). Three read-only maps done; findings folded into Context and Surprises. Raw reports, not committed: `.mj/agents/86723bf780a4dd9d8b24056c7b6be9b8/findings.md` (mbx crates and protocol), `.mj/agents/f3f4746fa398e3dbff9133f5e48cee2e/findings.md` (engine, network, IAM, controller), `.mj/agents/8f2bc9dd138866074e59bf08f113d596/findings.md` (Nitro and mise images).
 - [x] (2026-11-20) Milestone 1: engine image alignment (platform check, `maintain` verb with image reconciliation, pull credential remediation).
-- [ ] Milestone 2: controller image alignment (warm effective images at host creation, reconcile images during refresh, `mj image status` without a builder, Doctor, docs).
+- [x] (2026-11-20 15:58Z) Implemented Milestone 2: EC2 warming, host-scoped image reconciliation, builderless status, Doctor, and docs.
+- [x] (2026-11-20 16:17Z) Validated Milestone 2 with focused dev-profile tests and strict Clippy.
 - [x] (2026-11-20) Milestone 3: mbx in Nitro guests (pinned v1.30.0 musl release per guest architecture, staged through the worker binary store, launchers, guest-local store at /var/lib/hel/mbx). Ten focused filters passed one each; clippy clean on six crates. Live guest execution unverified until Milestone 6.
 - [ ] Milestone 4: the host proxy (engine verb, per-VM unit, firewall, host cache, trimming, tests).
 - [x] (2026-11-20 16:05Z) Milestone 5: implemented configuration, controller wiring, EC2 instance-role provisioning, the Doctor probe caller, and documentation in `nitro-mbx-wiring`.
@@ -66,6 +67,17 @@ To see it working:
   Evidence: `mj-core/src/config/machines.rs`, `resolve_target` and `fold_build_cache`.
 - Observation: mbx's GitHub Actions writer checks for a protected branch push in addition to the CI environment. The seed example checks both protection and default-branch placement.
   Evidence: mr-boxington `crates/mbx/src/policy.rs`, `trusted_cache_writer`.
+
+- Observation: the refresh poller used one task per image. The engine report
+  already exposed the native architecture and the crane path, and it needed
+  one additional field for the crane version.
+  Evidence: `mj-daemon/src/pollers/quota.rs` and `mj-worker/src/microvm/vm.rs`.
+
+- Observation: the EC2 SSH fixture must start commands in the remote home to
+  model the real engine installer. The fixture uses the worker dispatcher
+  stamped with the test identity. Existing Podman fixture runs also need a
+  PATH that keeps the controller's own mbx installation out of the fake host.
+  Evidence: the final `ec2::tests::` filter passed all 12 tests.
 
 ## Decision Log
 
@@ -121,6 +133,22 @@ To see it working:
   Rationale: the issue asked for a measurement before building anything. The guest already reuses tools baked into a matching mise image.
   Date/Author: 2026-11-20, parent session.
 
+- Decision: group poller work by the configured image host. Include images
+  with pull policy `never` in the retention set. If a Nitro target omits its
+  platform, resolve the host platform before planning any reconciliation.
+  Rationale: all targets that refer to a host contribute to its desired set.
+  The pull policy controls network activity and leaves retention intact. A
+  platform probe failure prevents reconciliation with incomplete inputs.
+  Date/Author: 2026-11-20, Milestone 2.
+
+- Decision: verify a same-platform Nitro builder candidate when its
+  architecture comes from a configured value or from Apple container's fixed
+  platform.
+  Rationale: in those cases platform discovery can succeed while the engine
+  is unavailable. Podman and Docker native platform discovery already
+  verifies that the engine can answer.
+  Date/Author: 2026-11-20, Milestone 2.
+
 ## Outcomes & Retrospective
 
 Milestone 1 adds validation of the fetched OCI architecture before publishing image state and validates cached image metadata before reuse. The engine's `maintain --keep-image` command reconciles tags and runs the existing unused-image prune; output lists removed references and reclaimed flattened-disk bytes. Crane digest resolution errors now point operators to host-side crane authorization.
@@ -128,6 +156,14 @@ Milestone 1 adds validation of the fetched OCI architecture before publishing im
 The requested package identifier in the concrete command is outdated for this checkout: Cargo names the package `brokk-mj-worker-runtime`, though its library target is `mj_worker`. Use that package name for test and clippy invocations.
 
 Milestone 5 resolves remote policy against the session's accepted bundle, using the primary namespace first and preserving case. Only engine arguments carry the policy. EC2 registration records the remote after AWS accepts the launch with an instance profile. Doctor can report readiness after the Milestone 4 engine is integrated. The isolated AWS and SSH fixture verifies the IAM policy, profile-propagation retry, launch JSON, and persisted settings. Milestone 6 owns live verification of role access and S3 misses.
+
+Milestone 2 shares effective-image resolution between the refresh planner and
+Doctor. EC2 uses that planner for the newly registered target. The poller
+runs the maintain command once per Nitro host after its pull batch succeeds.
+Status keeps listing assignments when builder selection fails, and Doctor
+uses the crane path and version reported by the installed engine. Live EC2
+validation and confirmation with the combined engine work remain in
+Milestone 6.
 
 ## Context and Orientation
 
@@ -339,6 +375,14 @@ The automated tests named in each milestone pass. Clippy is clean on every touch
 
 Milestone 5 validation ran in the dev profile through mbx. Each focused filter matched one passing test: `nitro_create_uses_enclave_ami_and_verified_bootstrap_before_registration` in `brokk-mjolnir`, `a_nitro_launch_keeps_referenced_environment_values_off_the_command_line` in `brokk-mj-controller`, `config_toml_round_trip_is_atomic` in `brokk-mj-core`, `nitro` in `brokk-mj-targets`, and `golden_doctor_reports_external_aws_ssh_docker_and_podman_observations` in `brokk-mj-setup`. The EC2 test uses AWS CLI and SSH fixture executables. The GitHub Actions workflow example parses as YAML.
 
+Milestone 2 validation ran from the detached controller worktree outside the
+sandbox with `TZ=UTC` and isolated Mjolnir config and data directories. The
+`ec2::tests::` filter passed 12 tests, the Doctor golden and Nitro maintenance
+filter each passed one, and the worker's `microvm` filter passed 21. The
+existing image status, planner, refresh, and worker staging regressions passed.
+Strict `cargo clippy --all-targets -- -D warnings` passed for the CLI, client,
+controller, daemon, setup, targets, worker runtime, and worker staging crates.
+
 ## Interfaces and Dependencies
 
 Engine CLI, the contract between Milestones 4/1 and 5/2:
@@ -375,3 +419,5 @@ Dependencies: `mbx-cache-core = "0.21"` and `mbx-cache-protocol = "0.5"` (crates
 Revision note (2026-11-20): initial plan, written after the three reconnaissance maps.
 
 Revision note (2026-11-20, Milestone 5): documented the Doctor engine verb and the bucket-level list permission required for S3 misses.
+
+Revision note (2026-11-20): recorded the Milestone 2 implementation and its host retention and platform decisions.

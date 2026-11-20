@@ -300,17 +300,29 @@ async fn builder(
                 | TargetTemplate::SshAppleContainer { .. }
         )
     });
-    for (id, _) in candidates {
-        match self::platform(config, id, &operation.cancel).await {
-            Ok(candidate) => {
-                considered.push(format!("{id} ({candidate})"));
-                if candidate == platform {
-                    operation.log(format!("Building on {id}: Nitro target {target} consumes {platform} images but has no build engine.\n").as_bytes());
-                    return Ok(id.clone());
-                }
+    for (id, template) in candidates {
+        let candidate = match self::platform(config, id, &operation.cancel).await {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                considered.push(format!("{id} ({error:#})"));
+                continue;
             }
-            Err(error) => considered.push(format!("{id} ({error:#})")),
+        };
+        if candidate == platform {
+            let (host, container) = template.image_host().expect("a container builder");
+            // The native platform probe already checked unpinned Podman and
+            // Docker engines. A configured platform or Apple's fixed platform
+            // answers the architecture even if the engine cannot build.
+            if (container.platform.is_some() || host.engine() == "container")
+                && let Err(error) = probe_builder(host, &operation.cancel).await
+            {
+                considered.push(format!("{id} ({error:#})"));
+                continue;
+            }
+            operation.log(format!("Building on {id}: Nitro target {target} consumes {platform} images but has no build engine.\n").as_bytes());
+            return Ok(id.clone());
         }
+        considered.push(format!("{id} ({candidate})"));
     }
     bail!(
         "Nitro image build needs a configured Podman, Docker, or Apple container target for {platform}; considered: {}",
@@ -320,6 +332,24 @@ async fn builder(
             considered.join(", ")
         }
     )
+}
+
+async fn probe_builder(host: ImageHost, cancel: &CancellationToken) -> Result<()> {
+    let words: &[&str] = match host.engine() {
+        "container" => &["container", "system", "status"],
+        engine => &[engine, "info"],
+    };
+    let command = host.command(
+        words.iter().map(|word| (*word).to_owned()).collect(),
+        "check the container image builder".into(),
+    );
+    let executor = mj_core::targets::CancellableProcessExecutor::new(Default::default())
+        .with_cancellation(cancel.clone());
+    mj_core::runtime::spawn_blocking(move || {
+        crate::controller::execute_checked(&executor, command).map(|_| ())
+    })
+    .await
+    .context("join image builder probe")?
 }
 
 async fn run(
@@ -539,13 +569,17 @@ fn engine_error(
     repository: &str,
     output: &mj_core::targets::CommandOutput,
 ) -> String {
-    let first = repository.split('/').next().unwrap_or(repository);
-    let registry = if first.contains('.') || first.contains(':') || first == "localhost" {
-        first
+    let registry = repository
+        .split_once('/')
+        .map(|(first, _)| first)
+        .filter(|first| first.contains('.') || first.contains(':') || *first == "localhost")
+        .unwrap_or("docker.io");
+    let nitro = matches!(host, ImageHost::SshNitro(_));
+    let mut words = if nitro {
+        vec!["sudo".into(), "crane".into(), "auth".into()]
     } else {
-        "docker.io"
+        vec![host.engine().to_owned()]
     };
-    let mut words = vec![host.engine().to_owned()];
     if matches!(
         host,
         ImageHost::AppleContainer | ImageHost::SshAppleContainer(_)
@@ -582,7 +616,11 @@ fn engine_error(
     .iter()
     .any(|message| lower.contains(message))
     {
-        format!("{failure}\nSign in on the engine host with: {login}")
+        if nitro {
+            format!("{failure}\nRun `{login} -u <user> -p <token>`; Mjolnir pulls as root.")
+        } else {
+            format!("{failure}\nSign in on the engine host with: {login}")
+        }
     } else {
         failure
     }
@@ -739,37 +777,48 @@ async fn status_images(
         .flatten()
     {
         let mut current = None;
+        let mut no_builder = false;
         if let Some((target, selected_platform)) = &selected
             && selected_platform == platform
         {
-            let builder = builder(&selection.config, target, platform, &operation).await?;
-            match prepare(
-                &selection.config,
-                target,
-                &builder,
-                platform,
-                &request.files,
-                operation.clone(),
-            )
-            .await
-            {
-                Ok(text) => {
-                    current = Some(
-                        image
-                            .rsplit_once(':')
-                            .is_some_and(|(_, tag)| tag == image_tag(&text)),
-                    )
+            let builder = match builder(&selection.config, target, platform, &operation).await {
+                Ok(builder) => Some(builder),
+                Err(error) => {
+                    no_builder = true;
+                    operation.log(format!("{error:#}\n").as_bytes());
+                    None
                 }
-                Err(error) => operation.log(
-                    format!("Image freshness for target {target} is unknown: {error:#}\n")
-                        .as_bytes(),
-                ),
+            };
+            if let Some(builder) = builder {
+                match prepare(
+                    &selection.config,
+                    target,
+                    &builder,
+                    platform,
+                    &request.files,
+                    operation.clone(),
+                )
+                .await
+                {
+                    Ok(text) => {
+                        current = Some(
+                            image
+                                .rsplit_once(':')
+                                .is_some_and(|(_, tag)| tag == image_tag(&text)),
+                        )
+                    }
+                    Err(error) => operation.log(
+                        format!("Image freshness for target {target} is unknown: {error:#}\n")
+                            .as_bytes(),
+                    ),
+                }
             }
         }
         status.push(ImageStatus {
             platform: platform.clone(),
             image: image.clone(),
             current,
+            no_builder,
         });
     }
     Ok(ImageResult {

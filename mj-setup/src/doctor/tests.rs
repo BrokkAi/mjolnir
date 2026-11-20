@@ -157,24 +157,51 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     };
     let nitro_report = |pool: u64| {
         format!(
-            r#"{{"engine_version":"2.70.0","state_format":1,"firecracker_version":"1.18.0","kernel_version":"6.18.56-126.188.amzn2023","memory_pool_total_mib":{pool},"memory_pool_free_mib":{free},"slots_in_use":1,"slots_total":80,"cpus":16}}"#,
+            r#"{{"engine_version":"2.70.0","state_format":1,"firecracker_version":"1.18.0","crane_path":"/usr/local/bin/crane","crane_version":"v0.20.3","architecture":"x86_64","kernel_version":"6.18.56-126.188.amzn2023","memory_pool_total_mib":{pool},"memory_pool_free_mib":{free},"slots_in_use":1,"slots_total":80,"cpus":16}}"#,
             free = pool.saturating_sub(4098)
         )
     };
+    let mut nitro_config = Config::default();
+    let base = "ghcr.io/example/dev:1.2.3";
+    let present = "ghcr.io/example/present:1";
+    let missing = "ghcr.io/example/missing:1";
+    for (id, image) in [("available", present), ("unavailable", missing)] {
+        nitro_config.bundles.insert(
+            id.into(),
+            mj_core::config::ProjectBundle {
+                primary_repo: "app".into(),
+                repositories: vec![],
+            },
+        );
+        nitro_config.images.bundles.insert(
+            id.into(),
+            BTreeMap::from([("linux/amd64".into(), image.into())]),
+        );
+    }
+    for id in ["nitro-ready", "nitro-fresh", "nitro-no-pool"] {
+        nitro_config.targets.insert(
+            id.into(),
+            TargetTemplate::SshNitro {
+                ssh: mj_core::config::SshConnection {
+                    host: "nitro.example.test".into(),
+                    user: Some("ec2-user".into()),
+                    identity_file: None,
+                    extra_args: vec![],
+                },
+                container: container(base),
+            },
+        );
+    }
     let nitro = FakeExecutor::new([
         Ok(output(b"")),
         Ok(output(nitro_report(49152).as_bytes())),
         Ok(output(b"sha256:0123456789abcdef\n")),
+        Ok(output(b"sha256:9876543210fedcba\n")),
+        Ok(failed("ghcr.io/example/missing:1: image not known")),
     ]);
-    let nitro_check = ssh_nitro_check(
-        "nitro-ready",
-        &nitro_ssh,
-        "ghcr.io/example/dev:1.2.3",
-        &nitro,
-        false,
-    );
+    let nitro_check = ssh_nitro_check(&nitro_config, "nitro-ready", &nitro_ssh, &nitro, false);
     let nitro_commands = nitro.commands.borrow();
-    assert_eq!(nitro_commands.len(), 3);
+    assert_eq!(nitro_commands.len(), 5);
     assert!(
         nitro_commands
             .iter()
@@ -184,7 +211,9 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     // from one constant, and the verbs reach it unchanged.
     for (command, verbs) in [
         (&nitro_commands[1], "'info' '--format' 'json'"),
-        (&nitro_commands[2], "'image' 'inspect' '--format' '{{.Id}}'"),
+        (&nitro_commands[2], "'ghcr.io/example/dev:1.2.3'"),
+        (&nitro_commands[3], "'ghcr.io/example/present:1'"),
+        (&nitro_commands[4], "'ghcr.io/example/missing:1'"),
     ] {
         let remote = command.args.last().unwrap();
         assert!(remote.contains("exec sudo -n \"$HOME/.local/share/hel/microvm/hel\" microvm"));
@@ -202,19 +231,14 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         )),
     ]);
     let nitro_missing_engine_check = ssh_nitro_check(
+        &nitro_config,
         "nitro-fresh",
         &nitro_ssh,
-        "ghcr.io/example/dev:1.2.3",
         &nitro_missing_engine,
         false,
     );
-    let nitro_no_pool_check = ssh_nitro_check(
-        "nitro-no-pool",
-        &nitro_ssh,
-        "ghcr.io/example/dev:1.2.3",
-        &no_pool,
-        false,
-    );
+    let nitro_no_pool_check =
+        ssh_nitro_check(&nitro_config, "nitro-no-pool", &nitro_ssh, &no_pool, false);
 
     let podman = FakeExecutor::new([Ok(output(
         b"keys.used=174\nkeys.quota=200\nkeys.max=1000\ninotify.max_user_instances=8192\nmaxstartups=10:30:100\n",

@@ -1400,33 +1400,32 @@ fn create_attempt(
     record.save(root)?;
     drop(lock.take());
     eprintln!(
-        "Registered {} target {}. Preloading {image}.",
+        "Registered {} target {}.",
         args.runtime.label(),
         record.target
     );
-    let image_host = match args.runtime {
-        Ec2Runtime::Podman => mj_core::targets::ImageHost::SshPodman((&ssh).into()),
-        Ec2Runtime::Nitro => mj_core::targets::ImageHost::SshNitro((&ssh).into()),
-    };
-    let preload = mj_core::targets::image_refresh(
-        image_host,
-        image,
-        Some(platform),
-        mj_core::config::ImagePullPolicy::Missing,
-    )
-    .context("prepare EC2 dev image preload")
-    .and_then(|refresh| {
-        mj_daemon::pollers::refresh_host_image(
-            &refresh,
-            &mj_controller::targets::ProcessExecutor,
-            &|_| {},
-        )
-        .map(|_| ())
-    });
-    if let Err(error) = preload {
-        eprintln!(
-            "Warning: dev image predownload failed: {error:#}\nThe host is registered; the background image refresher can retry."
-        );
+    match Config::load() {
+        Ok(config) => {
+            for refresh in
+                mj_controller::targets::image_refresh_plan(&config, [record.target.as_str()], None)
+                    .pulls
+            {
+                eprintln!("Preloading {} on {}.", refresh.image, record.target);
+                if let Err(error) = mj_daemon::pollers::refresh_host_image(
+                    &refresh,
+                    &mj_controller::targets::ProcessExecutor,
+                    &|_| {},
+                ) {
+                    eprintln!(
+                        "Warning: dev image predownload failed for {}: {error:#}\nThe host is registered; the background image refresher can retry.",
+                        refresh.image
+                    );
+                }
+            }
+        }
+        Err(error) => eprintln!(
+            "Warning: could not plan EC2 image warming: {error:#}\nThe host is registered; the background image refresher can retry."
+        ),
     }
     Ok(
         json!({"instance_id":id,"target":record.target,"region":record.region,"zone":placement.zone,"instance_type":placement.instance_type,"public_ip":host,"zfs_cache":local_nvme,"operation":record.operation}),
@@ -2297,6 +2296,7 @@ else:
                 concat!(
                     "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MJ_EC2_FIXTURE_CHILD/ssh-calls\"\n",
                     "export HOME=\"$MJ_EC2_FIXTURE_CHILD/remote-home\" SHELL=/bin/bash\n",
+                    "cd \"$HOME\" || exit 1\n",
                     "export PATH=\"$MJ_EC2_FIXTURE_CHILD/remote-bin:$PATH\"\n",
                     "unset XDG_CONFIG_HOME XDG_DATA_HOME\n",
                     "for remote_command do :; done\n",
@@ -2310,6 +2310,8 @@ else:
                     // instead of running it on the test host.
                     "*'sudo bash -s'*) cat > \"$MJ_EC2_FIXTURE_CHILD/tune-script\" ;;\n",
                     "*'cat /proc/sys/fs/inotify/max_user_instances'*) printf 'fs.inotify.max_user_instances=8192\nkernel.keys.maxkeys=4096\n' ;;\n",
+                    "*microvm*\"'image' 'inspect'\"*) exit 125 ;;\n",
+                    "*microvm*\"'pull'\"*) : ;;\n",
                     "*) exec sh -c \"$remote_command\" ;;\nesac\n",
                 ),
             ),
@@ -2329,6 +2331,10 @@ else:
             .env("MJ_CONFIG_DIR", directory.path().join("config"))
             .env("MJ_DATA_DIR", directory.path().join("data"))
             .env("MJ_INSTANCE", "ec2-fixture")
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::test_hooks::fake_worker_dispatcher(),
+            )
             .env("MJ_SSH_CONTROL_MASTER", "0")
             .env("PATH", std::env::join_paths(paths).unwrap());
         let output = checked(&mut command, &[]).unwrap();
@@ -2918,6 +2924,32 @@ else:
         let bin = fixture.join("bin");
         let root = config_dir().join("ec2");
         fs::write(bin.join("nitro"), "").unwrap();
+        let bundle_image = "ghcr.io/example/project:built";
+        Config::update(|config| {
+            config.bundles.insert(
+                "app".into(),
+                mj_core::config::ProjectBundle {
+                    primary_repo: "app".into(),
+                    repositories: vec![mj_core::config::ProjectRepository {
+                        id: "app".into(),
+                        github: Some("example/app".into()),
+                        destination: "app".into(),
+                        ..Default::default()
+                    }],
+                },
+            );
+            config.images.bundles.insert(
+                "app".into(),
+                std::collections::BTreeMap::from([("linux/amd64".into(), bundle_image.into())]),
+            );
+            Ok(())
+        })
+        .unwrap();
+        let worker = fixture
+            .join("remote-home")
+            .join(mj_core::targets::MICROVM_ENGINE_WORKER);
+        fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        fs::copy(mj_core::test_hooks::fake_worker_dispatcher(), &worker).unwrap();
         let cli = crate::Cli::try_parse_from([
             "mj",
             "--instance",
@@ -3027,6 +3059,15 @@ else:
         let ssh_calls = fs::read_to_string(fixture.join("ssh-calls")).unwrap();
         assert!(ssh_calls.contains("ec2-user@192.0.2.1"));
         assert!(ssh_calls.contains("ec2-user@192.0.2.7"));
+        for image in [mj_core::config::DEFAULT_SESSION_IMAGE, bundle_image] {
+            let expected = format!("'pull' '--platform=linux/amd64' '{image}'");
+            assert!(
+                ssh_calls
+                    .lines()
+                    .any(|line| line.contains("microvm") && line.contains(&expected)),
+                "{ssh_calls}"
+            );
+        }
         let record = records(&root).unwrap().pop().unwrap();
         assert_eq!(record.instance_id.as_deref(), Some("i-test"));
         let config = Config::load().unwrap();
