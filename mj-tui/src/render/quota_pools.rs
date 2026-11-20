@@ -697,8 +697,9 @@ pub(crate) fn provider_pools(
 }
 
 /// Largest-remainder apportionment for the available quota and refill chunks.
-/// Give every positive segment a cell when they all fit. On narrower bars,
-/// keep positive availability visible and let the caller list omitted refills.
+/// Give every positive segment a cell when they all fit, taking cells only
+/// from other refills. On narrower bars, keep positive availability visible
+/// and let the caller list omitted refills.
 pub(super) fn refill_widths(
     available: f64,
     refills: impl Iterator<Item = f64>,
@@ -723,15 +724,22 @@ pub(super) fn refill_widths(
         .filter(|&&capacity| capacity > 0.0)
         .count()
         <= cells;
+    // Minimum cells come only from refill chunks, never from the available
+    // fill, so the fill stays proportional to the percentage printed in it.
+    // A refill that cannot get a cell is listed under the bar instead.
     for (index, capacity) in capacities.into_iter().enumerate() {
-        if capacity > 0.0
-            && widths[index] == 0
-            && (all_fit || index == 0)
-            && let Some(donor) = widths.iter_mut().max()
-            && *donor > 0
-        {
-            *donor -= 1;
-            widths[index] = 1;
+        if capacity > 0.0 && widths[index] == 0 && (all_fit || index == 0) {
+            // A refill only takes a cell from a refill that keeps one.
+            let spare = if index == 0 { 0 } else { 1 };
+            if let Some(donor) = widths
+                .iter_mut()
+                .skip(1)
+                .filter(|width| **width > spare)
+                .max_by_key(|width| **width)
+            {
+                *donor -= 1;
+                widths[index] = 1;
+            }
         }
     }
     widths

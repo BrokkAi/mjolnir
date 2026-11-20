@@ -1142,6 +1142,21 @@ mod tests {
     use mj_core::config::{HarnessProfile, SymbolSet};
     use ratatui::{Terminal, backend::TestBackend};
 
+    // Hard-won: 8253cfeee: tiny refills took their minimum cells from the
+    // available fill, drawing a 97% pool as 70% of a 20-cell bar.
+    #[test]
+    fn refill_minimum_cells_never_shrink_the_available_fill() {
+        let widths = super::super::quota_pools::refill_widths(
+            200.0 * 100.0,
+            std::iter::repeat_n(100.0, 6),
+            206.0 * 100.0,
+            20,
+        );
+        assert_eq!(widths.iter().sum::<usize>(), 20);
+        // 97% of 20 cells; refills that cannot fit go under the bar.
+        assert!(widths[0] >= 19, "{widths:?}");
+    }
+
     fn fixture() -> (DashboardState, u64) {
         let quotas: BTreeMap<String, ProfileQuota> = serde_json::from_str(include_str!(
             "../../tests/fixtures/quota-provider-readings.json"
