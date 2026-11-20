@@ -675,6 +675,7 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
             .iter()
             .map(|repository| CheckpointRepositoryBundle {
                 metadata: mj_checkpoint::archive::RepositoryMetadata {
+                    origin_delta: None,
                     review_baseline_ref: None,
                     review_refs_metadata_only: false,
                     saved_refs: Default::default(),
@@ -773,6 +774,7 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
     let head = "b".repeat(40);
     let archived = CheckpointRepositoryBundle {
         metadata: mj_checkpoint::archive::RepositoryMetadata {
+            origin_delta: None,
             review_baseline_ref: None,
             review_refs_metadata_only: false,
             saved_refs: Default::default(),

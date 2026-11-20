@@ -608,6 +608,7 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
             .into_iter()
             .map(|repository| {
                 Ok(RepositorySnapshot {
+                    origin_delta_pack: None,
                     metadata: repository.metadata,
                     committed_bundle: read_staged_file(
                         &stage_path,
@@ -798,11 +799,12 @@ pub fn export_checkpoint_with_native_state(
     native_state: &dyn NativeCheckpointState,
 ) -> Result<TargetCheckpoint> {
     let started = std::time::Instant::now();
+    let protocol_version = CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
     ensure!(
-        spec.protocol_version == CHECKPOINT_EXPORT_PROTOCOL_VERSION,
+        spec.protocol_version == protocol_version,
         "unsupported checkpoint export protocol version {}; worker supports {}",
         spec.protocol_version,
-        CHECKPOINT_EXPORT_PROTOCOL_VERSION
+        protocol_version
     );
     let relay_root = resolve_target_path(&spec.relay_root)?;
     let harness_home =
@@ -857,10 +859,14 @@ pub fn export_checkpoint_with_native_state(
     }
     let native_ms = native_started.elapsed().as_millis() as u64;
     let repositories_started = std::time::Instant::now();
+    if protocol_version == CHECKPOINT_ORIGIN_DELTA_EXPORT_PROTOCOL_VERSION {
+        verify_origin_delta_quiescence(&relay_root, &workspace_root, &spec.repositories, git)?;
+    }
     let repositories = collect_checkpoint_repositories_with_policy(
         &workspace_root,
         &spec.repositories,
         git,
+        Some(native_snapshot.path()),
         if spec.ignore_nested_repositories {
             crate::archive::UntrackedFiles::IgnoreNestedRepositories
         } else {
@@ -906,14 +912,123 @@ pub(super) fn collect_checkpoint_repositories(
         workspace_root,
         specifications,
         git,
+        None,
         crate::archive::UntrackedFiles::Include,
     )
+}
+
+fn verify_origin_delta_quiescence(
+    relay_root: &Path,
+    workspace_root: &Path,
+    repositories: &[CheckpointRepositorySpec],
+    git: &dyn GitCommandRunner,
+) -> Result<()> {
+    use mj_core::worker_launch::{WorkerLaunchConfig, WorkerRunMode};
+    use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest};
+
+    let [repository] = repositories else {
+        bail!("managed clone suspend requires exactly one repository");
+    };
+    let request: SuspendRequest = wire::read(relay_root, wire::REQUEST)?
+        .context("managed clone capture has no quiescence request")?;
+    let receipt: SuspendReceipt = wire::read(relay_root, wire::RECEIPT)?
+        .context("managed clone capture has no quiescence receipt")?;
+    ensure!(
+        receipt.operation == request.operation
+            && receipt.error.is_none()
+            && !request.worker.is_alive()?
+            && WorkerLaunchConfig::read(&relay_root.join("launch.json"))?.run_mode
+                == WorkerRunMode::CheckpointOnly,
+        "managed clone capture requires a quiesced worker"
+    );
+    let location = crate::archive::git::locate_checkout(
+        git,
+        &workspace_root.join(&repository.relative_destination),
+    )?;
+    ensure!(
+        location.top_level.canonicalize()? == request.checkout.canonicalize()?,
+        "quiescence receipt belongs to a different checkout"
+    );
+    Ok(())
+}
+
+pub fn managed_clone_snapshot_input(
+    id: &str,
+    path: &Path,
+    pack_path: PathBuf,
+) -> crate::snapshot::RepositoryInput {
+    use crate::snapshot::{CheckoutOwnership, ExclusionSource, RepositoryInput};
+
+    RepositoryInput {
+        id: id.to_owned(),
+        checkout: path.to_path_buf(),
+        ownership: CheckoutOwnership::Managed,
+        origin_override: None,
+        pack_path,
+        exclusions: ExclusionSource::Origin,
+        keep_dir: Some(path.join(".mj/keep")),
+    }
+}
+
+fn collect_origin_delta(
+    git: &dyn GitCommandRunner,
+    path: &Path,
+    repository: &CheckpointRepositorySpec,
+    snapshot_directory: &Path,
+) -> Result<RepositorySnapshot> {
+    use crate::snapshot::{SessionCaptureConsent, SnapshotHead, capture_session_snapshot};
+
+    let location = crate::archive::git::locate_checkout(git, path)?;
+    let input = managed_clone_snapshot_input(
+        &repository.id,
+        &location.top_level,
+        snapshot_directory.join(&repository.id),
+    );
+    let mut snapshot = capture_session_snapshot(git, &[input], &SessionCaptureConsent::default())?
+        .repositories
+        .remove(&repository.id)
+        .context("origin delta snapshot is missing")?;
+
+    Ok(RepositorySnapshot {
+        metadata: crate::archive::RepositoryMetadata {
+            id: repository.id.clone(),
+            relative_destination: repository.relative_destination.clone(),
+            checkout_subdirectory: location.subdirectory,
+            origin: snapshot
+                .origin_url
+                .clone()
+                .context("managed clone has no origin")?,
+            push_urls: Vec::new(),
+            remote_workspace: false,
+            plain_directory: false,
+            base_commit: String::new(),
+            head_commit: snapshot.head.commit().to_owned(),
+            branch: match &snapshot.head {
+                SnapshotHead::Branch { name, .. } => Some(name.clone()),
+                SnapshotHead::Detached(_) => None,
+            },
+            review_refs_metadata_only: false,
+            review_baseline_ref: None,
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
+            git_operation: None,
+            origin_delta: Some(Box::new(snapshot.metadata)),
+        },
+        origin_delta_pack: snapshot.pack.take(),
+        committed_bundle: Vec::new(),
+        staged_patch: Vec::new(),
+        unstaged_patch: Vec::new(),
+        untracked_tar: Vec::new(),
+        operation_payloads: None,
+        linked_worktrees: Vec::new(),
+    })
 }
 
 fn collect_checkpoint_repositories_with_policy(
     workspace_root: &Path,
     specifications: &[CheckpointRepositorySpec],
     git: &dyn GitCommandRunner,
+    snapshot_directory: Option<&Path>,
     untracked_files: crate::archive::UntrackedFiles,
 ) -> Result<Vec<RepositorySnapshot>> {
     // Indexed parallel iteration preserves the spec order, which in turn keeps
@@ -924,6 +1039,15 @@ fn collect_checkpoint_repositories_with_policy(
             let path = workspace_root.join(&repository.relative_destination);
             ensure!(path.is_dir(), "repository {} is missing", path.display());
             let (history, remote_base) = match &repository.capture {
+                CheckpointRepositoryCapture::OriginDelta => {
+                    return collect_origin_delta(
+                        git,
+                        &path,
+                        repository,
+                        snapshot_directory
+                            .context("origin-delta suspend requires a single-shot export")?,
+                    );
+                }
                 CheckpointRepositoryCapture::PlainDirectory => {
                     return collect_plain_directory_snapshot(&GitCollectionSpec {
                         id: repository.id.clone(),

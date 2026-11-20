@@ -50,6 +50,9 @@ pub const ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK: u32 = 12;
 /// reject the canonical field, so an archive that carries it declares this
 /// schema whatever else it carries.
 pub const ARCHIVE_SCHEMA_VERSION_MAILBOX: u32 = 13;
+/// An origin-relative Git pack and workspace snapshot metadata. It can carry
+/// mail as well, so it comes after the mailbox schema.
+pub const ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA: u32 = 14;
 /// Mjolnir's private Git refs: review baselines, review points and reviewed
 /// trees. They are bookkeeping, never pushed, and some name a bare tree.
 pub const MJOLNIR_REF_NAMESPACE: &str = "refs/mj/";
@@ -98,6 +101,125 @@ pub struct TargetManifest {
     pub target_kind: String,
     /// Informational provenance only. It must not contain credentials.
     pub details: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SnapshotHead {
+    Branch { name: String, commit: String },
+    Detached(String),
+}
+impl SnapshotHead {
+    pub fn commit(&self) -> &str {
+        match self {
+            Self::Branch { commit, .. } | Self::Detached(commit) => commit,
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotStashEntry {
+    pub commit: String,
+    pub message: String,
+}
+mod snapshot_path_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+    use std::path::Path;
+    pub fn serialize<S: Serializer>(
+        path: &Path,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer
+            .serialize_str(&super::archive_path_text(path).map_err(serde::ser::Error::custom)?)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<PathBuf, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        let path = PathBuf::from(&text);
+        let normalized = super::archive_path_text(&path).map_err(serde::de::Error::custom)?;
+        if normalized != text {
+            return Err(serde::de::Error::custom(
+                "snapshot path is not slash-separated",
+            ));
+        }
+        Ok(path)
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotSubmodule {
+    #[serde(with = "snapshot_path_serde")]
+    pub path: PathBuf,
+    pub commit: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotGitlink {
+    #[serde(with = "snapshot_path_serde")]
+    pub path: PathBuf,
+    pub commit: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotWorktree {
+    pub has_uncommitted_state: bool,
+    #[serde(with = "snapshot_path_serde")]
+    pub relative_path: PathBuf,
+    pub head: SnapshotHead,
+    pub working_state: Option<String>,
+    pub working_state_skipped: bool,
+    pub initialized_submodules: Vec<SnapshotSubmodule>,
+    /// Only this checkout's index; module indexes do not travel.
+    pub index_gitlinks: Vec<SnapshotGitlink>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BranchTracking {
+    pub remote: Option<String>,
+    pub merge: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSnapshotMetadata {
+    /// Configured origin URL, redacted. None is an in-place-only raw snapshot.
+    pub origin_url: Option<String>,
+    pub object_format: String,
+    pub notices: Vec<String>,
+    pub head: SnapshotHead,
+    pub refs: BTreeMap<String, String>,
+    pub branch_tracking: BTreeMap<String, BranchTracking>,
+    pub stash: Vec<SnapshotStashEntry>,
+    pub working_state: Option<String>,
+    pub working_state_skipped: bool,
+    pub has_uncommitted_state: bool,
+    pub worktrees: Vec<SnapshotWorktree>,
+    pub initialized_submodules: Vec<SnapshotSubmodule>,
+    /// Only this checkout's index; module indexes do not travel.
+    pub index_gitlinks: Vec<SnapshotGitlink>,
+    pub remote_refs_stale: bool,
+    /// Boundary commits and saved tips omitted from the origin-relative pack.
+    pub prerequisites: Vec<String>,
+}
+
+pub fn archive_path_text(path: &std::path::Path) -> Result<String> {
+    use std::path::Component;
+    ensure!(!path.as_os_str().is_empty(), "archive path is empty");
+    ensure!(
+        !path.is_absolute(),
+        "archive path '{}' is absolute",
+        path.display()
+    );
+    let parts = path
+        .components()
+        .map(|component| {
+            let Component::Normal(part) = component else {
+                bail!("unsafe archive path '{}'", path.display());
+            };
+            part.to_str()
+                .with_context(|| format!("archive path '{}' is not UTF-8", path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(parts.join("/"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +281,8 @@ pub struct RepositoryMetadata {
     /// written exactly as before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_operation: Option<SavedGitOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_delta: Option<Box<WorkspaceSnapshotMetadata>>,
 }
 
 impl RepositoryMetadata {
@@ -277,9 +401,13 @@ pub struct SavedUnmergedEntry {
 pub struct RepositoryManifest {
     #[serde(flatten)]
     pub metadata: RepositoryMetadata,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub committed_bundle_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub staged_patch_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub unstaged_patch_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub untracked_tar_path: String,
     /// The working-tree files of the unmerged paths. Present exactly when
     /// `metadata.git_operation` is.
@@ -294,6 +422,8 @@ pub struct RepositoryManifest {
     /// any declares [`ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub linked_worktrees: Vec<LinkedWorktreeManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_delta_pack_path: Option<String>,
 }
 
 /// Controller-owned, materialized state captured at a checkpoint barrier.
@@ -580,6 +710,9 @@ pub enum PayloadRole {
         relative_path: PathBuf,
     },
     GitBundle {
+        repository_id: String,
+    },
+    GitOriginDeltaPack {
         repository_id: String,
     },
     GitStagedPatch {

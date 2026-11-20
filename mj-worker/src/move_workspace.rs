@@ -91,10 +91,11 @@ pub fn inspect(repositories: &[WorkspaceRepository]) -> Result<WorkspaceAssessme
             repository.id
         );
         ensure!(
-            git(&root, &["ls-files", "-v", "-z"])?
-                .split(|byte| *byte == 0)
-                .filter_map(|entry| entry.first())
-                .all(|flag| *flag != b'S' && !flag.is_ascii_lowercase()),
+            mj_checkpoint::archive::hidden_tracked_paths(
+                &mj_checkpoint::archive::SystemGit,
+                &root
+            )?
+            .is_empty(),
             "{} has skip-worktree or assume-unchanged files; clear those flags before Move so all tracked edits can be verified",
             repository.id
         );

@@ -1247,6 +1247,7 @@ impl CommandExecutor for CheckoutPositionExecutor {
 
 fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMetadata {
     RepositoryMetadata {
+        origin_delta: None,
         review_baseline_ref: None,
         review_refs_metadata_only: false,
         saved_refs: Default::default(),

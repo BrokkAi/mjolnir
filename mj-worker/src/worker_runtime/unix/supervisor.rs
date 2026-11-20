@@ -267,8 +267,7 @@ where
         .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true);
     command.process_group(0);
-    let mut child = command
-        .spawn()
+    let mut child = mj_core::subprocess::spawn_async_child(&mut command)
         .with_context(|| format!("launch supervised ACP bridge {}", spec.command.display()))?;
     let _group = mj_core::subprocess::ProcessGroupGuard::new(child.id());
     let pid = child

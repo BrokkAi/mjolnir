@@ -28,6 +28,25 @@ tokio::task_local! {
     static CANCELLATION: tokio_util::sync::CancellationToken;
 }
 
+#[cfg(target_os = "linux")]
+pub mod orphans;
+
+pub fn spawn_child(command: &mut Command) -> std::io::Result<std::process::Child> {
+    #[cfg(target_os = "linux")]
+    return orphans::tracked(|| command.spawn(), |child| Some(child.id()));
+    #[cfg(not(target_os = "linux"))]
+    command.spawn()
+}
+
+pub fn spawn_async_child(
+    command: &mut tokio::process::Command,
+) -> std::io::Result<tokio::process::Child> {
+    #[cfg(target_os = "linux")]
+    return orphans::tracked(|| command.spawn(), tokio::process::Child::id);
+    #[cfg(not(target_os = "linux"))]
+    command.spawn()
+}
+
 /// Give all preparation commands in this future the same owner. Blocking
 /// work receives `preparation_cancellation()` explicitly before being spawned.
 pub async fn with_preparation_cancellation<F: std::future::Future>(
@@ -243,7 +262,7 @@ impl SupervisedChild {
         command.process_group(0);
         #[cfg(windows)]
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
-        let mut child = command.spawn().context("start supervised subprocess")?;
+        let mut child = spawn_async_child(command).context("start supervised subprocess")?;
         #[cfg(windows)]
         let mut job = Some(ChildJob::attach(&child)?);
         let group = ProcessGroupGuard::new(child.id());
@@ -392,7 +411,7 @@ pub async fn capture(command: &mut tokio::process::Command) -> Result<Output> {
     command.process_group(0);
     #[cfg(windows)]
     command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
-    let mut child = command.spawn().context("start captured subprocess")?;
+    let mut child = spawn_async_child(command).context("start captured subprocess")?;
     #[cfg(windows)]
     let _job = ChildJob::attach(&child)?;
     let _group = ProcessGroupGuard::new(child.id());
@@ -430,7 +449,7 @@ pub async fn run_to_file_async(
     command.process_group(0);
     #[cfg(windows)]
     command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
-    let mut child = command.spawn().context("start logged subprocess")?;
+    let mut child = spawn_async_child(command).context("start logged subprocess")?;
     #[cfg(windows)]
     let _job = ChildJob::attach(&child)?;
     let _group = ProcessGroupGuard::new(child.id());
@@ -469,7 +488,7 @@ pub async fn run_bounded_observed(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    let mut child = command.spawn().context("start bounded subprocess")?;
+    let mut child = spawn_async_child(command).context("start bounded subprocess")?;
     spawned(child.id());
     #[cfg(windows)]
     let job = ChildJob::attach(&child)?;
@@ -577,7 +596,7 @@ pub async fn run_bounded_with_input(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    let mut child = command.spawn().context("start bounded subprocess")?;
+    let mut child = spawn_async_child(command).context("start bounded subprocess")?;
     let group = ProcessGroupGuard::new(child.id());
 
     async fn read(
@@ -701,7 +720,7 @@ pub fn spawn_detached(command: &mut Command, log_path: &Path) -> Result<u32> {
         command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
         // Windows has no zombie state: dropping the handle releases it while
         // the process keeps running.
-        let child = command.spawn().context("spawn detached child process")?;
+        let child = spawn_child(command).context("spawn detached child process")?;
         Ok(child.id())
     }
 }
@@ -814,7 +833,7 @@ fn spawn_detached_unix(command: &mut Command) -> Result<u32> {
         });
     }
 
-    let spawned = command.spawn().context("spawn detached child process");
+    let spawned = spawn_child(command).context("spawn detached child process");
     // Close this process's write end, so the read below sees EOF instead of
     // blocking if the intermediate died without reporting a PID.
     drop(writer);
@@ -1140,12 +1159,11 @@ fn raise_open_file_limit_impl() -> std::io::Result<()> {
 /// useful to the caller than a generic I/O error, so the output is still
 /// returned.
 pub fn run_with_input(command: &mut Command, input: &[u8]) -> Result<Output> {
-    let mut child = command
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawn child process")?;
+        .stderr(Stdio::piped());
+    let mut child = spawn_child(command).context("spawn child process")?;
 
     let mut stdin = child.stdin.take().context("child stdin is missing")?;
     let input = input.to_vec();
@@ -1263,7 +1281,7 @@ pub async fn run_capturing_stdout_cancellable(
     command.process_group(0);
     #[cfg(unix)]
     let _foreground = ForegroundGroup::prepare(command.as_std_mut())?;
-    let mut child = command.spawn().context("spawn interactive command")?;
+    let mut child = spawn_async_child(command).context("spawn interactive command")?;
     #[cfg(windows)]
     let job = ChildJob::attach(&child)?;
     let group = ProcessGroupGuard::new(child.id());
@@ -1302,12 +1320,11 @@ pub async fn run_capturing_stdout_cancellable(
 /// stream to deadlock against. Long-running callers must invoke this helper
 /// from their supervised blocking-work facility.
 pub fn run_capturing_stdout(command: &mut Command) -> Result<Output> {
-    let child = command
+    command
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("spawn child process")?;
+        .stderr(Stdio::inherit());
+    let child = spawn_child(command).context("spawn child process")?;
     child.wait_with_output().context("wait for child process")
 }
 
@@ -1320,9 +1337,8 @@ pub fn run_inherited(command: &mut Command) -> Result<ExitStatus> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("run child process")
+        .stderr(Stdio::inherit());
+    spawn_child(command)?.wait().context("run child process")
 }
 
 /// Run a noninteractive child with stdout sent directly to a file. No payload
@@ -1332,8 +1348,9 @@ pub fn run_to_file(command: &mut Command, output: std::fs::File) -> Result<ExitS
     command
         .stdin(Stdio::null())
         .stdout(Stdio::from(output))
-        .stderr(Stdio::inherit())
-        .status()
+        .stderr(Stdio::inherit());
+    spawn_child(command)?
+        .wait()
         .context("run child process with file output")
 }
 
@@ -1344,8 +1361,9 @@ pub fn run_interactive(command: &mut Command) -> Result<ExitStatus> {
     command
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+        .stderr(Stdio::inherit());
+    spawn_child(command)?
+        .wait()
         .context("run interactive child process")
 }
 

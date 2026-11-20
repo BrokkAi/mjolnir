@@ -48,7 +48,7 @@ fn uptime_ms() -> Result<i64> {
 /// Whether `pid`'s environment carries `wanted`. A refused read is not the same
 /// as an absent marker: for a process of this user it means the marker cannot be
 /// checked, which the scan reports instead of treating the process as foreign.
-pub(super) fn session_marker(pid: u32, wanted: &[u8]) -> Marker {
+pub(crate) fn session_marker(pid: u32, wanted: &[u8]) -> Marker {
     match std::fs::read(format!("/proc/{pid}/environ")) {
         Ok(environ) => {
             if environ

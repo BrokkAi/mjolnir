@@ -1234,6 +1234,27 @@ pub async fn run_daemon_owned(
         .await;
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let mut suspend_signal = crate::worker_stop::suspension::SuspendSignal::install(&root)?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let mut suspend_signal = ();
+    let mut suspend_request = None;
+    let suspend_session_id = config.session_id.clone();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use crate::worker_stop::suspension::{finish as finish_suspend, wait as wait_for_suspend};
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    async fn wait_for_suspend(_: &mut ()) -> Result<mj_core::worker_suspend::SuspendRequest> {
+        std::future::pending().await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    async fn finish_suspend(
+        _: PathBuf,
+        _: String,
+        _: mj_core::worker_suspend::SuspendRequest,
+    ) -> Result<()> {
+        unreachable!("unsupported suspend signal is always pending")
+    }
+
     let initial_step = "login-resolve";
     let (preparation_tx, preparation_rx) = watch::channel(PreparationSnapshot {
         state: Some(mj_core::relay::HarnessPreparation::Preparing {
@@ -1304,6 +1325,13 @@ pub async fn run_daemon_owned(
     let preparation_outcome = tokio::select! {
         biased;
         result = &mut prep_task => result,
+        request = wait_for_suspend(&mut suspend_signal) => {
+            let request = request?;
+            stop_preparation(&preparation_cancel, &mut prep_task).await;
+            client_task.abort();
+            let _ = client_task.await;
+            return finish_suspend(root, suspend_session_id, request).await;
+        }
         fatal = fatal_rx.recv() => {
             stop_preparation(&preparation_cancel, &mut prep_task).await;
             client_task.abort();
@@ -1346,6 +1374,11 @@ pub async fn run_daemon_owned(
             // completes the Close locally.
             let _dispatch_wakes = dispatch_wakes;
             tokio::select! {
+                request = wait_for_suspend(&mut suspend_signal) => {
+                    client_task.abort();
+                    let _ = client_task.await;
+                    return finish_suspend(root, suspend_session_id, request?).await;
+                }
                 fatal = fatal_rx.recv() => {
                     client_task.abort();
                     return Err(fatal.unwrap_or_else(|| anyhow::anyhow!("relay failure report was lost"))
@@ -1446,6 +1479,13 @@ pub async fn run_daemon_owned(
                 event_task.await.context("relay event task stopped")??;
                 Some(result)
             }
+            request = wait_for_suspend(&mut suspend_signal) => {
+                suspend_request = Some(request?);
+                acp_shutdown.cancel();
+                stop_failed_coordinator(&mut event_task).await;
+                let _ = acp_task.await;
+                None
+            }
             _ = &mut ctrl_c => {
                 acp_shutdown.cancel();
                 stop_failed_coordinator(&mut event_task).await;
@@ -1495,6 +1535,11 @@ pub async fn run_daemon_owned(
     if let Some(task) = harness_gc {
         task.abort();
     }
+    if let Some(request) = suspend_request {
+        client_task.abort();
+        let _ = client_task.await;
+        return finish_suspend(root, suspend_session_id, request).await;
+    }
     if !closed {
         // Includes a harness that did not open its session: the coordinator's
         // typed startup failure ends the worker and reaches the exit record.
@@ -1539,14 +1584,23 @@ async fn accept_worker_clients(
     runtime: ConnectionRuntime,
     fatal: mpsc::Sender<anyhow::Error>,
 ) -> Result<()> {
+    let mut clients = tokio::task::JoinSet::new();
     loop {
-        let (stream, _) = listener.accept().await.context("accept worker proxy")?;
+        let (stream, _) = tokio::select! {
+            accepted = listener.accept() => accepted.context("accept worker proxy")?,
+            completed = clients.join_next(), if !clients.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    tracing::warn!(%error, "worker proxy client task stopped");
+                }
+                continue;
+            }
+        };
         let client_relay = relay.clone();
         let client_dispatch_wake = dispatch_wake.clone();
         let client_credentials = credentials.clone();
         let client_runtime = runtime.clone();
         let client_fatal = fatal.clone();
-        mj_core::runtime::spawn(async move {
+        clients.spawn(async move {
             if let Err(error) = serve_client_with_memory(
                 stream,
                 client_relay,

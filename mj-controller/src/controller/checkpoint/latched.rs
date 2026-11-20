@@ -42,7 +42,11 @@ impl Controller {
         held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
         let mut layout = self.session_export_layout(session_id, executor)?;
-        if export_policy == CheckpointExportPolicy::SessionHandoff {
+        if export_policy == CheckpointExportPolicy::OriginDelta {
+            for repository in &mut layout.repositories {
+                repository.capture = CheckpointRepositoryCapture::OriginDelta;
+            }
+        } else if export_policy == CheckpointExportPolicy::SessionHandoff {
             for repository in &mut layout.repositories {
                 repository.capture = CheckpointRepositoryCapture::MetadataOnly;
             }
@@ -605,7 +609,7 @@ impl Controller {
             let target_files = target_files.get_or_insert_with(own_target_files);
             let spec = CheckpointExportSpec {
                 ignore_nested_repositories: export_policy == CheckpointExportPolicy::IgnoreNestedRepositories,
-                protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
+                protocol_version: CheckpointRepositoryCapture::export_protocol_version(&repositories),
                 session: session_manifest(&native_session_id),
                 target: target_manifest,
                 bundle: bundle_manifest,

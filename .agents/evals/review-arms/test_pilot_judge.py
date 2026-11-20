@@ -139,13 +139,21 @@ class PilotFixture(unittest.TestCase):
 
     # Hard-won: 7088aaa: an isolation scan could pair a retired session with its replacement's audit.
     def test_retirement_waits_for_judge_isolation_snapshot(self):
-        manifest, _, defects = fixture()
-        current = self.root / "runs/repo/d0/G/r1/writer"
+        manifest, labels, defects = fixture()
+        initial = setup(self.root, manifest, labels, defects)
+        manifest_path = self.root / "pilot/manifest.json"
+        snapshot_labels = j.load_snapshot(manifest_path, manifest)
+        oid, entry = next((oid, row) for oid, row in initial["outputs"].items()
+                          if row["kind"] == "writer" and row["arm"] == "G")
+        brief = self.root / entry["artifact"]
+        original = brief.read_bytes().decode()
+        sid = entry["session_id"]
+        current = brief.parent
         retired = current.with_name("writer.superseded-1")
         launch = current / "launch.json"
         old_hit = {"kind": "github-or-web", "snippet": "original", "seq": 1}
         new_hit = {**old_hit, "snippet": "replacement"}
-        j.save(launch, {"session_id": "original"})
+        j.save(launch, {"session_id": sid})
         j.save(current / "audit.json", {"passed": False, "hits": [old_hit]})
         read_launch, continue_snapshot, noticed = Event(), Event(), Event()
         original_load = j.load
@@ -159,7 +167,7 @@ class PilotFixture(unittest.TestCase):
 
         def load_and_pause(path):
             result = original_load(path)
-            if path == launch:
+            if path == current / "done.json":
                 read_launch.set()
                 self.assertTrue(continue_snapshot.wait(5))
             return result
@@ -169,12 +177,13 @@ class PilotFixture(unittest.TestCase):
                 pilot_run.archive(current)
                 j.save(launch, {"session_id": "replacement"})
                 j.save(current / "audit.json", {"passed": False, "hits": [new_hit]})
+                brief.write_text("replacement brief")
 
         notices = LockNotices()
         with (patch.object(j, "load", load_and_pause),
               contextlib.redirect_stderr(notices),
               ThreadPoolExecutor(2) as workers):
-            snapshot = workers.submit(j.prepare, self.root, manifest, {}, defects, [])
+            snapshot = workers.submit(j.prepare, self.root, manifest, snapshot_labels, defects)
             try:
                 self.assertTrue(read_launch.wait(5))
                 retirement = workers.submit(retire)
@@ -186,11 +195,15 @@ class PilotFixture(unittest.TestCase):
                 self.assertFalse(retirement.done())
             finally:
                 continue_snapshot.set()
-            isolated = snapshot.result(timeout=5)["isolation"]
+            prepared = snapshot.result(timeout=5)
             retirement.result(timeout=5)
-        self.assertEqual(isolated["void_reasons"]["writer"], {"original": [old_hit]})
-        self.assertEqual([entry["session_id"] for entry in isolated["attempts"]], ["original"])
-        self.assertEqual(j.load(retired / "launch.json")["session_id"], "original")
+        isolated = prepared["isolation"]
+        self.assertEqual(isolated["void_reasons"]["writer"], {sid: [old_hit]})
+        self.assertEqual([entry["session_id"] for entry in isolated["attempts"]], [sid])
+        self.assertEqual(prepared["outputs"][oid], entry)
+        items = j.load(self.root / j.INPUT_PATH / entry["batch"] / "items.json")["items"]
+        self.assertEqual(next(item["text"] for item in items if item["output_id"] == oid), original)
+        self.assertEqual(j.load(retired / "launch.json")["session_id"], sid)
         self.assertEqual(j.load(launch)["session_id"], "replacement")
         self.assertEqual((self.root / "pilot.lock").read_bytes(), b"")
 
@@ -199,23 +212,38 @@ class PilotFixture(unittest.TestCase):
         manifest, _, defects = fixture()
         arguments = (self.root, manifest, {}, defects, [])
         custom = self.root / "custom-egress.jsonl"
+        with self.assertRaises(FileNotFoundError):
+            j.prepare(*arguments, egress_log=custom)
+        uncaptured = j.prepare(*arguments)
+        default = self.root / "egress.jsonl"
+        self.assertEqual(uncaptured["egress_source"],
+                         {"path": str(default), "sha256": None, "status": "uncaptured"})
+        self.assertEqual(uncaptured["isolation"]["egress_source"], "missing")
+        self.assertNotIn("egress_measurements", uncaptured["isolation"])
         original = {"container": "first"}
         raw = (json.dumps(original) + "\n").encode()
-        custom.write_bytes(raw)
-        initial = j.prepare(*arguments, egress_log=custom)
-        self.assertEqual(initial["egress_source"], {"path": str(custom), "sha256": j.sha(raw)})
+        default.write_bytes(raw)
+        initial = j.prepare(*arguments)
+        self.assertEqual(initial["egress_source"], {"path": str(default), "sha256": j.sha(raw)})
+        self.assertNotIn("egress_source_history", initial)
 
-        replacement = self.root / "egress.jsonl"
-        replacement.write_text('{"container":"new"}\n')
-        custom.write_text('{"container":"changed"}\n')
-        for flag in (None, custom):
+        default.write_text('{"container":"changed"}\n')
+        for flag in (None, default):
             later = j.prepare(*arguments, egress_log=flag)
             self.assertEqual(later["egress_source"], initial["egress_source"])
             self.assertEqual(later["isolation"]["egress_measurements"], [original])
             self.assertNotIn("egress_source_history", later)
 
-        updated = j.prepare(*arguments, egress_log=replacement)
-        self.assertEqual(updated["egress_source"], {"path": str(replacement), "sha256": j.sha(replacement.read_bytes())})
+        default.unlink()
+        self.assertEqual(j.prepare(*arguments), initial)
+        for flag in (default, custom):
+            with self.assertRaises(FileNotFoundError):
+                j.prepare(*arguments, egress_log=flag)
+        self.assertEqual(j.load(self.root / j.KEY_PATH), initial)
+
+        custom.write_text('{"container":"new"}\n')
+        updated = j.prepare(*arguments, egress_log=custom)
+        self.assertEqual(updated["egress_source"], {"path": str(custom), "sha256": j.sha(custom.read_bytes())})
         self.assertEqual(updated["isolation"]["egress_measurements"], [{"container": "new"}])
         self.assertEqual(updated["egress_source_history"], [initial["egress_source"]])
         self.assertEqual(j.prepare(*arguments), updated)
@@ -267,6 +295,8 @@ class PilotFixture(unittest.TestCase):
         manifest, labels, defects = fixture()
         key = setup(self.root, manifest, labels, defects)
         old_batch = next(iter(key["outputs"].values()))["batch"]
+        judge = j.INPUT_PATH / "sessions" / old_batch / "attempt"
+        j.save(self.root / judge / "launch.json", {"session_id": "retired-judge"})
         rubric = j.HERE / "judge/PILOT.md"
         original = rubric.read_bytes()
         try:
@@ -274,7 +304,12 @@ class PilotFixture(unittest.TestCase):
             snapshot = j.load_snapshot(self.root / "pilot/manifest.json", manifest)
             updated = j.prepare(self.root, manifest, snapshot, defects)
             self.assertNotEqual(next(iter(updated["outputs"].values()))["batch"], old_batch)
-            self.assertTrue((self.root / j.KEY_PATH.parent / "retired" / old_batch / "key.json").is_file())
+            retired = j.KEY_PATH.parent / "retired" / old_batch
+            self.assertTrue((self.root / retired / "key.json").is_file())
+            self.assertEqual(updated["isolation"]["attempts"], [
+                {"kind": "judge", "session_id": "retired-judge", "path": (retired / judge).as_posix()},
+            ])
+            self.assertTrue((self.root / retired / judge / "launch.json").is_file())
             for batch in {entry["batch"] for entry in updated["outputs"].values()}:
                 payload = j.load(self.root / j.INPUT_PATH / batch / "items.json")
                 j.write_task(self.root / j.INPUT_PATH / batch, payload)
@@ -442,7 +477,21 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(live["isolation"]["void_reasons"]["writer"],
                          {"writer": [rejected], "alternate-later-writer": [rejected]})
         self.assertEqual(live["isolation"]["interpreter_screened"]["writer"], 2)
-        self.assertEqual(live["isolation"]["egress_measurements"], [egress, {**egress, "container": "later"}])
+        self.assertEqual(live["isolation"]["egress_source"], "missing")
+        self.assertNotIn("egress_measurements", live["isolation"])
+        with patch.object(sys, "argv", args):
+            egress_log.write_bytes(b"changed bytes")
+            r.main()
+            self.assertEqual(j.load(readout_path)["isolation"]["egress_source"], "missing")
+            egress_log.unlink()
+            r.main()
+            self.assertEqual(j.load(readout_path)["isolation"]["egress_source"], "missing")
+        explicit = self.root / "missing-explicit.jsonl"
+        with patch.object(sys, "argv", [*args, "--egress-log", str(explicit)]):
+            r.main()
+        self.assertEqual(j.load(readout_path)["isolation"]["egress_source"], "missing")
+        self.assertNotIn("egress_measurements", j.load(readout_path)["isolation"])
+        isolation_files.remove(egress_log)
 
         for entry in key["outputs"].values():
             artifact = self.root / entry["artifact"]

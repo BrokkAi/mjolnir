@@ -191,6 +191,38 @@ impl RuntimeState {
             Some(acceptance),
             move |state, session_id, _, session_admission| async move {
                 let result = async {
+                    if origin == super::lifecycle::LifecycleOrigin::Person {
+                        let controller = blocking(Controller::load).await?;
+                        if controller
+                            .state
+                            .sessions
+                            .get(&session_id)
+                            .is_some_and(|record| {
+                                record.target.is_some()
+                                    && matches!(
+                                        record.state,
+                                        SessionState::Running
+                                            | SessionState::Disconnected
+                                            | SessionState::Checkpointing,
+                                    )
+                            })
+                            && !controller.state.subagents.contains_key(&session_id)
+                        {
+                            let executor = DaemonStageReportingExecutor::new(
+                                CancellableProcessExecutor::new(control.cancelled.clone()),
+                                state.clone(),
+                                session_id.clone(),
+                            );
+                            executor.begin_resumable_work()?;
+                            let inventory = controller
+                                .preflight_origin_delta_suspension(&session_id, &executor);
+                            executor.end_resumable_work("accept managed clone suspend")?;
+                            inventory?;
+                            mj_core::runtime::off_async_worker(|| {
+                                controller.record_origin_delta_suspend_acceptance(&session_id)
+                            })?;
+                        }
+                    }
                     state.persist_suspension_intent(&session_id).await?;
                     accepted.send_replace(Some(Ok(())));
                     state

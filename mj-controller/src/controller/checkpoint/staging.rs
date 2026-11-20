@@ -210,6 +210,12 @@ pub(super) fn run_checkpoint_staging_command<T: serde::Serialize + Sync>(
         if output.status == 0 {
             return Ok(output);
         }
+        if output.status == mj_checkpoint::archive::EXPORT_REFUSED_EXIT_CODE {
+            return Err(mj_core::refusal::Refusal::precondition(
+                String::from_utf8_lossy(&output.stdout).trim(),
+            )
+            .into());
+        }
         let failure = String::from_utf8_lossy(&output.stderr).into_owned();
         if staging_protocol_unsupported(&failure)
             && replace_stale_export_worker(

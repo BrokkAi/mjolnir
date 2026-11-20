@@ -70,6 +70,18 @@ enum WorkerCommand {
         #[arg(long)]
         kill: bool,
     },
+    /// Ask a live worker to stop every process for a managed suspend.
+    #[command(hide = true)]
+    Quiesce {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        operation: String,
+        #[arg(long)]
+        checkout: PathBuf,
+        #[arg(long = "child-session")]
+        child_sessions: Vec<String>,
+    },
     /// Print this worker's compatibility identity. The controller asks an
     /// image's worker this before linking a session to it.
     #[command(hide = true)]
@@ -606,6 +618,22 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
     match args.command {
         WorkerCommand::Run { config, .. } => {
             lead_process_group();
+            #[cfg(target_os = "linux")]
+            let _orphan_reaper = {
+                use mj_core::subprocess::orphans;
+                let mut children =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
+                orphans::become_subreaper()?;
+                mj_core::runtime::spawn(async move {
+                    while children.recv().await.is_some() {
+                        match mj_core::runtime::spawn_blocking(orphans::reap_adopted_children).await
+                        {
+                            Ok(Ok(())) => {}
+                            error => tracing::warn!(?error, "worker orphan reaper failed"),
+                        }
+                    }
+                })
+            };
             // `main` installed the panic hook and writes the exit record for
             // every error this returns.
             run_daemon_owned(
@@ -650,12 +678,40 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
                 mj_worker::worker_stop::TERM_GRACE
             },
         ),
+        WorkerCommand::Quiesce {
+            root,
+            operation,
+            checkout,
+            child_sessions,
+        } => {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            return mj_worker::worker_stop::suspension::request(
+                &root,
+                &operation,
+                &checkout,
+                child_sessions,
+            );
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                let _ = (root, operation, checkout, child_sessions);
+                anyhow::bail!("managed checkout quiescence requires Linux or macOS");
+            }
+        }
         WorkerCommand::BuildId => {
             println!("{}", mj_core::worker_build::worker_build_id());
             Ok(())
         }
         WorkerCommand::ExportCheckpoint { spec } => {
-            let checkpoint = mj_worker::checkpoint::export_from_spec_file(&spec)?;
+            let checkpoint =
+                mj_worker::checkpoint::export_from_spec_file(&spec).map_err(|error| {
+                    if let Some(reason) =
+                        error.downcast_ref::<mj_checkpoint::snapshot::SnapshotRefused>()
+                    {
+                        anyhow::Error::new(ExportRefused(reason.to_string()))
+                    } else {
+                        error
+                    }
+                })?;
             println!("{}", serde_json::to_string(&checkpoint)?);
             Ok(())
         }

@@ -438,7 +438,8 @@ impl ReviewerHost {
                 .await
                 .context("prepare the reviewer's launch task failed")??
         };
-        let mut child = Command::new(&launch.command)
+        let mut command = Command::new(&launch.command);
+        command
             .args(&launch.args)
             .env_clear()
             .envs(&launch.environment)
@@ -446,8 +447,10 @@ impl ReviewerHost {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
+            .kill_on_drop(true);
+        // Register the bridge with the worker's orphan reaper as it spawns,
+        // so the reaper never takes the exit status its owner awaits.
+        let mut child = mj_core::subprocess::spawn_async_child(&mut command)
             .with_context(|| {
                 format!(
                     "start the reviewer's {} bridge {}",

@@ -578,6 +578,15 @@ pub(super) fn restore_repositories_from_archive(
         // A plain project folder is the user's own directory on a bare local
         // target. Its files were never captured, so a restore must never
         // check out, rewrite or remove anything in it.
+        if repository.metadata.origin_delta.is_some() {
+            // The managed-clone provisioner has already applied this snapshot
+            // in its staging checkout and repaired the published worktrees.
+            ensure!(
+                !restore_contents,
+                "origin delta requires managed clone provisioning"
+            );
+            continue;
+        }
         if repository.metadata.plain_directory {
             continue;
         }
@@ -639,7 +648,12 @@ pub(super) fn archived_repository_snapshot(
     repository: &crate::archive::RepositoryManifest,
 ) -> Result<RepositorySnapshot> {
     let id = &repository.metadata.id;
+    ensure!(
+        repository.metadata.origin_delta.is_none(),
+        "origin delta requires managed clone provisioning"
+    );
     Ok(RepositorySnapshot {
+        origin_delta_pack: None,
         metadata: repository.metadata.clone(),
         committed_bundle: archive
             .payload_by_role(&PayloadRole::GitBundle {
