@@ -25,7 +25,7 @@ def audit_call(tmp_path, call, **kwargs):
     "rg -ni sqlite src/analyzer/store/mod.rs",
     "find src -type f -path '/run/hel/git-cache'",
     "git log --grep='git fetch /run/hel/git-cache' HEAD",
-    "sed -i 's|before|curl https://example.invalid .mj/store.db|g' notes.txt",
+    "sed 's|before|curl https://example.invalid .mj/store.db|g' notes.txt",
     "grep -in 'curl https://github.com' README.md",
     "git grep -n 'git fetch /run/hel/git-cache' HEAD -- docs",
     "rg '/home/jonathan' src",
@@ -254,4 +254,40 @@ def test_awk_system_call_still_flags_network_access(tmp_path):
     command = """awk 'BEGIN { system("curl https://example.invalid") }' src/hel_database/events.rs"""
     report = audit_call(tmp_path, {"kind": "execute", "rawInput": {"command": command}})
     assert not report["passed"]
-    assert {hit["kind"] for hit in report["hits"]} == {"github-or-web"}
+    assert {hit["kind"] for hit in report["hits"]} == {"github-or-web", "needs-inspection"}
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    # Hard-won: 343e9f0: perl effects passed a denylist
+    ("""perl -ne 'use File::Copy; copy("/workspace/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/secret", "out")' input""",
+     {"needs-inspection", "other-workspace"}),
+    # Hard-won: 343e9f0: perl imported socket code outside the read subset
+    ("perl -ne 'use IO::Socket::INET; print' input", {"needs-inspection"}),
+    # Hard-won: 343e9f0: awk hid a later read behind backslash-newline
+    ("awk 'BEGIN { x = 1; " + "\\" + "\ngetline < input }'", {"needs-inspection"}),
+    # Hard-won: 343e9f0: awk hid print redirection after a trailing comma
+    ("awk '{ print $1,\n$2 > output }' input", {"needs-inspection"}),
+    # Hard-won: 343e9f0: gawk changed git's environment before a subprocess
+    ("""gawk 'BEGIN { ENVIRON["GIT_DIR"]="/tmp/other"; system("git show HEAD") }'""", {"needs-inspection"}),
+    # Hard-won: 343e9f0: perl substitution with whitespace hid its execution flag
+    ("perl -pe 's {x}{print}e' input", {"needs-inspection"}),
+    # Hard-won: 343e9f0: sed backup suffix could change the destination
+    ("sed '--in-place=*/../../outside' 'p' README.md", {"needs-inspection"}),
+    # Hard-won: 343e9f0: relative operands missed the recorded workspace boundary
+    (f"cat ../{FOREIGN}/README.md", {"other-workspace"}),
+])
+def test_text_filter_review_findings_still_void(tmp_path, command, expected):
+    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}")
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} >= expected
+
+
+@pytest.mark.parametrize("command", [
+    "awk -F: -v minimum=2 'NR >= minimum { print substr($1, 1, 4) }' input",
+    "sed -n -E -e '2,4p' -e '/x/{s/x/y/g; p;}' input",
+    "perl -ne 'print if /x/' input",
+    """perl -F: -lape 'my $word = lc $_; print join(",", @F) if length $word' input""",
+])
+def test_text_filter_read_subset_passes(tmp_path, command):
+    report = audit_call(tmp_path, shell(command))
+    assert report["passed"], report["hits"]
