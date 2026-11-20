@@ -370,6 +370,9 @@ impl Controller {
                 }
             })
         })?;
+        // Capture the definition used to discover/build this record. A built-in
+        // name can reappear with a different implicit definition after rename.
+        let target_definition = self.config.targets.get(&record.target_template_id).cloned();
         let locator = record
             .target
             .as_ref()
@@ -506,18 +509,30 @@ impl Controller {
             _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began before configuration validation"),
             config = tokio::task::spawn_blocking(mj_core::config::Config::load_locked) => config.context("read current adoption configuration")??,
         };
-        anyhow::ensure!(
-            current_config.profiles.contains_key(&record.last_profile),
-            "profile {:?} is no longer configured; worker continues running; retry recover adopt with --profile selecting a configured profile",
-            record.last_profile
-        );
-        anyhow::ensure!(
-            current_config
-                .targets
-                .contains_key(&record.target_template_id),
-            "target template {:?} is no longer configured; worker continues running; retry recover adopt selecting its current target template",
-            record.target_template_id
-        );
+        let durable_id = session_id.to_owned();
+        let already_installed = tokio::task::spawn_blocking(move || {
+            crate::database::read_durable_session_record(&durable_id)
+        })
+        .await
+        .context("read durable adoption owner")??
+        .is_some();
+        // The lifecycle holder protects row ownership, and the config owner
+        // serializes renames through installation. A tracked retry already has
+        // its harness/access metadata and must not depend on deleted templates.
+        if !already_installed {
+            anyhow::ensure!(
+                current_config.profiles.contains_key(&record.last_profile),
+                "profile {:?} is no longer configured; worker continues running; retry recover adopt with --profile selecting a configured profile",
+                record.last_profile
+            );
+            anyhow::ensure!(
+                target_definition.as_ref().is_some_and(|expected| {
+                    current_config.targets.get(&record.target_template_id) == Some(expected)
+                }),
+                "target template {:?} changed or is no longer configured; worker continues running; retry recover adopt selecting its current target template",
+                record.target_template_id
+            );
+        }
         let guard = AdoptionInstall {
             _session: install_owner,
             _handoff: crate::upgrade::activity_unless_draining("adoption install")?,

@@ -7409,7 +7409,9 @@ enum AdoptionProbe {
     PublicationRejected,
     ProfileRenamed,
     TargetRenamed,
+    BuiltinTargetRenamed,
     InstallInterrupted,
+    ProfileRemovedAfterInstall,
     Unusable(&'static str),
 }
 
@@ -7482,23 +7484,29 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
             | AdoptionProbe::Disconnect
             | AdoptionProbe::ProfileRenamed
             | AdoptionProbe::TargetRenamed
+            | AdoptionProbe::BuiltinTargetRenamed
     ) {
         fs::write(root.join("block-install-status"), b"1").unwrap();
     }
     if let AdoptionProbe::Unusable(kind) = disposition {
         fs::write(root.join("unusable-worker"), kind).unwrap();
     }
+    let adoption_target_id = if matches!(disposition, AdoptionProbe::BuiltinTargetRenamed) {
+        "docker"
+    } else {
+        "local-bare"
+    };
     let mut record = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
     record.state = SessionState::Disconnected;
     record.native_session_id = None;
-    record.target_template_id = "local-bare".into();
+    record.target_template_id = adoption_target_id.into();
     record.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: root.clone(),
     }));
     crate::database::save_session(&record).unwrap();
     let mut config = Config::default();
     config.targets.insert(
-        "local-bare".into(),
+        adoption_target_id.into(),
         mj_core::config::TargetTemplate::LocalBare,
     );
     add_codex_profile(&mut config, directory.path());
@@ -7511,7 +7519,7 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
     let owner_gate = gate.clone();
     let request = mj_client::daemon::RecoveryAdoptionRequest {
         session_id: MOVE_QUEUE_SESSION_ID.into(),
-        target_id: "local-bare".into(),
+        target_id: adoption_target_id.into(),
         profile: None,
         bundle: None,
         all_instances: false,
@@ -7530,6 +7538,7 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                 | AdoptionProbe::PreparingFails
                 | AdoptionProbe::PublicationRejected
                 | AdoptionProbe::InstallInterrupted
+                | AdoptionProbe::ProfileRemovedAfterInstall
         )
         .then_some(installed);
         let work = tokio::spawn(async move {
@@ -7574,6 +7583,7 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                 | AdoptionProbe::PreparingFails
                 | AdoptionProbe::PublicationRejected
                 | AdoptionProbe::InstallInterrupted
+                | AdoptionProbe::ProfileRemovedAfterInstall
         ) {
             let publication = tokio::time::timeout(std::time::Duration::from_secs(5), notice)
                 .await
@@ -7610,7 +7620,10 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
             .unwrap()
             .unwrap();
             drop(config_guard);
-            if matches!(disposition, AdoptionProbe::InstallInterrupted) {
+            if matches!(
+                disposition,
+                AdoptionProbe::InstallInterrupted | AdoptionProbe::ProfileRemovedAfterInstall
+            ) {
                 cancellation.cancel();
                 drop(publication);
                 let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
@@ -7621,11 +7634,19 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                 drop(outcome.admission);
                 fs::write(root.join("release-native-identity"), b"1").unwrap();
                 fs::write(root.join("test-native-ready"), b"1").unwrap();
+                if matches!(disposition, AdoptionProbe::ProfileRemovedAfterInstall) {
+                    Config::update(|config| {
+                        config.profiles.remove("codex");
+                        Ok(())
+                    })
+                    .unwrap();
+                    assert!(!Config::load().unwrap().profiles.contains_key("codex"));
+                }
                 let mut retry = Controller::load().unwrap();
                 retry
                     .adopt_orphan_worker(
                         MOVE_QUEUE_SESSION_ID,
-                        "local-bare",
+                        adoption_target_id,
                         None,
                         None,
                         false,
@@ -7813,17 +7834,28 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
         );
         if matches!(
             disposition,
-            AdoptionProbe::ProfileRenamed | AdoptionProbe::TargetRenamed
+            AdoptionProbe::ProfileRenamed
+                | AdoptionProbe::TargetRenamed
+                | AdoptionProbe::BuiltinTargetRenamed
         ) {
             // The orphan has no row for rename's reference migration to find.
             crate::database::delete_session(MOVE_QUEUE_SESSION_ID).unwrap();
             let mut renaming = Controller::load().unwrap();
-            if matches!(disposition, AdoptionProbe::TargetRenamed) {
+            if matches!(
+                disposition,
+                AdoptionProbe::TargetRenamed | AdoptionProbe::BuiltinTargetRenamed
+            ) {
                 renaming
-                    .rename_target_id("local-bare", "renamed-target")
+                    .rename_target_id(adoption_target_id, "renamed-target")
                     .unwrap();
             } else {
                 renaming.rename_profile_id("codex", "renamed").unwrap();
+            }
+            if matches!(disposition, AdoptionProbe::BuiltinTargetRenamed) {
+                assert!(matches!(
+                    Config::load().unwrap().targets.get("docker"),
+                    Some(mj_core::config::TargetTemplate::LocalDocker { .. })
+                ));
             }
             fs::write(root.join("release-install-status"), b"1").unwrap();
             let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), work)
@@ -8169,5 +8201,27 @@ fn adoption_revalidates_a_target_renamed_before_install() {
         true,
         AdoptionProbe::TargetRenamed,
         "adoption_revalidates_a_target_renamed_before_install",
+    );
+}
+
+#[cfg(unix)]
+// Hard-won: f534df3: implicit docker reappeared after rename and passed adoption's name-only check.
+#[test]
+fn adoption_revalidates_a_renamed_builtin_target_definition_before_install() {
+    adoption_interrupted_probe(
+        true,
+        AdoptionProbe::BuiltinTargetRenamed,
+        "adoption_revalidates_a_renamed_builtin_target_definition_before_install",
+    );
+}
+
+#[cfg(unix)]
+// Hard-won: f534df3: profile deletion made an installed but interrupted adoption impossible to retry.
+#[test]
+fn interrupted_adoption_retries_after_its_profile_is_removed() {
+    adoption_interrupted_probe(
+        true,
+        AdoptionProbe::ProfileRemovedAfterInstall,
+        "interrupted_adoption_retries_after_its_profile_is_removed",
     );
 }
