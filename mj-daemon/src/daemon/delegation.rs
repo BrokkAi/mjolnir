@@ -1495,8 +1495,8 @@ mod tests {
     }
 
     // After a failed review-host startup recovery its open-review answer is an
-    // error. Delegation decides what that means: a child that cannot request
-    // review never asks, and one that can settles as having no open review.
+    // error. Delegation decides what that means: the child settles as having
+    // no open review, whatever its parent's review choice.
     #[tokio::test]
     async fn children_settle_when_the_review_host_failed_its_startup_recovery() {
         const CHILD: &str = "MJ_TEST_DELEGATION_REVIEW_HOST_FAILED";
@@ -1557,8 +1557,6 @@ mod tests {
                 .insert(child_id.into(), relation.into());
         }
         let state = crate::daemon::tests::test_runtime_state_with(controller);
-        assert!(state.child_can_request_review("child-push"));
-        assert!(!state.child_can_request_review("child-off"));
         state
             .review_host()
             .fail_startup_recovery("the sweep could not read the store");

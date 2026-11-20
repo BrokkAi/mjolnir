@@ -932,7 +932,7 @@ fn review_tool_definitions() -> Vec<Value> {
             }),
         ),
         tool(
-            "set_review_baseline",
+            "set_baseline",
             "Mark commits through `commit` as reviewed, so later reviews cover only later changes. Accepted only for a commit whose tree a review has passed, clean or by override_review. A clean review already does this. Pass `path` for another worktree.",
             json!({
                 "type":"object",
@@ -1007,16 +1007,16 @@ fn review_action(name: &str, arguments: Value) -> Result<SubagentToolAction> {
             }
             SubagentToolAction::OverrideReview { overrides }
         }
-        "set_review_baseline" => {
+        "set_baseline" => {
             let args: SetReviewBaselineArgs = serde_json::from_value(arguments)?;
             let commit = args.commit.trim();
             if commit.is_empty() {
-                bail!("set_review_baseline commit cannot be empty");
+                bail!("set_baseline commit cannot be empty");
             }
             let path = match args.path {
                 Some(path) if path.trim().is_empty() => {
                     bail!(
-                        "set_review_baseline path cannot be empty; omit it for the session working directory"
+                        "set_baseline path cannot be empty; omit it for the session working directory"
                     )
                 }
                 other => other,
@@ -1311,14 +1311,14 @@ mod tests {
                 },
             ),
             (
-                json!({"name":"set_review_baseline","arguments":{"commit":" abc1234 ","path":"/other"}}),
+                json!({"name":"set_baseline","arguments":{"commit":" abc1234 ","path":"/other"}}),
                 SubagentToolAction::SetReviewBaseline {
                     commit: "abc1234".into(),
                     path: Some("/other".into()),
                 },
             ),
             (
-                json!({"name":"set_review_baseline","arguments":{"commit":"abc1234"}}),
+                json!({"name":"set_baseline","arguments":{"commit":"abc1234"}}),
                 SubagentToolAction::SetReviewBaseline {
                     commit: "abc1234".into(),
                     path: None,
@@ -1407,16 +1407,16 @@ mod tests {
                 .contains("now takes `overrides`")
         );
         assert!(
-            refused("set_review_baseline", json!({"commit":" "}))
+            refused("set_baseline", json!({"commit":" "}))
                 .contains("commit cannot be empty")
         );
         assert!(
-            refused("set_review_baseline", json!({"commit":"abc","path":" "}))
+            refused("set_baseline", json!({"commit":"abc","path":" "}))
                 .contains("path cannot be empty")
         );
-        assert!(refused("set_review_baseline", json!({})).contains("missing field `commit`"));
+        assert!(refused("set_baseline", json!({})).contains("missing field `commit`"));
         assert!(
-            refused("set_review_baseline", json!({"commit":"abc","extra":true}))
+            refused("set_baseline", json!({"commit":"abc","extra":true}))
                 .contains("unknown field `extra`")
         );
         assert!(refused("request_review", json!({"extra":true})).contains("unknown field"));
@@ -1500,7 +1500,7 @@ mod tests {
             overrides["items"]["properties"]["reason"]["description"],
             "Why this finding does not need fixing."
         );
-        let baseline = by_name("set_review_baseline");
+        let baseline = by_name("set_baseline");
         assert_eq!(baseline["inputSchema"]["required"], json!(["commit"]));
         assert!(baseline["inputSchema"]["properties"].get("path").is_some());
         assert!(

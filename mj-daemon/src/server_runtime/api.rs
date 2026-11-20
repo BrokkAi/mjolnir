@@ -337,7 +337,7 @@ impl ExportRuntime for RuntimeState {
             self.review_host()
                 .set_push_base(&session_id, commit, path)
                 .await
-                .map_err(|error| anyhow!("set_review_baseline refused: {}", error.0))
+                .map_err(|error| anyhow!("set_baseline refused: {}", error.0))
         })
     }
 

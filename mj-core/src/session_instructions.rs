@@ -102,7 +102,7 @@ pub fn compose(facts: &InstructionContext<'_>, index: Result<&str, &str>) -> Str
         };
         sections.push(standing_instructions(socket.role, facts.harness, review_role).to_owned());
         if socket.review_tools {
-            sections.push(review_instructions(socket.role).to_owned());
+            sections.push(REVIEW_SERVER_INSTRUCTIONS.to_owned());
         }
     }
     if facts.history_tools {
@@ -172,17 +172,13 @@ static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
 /// A child's server instructions: its report reaches the parent through `handback`.
 static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If you committed changes and have mj-review tools, get them reviewed before handing back. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. {}",
+        "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. {}",
         crate::subagent::HANDBACK_REPORT_RULES.as_str()
     )
 });
 
-/// Policy for the separate `mj-review` server of a managed child, delivered
-/// in the standing session instructions. A child does not push; it reviews before it reports.
-const CHILD_REVIEW_SERVER_INSTRUCTIONS: &str = "If you committed changes, call `request_review` before you hand back your report. A task that committed nothing (an investigation, a test run, a question) hands back without a review. It replies immediately; the verdict arrives later as a Mjolnir message. After calling it, end your turn: the verdict starts your next turn, and handback is refused until it arrives. Pass `path` for a worktree other than your working directory. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Hand back once the review is clean or you have overridden its findings. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
-
 /// Policy for the separate `mj-review` server, composed into standing instructions.
-const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. Pass `path` when pushing from another worktree; reviewing a worktree at HEAD lets you keep working meanwhile. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
+const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. Pass `path` when pushing from another worktree; reviewing a worktree at HEAD lets you keep working meanwhile. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
 
 static REVIEWER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
@@ -220,14 +216,6 @@ pub fn review_child_output_contract(role: ReviewChildRole) -> &'static str {
     match role {
         ReviewChildRole::Reviewer => REVIEWER_INSTRUCTIONS.as_str(),
         ReviewChildRole::BriefWriter => BRIEF_WRITER_HANDOFF.as_str(),
-    }
-}
-
-/// A managed child reviews before it reports; a top-level session, before it pushes.
-pub fn review_instructions(role: SubagentMcpRole) -> &'static str {
-    match role {
-        SubagentMcpRole::Child | SubagentMcpRole::FetchOnly => CHILD_REVIEW_SERVER_INSTRUCTIONS,
-        SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly => REVIEW_SERVER_INSTRUCTIONS,
     }
 }
 

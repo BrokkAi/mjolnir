@@ -179,66 +179,22 @@ impl RuntimeState {
         &self.review_host
     }
 
-    /// Whether `child_id` can request review: an ordinary worker child that
-    /// launch offers the review tools, by the same rule launch uses.
-    pub(super) fn child_can_request_review(&self, child_id: &str) -> bool {
-        let owner = self.owner();
-        let controller = owner.controller();
-        let worker = controller
-            .state
-            .subagents
-            .get(child_id)
-            .is_some_and(|relation| relation.kind == mj_core::subagent::SubagentKind::Worker);
-        let Some(session) = controller.state.sessions.get(child_id) else {
-            return false;
-        };
-        worker
-            && mj_core::worker_launch::offers_review_tools(
-                controller
-                    .state
-                    .effective_review_config(&controller.config.review, child_id)
-                    .trigger(),
-                session.harness_kind,
-            )
-    }
-
     /// Whether `child_id` is still waiting for its review's verdict, so its
     /// ended turn or recorded handback is not final. Delegation completion and
     /// parent report reconciliation both ask here. The review host owns the
-    /// answer: a review the child already started stays open even if review
-    /// has since been turned off, so the current configuration is not asked.
+    /// answer. A sub-agent no longer requests review, so only a review begun
+    /// before that change can be open.
     ///
-    /// When the host cannot answer (its startup recovery failed and it did not
-    /// restore this session), the child counts as having no open review: a
-    /// review recovery did not restore cannot produce a verdict in this daemon
-    /// run, and waiting would only block the child forever. Restored reviews
-    /// still answer open.
+    /// When the host cannot answer, the child counts as having no open review:
+    /// a review the host did not restore cannot produce a verdict in this
+    /// daemon run, and waiting would only block the child forever.
     pub(crate) async fn child_awaits_review(&self, child_id: &str) -> bool {
         match self.review_host().has_open_review(child_id).await {
             Ok(open) => open,
-            Err(crate::review_host::OpenReviewUnknown::RecoveryFailed(error)) => {
-                if self.child_can_request_review(child_id) {
-                    tracing::warn!(child_session_id = child_id, %error,
-                        "cannot tell whether the child's review is open; settling it as having none");
-                }
+            Err(unknown) => {
+                tracing::debug!(child_session_id = child_id, ?unknown,
+                    "cannot tell whether the child's review is open; settling it as having none");
                 false
-            }
-            // A host that is still restoring, or has stopped, says nothing
-            // about the review. A child that can request review waits, so its
-            // completion and its report retry later; any other child cannot
-            // have a review and is not held.
-            Err(
-                unknown @ (crate::review_host::OpenReviewUnknown::NotReady
-                | crate::review_host::OpenReviewUnknown::HostStopped),
-            ) => {
-                let held = self.child_can_request_review(child_id);
-                if held && unknown == crate::review_host::OpenReviewUnknown::HostStopped {
-                    tracing::warn!(
-                        child_session_id = child_id,
-                        "the review host stopped; holding the child's completion"
-                    );
-                }
-                held
             }
         }
     }

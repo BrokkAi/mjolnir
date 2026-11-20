@@ -3597,7 +3597,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         worker.child_session_id, child.child_session_id,
         "kind belongs to the idempotent key"
     );
-    // An ordinary sub-agent is offered the review tools but is not push-gated.
+    // An ordinary sub-agent is neither offered the review tools nor push-gated.
     let ordinary_launch = controller
         .current_worker_launch_config(
             &worker.child_session_id,
@@ -3610,7 +3610,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             },
         )
         .unwrap();
-    assert!(ordinary_launch.review_tools());
+    assert!(!ordinary_launch.review_tools());
     assert!(!ordinary_launch.review_gate());
     let child_record = controller
         .state
@@ -3678,13 +3678,13 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
 
 #[test]
 #[cfg_attr(windows, ignore = "local bare target fixture")]
-fn ordinary_children_inherit_the_parent_effective_review_setting() {
+fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
     const MARKER: &str = "MJ_TEST_CHILD_EFFECTIVE_REVIEW";
     if std::env::var_os(MARKER).is_none() {
         let directory = tempfile::tempdir().unwrap();
         run_registration_child(
             MARKER,
-            "ordinary_children_inherit_the_parent_effective_review_setting",
+            "ordinary_children_get_no_review_tools_when_the_parent_reviews",
             directory.path(),
         );
         return;
@@ -3695,8 +3695,7 @@ fn ordinary_children_inherit_the_parent_effective_review_setting() {
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
-    // Global review is off; the first parent enables it with a session
-    // selection, then the same parent explicitly disables it.
+    // Global review is off; the parent enables it with a session selection.
     config.review = mj_core::config::ReviewConfig::default();
     let mut controller = Controller {
         config,
@@ -3741,51 +3740,22 @@ fn ordinary_children_inherit_the_parent_effective_review_setting() {
             })
             .unwrap()
     };
-    let enabled = register_worker(&mut controller, "review-enabled");
-    let backend = |child_id: &str| targets::TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir()
-            .join("workers")
-            .join(child_id)
-            .to_string_lossy()
-            .into_owned(),
-    };
-    let enabled_launch = controller
+    let child = register_worker(&mut controller, "review-enabled");
+    let launch = controller
         .current_worker_launch_config(
-            &enabled.child_session_id,
-            &backend(&enabled.child_session_id),
+            &child.child_session_id,
+            &targets::TargetLocator::LocalBare {
+                worker_root: mj_core::config::data_dir()
+                    .join("workers")
+                    .join(&child.child_session_id)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
         )
         .unwrap();
     assert!(
-        enabled_launch.review_tools(),
-        "session-specific parent review enables child review tools"
-    );
-    // The review host asks the same function, so the child is reviewed by
-    // the parent's selected reviewers, not the global list.
-    let child_choice = controller
-        .state
-        .effective_review(&enabled.child_session_id)
-        .unwrap();
-    assert_eq!(
-        controller.config.review.for_session(child_choice).reviewers,
-        vec![mj_core::config::SubagentChoice {
-            model: "review-model".into(),
-            effort: None,
-        }]
-    );
-
-    controller.state.sessions.get_mut(parent_id).unwrap().review =
-        Some(Box::new(mj_core::config::SessionReview::Off));
-    crate::database::save_state(&controller.state).unwrap();
-    let disabled = register_worker(&mut controller, "review-disabled");
-    let disabled_launch = controller
-        .current_worker_launch_config(
-            &disabled.child_session_id,
-            &backend(&disabled.child_session_id),
-        )
-        .unwrap();
-    assert!(
-        !disabled_launch.review_tools(),
-        "explicitly disabled parent review disables child review tools"
+        !launch.review_tools(),
+        "a sub-agent never requests review, whatever its parent's choice"
     );
 }
 

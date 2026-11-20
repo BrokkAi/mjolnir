@@ -809,7 +809,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                             );
                             if offers_review {
                                 expected.extend(
-                                    ["request_review", "override_review", "set_review_baseline"]
+                                    ["request_review", "override_review", "set_baseline"]
                                         .map(|tool| format!("mcp__mj-review__{tool}")),
                                 );
                             }
@@ -830,7 +830,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         ("mcp  mj-agents  list agents", offers("list_agents")),
                         ("mcp  mj-review  request review", offers_review),
                         ("mcp  mj-review  override review", offers_review),
-                        ("mcp  mj-review  set review baseline", offers_review),
+                        ("mcp  mj-review  set baseline", offers_review),
                         ("mcp  mj-review_  request review", false),
                         ("mcp  mj-agents  handback", offers("handback")),
                         ("mcp  mj-memory  trace file src/lib.rs", true),
