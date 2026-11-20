@@ -7257,6 +7257,116 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     assert!(evidence(&relay).assistant_text_tail.is_empty());
 }
 
+// Hard-won: ce467bc6f: a restarted mailbox wake inherited the prior turn's closed answer.
+#[test]
+fn mailbox_reopen_keeps_latest_instructions_without_the_previous_reply() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "human-turn").unwrap();
+    let evidence = |relay: &DurableRelay| {
+        relay.turn_context().evidence(
+            mj_core::config::HarnessKind::Codex,
+            mj_core::activity::verdict::TurnPhase::Running,
+            &mj_core::activity::ActivityFacts::default(),
+            0,
+        )
+    };
+    submit_relay(
+        &mut relay,
+        "human-instructions",
+        prompt("Keep working under these instructions"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"human-answer",
+                "content":{"type":"text","text":"human turn complete"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    relay
+        .record_command_completed(
+            "human-instructions",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                diagnostic: None,
+                usage: None,
+                work_facts: None,
+            },
+        )
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "idle-after-human").unwrap();
+    assert_eq!(evidence(&relay).assistant_text_tail, "human turn complete");
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    submit_relay(
+        &mut relay,
+        "mailbox-event-assessment",
+        RelayCommand::DeliverMailboxEvent {
+            event: mj_core::mailbox::MailboxEvent {
+                key: "new-mailbox-work".into(),
+                source: "operator".into(),
+                wake: true,
+                created_at_ms: 1,
+                body: mj_core::mailbox::MailboxEventBody::OperatorBack {
+                    requests: vec!["continue the work".into()],
+                },
+            },
+        },
+    );
+    let wake = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(wake.len(), 1);
+    assert!(matches!(wake[0].command, RelayCommand::MailboxWake { .. }));
+    assert!(evidence(&relay).assistant_text_tail.is_empty());
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "mailbox-before-output").unwrap();
+    assert_eq!(
+        evidence(&relay).user_prompt_tail,
+        "Keep working under these instructions"
+    );
+    assert!(evidence(&relay).assistant_text_tail.is_empty());
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"mailbox-answer",
+                "content":{"type":"text","text":"mailbox prefix"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "mailbox-with-output").unwrap();
+    assert_eq!(evidence(&relay).assistant_text_tail, "mailbox prefix");
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"mailbox-answer",
+                "content":{"type":"text","text":" plus suffix"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        evidence(&relay).assistant_text_tail,
+        "mailbox prefix plus suffix"
+    );
+    assert_eq!(
+        evidence(&relay).user_prompt_tail,
+        "Keep working under these instructions"
+    );
+}
+
 // Hard-won: 31d6d4489: ACK and a second running restart lost the confirmed correction.
 #[test]
 fn restart_continuation_preserves_confirmed_steering_context() {

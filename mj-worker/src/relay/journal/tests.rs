@@ -412,6 +412,7 @@ fn revision_16_snapshot_and_journal_replay_legacy_mailbox_text() {
 
 /// A relay that dies mid-turn keeps every chunk it acknowledged, and the
 /// relay that reopens republishes the frontier it replayed.
+// Hard-won: ce467bc6f: restoring tails closed an open reply and lost its prefix on the next chunk.
 #[test]
 fn a_relay_that_dies_mid_stream_recovers_its_unpersisted_chunks() {
     let temp = tempfile::tempdir().unwrap();
@@ -432,7 +433,7 @@ fn a_relay_that_dies_mid_stream_recovers_its_unpersisted_chunks() {
     // No teardown: the process is gone before anything else is written.
     drop(relay);
 
-    let reopened = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let mut reopened = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     assert_eq!(reopened.latest_ordinal(), frontier);
     assert_eq!(reopened.latest_digest(), digest);
     assert_eq!(
@@ -446,6 +447,23 @@ fn a_relay_that_dies_mid_stream_recovers_its_unpersisted_chunks() {
         persisted_relay_snapshot(temp.path()).latest_ordinal,
         frontier,
         "recovery must republish the frontier it replayed"
+    );
+    reopened
+        .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+            ContentBlock::from("chunk 8"),
+        )))
+        .unwrap();
+    let evidence = reopened.turn_context().evidence(
+        mj_core::config::HarnessKind::Codex,
+        mj_core::activity::verdict::TurnPhase::Running,
+        &mj_core::activity::ActivityFacts::default(),
+        0,
+    );
+    assert_eq!(
+        evidence.assistant_text_tail,
+        (0..9)
+            .map(|index| format!("chunk {index}"))
+            .collect::<String>()
     );
 }
 
@@ -1728,6 +1746,7 @@ fn reopening_does_not_decompress_historical_sealed_segments() {
     );
 }
 
+// Hard-won: ce467bc6f: absent restored assessment history erased evidence replayed from the journal.
 #[test]
 fn restored_relay_continues_after_canonical_event_frontier() {
     let temp = tempfile::tempdir().unwrap();
@@ -1771,6 +1790,56 @@ fn restored_relay_continues_after_canonical_event_frontier() {
             .unwrap()[0]
             .ordinal,
         42
+    );
+    let mut relay = relay;
+    let recovery = relay
+        .snapshot
+        .queued_prompts
+        .first()
+        .unwrap()
+        .command_id
+        .clone();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            &recovery,
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                diagnostic: None,
+                usage: None,
+                work_facts: None,
+            },
+        )
+        .unwrap();
+    submit_relay(
+        &mut relay,
+        "post-restore-prompt",
+        prompt("new work after restoration"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+            ContentBlock::from("actual restored-session reply"),
+        )))
+        .unwrap();
+    assert!(relay.snapshot.assessment_context.is_none());
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "reopened-without-assessment").unwrap();
+    let evidence = relay.turn_context().evidence(
+        mj_core::config::HarnessKind::Codex,
+        mj_core::activity::verdict::TurnPhase::Running,
+        &mj_core::activity::ActivityFacts::default(),
+        0,
+    );
+    assert_eq!(evidence.user_prompt_tail, "new work after restoration");
+    assert_eq!(
+        evidence.assistant_text_tail,
+        "actual restored-session reply"
     );
 }
 

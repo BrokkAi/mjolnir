@@ -1092,9 +1092,11 @@ impl DurableRelay {
             // The latest persisted human instructions govern every turn,
             // including mailbox wakes and restart continuations. Use what
             // remains in that history, without matching an executing request ID.
-            relay
-                .turn_context
-                .restore_text_tails(&relay.snapshot.authorization_context().unwrap_or_default());
+            if let Some(history) = relay.snapshot.authorization_context() {
+                relay
+                    .turn_context
+                    .restore_text_tails(&history, relay.turn_in_progress());
+            }
         }
         relay
             .turn_context
