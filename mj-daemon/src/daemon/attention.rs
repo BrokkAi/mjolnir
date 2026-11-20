@@ -290,6 +290,24 @@ pub(super) fn semantic_question(
     }
 }
 
+/// Workers before open-request projection can dismiss only their current
+/// inferred assessment. Older workers may be unable to dismiss prose at all.
+pub(super) fn supports_question_dismissal(
+    live: &mj_core::relay::RelayOperationalState,
+    question: &mj_core::assessment::InferredQuestion,
+) -> bool {
+    live.relay_protocol_version.is_some_and(|version| {
+        version >= mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL
+            || version >= mj_core::relay::RELAY_DISMISS_QUESTION_PROTOCOL
+                && live
+                    .assessment
+                    .as_ref()
+                    .and_then(|assessment| assessment.inferred_question())
+                    .as_ref()
+                    == Some(question)
+    })
+}
+
 fn current_condition_failure(runtime: &RuntimeProjection, id: &str) -> bool {
     runtime.records.get(id).is_some_and(|record| {
         record
@@ -346,11 +364,7 @@ fn dismissal(
         SessionAttention::Important => Some(NotificationDismissal::ReadThrough(
             live.assessment.as_deref()?.completed_ordinal,
         )),
-        SessionAttention::NeedsInput
-            if live.relay_protocol_version.is_some_and(|version| {
-                version >= mj_core::relay::RELAY_DISMISS_QUESTION_PROTOCOL
-            }) =>
-        {
+        SessionAttention::NeedsInput => {
             let tail = runtime.transcripts.get(id)?;
             if !tail.header.pending_elicitations.is_empty()
                 || runtime.metadata.reviews.iter().any(|review| {
@@ -360,20 +374,8 @@ fn dismissal(
                 return None;
             }
             let question = semantic_question(runtime, id)?;
-            // Pre-64 workers can dismiss only the current inferred assessment.
-            if live
-                .relay_protocol_version
-                .is_some_and(|version| version < mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL)
-                && live
-                    .assessment
-                    .as_ref()
-                    .and_then(|assessment| assessment.inferred_question())
-                    .as_ref()
-                    != Some(&question)
-            {
-                return None;
-            }
-            Some(NotificationDismissal::Question(question))
+            supports_question_dismissal(live, &question)
+                .then_some(NotificationDismissal::Question(question))
         }
         _ => None,
     }

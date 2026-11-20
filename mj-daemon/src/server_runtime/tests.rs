@@ -3076,7 +3076,10 @@ fn session_verdicts_reconcile_lifecycle_move_and_workspace_offers() {
     failed.last_error = Some("destroy failed".into());
     let mut moving = phone_session("moving", 0);
     moving.state = SessionState::Running;
-    for record in [checkpoint, failed, moving] {
+    let mut failed_launch = phone_session("retry-launch", 0);
+    failed_launch.state = SessionState::StartupCleanup;
+    failed_launch.last_error = Some("launch cleanup failed".into());
+    for record in [checkpoint, failed, moving, failed_launch] {
         controller.state.sessions.insert(record.id.clone(), record);
     }
     let mut held = move_recovery_fixture();
@@ -3098,7 +3101,12 @@ fn session_verdicts_reconcile_lifecycle_move_and_workspace_offers() {
             session_count: 0,
         })
         .collect();
+    runtime
+        .metadata
+        .failed_launch_retries
+        .insert("retry-launch".into());
     let snapshot = publish_fixture(&mut Default::default(), &controller, &runtime);
+    assert!(snapshot.sessions.0["retry-launch"].verdict.resume.offered());
     let failed = &snapshot.sessions.0["failed"];
     assert!(failed.verdict.live_dashboard);
     assert!(failed.verdict.transition.is_none());
@@ -3114,4 +3122,8 @@ fn session_verdicts_reconcile_lifecycle_move_and_workspace_offers() {
     assert!(checkpoint.verdict.transition.is_none());
     assert!(checkpoint.verdict.change_workspace.offered());
     assert!(checkpoint.capabilities.change_workspace);
+    assert_eq!(checkpoint.verdict.stop, SessionOffer::OperationInProgress);
+    assert!(!checkpoint.capabilities.suspend);
+    assert!(!checkpoint.capabilities.restart);
+    assert!(!checkpoint.capabilities.move_session);
 }

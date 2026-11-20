@@ -7,14 +7,14 @@ use mj_core::subagent::SubagentKind;
 
 type Children<'a> = BTreeMap<String, Vec<(&'a str, Option<SubagentKind>)>>;
 
+fn is_active_member(record: &SessionRecord) -> bool {
+    record.state.has_live_worker() && !record.archived
+}
+
 fn children(runtime: &RuntimeProjection) -> Children<'_> {
     let mut children = Children::new();
     for (id, child) in &runtime.subagents {
-        if runtime
-            .records
-            .get(id)
-            .is_some_and(|r| r.state.has_live_worker() && !r.archived)
-        {
+        if runtime.records.get(id).is_some_and(is_active_member) {
             children
                 .entry(child.parent_session_id.clone())
                 .or_default()
@@ -99,6 +99,11 @@ fn needs_person(attention: Option<&SessionAttention>) -> bool {
     )
 }
 
+fn has_waiting_form(view: Option<&RuntimeSessionView>) -> bool {
+    view.and_then(|view| view.materialized.as_deref())
+        .is_some_and(|view| !view.pending_elicitations.is_empty())
+}
+
 fn own_verdict(
     runtime: &RuntimeProjection,
     id: &str,
@@ -124,20 +129,21 @@ fn own_verdict(
         Transitioning
     } else if transition_failure.is_some() {
         TransitionFailed
+    } else if record.state == SessionState::Checkpointing {
+        OperationInProgress
     } else {
         Ready
     };
     let state = record.state;
     let view = runtime.sessions.get(id);
     let live = view.and_then(|v| v.operational.as_deref());
-    let form = view
-        .and_then(|v| v.materialized.as_deref())
-        .is_some_and(|v| !v.pending_elicitations.is_empty());
+    let form = has_waiting_form(view);
     let attention = runtime.metadata.session_attention.get(id);
     let activity = live.map(|v| v.activity_state());
     let running = live.is_some_and(|live| {
         live.active_prompt.is_some()
-            || live.harness_turn.is_some() && !live.goal.active()
+            || live.harness_turn.is_some()
+            || live.goal.running()
             || live
                 .capacity_retry
                 .as_ref()
@@ -156,7 +162,9 @@ fn own_verdict(
         && live.is_some()
         && (running || form || super::attention::semantic_question(runtime, id).is_some());
     let failed_first_launch = runtime.metadata.failed_launch_retries.contains(id);
-    let resume = if operation != Ready {
+    let resume = if failed_first_launch && operation == Ready {
+        Ready
+    } else if operation != Ready {
         operation
     } else if state.is_active() && state != SessionState::Error {
         Active
@@ -166,8 +174,7 @@ fn own_verdict(
         state,
         SessionState::Lost | SessionState::DestroyedWithDataLoss
     ) && (record.checkpoint.is_some()
-        || (state == SessionState::Error && record.target.is_some())
-        || failed_first_launch)
+        || (state == SessionState::Error && record.target.is_some()))
     {
         Ready
     } else {
@@ -329,13 +336,38 @@ pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProject
                 }
             })
         };
+        let before = previous.verdicts.get(id).copied();
+        let rollup_changed = match (before, verdict) {
+            (Some(old), Some(new)) => {
+                (old.working, old.unfinished, old.interrupt_member)
+                    != (new.working, new.unfinished, new.interrupt_member)
+            }
+            (None, None) => false,
+            _ => true,
+        };
+        let parent_changed = previous.subagents.get(id) != runtime.subagents.get(id)
+            || previous.native_agents.get(id).map(|view| &view.agent)
+                != runtime.native_agents.get(id).map(|view| &view.agent)
+            || previous.records.get(id).map(is_active_member)
+                != runtime.records.get(id).map(is_active_member);
         match verdict {
-            Some(verdict) => {
-                verdicts.insert(id.to_owned(), verdict);
+            Some(mut verdict) => {
+                if let Some(old) = before {
+                    verdict.working_children = old.working_children;
+                    verdict.unfinished_children = old.unfinished_children;
+                    verdict.interrupt_count = old.interrupt_count;
+                    verdict.interrupt_all = old.interrupt_all;
+                }
+                if before != Some(verdict) {
+                    verdicts.insert(id.to_owned(), verdict);
+                }
             }
             None => {
                 verdicts.remove(id);
             }
+        }
+        if !rollup_changed && !parent_changed {
+            continue;
         }
         for runtime in [previous, &*runtime] {
             let mut visited = BTreeSet::new();
@@ -359,6 +391,10 @@ pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProject
         }
     }
 
+    if families.is_empty() {
+        runtime.verdicts = verdicts;
+        return;
+    }
     let children = children(runtime);
     let own = verdicts.clone();
     for id in families {
@@ -418,22 +454,23 @@ impl RuntimeState {
         id: &str,
         include_question: bool,
     ) -> Result<()> {
-        let command = include_question
+        let view = runtime.sessions.get(id);
+        let live = view.and_then(|view| view.operational.as_deref());
+        let question = (include_question && !has_waiting_form(view))
             .then(|| super::attention::semantic_question(runtime, id))
-            .flatten()
-            .map(|question| RelayCommand::DismissQuestion { question })
-            .or_else(|| {
-                runtime
-                    .sessions
-                    .get(id)?
-                    .operational
-                    .as_ref()?
-                    .turn_controls
-                    .as_ref()?
-                    .interrupt
-                    .clone()
-            })
-            .unwrap_or(RelayCommand::CancelTurn);
+            .flatten();
+        let command = if let Some(question) = question {
+            ensure!(
+                live.is_some_and(|live| super::attention::supports_question_dismissal(
+                    live, &question
+                )),
+                "this worker cannot dismiss its open question; open the session to answer it or stop the session"
+            );
+            RelayCommand::DismissQuestion { question }
+        } else {
+            live.and_then(|live| live.turn_controls.as_ref()?.interrupt.clone())
+                .unwrap_or(RelayCommand::CancelTurn)
+        };
         self.session_manager
             .session(id)
             .await?
@@ -555,5 +592,33 @@ mod tests {
             .insert(finished.agent.view_id(), finished);
         project(&mut capture, &before);
         assert!(!capture.verdicts["parent"].interrupt_all);
+
+        // A harness-owned goal can run without either a prompt or a
+        // materialized active turn. It still adds the owning session.
+        let before = capture.clone();
+        let mut live = mj_core::relay::RelaySnapshot::new("parent".into()).operational_state();
+        live.goal.execution = Some(mj_core::goal::GoalExecution {
+            version: 1,
+            revision: None,
+            status: "running".into(),
+            turn_id: Some("goal".into()),
+        });
+        let mut view = RuntimeSessionView::from_managed("parent".into(), Default::default());
+        view.operational = Some(live.into());
+        capture.sessions.insert("parent".into(), view);
+        project(&mut capture, &before);
+        assert!(capture.verdicts["parent"].interrupt);
+        assert!(capture.verdicts["parent"].interrupt_all);
+        assert_eq!(capture.verdicts["parent"].interrupt_count, 1);
+        let (outcome, commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        let result = outcome.unwrap();
+        assert_eq!(result.requested, 1);
+        assert!(result.failures.is_empty());
+        assert!(
+            matches!(commands.as_slice(), [(id, _, RelayCommand::CancelTurn)] if id == "parent")
+        );
     }
 }

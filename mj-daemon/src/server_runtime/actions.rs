@@ -552,12 +552,13 @@ pub(super) async fn apply_phone_action(
         ControllerAction::InterruptAll { session_id } => {
             let result = services.daemon_runtime.interrupt_all(&session_id).await?;
             let failed = result.failures.len();
-            // The successes are not rolled back, so one failure reads as a
-            // count of what could not be interrupted, not a named session.
-            anyhow::ensure!(
-                failed == 0,
-                "could not interrupt {failed} of the tree's sessions"
-            );
+            // Report the number without exposing worker diagnostics. The
+            // successfully interrupted members are already settling.
+            if failed != 0 {
+                return Err(mj_core::refusal::Refusal::precondition(format!(
+                    "Could not interrupt {failed} of the tree's sessions. Open the remaining sessions to check for an unanswered question or stop the session."
+                )).into());
+            }
             Ok(())
         }
         // Refreshes are handled by the phone control loop, which owns the

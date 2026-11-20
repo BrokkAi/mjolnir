@@ -671,10 +671,9 @@ pub(crate) async fn run_dashboard_for_workspace(
                         .session_record_with_verdict(record.id.clone())
                         .await?;
                     current.map(|current| {
-                        context
-                            .dashboard
-                            .set_session_verdict(&record.id, current.verdict);
-                        current.record
+                        let record = current.record.clone();
+                        context.dashboard.remember_stopped_record(current);
+                        record
                     })
                 } else {
                     startup

@@ -34,6 +34,7 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-20 19:30Z) Milestone 3: verified that a saved non-UTF-8 project path remains available in the browser capture without breaking terminal control frames.
 - [x] (2026-11-20) Milestone 4: added the per-session verdict, switched both surfaces to it, and put Interrupt All selection and execution in the daemon.
 - [x] (2026-11-20) Milestone 4: validated after merging `origin/master`. The terminal and phone goldens, daemon offer tests, browser tests, and a named-instance run with one working child passed.
+- [x] (2026-11-20) Milestone 4 first review: retained worker-targeted terminal interruption, included autonomous goal work, kept the stopped record and its Resume verdict together, and preserved Retry Launch after failed startup cleanup. Checkpoint activity blocks lifecycle offers while the conversation and workspace editing stay available.
 - [ ] Milestone 5: one history for both feeds.
 
 

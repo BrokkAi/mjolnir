@@ -68,7 +68,8 @@ impl DashboardState {
         }
     }
 
-    pub fn set_session_verdict(
+    #[cfg(test)]
+    pub(crate) fn set_session_verdict(
         &mut self,
         session_id: &str,
         verdict: mj_client::runtime_feed::SessionVerdict,
@@ -82,6 +83,11 @@ impl DashboardState {
         self.session_verdicts
             .get(session_id)
             .copied()
+            .or_else(|| {
+                self.stopped_records
+                    .get(session_id)
+                    .map(|cached| cached.verdict)
+            })
             .unwrap_or_default()
     }
 

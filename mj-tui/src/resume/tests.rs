@@ -2862,6 +2862,11 @@ fn the_mjolnir_tab_lists_the_daemons_answer_and_resumes_a_session_the_feed_lacks
     };
     assert_eq!(wizard.session_id, "session-1");
     assert!(dashboard.state.sessions.is_empty());
+
+    dashboard.cancel_modal();
+    dashboard.set_session_verdicts(Default::default());
+    dashboard.begin_resume_for("session-1");
+    assert!(matches!(dashboard.mode, Mode::Resume(_)));
 }
 
 #[test]

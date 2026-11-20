@@ -17,15 +17,15 @@ use mj_tui::{DashboardAction, SessionOperationKind};
 
 use crate::daemon;
 use crate::dashboard::io::{
-    self, ConfigRenameRequest, ContainerSettingsRequest, DashboardIoUpdate,
-    LifecycleOperationRequest, ResumeRepositoryPreflightApply, report, spawn_async_job,
-    spawn_cancellable_io, spawn_cancellable_io_with_token, spawn_clipboard_read,
-    spawn_config_rename, spawn_create_bundle, spawn_dashboard_change_workspace,
-    spawn_dashboard_container_settings, spawn_dashboard_create_session,
-    spawn_dashboard_notifications_ignored, spawn_dashboard_rename, spawn_lifecycle_operation,
-    spawn_quota_preferences_save, spawn_quota_probe_request, spawn_remove_bundle,
-    spawn_workspace_close, spawn_workspace_close_cancel, spawn_workspace_create,
-    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
+    ConfigRenameRequest, ContainerSettingsRequest, DashboardIoUpdate, LifecycleOperationRequest,
+    ResumeRepositoryPreflightApply, report, spawn_async_job, spawn_cancellable_io,
+    spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
+    spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
+    spawn_dashboard_create_session, spawn_dashboard_notifications_ignored, spawn_dashboard_rename,
+    spawn_lifecycle_operation, spawn_quota_preferences_save, spawn_quota_probe_request,
+    spawn_remove_bundle, spawn_workspace_close, spawn_workspace_close_cancel,
+    spawn_workspace_create, spawn_workspace_draft_recovery, spawn_workspace_management_load,
+    spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -357,24 +357,21 @@ pub(crate) async fn apply_dashboard_action(
         }
 
         DashboardAction::InterruptTurn { session_id } => {
-            io::spawn_background_async(
-                "interrupt turn",
-                context.dashboard_io_tx.clone(),
-                io::SAVE_ACK_TIMEOUT,
-                async move {
-                    let mut client = daemon::connect_existing().await?;
-                    match client
-                        .request(daemon::DaemonAction::InterruptTurn { session_id })
-                        .await?
-                    {
-                        daemon::DaemonReply::Done => Ok(()),
-                        reply => anyhow::bail!("unexpected Interrupt turn reply: {reply:?}"),
-                    }
-                },
-                DashboardIoUpdate::InterruptTurnFinished,
-            );
+            // The chat is what knows the turn and sends the interrupt, so the
+            // command reaches only a conversation this terminal has open.
+            let notice = match context
+                .chats
+                .get_mut(&session_id)
+                .map(|chat| chat.interrupt_turn())
+            {
+                Some(true) => None,
+                Some(false) => Some("No turn to interrupt."),
+                None => Some("Open the conversation to interrupt its turn."),
+            };
+            if let Some(notice) = notice {
+                context.dashboard.set_notice(notice);
+            }
         }
-
         DashboardAction::ExitSubagentWorkspace => {
             let parent_id = context.dashboard.subagent_parent_id().map(str::to_owned);
             context.dashboard.close_subagent_workspace();

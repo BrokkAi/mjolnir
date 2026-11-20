@@ -905,10 +905,6 @@ pub(super) async fn handle_action(
         DaemonAction::InterruptAll { session_id } => Ok(DaemonReply::InterruptedAll(
             state.interrupt_all(&session_id).await?,
         )),
-        DaemonAction::InterruptTurn { session_id } => {
-            state.interrupt_turn(&session_id).await?;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::SubmitSessionCommand {
             inherited_draft,
             session_id,
@@ -1323,10 +1319,7 @@ pub(super) async fn handle_action(
 pub(super) fn upgrade_request_activity(
     action: &DaemonAction,
 ) -> Result<Option<mj_controller::upgrade::Work>> {
-    if matches!(
-        action,
-        DaemonAction::InterruptAll { .. } | DaemonAction::InterruptTurn { .. }
-    ) {
+    if matches!(action, DaemonAction::InterruptAll { .. }) {
         return mj_controller::upgrade::activity("interrupt session work").map(Some);
     }
     if matches!(action, DaemonAction::WikiSyncRequest) {

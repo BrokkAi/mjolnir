@@ -1228,9 +1228,6 @@ pub enum DaemonAction {
     InterruptAll {
         session_id: String,
     },
-    InterruptTurn {
-        session_id: String,
-    },
     SubmitSessionCommand {
         #[serde(default)]
         inherited_draft: Option<String>,

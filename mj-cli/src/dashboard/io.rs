@@ -143,7 +143,6 @@ pub(crate) enum DashboardIoUpdate {
     /// Interrupt all finished sending. Each failure names the session or
     /// native sub-agent view it was for.
     InterruptAllFinished(Result<mj_client::daemon::InterruptAllResult>),
-    InterruptTurnFinished(std::result::Result<(), String>),
     ReviewRefused {
         session_id: String,
         message: String,
@@ -824,11 +823,6 @@ impl DashboardContext {
                 Ok(result) => self.dashboard.interrupt_all_finished(result.requested, result.failures),
                 Err(error) => self.dashboard.set_notice(format!("Could not interrupt all: {error:#}")),
             },
-            DashboardIoUpdate::InterruptTurnFinished(result) => {
-                if let Err(error) = result {
-                    self.dashboard.set_notice(format!("Could not interrupt turn: {error}"));
-                }
-            }
             DashboardIoUpdate::ReviewRefused {
                 session_id,
                 message,
@@ -1527,9 +1521,10 @@ impl DashboardContext {
                     let session_id = applied.session.id.clone();
                     // The import's own answer carries the stopped record the
                     // resume wizard opens on.
-                    self.dashboard.set_session_verdict(&session_id, applied.verdict);
-                    self.dashboard
-                        .remember_stopped_record(applied.session.clone());
+                    self.dashboard.remember_stopped_record(mj_client::daemon::SessionRecordWithVerdict {
+                        record: applied.session.clone(),
+                        verdict: applied.verdict,
+                    });
                     self.resolve_project_sources();
                     self.dashboard.set_notice(format!(
                         "Imported {} session {}.",

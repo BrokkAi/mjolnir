@@ -1020,7 +1020,7 @@ pub struct DashboardState {
     /// dialog, the session `mj go` starts in, and a session just imported.
     /// The runtime feed carries only live sessions; read both through
     /// [`DashboardState::session_record`].
-    pub(crate) stopped_records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    pub(crate) stopped_records: SnapshotMap<String, mj_client::daemon::SessionRecordWithVerdict>,
     /// What new-session defaults are chosen from. The feed carries only live
     /// sessions, so this summary of every session arrives beside them.
     pub(crate) launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,

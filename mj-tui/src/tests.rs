@@ -1923,6 +1923,9 @@ fn retry_launch_from_the_failed_session_dialog_uses_the_saved_destination() {
     };
     let id = session.id.clone();
     let mut dashboard = dashboard_with_session(session);
+    let mut verdict = dashboard.verdict(&id);
+    verdict.resume = mj_client::runtime_feed::SessionOffer::Ready;
+    dashboard.set_session_verdict(&id, verdict);
     dashboard.set_failed_launch_retries([id].into());
 
     dashboard.handle_key(key(KeyCode::Enter));

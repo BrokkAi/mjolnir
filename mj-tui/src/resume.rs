@@ -1314,10 +1314,11 @@ impl DashboardState {
     /// stopped one loaded on demand for the resume dialog, `mj go`, or an
     /// import. The feed carries only live sessions.
     pub fn session_record(&self, session_id: &str) -> Option<&SessionRecord> {
-        self.state
-            .sessions
-            .get(session_id)
-            .or_else(|| self.stopped_records.get(session_id))
+        self.state.sessions.get(session_id).or_else(|| {
+            self.stopped_records
+                .get(session_id)
+                .map(|cached| &cached.record)
+        })
     }
 
     /// Replace what new-session defaults are chosen from.
@@ -1361,8 +1362,12 @@ impl DashboardState {
 
     /// Keep one stopped record that something loaded on demand: the session
     /// `mj go` starts in, or a session just imported.
-    pub fn remember_stopped_record(&mut self, record: SessionRecord) {
-        self.stopped_records.insert(record.id.clone(), record);
+    pub fn remember_stopped_record(
+        &mut self,
+        session: mj_client::daemon::SessionRecordWithVerdict,
+    ) {
+        self.stopped_records
+            .insert(session.record.id.clone(), session);
     }
 
     /// Open the resume wizard on a record fetched for the row picked in the
@@ -1382,8 +1387,7 @@ impl DashboardState {
         dialog.opening = None;
         match record {
             Ok(Some(record)) => {
-                self.set_session_verdict(session_id, record.verdict);
-                self.remember_stopped_record(record.record);
+                self.remember_stopped_record(record);
                 self.cancel_modal();
                 self.begin_resume_for(session_id)
             }
