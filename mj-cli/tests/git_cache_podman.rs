@@ -42,6 +42,8 @@ fn fixture_git(directory: &Path, args: &[&str]) -> Result<String> {
 }
 
 // Hard-won: 8d8e2db1: a Podman cutoff checkout fetched a host-only source from inside the container.
+// Hard-won: a90bd7e75: an ordinary host-only checkout borrowed objects from the snapshot mount.
+// Hard-won: a90bd7e75: an exact host-only checkout needed to fetch an unadvertised commit inside the container.
 #[test]
 #[ignore = "requires Podman, its locally available agent-dev:latest image, and a matching portable MJ_WORKER_BINARY"]
 fn podman_bundle_uses_a_host_only_git_source_without_later_history() -> Result<()> {
@@ -269,10 +271,31 @@ case "$1" in *.bundle) test -f "$1";; *) exit 1;; esac
         );
         cli(&["destroy", "--session", &session])?;
 
-        // A regular checkout also needs to clone from the host snapshot.
-        // Change the server's default branch after warming the cache.
-        fixture_git(repository, &["symbolic-ref", "HEAD", "refs/heads/base"])?;
-        let session = start(&[])?;
+        // Warm the cache with an advertised default branch, then launch at a
+        // commit the server serves by SHA but no advertised ref reaches.
+        fixture_git(repository, &["switch", "--quiet", "--detach", at])?;
+        fixture_git(
+            repository,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "SHA-only commit",
+            ],
+        )?;
+        let hidden = fixture_git(repository, &["rev-parse", "HEAD"])?;
+        fixture_git(repository, &["switch", "--quiet", "base"])?;
+        fixture_git(
+            repository,
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        )?;
+        let advertised = fixture_git(repository, &["ls-remote", source])?;
+        ensure!(
+            !advertised.contains(&hidden),
+            "the exact commit must be absent from advertised refs"
+        );
+        let session = start(&["--at", &hidden])?;
         let container = mj_core::targets::resource_name(&session)?;
         let checkout = mj_core::targets::new_container_workspace(&session)?.join("project");
         output(
@@ -285,11 +308,14 @@ case "$1" in *.bundle) test -f "$1";; *) exit 1;; esac
                     "-ceu",
                     r#"
 test "$(git rev-parse HEAD)" = "$1"
-test "$(git branch --show-current)" = base
+test -z "$(git branch --show-current)"
+test "$(git symbolic-ref refs/remotes/origin/HEAD)" = refs/remotes/origin/base
 test "$(git remote get-url origin)" = "$2"
+test "$(git config --get-all remote.origin.fetch)" = '+refs/heads/*:refs/remotes/origin/*'
+test ! -e .git/objects/info/alternates
 "#,
                     "verify-clone",
-                    base,
+                    &hidden,
                     source,
                 ]),
         )?;

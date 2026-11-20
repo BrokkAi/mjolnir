@@ -663,28 +663,35 @@ pub(super) fn apply_session_history_cutoff(
     spec: &mut ProjectBundleSpec,
 ) -> Result<()> {
     if let Some(cutoff) = session_history_cutoff(session)? {
-        let bundle = session
-            .project_bundle(config)
-            .context("session bundle is missing")?;
         let checkout = session
             .checkout
             .as_ref()
             .expect("cutoff comes from the checkout");
-        let destination = bundle
-            .repositories
-            .iter()
-            .find(|repository| repository.id == checkout.repository_id)
-            .context("checkout repository is no longer in the configured bundle")?
-            .destination
-            .to_string_lossy()
-            .into_owned();
+        let destination = session_checkout_destination(session, config, &checkout.repository_id)?;
         spec.repositories
             .iter_mut()
-            .find(|repository| repository.destination == destination)
+            .find(|repository| repository.destination == destination.to_string_lossy())
             .context("cutoff repository is missing from the workspace bundle")?
             .history_cutoff = Some(cutoff);
     }
     Ok(())
+}
+
+pub(super) fn session_checkout_destination<'a>(
+    session: &'a SessionRecord,
+    config: &'a mj_core::config::Config,
+    repository_id: &str,
+) -> Result<&'a std::path::Path> {
+    let bundle = session
+        .project_bundle(config)
+        .context("session bundle is missing")?;
+    Ok(bundle
+        .repositories
+        .iter()
+        .find(|repository| repository.id == repository_id)
+        .context("checkout repository is no longer in the configured bundle")?
+        .destination
+        .as_path())
 }
 
 /// The history a session created with `no_later_history` starts with: its

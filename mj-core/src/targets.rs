@@ -2854,6 +2854,10 @@ pub fn command_thread_panic_message(payload: &(dyn std::any::Any + Send)) -> Str
     }
 }
 
+/// Internal namespace used to carry an exact checkout selection from a host
+/// snapshot into an ordinary clone without borrowing the snapshot's objects.
+pub const HOST_SNAPSHOT_EXACT_REFS: &str = "refs/mj/host-snapshot-exact";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositorySpec {
     /// Network clone URL. Managed workspaces require a configured remote.

@@ -233,17 +233,48 @@ pub fn clone_commands(
         }
         args.push("clone".into());
         if let Some(snapshot) = checkout_snapshot {
-            args.extend(["--no-local".into(), "--reference".into(), snapshot.clone()]);
+            // Clone normally transfers branches and tags. Include the
+            // private exact-checkout pin, if the host prepared one, before
+            // dissociation copies the borrowed objects into the checkout.
+            let namespace = mj_core::targets::HOST_SNAPSHOT_EXACT_REFS;
+            let refspec = format!("+{namespace}/*:{namespace}/*");
+            args.extend([
+                "--no-local".into(),
+                "--dissociate".into(),
+                "--reference".into(),
+                snapshot.clone(),
+                "--config".into(),
+                format!("remote.origin.fetch={refspec}"),
+            ]);
             restore_origins.push(
-                wrap(vec![
-                    "git".into(),
-                    "-C".into(),
-                    destination.clone(),
-                    "remote".into(),
-                    "set-url".into(),
-                    "origin".into(),
-                    url.clone(),
-                ])
+                wrap(step_script([
+                    CommandStep::new(
+                        "remove the temporary snapshot refspec",
+                        [
+                            "git",
+                            "-C",
+                            &destination,
+                            "config",
+                            "--local",
+                            "--fixed-value",
+                            "--unset-all",
+                            "remote.origin.fetch",
+                            &refspec,
+                        ],
+                    ),
+                    CommandStep::new(
+                        "configure the source origin",
+                        [
+                            "git",
+                            "-C",
+                            &destination,
+                            "remote",
+                            "set-url",
+                            "origin",
+                            url,
+                        ],
+                    ),
+                ]))
                 .purpose(format!("configure origin for {}", repository.destination))
                 .stage(ProvisionStage::Cloning)
                 .parallel_group(BUNDLE_REPOSITORIES_PARALLEL_GROUP + 1),

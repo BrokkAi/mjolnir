@@ -789,6 +789,13 @@ impl Controller {
                 .get(&session.last_profile)
                 .context("harness profile disappeared before provisioning")?
                 .ensure_ready(&session.last_profile)?;
+            // A recovered Move may already have sealed its handoff. Check
+            // the recorded source before running any destination preflight.
+            let move_bundle = if self.state.checkout(session_id)?.project_directory().is_none() {
+                self.move_destination_bundle(session_id, executor)?
+            } else {
+                None
+            };
             let mut runtime = mj_core::state::TargetRuntimeSettings::from(selected);
             if let Some(recorded) = &session.target_runtime {
                 runtime.tool_cache = recorded.tool_cache.clone();
@@ -821,9 +828,10 @@ impl Controller {
                 super::worker_binary::preflight_harness(template, profile, executor)?;
             }
             let _timing = LaunchPhaseTimer::new(session_id, "plan managed checkout");
-            self.plan_managed_raw_worktree(session_id, executor)
+            let managed_checkout = self.plan_managed_raw_worktree(session_id, executor)?;
+            Ok((managed_checkout, move_bundle))
         })();
-        let managed_checkout = match preparation {
+        let (managed_checkout, move_bundle) = match preparation {
             Ok(created) => created,
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
                 return Err(self.rollback_unless_interrupted(session_id, error, interrupted)?);
@@ -874,7 +882,7 @@ impl Controller {
             }
             let mut bundle = if project_directory.is_some() {
                 None
-            } else if let Some(bundle) = self.move_destination_bundle(session_id)? {
+            } else if let Some(bundle) = move_bundle {
                 Some(bundle)
             } else if failure_disposition == ProvisioningFailureDisposition::Preserve {
                 Some(super::network_git::checkpoint_bundle(&session)?)
@@ -935,12 +943,22 @@ impl Controller {
                 .as_mut()
                 .filter(|_| !moving_workspace)
                 .map(|bundle| {
+                    let exact = session.checkout.as_ref()
+                        .filter(|checkout| !checkout.no_later_history)
+                        .map(|checkout| {
+                            super::backend::session_checkout_destination(
+                                &session, &self.config, &checkout.repository_id,
+                            )
+                            .map(|destination| (destination.to_string_lossy(), checkout.commit.as_str()))
+                        })
+                        .transpose()?;
                     git_cache::prepare(
                         &target,
                         session_id,
                         bundle,
                         &mut runtime_mounts,
                         github_token,
+                        exact.as_ref().map(|(destination, commit)| (destination.as_ref(), *commit)),
                         executor,
                     )
                 })

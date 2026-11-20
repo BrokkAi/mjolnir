@@ -61,6 +61,124 @@ fn add_codex_profile(config: &mut Config, home: &Path) {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn host_only_move_refuses_before_destination_work_but_new_session_can_use_cache() {
+    if !isolated_test_child(
+        &test_name("host_only_move_refuses_before_destination_work_but_new_session_can_use_cache"),
+        "MJ_TEST_HOST_ONLY_MOVE",
+    ) {
+        return;
+    }
+    use crate::controller::test_support::{
+        checkpoint_archive_input, write_checkpoint_archive_input,
+    };
+    use mj_checkpoint::archive::{
+        GitCollectionSpec, GitHistoryMode, SystemGit, collect_git_metadata_snapshot,
+    };
+    use mj_core::move_workspace::{WorkspaceTransfer, WorkspaceTransferPhase};
+
+    let origin = "git://127.0.0.1:9418/app";
+    let source_host = "engine.example.test";
+    let repository = committed_repository();
+    let snapshot = collect_git_metadata_snapshot(
+        &SystemGit,
+        repository.path(),
+        &GitCollectionSpec {
+            id: "project".into(),
+            relative_destination: "app".into(),
+            history: GitHistoryMode::NoBundle,
+            origin_override: Some(origin.into()),
+        },
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let session = MOVE_QUEUE_SESSION_ID;
+    let mut source = checkpoint_test_session(session);
+    source.target = Some(Box::new(TargetLocator::SshPodman {
+        host: format!("builder@{source_host}"),
+        container_id: crate::targets::resource_name(session).unwrap(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    }));
+    let mut operation = source_recovery_operation(&source);
+    let mut config = resume_compatibility_config();
+    add_codex_profile(&mut config, root.path());
+    let container = config.targets["podman"].container().unwrap().clone();
+    config.targets.insert(
+        "sandbox".into(),
+        mj_core::config::TargetTemplate::SshNitro {
+            container,
+            ssh: mj_core::config::SshConnection {
+                host: "other.example.test".into(),
+                user: None,
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+        },
+    );
+    config.save().unwrap();
+    let controller = Controller {
+        config: Config::load().unwrap(),
+        state: State {
+            sessions: [(session.into(), source.clone())].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    operation.selection.target_template_id = Some("sandbox".into());
+    operation.selection.profile_id = Some("codex".into());
+    operation.configuration_fingerprint = controller
+        .move_configuration_fingerprint(&operation.selection)
+        .unwrap();
+    operation.handoff = Some(write_checkpoint_archive_input(
+        root.path(),
+        session,
+        &checkpoint_archive_input(session, 0, vec![snapshot], Vec::new()),
+    ));
+    operation.workspace_transfer = Some(WorkspaceTransfer {
+        assessment: Default::default(),
+        source: Box::new(source),
+        source_stage: root.path().join("source"),
+        controller_stage: root.path().join("stage"),
+        phase: WorkspaceTransferPhase::Planned,
+    });
+    let error = controller
+        .validate_move_checkpoint(&operation, None, None, &RefusingExecutor("host-only Move"))
+        .unwrap_err();
+    assert_eq!(
+        mj_core::refusal::Refusal::of(&error).unwrap().message(),
+        format!(
+            "Git source {origin} is reachable only from {source_host}, and Move clones from the source. Keep the existing environment on {source_host} for an in-place Move, or set the checkout's origin to a URL the destination can reach and retry."
+        )
+    );
+
+    let target = crate::controller::backend::backend_target(
+        &controller.config.targets["podman"],
+        None,
+        Default::default(),
+    )
+    .unwrap();
+    let cache = "/run/hel/git-cache/app.git";
+    let bundle = crate::targets::ProjectBundleSpec {
+        primary: "app".into(),
+        repositories: vec![crate::targets::RepositorySpec {
+            url: Some(origin.into()),
+            push_urls: Vec::new(),
+            destination: "app".into(),
+            git_ref: None,
+            reference: Some(cache.into()),
+            history_cutoff: None,
+        }],
+    };
+    let plan = crate::targets::provision_plan(&target, session, &bundle, &[], None).unwrap();
+    let clone = plan
+        .commands
+        .iter()
+        .find(|command| command.purpose == "clone app")
+        .unwrap();
+    assert!(clone.args.iter().any(|arg| arg == cache));
+}
+
 fn test_name(short: &str) -> String {
     crate::controller::test_support::test_name(module_path!(), short)
 }
@@ -2375,7 +2493,7 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
     let resource =
         mj_core::targets::move_resource_name(session_id, &operation.operation_id).unwrap();
     let bundle = controller
-        .move_destination_bundle(session_id)
+        .move_destination_bundle(session_id, &executor)
         .unwrap()
         .expect("a Move into a container clones the session's bundle");
     let plan = crate::targets::provision_plan_named(

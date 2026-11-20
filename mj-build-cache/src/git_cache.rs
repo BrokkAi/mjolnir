@@ -90,12 +90,20 @@ pub fn prepare(
     bundle: &mut ProjectBundleSpec,
     mounts: &mut Vec<AdditionalMount>,
     github_token: Option<&str>,
+    exact_checkout: Option<(&str, &str)>,
     executor: &(impl CommandExecutor + Sync),
 ) -> Result<Option<PreparedCloneCache>> {
     let Some((host, engine)) = CacheHost::for_target(target).zip(target.container_engine()) else {
         return Ok(None);
     };
     bundle.validate()?;
+    let exact_for = |destination: &str, source: &str, cutoff: Option<&HistoryCutoff>| {
+        exact_checkout
+            .filter(|(selected, _)| {
+                *selected == destination && cutoff.is_none() && is_host_only_git_source(source)
+            })
+            .map(|(_, commit)| commit)
+    };
     let repositories = bundle
         .repositories
         .iter()
@@ -105,16 +113,17 @@ pub fn prepare(
                 .as_deref()
                 .expect("validated network repository");
             let cutoff = repository.history_cutoff.as_ref();
+            let exact = exact_for(&repository.destination, source, cutoff);
             (
-                snapshot_name(source, cutoff),
-                (source, cutoff, is_host_only_git_source(source)),
+                snapshot_name(source, cutoff, exact),
+                (source, cutoff, exact, is_host_only_git_source(source)),
             )
         })
         .collect::<BTreeMap<_, _>>();
     let required_sources = repositories
         .values()
-        .filter(|(_, _, required)| *required)
-        .map(|(source, _, _)| display_url(source))
+        .filter(|(_, _, _, required)| *required)
+        .map(|(source, _, _, _)| display_url(source))
         .collect::<Vec<_>>()
         .join(", ");
     let cache_destination = Path::new(CACHE_CONTAINER_ROOT);
@@ -154,7 +163,7 @@ pub fn prepare(
     let prepared = std::thread::scope(|scope| {
         let handles = repositories
             .iter()
-            .map(|(name, (source, cutoff, required))| {
+            .map(|(name, (source, cutoff, exact, required))| {
                 let snapshot = session_root.join(name);
                 let host = &host;
                 let cache_root = &cache_root;
@@ -166,6 +175,7 @@ pub fn prepare(
                         source,
                         &snapshot,
                         *cutoff,
+                        *exact,
                         github_token,
                         executor,
                     )
@@ -224,7 +234,12 @@ pub fn prepare(
             .url
             .as_deref()
             .expect("validated network repository");
-        let name = snapshot_name(source, repository.history_cutoff.as_ref());
+        let cutoff = repository.history_cutoff.as_ref();
+        let name = snapshot_name(
+            source,
+            cutoff,
+            exact_for(&repository.destination, source, cutoff),
+        );
         repository.reference = references.get(&name).cloned();
     }
     mounts.push(AdditionalMount {
@@ -252,7 +267,7 @@ pub fn prepare(
 }
 
 /// Snapshots share the mirror, but each source and selection owns its files.
-fn snapshot_name(source: &str, cutoff: Option<&HistoryCutoff>) -> String {
+fn snapshot_name(source: &str, cutoff: Option<&HistoryCutoff>, exact: Option<&str>) -> String {
     let mut digest = Sha256::new_with_prefix(source);
     if let Some(cutoff) = cutoff {
         for commit in cutoff.commits() {
@@ -261,6 +276,10 @@ fn snapshot_name(source: &str, cutoff: Option<&HistoryCutoff>) -> String {
         }
         format!("{}.bundle", lower_hex(digest.finalize()))
     } else {
+        if let Some(commit) = exact {
+            digest.update([0]);
+            digest.update(commit);
+        }
         format!("{}.git", lower_hex(digest.finalize()))
     }
 }
@@ -310,8 +329,9 @@ has_token=$5
 ssh_command=$6
 source_id=$7
 host_only=$8
+exact_ref=$9
 # Any further arguments are a history cutoff: its head, then its base.
-shift 8
+shift 9
 umask 077
 mkdir -p "$cache_root/mirrors" "$cache_root/locks" "$(dirname "$snapshot")"
 # The session root's own time is its preparation stamp: until the container
@@ -403,6 +423,13 @@ locked=0
 rmdir "$lock"
 rm -rf -- "$snapshot" "$snapshot_partial"
 if [ "$#" -eq 0 ]; then
+    if [ -n "$exact_ref" ]; then
+        commit=${exact_ref##*/}
+        if ! git -C "$pinned" cat-file -e "$commit^{commit}" 2>/dev/null; then
+            git_remote -C "$pinned" fetch --quiet --no-tags -- "$source" "$commit"
+        fi
+        git -C "$pinned" update-ref "$exact_ref" "$commit"
+    fi
     mv -- "$pinned" "$snapshot_partial"
 else
     # Copy only the cutoff commits and their history out of the private pin,
@@ -450,9 +477,19 @@ fn prepare_repository(
     source: &str,
     snapshot: &Path,
     cutoff: Option<&HistoryCutoff>,
+    exact: Option<&str>,
     github_token: Option<&str>,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
+    let exact_ref = if let Some(commit) = exact {
+        ensure!(
+            mj_core::remote_git::is_object_id(commit),
+            "invalid exact checkout commit"
+        );
+        format!("{}/{commit}", mj_core::targets::HOST_SNAPSHOT_EXACT_REFS)
+    } else {
+        String::new()
+    };
     let github_token = github_token.filter(|_| is_github_https_url(source));
     let token = github_token.is_some();
     let mut arguments = vec![
@@ -469,6 +506,7 @@ fn prepare_repository(
         },
         lower_hex(Sha256::digest(source.as_bytes())),
         u8::from(is_host_only_git_source(source)).to_string(),
+        exact_ref,
     ];
     if let Some(cutoff) = cutoff {
         cutoff.validate()?;
@@ -738,6 +776,7 @@ mod tests {
             &mut bundle,
             &mut mounts,
             None,
+            None,
             &executor,
         )
         .unwrap_err();
@@ -762,6 +801,7 @@ mod tests {
                 session_id,
                 &mut bundle,
                 &mut mounts,
+                None,
                 None,
                 &executor
             )
@@ -794,6 +834,7 @@ mod tests {
             "abc123",
             "https://github.com/example/app.git",
             Path::new("/home/test/.cache/mjolnir/git/sessions/session-12345678/abc123.git"),
+            None,
             None,
             Some(token),
             &executor,
@@ -934,6 +975,7 @@ mod tests {
                 &key,
                 url,
                 snapshot,
+                None,
                 None,
                 None,
                 &executor,
@@ -1093,6 +1135,7 @@ mod tests {
             &mut bundle,
             &mut mounts,
             None,
+            None,
             &executor,
         )
         .unwrap()
@@ -1183,6 +1226,7 @@ mod tests {
             &refreshed,
             None,
             None,
+            None,
             &executor,
         )
         .unwrap();
@@ -1201,6 +1245,7 @@ mod tests {
                 remote,
                 snapshot,
                 Some(&missing),
+                None,
                 None,
                 &executor,
             )
@@ -1254,6 +1299,7 @@ mod tests {
                     ssh_command.into(),
                     "ssh-fixture-source".into(),
                     "0".into(),
+                    String::new(),
                 ],
                 "prepare cached Git objects",
             );
@@ -1395,6 +1441,7 @@ exec "$CACHE_TEST_MKDIR" "$@"
                 source.to_str().unwrap(),
                 snapshot,
                 Some(&cutoff),
+                None,
                 None,
                 executor,
             )
