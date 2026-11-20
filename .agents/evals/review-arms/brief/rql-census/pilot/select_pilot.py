@@ -7,6 +7,7 @@ from pathlib import Path
 import random
 import subprocess
 import sys
+import tempfile
 
 # This file lives at .agents/evals/review-arms/brief/rql-census/pilot/.
 REVIEW_ARMS = Path(__file__).resolve().parents[3]
@@ -29,38 +30,65 @@ def draw(rows, count, label):
     return rows[:count]
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parent / "manifest.json")
-    parser.add_argument("--frozen-at", help="Optional explicit timestamp recorded in the manifest")
-    args = parser.parse_args()
-
+def refresh_eligible(eligible_path):
+    """Write every eligible label (confirmed relation bugs in the pilot repos) from ONE read of the
+    live label file, parsed with the shared reader's record-boundary rules, so labels, line numbers
+    and the digest all describe the same bytes."""
     items, pins, _ = census.item_sets()
     docs = census.input_documents()
     selected_items = [census.labeller_item(row, "development") for row in items["development"]]
     heads = {repo: census.checkout_revision(repo, pins) for repo in {item["repo"] for item in selected_items}}
     expected = {(item["repo"], item["id"]): census.inputs_sha(item, docs, "primary", heads[item["repo"]])
                 for item in selected_items}
-    labels_path = census.LABELS / "development-primary.jsonl"
-    labels, _ = census.read_current_labels(labels_path, expected)
-    line_numbers = {}
-    with labels_path.open() as source:
-        for number, line in enumerate(source, 1):
-            if not line.strip():
-                continue
-            row = json.loads(line)
+    data = (census.LABELS / "development-primary.jsonl").read_bytes()
+    with tempfile.TemporaryDirectory(dir=REVIEW_ARMS.parents[2] / ".mj") as scratch:
+        frozen = Path(scratch) / "development-primary.jsonl"
+        frozen.write_bytes(data)
+        labels, _ = census.read_current_labels(frozen, expected)
+        line_numbers = {}
+        for number, row in enumerate_records(frozen):
             key = row["repo"], row["id"]
-            if key in expected and row.get("inputs_sha") == expected[key]:
+            if key in labels and row.get("inputs_sha") == expected[key]:
                 line_numbers[key] = number
-
     items_by_key = {(row["repo"], row["id"]): row for row in selected_items}
-    candidates = []
-    for (repo, item_id), label in labels.items():
+    rows = []
+    for (repo, item_id), label in sorted(labels.items()):
         if repo not in dict(REPO_COUNTS) or label["defect_check"] != "confirmed" or not label["relation_bug"]:
             continue
         item = items_by_key[(repo, item_id)]
-        candidates.append({"repo": repo, "id": str(item_id), "intro": item["intro_commit"],
-                           "base": item["base_commit"], "label_line": line_numbers[(repo, item_id)]})
+        rows.append({"repo": repo, "id": str(item_id), "intro": item["intro_commit"], "base": item["base_commit"],
+                     "label_line": line_numbers[(repo, item_id)], "label": label,
+                     "source_sha256": hashlib.sha256(data).hexdigest()})
+    eligible_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+
+
+def enumerate_records(path):
+    """Line-numbered records under census_label.rows's boundary rule: an unterminated final line is
+    an incomplete record and is skipped."""
+    with path.open() as source:
+        for number, line in enumerate(source, 1):
+            if line.strip() and line.endswith("\n"):
+                yield number, json.loads(line)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parent / "manifest.json")
+    parser.add_argument("--frozen-at", help="Optional explicit timestamp recorded in the manifest")
+    parser.add_argument("--refresh-eligible", action="store_true",
+                        help="regenerate eligible-labels.jsonl from the live label file (once, before freezing)")
+    parser.add_argument("--plan-commit", required=True,
+                        help="the commit whose PLAN-rql-census.md this selection was frozen under; the "
+                             "working copy of the plan must match it, so later commits don't change the output")
+    args = parser.parse_args()
+
+    eligible_path = Path(__file__).resolve().parent / "eligible-labels.jsonl"
+    if args.refresh_eligible:
+        refresh_eligible(eligible_path)
+    # The draw reads only this committed file, so it reproduces from a clean checkout.
+    eligible = [json.loads(line) for line in eligible_path.read_text().splitlines() if line.strip()]
+    labels = {(row["label"]["repo"], row["label"]["id"]): row["label"] for row in eligible}
+    candidates = [{key: row[key] for key in ("repo", "id", "intro", "base", "label_line")} for row in eligible]
 
     deduped, duplicates = {}, []
     for row in sorted(candidates, key=lambda r: (r["repo"], r["intro"], r["id"])):
@@ -109,13 +137,20 @@ def main():
 
     census_root = census.CENSUS
     steps_path = census_root / "menu-steps.md"
-    plan_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    plan_path = "brief/PLAN-rql-census.md"
+    plan_commit = subprocess.check_output(["git", "rev-parse", "--verify", args.plan_commit + "^{commit}"],
+                                          cwd=ROOT, text=True).strip()
+    frozen_plan = subprocess.check_output(["git", "show", f"{plan_commit}:.agents/evals/review-arms/{plan_path}"],
+                                          cwd=ROOT)
+    if frozen_plan != (REVIEW_ARMS / plan_path).read_bytes():
+        raise SystemExit(f"{plan_path} differs from its version at {plan_commit}: re-freeze under the new plan")
     pool_bytes = json.dumps(pool, sort_keys=True, separators=(",", ":")).encode()
     manifest = {"version": 1, "seed": SEED, "plan_commit": plan_commit,
-                "inputs": {"labels_sha256": sha(labels_path), "menu_sha256": sha(census_root / "menu.json"),
+                "inputs": {"eligible_labels_sha256": sha(eligible_path), "menu_sha256": sha(census_root / "menu.json"),
                            "catalogue_sha256": sha(census_root / "rql-documented-steps.md"),
                            "steps_sha256": sha(steps_path) if steps_path.exists() else None,
-                           "labels_snapshot_sha256": sha(snapshot_path)},
+                           "labels_snapshot_sha256": sha(snapshot_path),
+                           "plan_sha256": hashlib.sha256(frozen_plan).hexdigest()},
                 "models": {"writer": "gpt-6.1-sol/high", "reviewer": "gpt-6.1-terra/high",
                            "engine": "fable/high", "judge": "fable/high"},
                 "model_versions": {"fable": "Fable 5.2"}, "page_rows": 50,
