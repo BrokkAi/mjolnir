@@ -722,6 +722,12 @@ def quota(args, role):
                 if harness != "claude":
                     readings[candidate], unavailable[candidate] = None, f"harness {harness}, not claude"
                     continue
+                # A usage-billed profile (for example through Bedrock) has no weekly window, so it
+                # can never clear the weekly floor.
+                billing = report[0].get("billing")
+                if billing != "subscription":
+                    readings[candidate], unavailable[candidate] = None, f"billing {billing} has no weekly quota"
+                    continue
                 report = (report[0].get("report") or {}) if report else {}
                 scoped = [window for window in report.get("windows", [])
                           if not window.get("model_scope") or scope in window["model_scope"].split(",")]
@@ -949,7 +955,8 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         sid = driver.mj("new", "--workspace", args.workspace, "--target", args.target, *project,
                         "--profile", profile, "--effort", "high",
                         "--review", "off", "--no-project-memory", "--no-github-events",
-                        "--no-github-credentials", "--subagents", "none", "--title", title,
+                        "--no-github-credentials", "--subagents", "none", "--oracle", "disabled",
+                        "--title", title,
                         timeout=900)["session_id"]
     except BaseException as error:
         if launch_requested:
