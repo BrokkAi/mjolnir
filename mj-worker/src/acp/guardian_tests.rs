@@ -33,12 +33,17 @@ def ask(ident, session, call, title, kind, raw_input):
         'options':[{'optionId':'approve','name':'Approve once','kind':'allow_once'},
                    {'optionId':'reject','name':'Reject','kind':'reject_once'},
                    {'optionId':'reject-always','name':'Always reject','kind':'reject_always'}]}})
+    deferred = []
     while True:
         message = read()
         if message is None: sys.exit(0)
-        if message.get('id') == ident and 'method' not in message: return message.get('result', {}).get('outcome')
+        if message.get('id') == ident and 'method' not in message:
+            buffered[:0] = deferred
+            return message.get('result', {}).get('outcome')
         if 'method' in message and 'id' in message:
             send({'jsonrpc':'2.0','id':message['id'],'result':{}})
+        else:
+            deferred.append(message)
 while True:
     message = read()
     if message is None: break

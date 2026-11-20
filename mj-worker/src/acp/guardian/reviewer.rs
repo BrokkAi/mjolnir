@@ -322,9 +322,10 @@ struct ReviewerHost {
     replies: Arc<Replies>,
     stop: CancellationToken,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Cancelled once the bridge or its connection is gone. The one owner of
-    /// whether this reviewer is alive: a request to a dead bridge is never
-    /// answered, so every request races it.
+    /// Cancelled once the bridge or its connection is gone, by whichever
+    /// observer sees it first (see [`ReviewerHost::until_exit`]). The one
+    /// owner of whether this reviewer is alive: a request to a dead bridge
+    /// may never be answered, so every request races it.
     gone: CancellationToken,
 }
 
@@ -482,11 +483,27 @@ impl ReviewerHost {
     }
 
     /// Run `work` against this reviewer, failing it if the bridge exits.
+    ///
+    /// A request can learn that the bridge is gone before this host's task
+    /// does: the connection fails it with "incoming transport closed" first.
+    /// That failure is recorded in `gone` before it is returned, so the
+    /// decision to retry, which reads only `gone`, sees the death whichever
+    /// observer saw it first.
     async fn until_exit<T>(&self, work: impl Future<Output = Result<T>>) -> Result<T> {
-        tokio::select! {
+        let result = tokio::select! {
             result = work => result,
             () = self.gone.cancelled() => Err(anyhow!("the reviewer's bridge exited")),
+        };
+        if let Err(error) = &result
+            && error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<agent_client_protocol::Error>()
+                    .is_some_and(agent_client_protocol::is_incoming_transport_closed)
+            })
+        {
+            self.gone.cancel();
         }
+        result
     }
 
     /// Open a reviewer session configured like the reviewed one.
