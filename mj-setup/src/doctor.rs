@@ -699,7 +699,7 @@ Run these commands as the user who will run `mj`:\n\n\
 3. If you intend to use containers, start the runtime and run\n\
    `mj doctor --json --smoke`. Do this for Podman, Docker Desktop, and Apple\n\
    container. Resolve failures for the target you intend to use.\n\
-4. Run `mj`, then press n in the Sessions pane to start your first session.\n\
+4. Run `mj` and choose Create session (Ctrl-B then c by default).\n\
    If no profile was discovered, open Settings (Ctrl-B then s by default)\n\
    to add one first.\n\n\
 Profiles and targets can also be configured in Settings.\n\

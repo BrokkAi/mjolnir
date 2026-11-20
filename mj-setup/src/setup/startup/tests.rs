@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use super::*;
-use mj_core::config::{HarnessKind, TargetTemplate};
+use mj_core::config::HarnessKind;
 
 fn homes(directory: &Path, kinds: &[HarnessKind]) -> Vec<DiscoveredHome> {
     kinds

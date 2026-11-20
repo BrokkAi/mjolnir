@@ -62,7 +62,7 @@ in that container.
 
 Start `mj` on a fresh volume and wait for the welcome dialog to finish
 discovering agents. First-run setup finds the harnesses in the daemon container
-and configures the volume. Sign in with the normal command:
+and configures the volume. Use `mj login` to sign in.
 
 ```console
 mj login --profile codex
