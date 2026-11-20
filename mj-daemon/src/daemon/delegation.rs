@@ -1069,6 +1069,17 @@ mod tests {
 
     /// The session actor's view of the child: connected and idle after `turn`,
     /// which is what a delegation observation is made from.
+    /// Waits for the review host's startup sweep. Until it ends the host
+    /// cannot say whether a child's review is open, so every child is held.
+    async fn review_host_ready(state: &RuntimeState) {
+        while state.review_host().has_open_review("no-such-session").await
+            == Err(crate::review_host::OpenReviewUnknown::NotReady)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+
     async fn publish_idle_child(
         manager: &crate::daemon::tests::TestRemoteManager,
         turn: &mj_core::state::MaterializedTurnOutcome,
@@ -1156,6 +1167,7 @@ mod tests {
             parks.clone(),
         ));
         state.install_report_backend(&backend);
+        review_host_ready(&state).await;
         // The readers' snapshot holds the turn the observation reports.
         let turn = store_finished_turn("child", "turn", 10);
         publish_idle_child(&manager, &turn).await;
@@ -1416,6 +1428,7 @@ mod tests {
             parks.clone(),
         ));
         state.install_report_backend(&backend);
+        review_host_ready(&state).await;
 
         // The snapshot holds the child's earlier turn; the observation is the
         // turn after it.

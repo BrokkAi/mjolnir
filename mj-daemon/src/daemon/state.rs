@@ -182,20 +182,27 @@ impl RuntimeState {
     /// Whether `child_id` is still waiting for its review's verdict, so its
     /// ended turn or recorded handback is not final. Delegation completion and
     /// parent report reconciliation both ask here. The review host owns the
-    /// answer. A sub-agent no longer requests review, so only a review begun
-    /// before that change can be open.
+    /// answer. A sub-agent no longer requests review, but a child launched
+    /// before that change can still have one open, and it must survive a
+    /// daemon handoff.
     ///
-    /// When the host cannot answer, the child counts as having no open review:
-    /// a review the host did not restore cannot produce a verdict in this
-    /// daemon run, and waiting would only block the child forever.
+    /// While the host is still restoring reviews, or has stopped, it says
+    /// nothing about this child, so the child is held and its completion and
+    /// report retry later. When the host's startup recovery failed, a review
+    /// it did not restore cannot produce a verdict in this daemon run, and
+    /// waiting would only block the child forever, so the child settles.
     pub(crate) async fn child_awaits_review(&self, child_id: &str) -> bool {
         match self.review_host().has_open_review(child_id).await {
             Ok(open) => open,
-            Err(unknown) => {
-                tracing::debug!(child_session_id = child_id, ?unknown,
+            Err(crate::review_host::OpenReviewUnknown::RecoveryFailed(error)) => {
+                tracing::debug!(child_session_id = child_id, %error,
                     "cannot tell whether the child's review is open; settling it as having none");
                 false
             }
+            Err(
+                crate::review_host::OpenReviewUnknown::NotReady
+                | crate::review_host::OpenReviewUnknown::HostStopped,
+            ) => true,
         }
     }
 

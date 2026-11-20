@@ -330,7 +330,7 @@ async fn run_override(
         "message": if base_moved {
             "The findings are recorded as declined. You may push these commits. This session's worker is older than this feature, so the review base moved to these commits: later reviews cover only later changes. Restart the session to get the new behaviour."
         } else {
-            "The findings are recorded as declined. You may push these commits. The review base is unchanged: later reviews still cover this change and are told not to report the declined findings again. Call set_review_baseline with a reviewed commit to move the base."
+            "The findings are recorded as declined. You may push these commits. The review base is unchanged: later reviews still cover this change and are told not to report the declined findings again. Call set_baseline with a reviewed commit to move the base."
         },
     }))
 }
