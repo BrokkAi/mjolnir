@@ -392,7 +392,7 @@ def main():
         egress_path = args.egress_log.resolve() if args.egress_log is not None else default_egress
         expected_egress = source.get("sha256") if str(egress_path) == source.get("path") else None
         with pilot_lock(runs.parent):
-            _, egress = read_egress(egress_path, required=args.egress_log is not None, expected_sha256=expected_egress)
+            _, egress = read_egress(egress_path, expected_sha256=expected_egress)
             isolation = isolation_report(egress, isolation_evidence(args.root, runs))
             stale = stale_judged_diffs(runs, key)
             deliveries = load_deliveries(runs, key, stale_diffs=stale)
