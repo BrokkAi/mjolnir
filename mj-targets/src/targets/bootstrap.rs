@@ -198,9 +198,12 @@ pub fn clone_commands(
             .url
             .as_ref()
             .expect("validated network repository");
+        let checkout_snapshot = repository
+            .reference
+            .as_ref()
+            .filter(|_| mj_core::remote_git::is_host_only_git_source(url));
         let wrap_fetch = |args: Vec<String>| {
             if let Some(token) = github_token
-                && repository.reference.is_none()
                 && mj_core::remote_git::is_github_https_url(url)
                 && fetches_repository(&args)
             {
@@ -223,13 +226,13 @@ pub fn clone_commands(
             continue;
         }
         let mut args = vec!["git".to_owned()];
-        if let Some(snapshot) = &repository.reference {
+        if let Some(snapshot) = checkout_snapshot {
             // A mounted cache can have a different owner from the container
             // user. Git needs to trust this particular read-only repository.
             args.extend(["-c".into(), format!("safe.directory={snapshot}")]);
         }
         args.push("clone".into());
-        if let Some(snapshot) = &repository.reference {
+        if let Some(snapshot) = checkout_snapshot {
             args.extend(["--no-local".into(), "--reference".into(), snapshot.clone()]);
             restore_origins.push(
                 wrap(vec![
@@ -252,8 +255,13 @@ pub fn clone_commands(
                 format!("remote.origin.pushurl={push_url}"),
             ]);
         }
+        if checkout_snapshot.is_none()
+            && let Some(reference) = &repository.reference
+        {
+            args.extend(["--reference-if-able".to_owned(), reference.clone()]);
+        }
         args.push("--".to_owned());
-        args.push(repository.reference.as_ref().unwrap_or(url).clone());
+        args.push(checkout_snapshot.unwrap_or(url).clone());
         args.push(destination);
         commands.push(
             wrap_fetch(args)

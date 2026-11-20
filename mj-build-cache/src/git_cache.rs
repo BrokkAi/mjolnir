@@ -1,8 +1,8 @@
-//! Host-side Git checkout sources for container-backed sessions.
+//! Host-side Git caches for container-backed sessions.
 
 use mj_core::hex::lower_hex;
 use mj_core::refusal::Refusal;
-use mj_core::remote_git::{display_url, is_github_https_url};
+use mj_core::remote_git::{display_url, is_github_https_url, is_host_only_git_source};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -80,8 +80,10 @@ impl PreparedCloneCache {
     }
 }
 
-/// Prepare the source snapshots a container will clone or fetch from.
+/// Populate session-scoped Git snapshots and attach them to a container bundle.
 /// A history cutoff mounts only the selected commits and their ancestors.
+/// Host-only sources require a snapshot. For other sources, preparation
+/// failures are visible optimization misses and checkout can reach the remote.
 pub fn prepare(
     target: &targets::TargetTemplate,
     session_id: &str,
@@ -102,15 +104,17 @@ pub fn prepare(
                 .url
                 .as_deref()
                 .expect("validated network repository");
+            let cutoff = repository.history_cutoff.as_ref();
             (
-                repository_cache_key(source),
-                (source, repository.history_cutoff.as_ref()),
+                snapshot_name(source, cutoff),
+                (source, cutoff, is_host_only_git_source(source)),
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let sources = repositories
+    let required_sources = repositories
         .values()
-        .map(|(source, _)| display_url(source))
+        .filter(|(_, _, required)| *required)
+        .map(|(source, _, _)| display_url(source))
         .collect::<Vec<_>>()
         .join(", ");
     let cache_destination = Path::new(CACHE_CONTAINER_ROOT);
@@ -118,31 +122,47 @@ pub fn prepare(
         mount.destination.starts_with(cache_destination)
             || cache_destination.starts_with(&mount.destination)
     }) {
-        return Err(Refusal::precondition(format!(
-            "Cannot mount the Git checkout sources {sources}. Move the attached directory that overlaps {CACHE_CONTAINER_ROOT}."
-        )).into());
+        if !required_sources.is_empty() {
+            return Err(Refusal::precondition(format!(
+                "Cannot mount the host-only Git sources {required_sources}. Move the attached directory that overlaps {CACHE_CONTAINER_ROOT}."
+            )).into());
+        }
+        executor.notify_notice(
+            "Clone cache disabled because an attached directory overlaps /run/hel/git-cache.",
+        );
+        return Ok(None);
     }
 
     let _stage = ProvisionStageGuard::new(executor, ProvisionStage::Cloning);
-    let home = cache_home(&host, executor).with_context(|| Refusal::precondition(format!(
-        "Cannot prepare Git checkout sources {sources} on the container host. Make sure Git is available and the host has an absolute home directory."
-    )))?;
+    let home = match cache_home(&host, executor) {
+        Ok(home) => home,
+        Err(error) if !required_sources.is_empty() => {
+            return Err(error.context(Refusal::precondition(format!(
+                "Cannot prepare host-only Git sources {required_sources} on the container host. Make sure Git and sh are available and the host has an absolute home directory."
+            ))));
+        }
+        Err(error) => {
+            executor.notify_notice(&format!(
+                "Clone cache unavailable on the container host: {error:#}; using direct clones."
+            ));
+            return Ok(None);
+        }
+    };
     let cache_root = home.join(CACHE_RELATIVE_ROOT);
     let session_root = cache_root.join("sessions").join(session_id);
 
     let prepared = std::thread::scope(|scope| {
         let handles = repositories
             .iter()
-            .map(|(key, (source, cutoff))| {
-                let name = snapshot_name(key, *cutoff);
-                let snapshot = session_root.join(&name);
+            .map(|(name, (source, cutoff, required))| {
+                let snapshot = session_root.join(name);
                 let host = &host;
                 let cache_root = &cache_root;
                 let handle = scope.spawn(move || {
                     prepare_repository(
                         host,
                         cache_root,
-                        key,
+                        &repository_cache_key(source),
                         source,
                         &snapshot,
                         *cutoff,
@@ -151,54 +171,61 @@ pub fn prepare(
                     )
                     .map(|()| format!("{CACHE_CONTAINER_ROOT}/{name}"))
                 });
-                (key, source, handle)
+                (name, source, required, handle)
             })
             .collect::<Vec<_>>();
         handles
             .into_iter()
-            .map(|(key, source, handle)| {
+            .map(|(name, source, required, handle)| {
                 let result = handle.join().unwrap_or_else(|panic| {
                     Err(anyhow::anyhow!(
                         "clone-cache preparation thread panicked: {}",
                         targets::command_thread_panic_message(panic.as_ref())
                     ))
-                }).with_context(|| Refusal::precondition(format!(
-                    "Cannot prepare {} on the container host. Verify that the host can fetch the source with Git and write its cache. For a pinned checkout, verify that the requested commits are available from the source.",
-                    display_url(source)
-                )));
-                (key.clone(), result)
+                });
+                (name.clone(), source, *required, result)
             })
             .collect::<Vec<_>>()
     });
 
     let mut references = BTreeMap::new();
     let mut failures = Vec::new();
-    for (key, result) in prepared {
+    for (name, source, required, result) in prepared {
         match result {
             Ok(reference) => {
-                references.insert(key, reference);
+                references.insert(name, reference);
             }
-            Err(error) => failures.push(error),
+            Err(error) if required => failures.push(error.context(Refusal::precondition(format!(
+                "Cannot prepare {} on the container host. Verify that the host can fetch the source with Git and write its cache. For a pinned checkout, verify that the requested commits are available from the source.",
+                display_url(source)
+            )))),
+            Err(error) => executor.notify_notice(&format!(
+                "Clone cache preparation failed: {error:#}; using a direct checkout for that repository."
+            )),
         }
     }
-    let mut failures = failures.into_iter();
-    if let Some(error) = failures.next() {
-        for additional in failures {
-            executor.notify_notice(&format!("{additional:#}"));
-        }
+    if !failures.is_empty() || references.is_empty() {
         if let Err(cleanup) = cleanup_session_root(&host, &session_root, executor) {
             executor.notify_notice(&format!(
                 "Could not remove the failed Git checkout snapshot: {cleanup:#}"
             ));
         }
-        return Err(error);
+        let mut failures = failures.into_iter();
+        if let Some(error) = failures.next() {
+            for additional in failures {
+                executor.notify_notice(&format!("{additional:#}"));
+            }
+            return Err(error);
+        }
+        return Ok(None);
     }
     for repository in &mut bundle.repositories {
         let source = repository
             .url
             .as_deref()
             .expect("validated network repository");
-        repository.reference = Some(references[&repository_cache_key(source)].clone());
+        let name = snapshot_name(source, repository.history_cutoff.as_ref());
+        repository.reference = references.get(&name).cloned();
     }
     mounts.push(AdditionalMount {
         source: session_root.clone(),
@@ -224,12 +251,17 @@ pub fn prepare(
     Ok(Some(PreparedCloneCache { host, session_root }))
 }
 
-/// A session snapshot's file name: a bare repository, or for a cutoff the
-/// bundle a checkout without later history fetches from.
-fn snapshot_name(key: &str, cutoff: Option<&HistoryCutoff>) -> String {
-    match cutoff {
-        Some(_) => format!("{key}.bundle"),
-        None => format!("{key}.git"),
+/// Snapshots share the mirror, but each source and selection owns its files.
+fn snapshot_name(source: &str, cutoff: Option<&HistoryCutoff>) -> String {
+    let mut digest = Sha256::new_with_prefix(source);
+    if let Some(cutoff) = cutoff {
+        for commit in cutoff.commits() {
+            digest.update([0]);
+            digest.update(commit);
+        }
+        format!("{}.bundle", lower_hex(digest.finalize()))
+    } else {
+        format!("{}.git", lower_hex(digest.finalize()))
     }
 }
 
@@ -276,8 +308,10 @@ has_token=$5
 # this host's GIT_SSH_COMMAND as it is: on the controller that is the
 # operator's own command, inherited exactly.
 ssh_command=$6
+source_id=$7
+host_only=$8
 # Any further arguments are a history cutoff: its head, then its base.
-shift 6
+shift 8
 umask 077
 mkdir -p "$cache_root/mirrors" "$cache_root/locks" "$(dirname "$snapshot")"
 # The session root's own time is its preparation stamp: until the container
@@ -285,7 +319,8 @@ mkdir -p "$cache_root/mirrors" "$cache_root/locks" "$(dirname "$snapshot")"
 touch -- "$(dirname "$snapshot")"
 entry="$cache_root/mirrors/$key"
 mirror="$entry/repo.git"
-# An overlapping refresher satisfies this request too. The locked read below
+# An overlapping refresh of the same requested URL satisfies this request too.
+# GitHub URLs with different transports still share one mirror. The locked read
 # is authoritative; this optimistic read may race eviction or publication.
 observed_generation=$(cat "$entry/generation" 2>/dev/null || :)
 lock="$cache_root/locks/$key"
@@ -332,25 +367,32 @@ git_remote() {
     fi
 }
 generation=$(cat "$entry/generation" 2>/dev/null || :)
+next_generation="$source_id:${preparation##*/}"
 if [ ! -d "$mirror" ]; then
     rm -rf -- "$entry"
     mkdir "$partial"
     git_remote clone --mirror -- "$source" "$partial/repo.git"
     git -C "$partial/repo.git" config gc.auto 0
-    printf '%s\n' "${preparation##*/}" > "$partial/generation"
+    printf '%s\n' "$next_generation" > "$partial/generation"
     mv -- "$partial" "$entry"
-elif [ -z "$generation" ] || [ "$generation" = "$observed_generation" ]; then
-    git_remote -C "$mirror" remote update --prune
-    # Fetch updates branches but leaves the mirror's symbolic HEAD alone.
-    advertised_head=$(git_remote -C "$mirror" ls-remote --symref origin HEAD)
-    default_ref=$(printf '%s\n' "$advertised_head" | awk '$1 == "ref:" && $3 == "HEAD" { print $2 }')
-    if [ -n "$default_ref" ]; then
-        git -C "$mirror" symbolic-ref HEAD "$default_ref"
-    elif [ -n "$advertised_head" ]; then
-        detached_head=$(printf '%s\n' "$advertised_head" | awk '$2 == "HEAD" { print $1 }')
-        git -C "$mirror" update-ref --no-deref HEAD "$detached_head"
+elif [ "${generation%%:*}" != "$source_id" ] || [ "$generation" = "$observed_generation" ]; then
+    git_remote -C "$mirror" fetch --prune -- "$source" '+refs/*:refs/*'
+    # Only a host-only checkout reads the mirror's default branch.
+    if [ "$host_only" = 1 ]; then
+        advertised_head=$(git_remote -C "$mirror" ls-remote --symref -- "$source" HEAD)
+        default_ref=$(printf '%s\n' "$advertised_head" | awk '$1 == "ref:" && $3 == "HEAD" { print $2 }')
+        if [ -n "$default_ref" ]; then
+            git -C "$mirror" symbolic-ref HEAD "$default_ref"
+        elif [ -n "$advertised_head" ]; then
+            detached_head=$(printf '%s\n' "$advertised_head" | awk '$2 == "HEAD" { print $1 }')
+            if ! git -C "$mirror" cat-file -e "$detached_head^{commit}" 2>/dev/null; then
+                # A detached HEAD may be outside every mirrored ref.
+                git_remote -C "$mirror" fetch --no-tags -- "$source" HEAD
+            fi
+            git -C "$mirror" update-ref --no-deref HEAD "$detached_head"
+        fi
     fi
-    printf '%s\n' "${preparation##*/}" > "$entry/generation"
+    printf '%s\n' "$next_generation" > "$entry/generation"
 fi
 : > "$entry/last-used"
 # Own every object and ref before releasing the mirror to refresh or eviction.
@@ -425,6 +467,8 @@ fn prepare_repository(
                 .to_owned(),
             _ => mj_core::local_git::remote_git_ssh_command()?,
         },
+        lower_hex(Sha256::digest(source.as_bytes())),
+        u8::from(is_host_only_git_source(source)).to_string(),
     ];
     if let Some(cutoff) = cutoff {
         cutoff.validate()?;
@@ -614,12 +658,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unavailable_host_git_reports_the_source_without_mutating_the_bundle() {
-        let executor = RecordingExecutor {
-            status: 127,
-            ..Default::default()
-        };
+    #[cfg(unix)]
+    struct GitExecutor(BTreeMap<String, String>);
+
+    #[cfg(unix)]
+    impl CommandExecutor for GitExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            if command.program == "podman" {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"[]".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            let mut command = command.clone();
+            command.env.extend(self.0.clone());
+            ProcessExecutor.execute(&command)
+        }
+    }
+
+    fn podman_fixture_bundle(source: &str) -> (TargetTemplate, ProjectBundleSpec) {
         let target = TargetTemplate::LocalPodman(ContainerTemplate {
             build_cache: None,
             image: "ubuntu:24.04".to_owned(),
@@ -627,10 +708,10 @@ mod tests {
             extra_run_args: Vec::new(),
             workspace_storage: Default::default(),
         });
-        let mut bundle = ProjectBundleSpec {
+        let bundle = ProjectBundleSpec {
             primary: "app".to_owned(),
             repositories: vec![RepositorySpec {
-                url: Some("https://github.com/example/app.git".to_owned()),
+                url: Some(source.to_owned()),
                 push_urls: Vec::new(),
                 destination: "app".to_owned(),
                 git_ref: None,
@@ -638,6 +719,17 @@ mod tests {
                 history_cutoff: None,
             }],
         };
+        (target, bundle)
+    }
+
+    #[test]
+    fn unavailable_host_git_reports_the_source_without_mutating_the_bundle() {
+        let executor = RecordingExecutor {
+            status: 127,
+            ..Default::default()
+        };
+        let source = "git://127.0.0.2/app.git";
+        let (target, mut bundle) = podman_fixture_bundle(source);
         let mut mounts = Vec::new();
 
         let error = prepare(
@@ -649,14 +741,44 @@ mod tests {
             &executor,
         )
         .unwrap_err();
-        assert!(
-            Refusal::of(&error)
-                .unwrap()
-                .message()
-                .contains("https://github.com/example/app.git")
-        );
+        assert!(Refusal::of(&error).unwrap().message().contains(source));
         assert_eq!(bundle.repositories[0].reference, None);
         assert!(mounts.is_empty());
+    }
+
+    #[test]
+    fn unavailable_host_git_leaves_a_github_bundle_to_clone_directly() {
+        let executor = RecordingExecutor {
+            status: 127,
+            ..Default::default()
+        };
+        let source = "https://github.com/example/app.git";
+        let (target, mut bundle) = podman_fixture_bundle(source);
+        let session_id = "session-12345678";
+        let mut mounts = Vec::new();
+        assert!(
+            prepare(
+                &target,
+                session_id,
+                &mut bundle,
+                &mut mounts,
+                None,
+                &executor
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(mounts.is_empty());
+        assert_eq!(bundle.repositories[0].reference, None);
+        assert!(executor.notices.lock().unwrap()[0].contains("using direct clones"));
+        let plan = targets::provision_plan(&target, session_id, &bundle, &mounts, None).unwrap();
+        let clone = plan
+            .commands
+            .iter()
+            .find(|command| command.purpose == "clone app")
+            .unwrap();
+        assert!(clone.args.iter().any(|arg| arg == source));
+        assert!(!clone.args.iter().any(|arg| arg.starts_with("--reference")));
     }
 
     #[test]
@@ -727,6 +849,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 020257d9f: cached GitHub mirrors reused the original fetch transport.
     #[cfg(unix)]
     #[test]
     fn local_snapshot_hardlinks_objects_but_owns_its_refs() {
@@ -780,19 +903,45 @@ mod tests {
             checked(ProcessExecutor.execute(&command).unwrap(), &command).unwrap();
         }
 
-        prepare_repository(
-            &CacheHost::Local,
-            &cache_root,
-            "repository",
-            source.to_str().unwrap(),
-            &snapshot,
-            None,
-            None,
-            &ProcessExecutor,
-        )
-        .unwrap();
+        let git = |directory: &Path, args: &[&str]| {
+            let command = CommandSpec::new(
+                "git",
+                ["-C", directory.to_str().unwrap()]
+                    .into_iter()
+                    .chain(args.iter().copied()),
+            );
+            let output = checked(ProcessExecutor.execute(&command).unwrap(), &command).unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let ssh_url = "git@github.com:example/cache.git";
+        let https_url = "https://github.com/example/cache.git";
+        let config = temporary.path().join("gitconfig");
+        let config_path = config.to_str().unwrap();
+        let rewrite = format!("url.{}.insteadOf", source.display());
+        git(
+            &source,
+            &["config", "--file", config_path, &rewrite, ssh_url],
+        );
+        let executor = GitExecutor(BTreeMap::from([
+            ("GIT_CONFIG_GLOBAL".into(), config.display().to_string()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]));
+        let key = repository_cache_key(ssh_url);
+        let prepare = |url: &str, snapshot: &Path| {
+            prepare_repository(
+                &CacheHost::Local,
+                &cache_root,
+                &key,
+                url,
+                snapshot,
+                None,
+                None,
+                &executor,
+            )
+        };
+        prepare(ssh_url, &snapshot).unwrap();
 
-        let mirror = cache_root.join("mirrors/repository/repo.git");
+        let mirror = cache_root.join("mirrors").join(&key).join("repo.git");
         let object = first_object_file(&mirror.join("objects")).unwrap();
         let relative = object.strip_prefix(&mirror).unwrap();
         let snapshot_object = snapshot.join(relative);
@@ -817,27 +966,51 @@ mod tests {
         );
         assert_eq!(snapshot_metadata.permissions().mode() & 0o004, 0o004);
 
-        let command = CommandSpec::new(
-            "git",
-            [
-                "-C",
-                snapshot.to_str().unwrap(),
-                "rev-parse",
-                "--verify",
-                "HEAD",
+        let initial = git(&snapshot, &["rev-parse", "--verify", "HEAD"]);
+        // Retire the original transport after populating the shared mirror.
+        git(
+            &source,
+            &["config", "--file", config_path, &rewrite, https_url],
+        );
+        let missing = temporary.path().join("missing");
+        git(
+            &source,
+            &[
+                "config",
+                "--file",
+                config_path,
+                &format!("url.{}.insteadOf", missing.display()),
+                ssh_url,
             ],
-        )
-        .purpose("verify cached snapshot");
-        checked(ProcessExecutor.execute(&command).unwrap(), &command).unwrap();
+        );
+        git(&source, &["switch", "--quiet", "-c", "new-default"]);
+        git(
+            &source,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "new upstream state",
+            ],
+        );
+        assert_eq!(repository_cache_key(https_url), key);
+        let refreshed = snapshot.with_file_name("refreshed.git");
+        prepare(https_url, &refreshed).unwrap();
+        assert_eq!(
+            git(&refreshed, &["rev-parse", "refs/heads/new-default"]),
+            git(&source, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(git(&snapshot, &["rev-parse", "HEAD"]), initial);
     }
 
+    // Hard-won: 020257d9f: destinations sharing a remote overwrote each other's cutoff snapshots.
     #[cfg(unix)]
     #[test]
     fn a_cutoff_snapshot_is_a_bundle_of_the_cutoff_history_alone() {
         let temporary = tempfile::tempdir().unwrap();
         let source = temporary.path().join("source");
-        let cache_root = temporary.path().join("cache");
-        let snapshot = cache_root.join("sessions/session-12345678/repository.bundle");
+        let cache_root = temporary.path().join(CACHE_RELATIVE_ROOT);
         let git = |directory: &Path, args: &[&str]| -> String {
             let mut arguments = vec!["-C", directory.to_str().unwrap()];
             arguments.extend(args);
@@ -867,36 +1040,97 @@ mod tests {
             base: Some(base.clone()),
         };
 
-        prepare_repository(
-            &CacheHost::Local,
-            &cache_root,
-            "repository",
-            source.to_str().unwrap(),
-            &snapshot,
-            Some(&cutoff),
+        let remote = "git://127.0.0.1:9418/repository";
+        let config = temporary.path().join("gitconfig");
+        git(
+            &source,
+            &[
+                "config",
+                "--file",
+                config.to_str().unwrap(),
+                &format!("url.{}.insteadOf", source.display()),
+                remote,
+            ],
+        );
+        let executor = GitExecutor(BTreeMap::from([
+            ("HOME".into(), temporary.path().display().to_string()),
+            ("GIT_CONFIG_GLOBAL".into(), config.display().to_string()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]));
+        let target = TargetTemplate::LocalPodman(ContainerTemplate {
+            build_cache: None,
+            image: "ubuntu:24.04".into(),
+            pull_policy: ImagePullPolicy::Auto,
+            extra_run_args: Vec::new(),
+            workspace_storage: Default::default(),
+        });
+        let repository = |destination: &str, history_cutoff| RepositorySpec {
+            url: Some(remote.into()),
+            push_urls: Vec::new(),
+            destination: destination.into(),
+            git_ref: None,
+            reference: None,
+            history_cutoff,
+        };
+        let mut bundle = ProjectBundleSpec {
+            primary: "pinned".into(),
+            repositories: vec![
+                repository("pinned", Some(cutoff)),
+                repository(
+                    "other-pin",
+                    Some(HistoryCutoff {
+                        head: base.clone(),
+                        base: None,
+                    }),
+                ),
+                repository("full", None),
+            ],
+        };
+        let mut mounts = Vec::new();
+        prepare(
+            &target,
+            "session-12345678",
+            &mut bundle,
+            &mut mounts,
             None,
-            &ProcessExecutor,
+            &executor,
         )
+        .unwrap()
         .unwrap();
-
-        assert!(snapshot.is_file());
-        assert_eq!(
-            std::fs::read_dir(snapshot.parent().unwrap())
-                .unwrap()
-                .map(|entry| entry.unwrap().file_name())
-                .collect::<Vec<_>>(),
-            ["repository.bundle"]
-        );
-        assert_eq!(
-            git(
-                temporary.path(),
-                &["bundle", "list-heads", snapshot.to_str().unwrap()]
+        assert_eq!(mounts.len(), 1);
+        let snapshots: Vec<_> = bundle
+            .repositories
+            .iter()
+            .map(|repository| {
+                let reference = Path::new(repository.reference.as_ref().unwrap());
+                mounts[0]
+                    .source
+                    .join(reference.strip_prefix(&mounts[0].destination).unwrap())
+            })
+            .collect();
+        let [snapshot, other, full] = snapshots.as_slice() else {
+            unreachable!()
+        };
+        assert_ne!(snapshot, other);
+        assert_eq!(std::fs::read_dir(&mounts[0].source).unwrap().count(), 3);
+        for (path, refs) in [
+            (
+                snapshot,
+                format!("{head} refs/mj/head\n{base} refs/mj/base"),
             ),
-            format!("{head} refs/mj/head\n{base} refs/mj/base")
-        );
-        // The mirror keeps the full history on the host; only the bundle is
-        // mounted.
-        let mirror = cache_root.join("mirrors/repository/repo.git");
+            (other, format!("{base} refs/mj/head")),
+        ] {
+            assert_eq!(
+                git(
+                    temporary.path(),
+                    &["bundle", "list-heads", path.to_str().unwrap()]
+                ),
+                refs
+            );
+        }
+        assert_eq!(git(full, &["rev-parse", "HEAD"]), later);
+        let key = repository_cache_key(remote);
+        let mirror = cache_root.join("mirrors").join(&key).join("repo.git");
         git(&mirror, &["cat-file", "-e", &later]);
 
         let checkout = temporary.path().join("checkout");
@@ -937,6 +1171,23 @@ mod tests {
         assert_eq!(present, reachable);
         assert!(!present.contains(&later));
 
+        // A warm host-only mirror also serves a detached HEAD outside refs/*.
+        git(&source, &["switch", "--quiet", "--detach"]);
+        let detached = commit("unreferenced detached HEAD");
+        let refreshed = full.with_file_name("detached.git");
+        prepare_repository(
+            &CacheHost::Local,
+            &cache_root,
+            &key,
+            remote,
+            &refreshed,
+            None,
+            None,
+            &executor,
+        )
+        .unwrap();
+        assert_eq!(git(&refreshed, &["rev-parse", "HEAD"]), detached);
+
         // A cutoff the host cannot fetch fails before anything is mounted.
         let missing = HistoryCutoff {
             head: "1".repeat(40),
@@ -946,12 +1197,12 @@ mod tests {
             prepare_repository(
                 &CacheHost::Local,
                 &cache_root,
-                "repository",
-                source.to_str().unwrap(),
-                &snapshot,
+                &key,
+                remote,
+                snapshot,
                 Some(&missing),
                 None,
-                &ProcessExecutor,
+                &executor,
             )
             .is_err()
         );
@@ -1001,6 +1252,8 @@ mod tests {
                         .to_string(),
                     "0".into(),
                     ssh_command.into(),
+                    "ssh-fixture-source".into(),
+                    "0".into(),
                 ],
                 "prepare cached Git objects",
             );
@@ -1089,12 +1342,12 @@ wait_for() {
     done
 }
 if { [ "$1" = clone ] && [ "$2" = --mirror ] && [ "$3" = -- ]; } ||
-   { [ "$1" = -C ] && [ "$3" = remote ] && [ "$4" = update ]; }; then
+   { [ "$1" = -C ] && [ "$3" = fetch ] && [ "$4" = --prune ]; }; then
     echo refresh >> "$CACHE_TEST_ROOT/refreshes"
     : > "$CACHE_TEST_ROOT/refresh-started"
     wait_for "$CACHE_TEST_ROOT/release-refresh"
 fi
-if [ "$1" = -C ] && [ "$3" = fetch ]; then
+if [ "$1" = -C ] && [ "$3" = fetch ] && [ "$4" != --prune ]; then
     if [ "${CACHE_TEST_PAUSE_FETCH:-0}" = 1 ]; then
         : > "$CACHE_TEST_ROOT/snapshot-pinned"
         wait_for "$CACHE_TEST_ROOT/release-snapshot"
@@ -1118,37 +1371,6 @@ exec "$CACHE_TEST_MKDIR" "$@"
             let path = wrappers.join(name);
             std::fs::write(&path, script).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        struct GitExecutor(BTreeMap<String, String>);
-        impl CommandExecutor for GitExecutor {
-            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-                mj_core::targets::DeadlinePause::none()
-            }
-
-            fn cancellation_requested_without_deadline(&self) -> bool {
-                self.cancellation_requested()
-            }
-
-            fn execute_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute(command)
-            }
-
-            fn execute_with_stdin_without_deadline(
-                &self,
-                command: &mj_core::targets::CommandSpec,
-                input: &mut (dyn std::io::Read + Send),
-            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-                self.execute_with_stdin(command, input)
-            }
-
-            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                let mut command = command.clone();
-                command.env.extend(self.0.clone());
-                ProcessExecutor.execute(&command)
-            }
         }
         let environment = BTreeMap::from([
             (
