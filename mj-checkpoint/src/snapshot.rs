@@ -3645,7 +3645,12 @@ pub fn restore_workspace_snapshot(
     // Capture saved origin with credentials redacted; the seed keeps its URL
     // as configured. Compare both redacted, so an unchanged origin keeps the
     // seed's credentialed URL and its push settings.
-    let seeded = run_git(runner, destination, ["config", "--get", "remote.origin.url"], &[])?;
+    let seeded = run_git(
+        runner,
+        destination,
+        ["config", "--get", "remote.origin.url"],
+        &[],
+    )?;
     let origin_changed = seeded.status != 0
         || redact_snapshot_url(String::from_utf8_lossy(&seeded.stdout).trim_end())?
             != origin.as_str();
@@ -3670,7 +3675,11 @@ pub fn restore_workspace_snapshot(
         let stale = git_bytes(
             runner,
             destination,
-            ["for-each-ref", "--format=delete %(refname)", "refs/remotes/origin/"],
+            [
+                "for-each-ref",
+                "--format=delete %(refname)",
+                "refs/remotes/origin/",
+            ],
             &[],
             "list the seed's origin tracking refs",
         )?;

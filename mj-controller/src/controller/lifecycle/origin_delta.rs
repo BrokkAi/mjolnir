@@ -20,7 +20,11 @@ impl OriginDeltaSuspend {
     /// an origin to delta against; otherwise it keeps the capture this
     /// release replaced, so an older worker or an originless clone suspends
     /// as it did before the upgrade.
-    pub(super) fn applies(controller: &Controller, session_id: &str, clone: &std::path::Path) -> Result<bool> {
+    pub(super) fn applies(
+        controller: &Controller,
+        session_id: &str,
+        clone: &std::path::Path,
+    ) -> Result<bool> {
         let (_, root) = controller.worker_placement(session_id)?;
         let root = PathBuf::from(root);
         mj_core::runtime::off_async_worker(|| -> Result<bool> {
@@ -38,7 +42,9 @@ impl OriginDeltaSuspend {
             let origin = mj_checkpoint::archive::SystemGit.run(
                 clone,
                 &mj_checkpoint::archive::GitCommand {
-                    arguments: ["config", "--get", "remote.origin.url"].map(Into::into).into(),
+                    arguments: ["config", "--get", "remote.origin.url"]
+                        .map(Into::into)
+                        .into(),
                     ..Default::default()
                 },
             )?;
