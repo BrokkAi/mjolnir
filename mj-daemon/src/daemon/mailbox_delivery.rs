@@ -421,7 +421,9 @@ pub(crate) async fn deliver_mailbox_event(
                         code.0 == mj_core::relay::RelayErrorCode::InvalidRequest
                     }) =>
             {
-                Ok(MailboxEventDelivery::Discarded)
+                Ok(MailboxEventDelivery::Failed(
+                    "The child's quota stop was superseded by newer work.".into(),
+                ))
             }
             Err(error) => Err(error),
         };

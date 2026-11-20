@@ -195,7 +195,7 @@ impl WaitObservation {
     /// and the retry's own ending is what answers for the turn. A restart
     /// continuation likewise carries out the interrupted request.
     fn resubmits(&self, outcome: &MaterializedTurnOutcome) -> bool {
-        let retries = |command_id: &str| outcome.is_resubmitted_by(command_id);
+        let retries = |command_id: &str| outcome.is_resubmitted_by(command_id, self.subagent);
         self.capacity_retry
             .as_ref()
             .is_some_and(|retry| !retry.submitted && retries(&retry.command_id))

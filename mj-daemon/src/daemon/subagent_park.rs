@@ -284,10 +284,15 @@ impl RuntimeState {
         use mj_controller::controller::ParkOutcome;
         use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
 
+        let key = format!("quota-retry-{child}-{completed_ordinal}");
+        let mut start =
+            super::lifecycle::LifecycleStart::request(key.clone(), None, None).automatic();
+        start.deferrable_admission = Some("subagent quota switch");
         let result = self
-            .run_lifecycle(
+            .admit_lifecycle(
                 child,
                 LifecycleKind::Park,
+                start,
                 move |state, session_id, cancelled, admission| async move {
                     let controller = blocking(Controller::load).await?;
                     ensure!(
@@ -315,23 +320,6 @@ impl RuntimeState {
                         parked == ParkOutcome::Parked,
                         "the quota-limited sub-agent is no longer idle"
                     );
-                    let event = MailboxEvent {
-                        key: format!("quota-retry-{session_id}-{completed_ordinal}"),
-                        source: "mjolnir".into(),
-                        wake: true,
-                        created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
-                        body: MailboxEventBody::PlainText {
-                            text: mj_core::continuation::PROMPT.into(),
-                        },
-                    };
-                    let child = session_id.clone();
-                    blocking(move || {
-                        let json = serde_json::to_string(&event)?;
-                        mj_controller::database::enqueue_mailbox_event(
-                            &event.key, &child, &json, true, false,
-                        )
-                    })
-                    .await?;
                     let executor = DaemonStageReportingExecutor::new(
                         CancellableProcessExecutor::new(cancelled).with_deadline(UNPARK_TIMEOUT),
                         state.clone(),
@@ -347,17 +335,31 @@ impl RuntimeState {
                             &executor,
                         )
                         .await?;
+                    let event = MailboxEvent {
+                        key,
+                        source: "mjolnir".into(),
+                        wake: true,
+                        created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
+                        body: MailboxEventBody::PlainText {
+                            text: mj_core::continuation::PROMPT.into(),
+                        },
+                    };
+                    let child = session_id.clone();
+                    blocking(move || {
+                        let json = serde_json::to_string(&event)?;
+                        mj_controller::database::enqueue_mailbox_event(
+                            &event.key, &child, &json, true, false,
+                        )
+                    })
+                    .await?;
                     Ok(DaemonLifecycleResult::Done)
                 },
             )
             .await?;
+        let outcome = Self::wait_lifecycle_result(result.clone()).await;
+        self.remove_completed_lifecycle(&result);
         self.publish_revision();
-        ensure!(
-            matches!(result, DaemonLifecycleResult::Done),
-            "another park won the quota switch"
-        );
-
-        Ok(())
+        outcome.map(|_| ())
     }
 
     /// Accept a durable wake and launch the worker. Its actor observes startup

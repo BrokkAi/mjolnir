@@ -333,11 +333,12 @@ pub struct MaterializedTurnOutcome {
 impl MaterializedTurnOutcome {
     /// Whether this command carries out the request again, including provider
     /// retries and any generation of worker restart continuation.
-    pub fn is_resubmitted_by(&self, command_id: &str) -> bool {
+    pub fn is_resubmitted_by(&self, command_id: &str, subagent: bool) -> bool {
         let carried = crate::continuation::carried_command(command_id);
         crate::relay::retried_turn(carried) == Some(self.completed_ordinal)
-            || crate::continuation::GeneratedPrompt::QuotaRetry.retry_ordinal(carried)
-                == Some(self.completed_ordinal)
+            || (subagent
+                && crate::continuation::GeneratedPrompt::QuotaRetry.retry_ordinal(carried)
+                    == Some(self.completed_ordinal))
             || (carried != command_id
                 && carried == crate::continuation::carried_command(&self.command_id))
     }
