@@ -3,11 +3,19 @@
 // Paths below a directory Mjolnir owns, reached without following a link
 // that the directory's contents could have planted to send a read or a
 // change somewhere else.
+//
+// The handle operations (openat-style calls in place of Rust's cap-std) are
+// in confined_path_unix.go and confined_path_windows.go.
 
 package core
 
 import (
+	"crypto/rand"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 )
 
@@ -16,7 +24,24 @@ import (
 // ends at the first part that does not exist, since nothing below it exists
 // either.
 func RejectSymlinks(root string, relative string, missingAllowed bool) error {
-	panic("unported: mj-core/src/confined_path.rs reject_symlinks")
+	if info, err := os.Lstat(root); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symbolic link", root)
+	}
+	current := root
+	for _, component := range pathComponents(relative) {
+		current = rustPathPush(current, component.text)
+		info, err := os.Lstat(current)
+		switch {
+		case err == nil && info.Mode()&fs.ModeSymlink != 0:
+			return fmt.Errorf("%s reaches %s through a symbolic link", rustPathPush(root, relative), current)
+		case err == nil:
+		case missingAllowed && errors.Is(err, fs.ErrNotExist):
+			return nil
+		default:
+			return fmt.Errorf("inspect %s: %w", current, err)
+		}
+	}
+	return nil
 }
 
 // ConfinedDir is a directory opened without following a link, through which
@@ -92,48 +117,185 @@ func (e PublishErrorFailed) Unwrap() error { return e.Err }
 // nil when it does not exist. Directories above `root` are trusted as they
 // are.
 func ConfinedDirOpenRoot(root string) (*ConfinedDir, error) {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::open_root")
+	parentPath, name, err := splitRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	parent, err := os.Open(parentPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", parentPath, err)
+	}
+	defer parent.Close()
+	dir, err := openDirNoFollow(parent, name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", noFollowDirectory(root), err)
+	}
+	return &ConfinedDir{dir: dir, path: root}, nil
 }
 
 // ConfinedDirCreateRoot opens `root` as ConfinedDirOpenRoot does, creating
 // it and its missing parents first.
 func ConfinedDirCreateRoot(root string) (*ConfinedDir, error) {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::create_root")
+	parentPath, name, err := splitRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(parentPath, 0o777); err != nil {
+		return nil, fmt.Errorf("create %s: %w", parentPath, err)
+	}
+	parent, err := os.Open(parentPath)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", parentPath, err)
+	}
+	defer parent.Close()
+	dir, err := createAndOpen(parent, name, root)
+	if err != nil {
+		return nil, err
+	}
+	return &ConfinedDir{dir: dir, path: root}, nil
 }
 
 func (d *ConfinedDir) Path() string { return d.path }
 
+// Close releases the directory handle (Rust's Drop).
+func (d *ConfinedDir) Close() error { return d.dir.Close() }
+
 // OpenDir opens the directory at `relative` below this one. Returns nil when
 // a part of it does not exist; refuses a part that is a link.
 func (d *ConfinedDir) OpenDir(relative string) (*ConfinedDir, error) {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::open_dir")
+	names, err := normalComponents(relative)
+	if err != nil {
+		return nil, err
+	}
+	current, err := d.tryClone()
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range names {
+		path := rustPathPush(current.path, name)
+		dir, err := openDirNoFollow(current.dir, name)
+		current.dir.Close()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", noFollowDirectory(path), err)
+		}
+		current = &ConfinedDir{dir: dir, path: path}
+	}
+	return current, nil
 }
 
 // CreateDirAll opens the directory at `relative` below this one, creating
 // each missing part; refuses a part that is a link.
 func (d *ConfinedDir) CreateDirAll(relative string) (*ConfinedDir, error) {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::create_dir_all")
+	names, err := normalComponents(relative)
+	if err != nil {
+		return nil, err
+	}
+	current, err := d.tryClone()
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range names {
+		path := rustPathPush(current.path, name)
+		dir, err := createAndOpen(current.dir, name, path)
+		current.dir.Close()
+		if err != nil {
+			return nil, err
+		}
+		current = &ConfinedDir{dir: dir, path: path}
+	}
+	return current, nil
 }
 
 // Entries is the names directly in this directory and what each holds.
 func (d *ConfinedDir) Entries() ([]ConfinedEntry, error) {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::entries")
+	listing, err := reopenDir(d.dir, d.path)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", d.path, err)
+	}
+	defer listing.Close()
+	names, err := listing.ReadDir(-1)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", d.path, err)
+	}
+	entries := make([]ConfinedEntry, 0, len(names))
+	for _, entry := range names {
+		kind := EntryKindOther
+		mode, err := lstatAt(d.dir, entry.Name())
+		if err != nil {
+			return nil, fmt.Errorf("inspect %s: %w", rustPathPush(d.path, entry.Name()), err)
+		}
+		switch {
+		case mode&fs.ModeSymlink != 0:
+		case mode.IsDir():
+			kind = EntryKindDirectory
+		case mode.IsRegular():
+			kind = EntryKindFile
+		}
+		entries = append(entries, ConfinedEntry{Name: entry.Name(), Kind: kind})
+	}
+	return entries, nil
 }
 
 func (d *ConfinedDir) openRegularFile(name string) (*os.File, error) {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::open_regular_file")
+	path := rustPathPush(d.path, name)
+	file, err := openFileNoFollow(d.dir, name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open %s without following a link: %w", path, err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		file.Close()
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	return file, nil
 }
 
 // ReadBytes reads bytes without following links or opening a non-regular
 // file for reading. Returns nil, nil when the name does not exist.
 func (d *ConfinedDir) ReadBytes(name string) ([]byte, error) {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::read_bytes")
+	file, err := d.openRegularFile(name)
+	if err != nil || file == nil {
+		return nil, err
+	}
+	defer file.Close()
+	content, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", rustPathPush(d.path, name), err)
+	}
+	if content == nil {
+		content = []byte{}
+	}
+	return content, nil
 }
 
 // ReadToString reads text without following links or opening a non-regular
 // file for reading. Returns nil when the name does not exist.
 func (d *ConfinedDir) ReadToString(name string) (*string, error) {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::read_to_string")
+	content, err := d.ReadBytes(name)
+	if err != nil || content == nil {
+		return nil, err
+	}
+	text, err := decodeUTF8(content, fmt.Sprintf("read %s", rustPathPush(d.path, name)))
+	if err != nil {
+		return nil, err
+	}
+	return &text, nil
 }
 
 // WriteAtomically publishes `body` as the file `name` in this directory
@@ -142,40 +304,144 @@ func (d *ConfinedDir) ReadToString(name string) (*string, error) {
 // replaced file keeps its permissions. Refuses a `name` that is not a
 // regular file, such as a link, rather than replacing it.
 func (d *ConfinedDir) WriteAtomically(name string, body []byte, publish Publish) PublishError {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::write_atomically")
+	path := rustPathPush(d.path, name)
+	var existing *fs.FileMode
+	mode, err := lstatAt(d.dir, name)
+	switch {
+	case err == nil && !mode.IsRegular():
+		return PublishErrorNotARegularFile{}
+	case err == nil && publish == PublishCreateNew:
+		return PublishErrorAlreadyExists{}
+	case err == nil:
+		permissions := mode.Perm()
+		existing = &permissions
+	case errors.Is(err, fs.ErrNotExist):
+	default:
+		return PublishErrorFailed{fmt.Errorf("inspect %s: %w", path, err)}
+	}
+	var random [8]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return PublishErrorFailed{fmt.Errorf("generate temporary filename: %w", err)}
+	}
+	temporary := fmt.Sprintf(".%s.%d.%016x.tmp", name, os.Getpid(), binary.LittleEndian.Uint64(random[:]))
+	result := d.publish(name, temporary, path, body, publish, existing)
+	if result != nil {
+		_ = removeAt(d.dir, temporary, false)
+	}
+	return result
+}
+
+func (d *ConfinedDir) publish(name, temporary, path string, body []byte, publish Publish, existing *fs.FileMode) PublishError {
+	file, err := createFileNoFollow(d.dir, temporary)
+	if err != nil {
+		return PublishErrorFailed{fmt.Errorf("create a temporary file for %s: %w", path, err)}
+	}
+	written := func() error {
+		defer file.Close()
+		if existing != nil {
+			if err := file.Chmod(*existing); err != nil {
+				return fmt.Errorf("keep the permissions of %s: %w", path, err)
+			}
+		} else if err := restrictNewFile(file); err != nil {
+			return fmt.Errorf("restrict %s: %w", path, err)
+		}
+		if _, err := file.Write(body); err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
+		if err := file.Sync(); err != nil {
+			return fmt.Errorf("sync %s: %w", path, err)
+		}
+		return nil
+	}()
+	if written != nil {
+		return PublishErrorFailed{written}
+	}
+	switch publish {
+	case PublishReplace:
+		// A rename replaces whatever entry holds `name` at that moment, a
+		// link included, and never follows it.
+		if err := renameAt(d.dir, temporary, name); err != nil {
+			return PublishErrorFailed{fmt.Errorf("replace %s: %w", path, err)}
+		}
+	case PublishCreateNew:
+		// A link fails when `name` exists, so a file that appeared since
+		// the check above is never replaced.
+		if err := linkAt(d.dir, temporary, name); err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				return PublishErrorAlreadyExists{}
+			}
+			return PublishErrorFailed{fmt.Errorf("publish %s: %w", path, err)}
+		}
+		if err := removeAt(d.dir, temporary, false); err != nil {
+			return PublishErrorFailed{fmt.Errorf("remove the temporary file for %s: %w", path, err)}
+		}
+	}
+	if err := d.sync(); err != nil {
+		return PublishErrorFailed{err}
+	}
+	return nil
 }
 
 // RemoveFile removes the file or link `name` in this directory; a link is
 // removed itself, never what it points to.
 func (d *ConfinedDir) RemoveFile(name string) error {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::remove_file")
+	return removeAt(d.dir, name, false)
 }
 
 // RemoveDir removes the empty directory `name` in this directory.
 func (d *ConfinedDir) RemoveDir(name string) error {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::remove_dir")
+	return removeAt(d.dir, name, true)
 }
 
 func (d *ConfinedDir) tryClone() (*ConfinedDir, error) {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::try_clone")
+	dir, err := duplicateDir(d.dir, d.path)
+	if err != nil {
+		return nil, fmt.Errorf("duplicate the handle of %s: %w", d.path, err)
+	}
+	return &ConfinedDir{dir: dir, path: d.path}, nil
 }
 
 // sync makes a rename or new entry in this directory durable. Directory
 // fsync is only available on Unix, as in SyncDirectory.
 func (d *ConfinedDir) sync() error {
-	panic("unported: mj-core/src/confined_path.rs ConfinedDir::sync")
+	if err := syncDir(d.dir, d.path); err != nil {
+		return fmt.Errorf("sync directory %s: %w", d.path, err)
+	}
+	return nil
 }
 
 func splitRoot(root string) (string, string, error) {
-	panic("unported: mj-core/src/confined_path.rs split_root")
+	name, ok := pathFileName(root)
+	if !ok {
+		return "", "", fmt.Errorf("%s does not end in a directory name", root)
+	}
+	parent, ok := pathParent(root)
+	if !ok || parent == "" {
+		parent = "."
+	}
+	return parent, name, nil
 }
 
 func normalComponents(relative string) ([]string, error) {
-	panic("unported: mj-core/src/confined_path.rs normal_components")
+	var names []string
+	for _, component := range pathComponents(relative) {
+		if component.kind != pathComponentNormal {
+			return nil, fmt.Errorf("%s is not a plain relative path below a confined directory", relative)
+		}
+		names = append(names, component.text)
+	}
+	return names, nil
 }
 
 func createAndOpen(parent *os.File, name string, path string) (*os.File, error) {
-	panic("unported: mj-core/src/confined_path.rs create_and_open")
+	if err := mkdirAt(parent, name); err != nil && !errors.Is(err, fs.ErrExist) {
+		return nil, fmt.Errorf("create %s: %w", path, err)
+	}
+	dir, err := openDirNoFollow(parent, name)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", noFollowDirectory(path), err)
+	}
+	return dir, nil
 }
 
 func noFollowDirectory(path string) string {

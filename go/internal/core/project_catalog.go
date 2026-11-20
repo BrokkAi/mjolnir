@@ -130,3 +130,23 @@ type ProjectCatalogView struct {
 	Locations []ProjectLocation    `json:"locations"`
 	Status    ProjectCatalogStatus `json:"status"`
 }
+
+// MarshalJSON writes empty lists as `[]`, as serde writes an empty Vec.
+func (v ProjectCatalogView) MarshalJSON() ([]byte, error) {
+	type wire ProjectCatalogView
+	if v.Projects == nil {
+		v.Projects = []SavedProject{}
+	}
+	if v.Locations == nil {
+		v.Locations = []ProjectLocation{}
+	}
+	return marshalSerdeJSON(wire(v))
+}
+
+func (v *ProjectCatalogView) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "projects", "locations", "status"); err != nil {
+		return err
+	}
+	type wire ProjectCatalogView
+	return json.Unmarshal(data, (*wire)(v))
+}

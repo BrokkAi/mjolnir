@@ -5,8 +5,16 @@
 package core
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"unicode"
 )
 
 type GoRecipe struct {
@@ -21,6 +29,16 @@ type GoRecipe struct {
 	AdditionalMounts []AdditionalMount `json:"additional_mounts"`
 	// nil is Rust's None.
 	ResourceAllocation SessionResourceAllocation `json:"resource_allocation"`
+}
+
+// MarshalJSON writes no additional mounts as `[]`, as serde writes an empty
+// Vec.
+func (r GoRecipe) MarshalJSON() ([]byte, error) {
+	type wire GoRecipe
+	if r.AdditionalMounts == nil {
+		r.AdditionalMounts = []AdditionalMount{}
+	}
+	return marshalSerdeJSON(wire(r))
 }
 
 // UnmarshalJSON follows serde: `subagents` has the alias `mjolnir_subagents`
@@ -138,7 +156,7 @@ func (p GoPreferences) MarshalJSON() ([]byte, error) {
 	if workspaces == nil {
 		workspaces = []GoWorkspace{}
 	}
-	return json.Marshal(goPreferencesWire{
+	return marshalSerdeJSON(goPreferencesWire{
 		Version:    p.version,
 		Default:    p.Default,
 		Recent:     p.Recent,
@@ -185,41 +203,154 @@ func GoPreferencesRememberRecent(path string, recent RecentLaunch) error {
 func (p *GoPreferences) Workspaces() []GoWorkspace { return p.workspaces }
 
 func (p *GoPreferences) Workspace(directory string) *GoWorkspace {
-	panic("unported: mj-core/src/go.rs GoPreferences::workspace")
+	for i := range p.workspaces {
+		if comparePaths(p.workspaces[i].Directory, directory) == 0 {
+			return &p.workspaces[i]
+		}
+	}
+	return nil
 }
 
 func GoPreferencesBindWorkspace(path string, directory string, workspaceID string) error {
-	panic("unported: mj-core/src/go.rs GoPreferences::bind_workspace")
+	return goPreferencesUpdate(path, func(preferences *GoPreferences) {
+		if workspace := preferences.Workspace(directory); workspace != nil {
+			if workspace.WorkspaceID != workspaceID {
+				workspace.WorkspaceID = workspaceID
+				workspace.LastSessionID = nil
+			}
+			return
+		}
+		preferences.workspaces = append(preferences.workspaces, GoWorkspace{
+			Directory:   directory,
+			WorkspaceID: workspaceID,
+		})
+	})
 }
 
 func GoPreferencesRememberSession(path string, directory string, workspaceID string, sessionID string) error {
-	panic("unported: mj-core/src/go.rs GoPreferences::remember_session")
+	lock, err := configLockAcquire(path)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	preferences, err := GoPreferencesLoad(path)
+	if err != nil {
+		return err
+	}
+	var workspace *GoWorkspace
+	for i := range preferences.workspaces {
+		entry := &preferences.workspaces[i]
+		if comparePaths(entry.Directory, directory) == 0 && entry.WorkspaceID == workspaceID {
+			workspace = entry
+			break
+		}
+	}
+	if workspace == nil {
+		return errors.New("fast-start workspace binding changed; selection was not saved")
+	}
+	workspace.LastSessionID = &sessionID
+	preferences.version = 2
+	return goPreferencesWrite(path, &preferences)
 }
 
 func goPreferencesUpdate(path string, edit func(*GoPreferences)) error {
-	panic("unported: mj-core/src/go.rs GoPreferences::update")
+	lock, err := configLockAcquire(path)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	preferences, err := GoPreferencesLoad(path)
+	if err != nil {
+		return err
+	}
+	edit(&preferences)
+	preferences.version = 2
+	return goPreferencesWrite(path, &preferences)
+}
+
+// goPreferencesWrite stores preferences as serde_json::to_vec_pretty does.
+func goPreferencesWrite(path string, preferences *GoPreferences) error {
+	body, err := marshalSerdeJSONPretty(preferences)
+	if err != nil {
+		return err
+	}
+	return AtomicWrite(path, body)
+}
+
+// goLabel keeps the first `limit` characters of a name that are not control
+// characters.
+func goLabel(name string, limit int) string {
+	var label strings.Builder
+	count := 0
+	for _, c := range name {
+		if count == limit {
+			break
+		}
+		if unicode.IsControl(c) {
+			continue
+		}
+		label.WriteRune(c)
+		count++
+	}
+	return label.String()
 }
 
 func GoPreferencesDirectoryLabel(directory string) string {
-	panic("unported: mj-core/src/go.rs GoPreferences::directory_label")
+	name, ok := pathFileName(directory)
+	if !ok {
+		name = directory
+	}
+	name = goLabel(strings.ToValidUTF8(name, "�"), 48)
+	if strings.TrimSpace(name) == "" {
+		return "Project"
+	}
+	return name
 }
 
 // GoPreferencesWorkspaceName locates workspaces created by the first
 // implementation without renaming unrelated workspaces.
 func GoPreferencesWorkspaceName(directory string) string {
-	panic("unported: mj-core/src/go.rs GoPreferences::workspace_name")
+	digest := sha256.Sum256([]byte(directory))
+	identity := hex.EncodeToString(digest[:16])
+	leaf, _ := pathFileName(directory)
+	label := goLabel(strings.ToValidUTF8(leaf, "�"), 24)
+	return fmt.Sprintf("go: %s %s", label, identity)
 }
 
 func GoPreferencesPath() string {
-	panic("unported: mj-core/src/go.rs GoPreferences::path")
+	return filepath.Join(filepath.Dir(ConfigPath()), "go.json")
 }
 
 func GoPreferencesLoad(path string) (GoPreferences, error) {
-	panic("unported: mj-core/src/go.rs GoPreferences::load")
+	body, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return DefaultGoPreferences(), nil
+	}
+	if err != nil {
+		return GoPreferences{}, fmt.Errorf("read fast-start preferences: %w", err)
+	}
+	var preferences GoPreferences
+	if err := json.Unmarshal(body, &preferences); err != nil {
+		return GoPreferences{}, fmt.Errorf("read fast-start preferences: %w", err)
+	}
+	if preferences.version != 1 && preferences.version != 2 {
+		return GoPreferences{}, fmt.Errorf("unsupported fast-start preferences version %d", preferences.version)
+	}
+	return preferences, nil
 }
 
 func (p *GoPreferences) Recipe(directory string) *GoRecipe {
-	panic("unported: mj-core/src/go.rs GoPreferences::recipe")
+	for i := range p.projects {
+		if comparePaths(p.projects[i].Directory, directory) == 0 {
+			recipe := p.projects[i].Recipe
+			return &recipe
+		}
+	}
+	if p.Default == nil {
+		return nil
+	}
+	recipe := *p.Default
+	return &recipe
 }
 
 // GoPreferencesRememberFirstPair records a profile and target an interactive
@@ -232,9 +363,36 @@ func (p *GoPreferences) Recipe(directory string) *GoRecipe {
 // a default, so `mj new` with no `--profile` failed after sessions made
 // through another interactive surface.
 func GoPreferencesRememberFirstPair(path string, profileID string, targetID string) error {
-	panic("unported: mj-core/src/go.rs GoPreferences::remember_first_pair")
+	preferences, err := GoPreferencesLoad(path)
+	if err != nil {
+		return err
+	}
+	if preferences.Default != nil {
+		return nil
+	}
+	return goPreferencesUpdate(path, func(preferences *GoPreferences) {
+		if preferences.Default == nil {
+			preferences.Default = &GoRecipe{
+				ProfileID:        profileID,
+				TargetID:         targetID,
+				AdditionalMounts: []AdditionalMount{},
+			}
+		}
+	})
 }
 
 func GoPreferencesSaveRecipe(path string, directory string, recipe GoRecipe, global bool) error {
-	panic("unported: mj-core/src/go.rs GoPreferences::save_recipe")
+	return goPreferencesUpdate(path, func(preferences *GoPreferences) {
+		if global || preferences.Default == nil {
+			defaults := recipe.Defaults()
+			preferences.Default = &defaults
+		}
+		kept := preferences.projects[:0]
+		for _, project := range preferences.projects {
+			if comparePaths(project.Directory, directory) != 0 {
+				kept = append(kept, project)
+			}
+		}
+		preferences.projects = append(kept, projectRecipe{Directory: directory, Recipe: recipe})
+	})
 }
