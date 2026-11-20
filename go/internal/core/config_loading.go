@@ -22,6 +22,64 @@ const ConfigVersion = 23
 // ProductDir is the directory name under the platform configuration and data roots.
 const ProductDir = "mjolnir"
 
+// newerVersion is the config version in document when it is above this
+// build's.
+func newerVersion(document map[string]any) (uint32, bool) {
+	version, ok := document["version"].(int64)
+	if !ok || version <= ConfigVersion {
+		return 0, false
+	}
+	if version > int64(^uint32(0)) {
+		return ^uint32(0), true
+	}
+	return uint32(version), true
+}
+
+// NewerVersionOnDisk is the config version at path when it is above this
+// build's. Read tolerantly: a missing or unreadable file never blocks a save.
+func NewerVersionOnDisk(path string) (uint32, bool) {
+	panic("unported: mj-core/src/config/loading.rs newer_version_on_disk")
+}
+
+func rejectRemovedProfileOverrides(contents string) error {
+	panic("unported: mj-core/src/config/loading.rs reject_removed_profile_overrides")
+}
+
+// removedHarnessKinds is the harness kinds an earlier release accepted in a
+// profile's `kind`.
+var removedHarnessKinds = [1]string{"mimo"}
+
+// isRemovedHarnessProfile reports whether profile, a decoded
+// [profiles.<id>] table, names a removed harness.
+func isRemovedHarnessProfile(profile any) bool {
+	table, ok := profile.(map[string]any)
+	if !ok {
+		return false
+	}
+	kind, ok := table["kind"].(string)
+	if !ok {
+		return false
+	}
+	for _, removed := range removedHarnessKinds {
+		if kind == removed {
+			return true
+		}
+	}
+	return false
+}
+
+// dropRemovedHarnessProfiles takes out every profile whose harness this build
+// no longer supports, and a legacy [review] profile pin naming one, returning
+// the removed profile ids. Such a profile cannot start a session, so the file
+// still loads without it and the next save leaves it out.
+func dropRemovedHarnessProfiles(document map[string]any) []string {
+	panic("unported: mj-core/src/config/loading.rs drop_removed_harness_profiles")
+}
+
+// EnvOverrideOS is Rust's env_override_os. Go environment values are strings,
+// so it is EnvOverride.
+func EnvOverrideOS(name string) (string, bool) { return EnvOverride(name) }
+
 // EnvOverride reads a configuration override under its MJ_ name. Mjolnir
 // shares no state or environment with hel installs; there is no legacy fallback.
 func EnvOverride(name string) (string, bool) {
@@ -355,6 +413,19 @@ func ValidateRelativeDestination(path string) error {
 }
 
 func isSeparator(r rune) bool { return os.IsPathSeparator(uint8(r)) && r < 0x80 }
+
+// isGithubSource reports whether a bundle repository's `github` value may
+// load.
+//
+// The shared GitHub parser is tried first. The looser rule after it keeps
+// loading every value that loaded before the parser existed, because a
+// rejected value here fails the whole configuration: anything with exactly
+// one `/`, such as `git@gitlab.com:o/r`, which resolution uses as a plain Git
+// URL, or a shorthand with a name GitHub would not allow, which resolution
+// rejects when the repository is used.
+func isGithubSource(source string) bool {
+	panic("unported: mj-core/src/config/loading.rs is_github_source")
+}
 
 // AtomicWrite replaces path without exposing a partially written
 // configuration or state file.
