@@ -1210,7 +1210,7 @@ const ReviewMCPServer = "mj-review"
 
 // ReviewMCPTools are the tools the review server lists, in the order it
 // lists them.
-var ReviewMCPTools = []string{"request_review", "override_review", "set_review_baseline"}
+var ReviewMCPTools = []string{"request_review", "override_review", "set_baseline"}
 
 // SubagentMcpRole is which tools a worker's mj-agents MCP server offers. A
 // parent may delegate, a top-level session without Mjolnir delegation can
