@@ -11,6 +11,11 @@ product sources for exactly what is used and cover that completely.
    `get_index`, `get_full`, `entry`, `retain`, `sort_keys`/`sort_by`, `pop`,
    `first`/`last`, iteration, `extend`. Zero value usable; implements
    `rs.ReflectMap`.
+   Do not give it `Clone`, `Equal` or `Compare` methods: `rs.Clone`, `rs.Eq`
+   and `rs.Cmp` prefer such methods, and would then copy `Arc`-shared values in
+   `arc`-tagged fields deeply. They reach a collection through
+   `rs.ReflectMap`/`rs.ReflectSeq` instead (`go/rs/collections` does the
+   same; read its `doc.go`). The same holds for `OrdMap` below.
 2. `go/crates/imbl` for imbl 7.0.2 (same oracle feature): `OrdMap[K, V]` as
    used in `mj-core/src/snapshot_map.rs`, with persistent semantics: a clone is
    cheap and independent. A real persistent balanced tree is ideal; say what
