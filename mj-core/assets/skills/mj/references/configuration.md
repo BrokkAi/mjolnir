@@ -860,16 +860,15 @@ Repository fields:
 | Field | TOML type | Required | Validation and behavior |
 | --- | --- | --- | --- |
 | `id` | string | yes | Valid, unique ID within the bundle. |
-| `github` | string | exactly one source | GitHub source in a supported form; cannot be combined with `local`. |
+| `github` | string | exactly one source | Network Git URL or GitHub shorthand; cannot be combined with `local`. |
 | `local` | path string | exactly one source | Absolute controller-side Git path used to resolve its network remotes; cannot be combined with `github`. |
 | `destination` | path string | yes | Non-empty relative path below the target workspace; no `.` or `..` components. |
 
-Supported GitHub forms are `owner/repository`,
-`https://github.com/owner/repository`, `git@github.com:owner/repository`, and
-`ssh://git@github.com/owner/repository`, with an optional `.git` suffix. Sources
-cannot contain whitespace or begin with `-`. At session creation, Mjolnir uses
-the source's default network fetch remote and preserves its configured push
-destination(s). A `local` path is inspected for that configuration; its local
+The `github` key accepts HTTP(S), SSH, scp-style SSH, and `git://` URLs on any
+host, plus GitHub `owner/repository` shorthand. Sources cannot contain whitespace
+or begin with `-`. Mjolnir removes HTTP userinfo before saving, retains SSH
+usernames, and uses the saved URL for fetch and push. Private repositories
+outside GitHub have no credential path in containers yet. A `local` path is inspected for that configuration; its local
 commits, staged changes, unstaged changes, and untracked files are excluded
 from an isolated clone. Repository destinations may not be equal, ancestors,
 or descendants of one another.

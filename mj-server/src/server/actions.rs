@@ -399,6 +399,8 @@ pub struct BundleRequest {
     pub source: String,
     /// The requested full repository set, with its primary repository first.
     pub exact_sources: Option<Vec<String>>,
+    /// A discovered network source may select an existing project unchanged.
+    pub discovered: bool,
     pub reply: tokio::sync::oneshot::Sender<Result<String, BundleFailure>>,
 }
 

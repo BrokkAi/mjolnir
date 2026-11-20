@@ -356,7 +356,7 @@ pub fn label(key: &str) -> String {
         "primary_repo" => "Main repository",
         "repositories" => "Repositories",
         "id" => "Name",
-        "github" => "GitHub owner/repository",
+        "github" => "Git URL or GitHub owner/repository",
         "local" => "Local repository directory",
         "destination" => "Checkout folder",
         "tools_directory" => "Native tool cache directory",

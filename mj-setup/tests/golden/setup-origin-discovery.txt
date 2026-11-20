@@ -1,24 +1,19 @@
-=== HTTPS remote (1 setup summary) ===
-repository prompt: BrokkAi/hel
-setup summary: No coding agent found yet. Mjolnir can install one and sign you in. Project: BrokkAi/hel.
-=== SSH remote (1 setup summary) ===
-repository prompt: BrokkAi/hel
-setup summary: No coding agent found yet. Mjolnir can install one and sign you in. Project: BrokkAi/hel.
-=== SSH URL (1 setup summary) ===
-repository prompt: BrokkAi/hel
-setup summary: No coding agent found yet. Mjolnir can install one and sign you in. Project: BrokkAi/hel.
-=== non-GitHub remote (1 setup summary) ===
-repository prompt: <none>
-setup summary: No coding agent found yet. Mjolnir can install one and sign you in.
-=== shared executor success (1 setup summary) ===
-probe: git -C <working-directory> remote get-url origin
-repository prompt: BrokkAi/hel
-setup summary: No coding agent found yet. Mjolnir can install one and sign you in. Project: BrokkAi/hel.
-=== shared executor failure (1 setup summary) ===
-probe: command failed
-repository prompt: <none>
-setup summary: No coding agent found yet. Mjolnir can install one and sign you in.
-=== shared executor unavailable (1 setup summary) ===
-probe: no result
-repository prompt: <none>
-setup summary: No coding agent found yet. Mjolnir can install one and sign you in.
+=== origin and a fork ===
+No coding agent found yet. Mjolnir can install one and sign you in. Project: https://github.com/BrokkAi/hel.git.
+git -C /work/hel remote get-url origin
+=== sole SSH remote ===
+No coding agent found yet. Mjolnir can install one and sign you in. Project: ssh://git@git.example.com/team/hel.git.
+git -C /work/hel remote get-url origin
+git -C /work/hel remote
+git -C /work/hel remote get-url upstream
+=== HTTP credentials ===
+Removed credentials from the HTTP Git URL. Configure Git credentials on the target.
+No coding agent found yet. Mjolnir can install one and sign you in. Project: https://git.example.com/team/hel.git?ref=1#clone.
+git -C /work/hel remote get-url origin
+=== relative remote ===
+No coding agent found yet. Mjolnir can install one and sign you in.
+git -C /work/hel remote get-url origin
+=== ambiguous remotes ===
+No coding agent found yet. Mjolnir can install one and sign you in.
+git -C /work/hel remote get-url origin
+git -C /work/hel remote

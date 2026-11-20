@@ -539,6 +539,22 @@ fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases()
 }
 
 #[test]
+fn directory_discovery_keeps_the_saved_transport_for_an_existing_identity() {
+    let mut config = Config::default();
+    let saved =
+        create_quick_bundle_in_config(&mut config, "ssh://git@github.com/BrokkAi/hel.git").unwrap();
+    let before = config.clone();
+    let discovered = add_project_sources(
+        &mut config,
+        &["https://github.com/BrokkAi/hel.git".into()],
+        true,
+    )
+    .unwrap();
+    assert_eq!(discovered, saved);
+    assert_eq!(config, before);
+}
+
+#[test]
 fn selecting_a_linked_checkout_reuses_identity_and_retains_its_push_settings() {
     let checkout = super::test_support::committed_repository();
     let worktree_parent = tempfile::tempdir().unwrap();

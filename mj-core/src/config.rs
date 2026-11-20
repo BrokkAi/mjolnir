@@ -1615,11 +1615,12 @@ impl TryFrom<StoredConfig> for Config {
             keys,
             legacy_startup,
             mut profiles,
-            bundles,
+            mut bundles,
             images,
             mut machines,
             targets,
         } = stored;
+        strip_project_credentials(&mut bundles);
         github.watch.enabled &= mailbox.enabled;
         github.validate()?;
         for profile in profiles.values_mut() {
@@ -1723,8 +1724,18 @@ impl TryFrom<StoredConfig> for Config {
     }
 }
 
+fn strip_project_credentials(bundles: &mut BTreeMap<String, ProjectBundle>) {
+    for repository in bundles
+        .values_mut()
+        .flat_map(|bundle| &mut bundle.repositories)
+    {
+        repository.strip_http_userinfo();
+    }
+}
+
 impl From<Config> for StoredConfig {
-    fn from(config: Config) -> Self {
+    fn from(mut config: Config) -> Self {
+        strip_project_credentials(&mut config.bundles);
         let mut machines = config.machines;
         let mut targets = BTreeMap::new();
         for (id, target) in &config.targets {
@@ -2338,6 +2349,7 @@ impl Config {
     {
         let mut config = Self::load_from(path)?;
         let value = edit(&mut config)?;
+        strip_project_credentials(&mut config.bundles);
         config.save_to_locked(path)?;
         Ok((config, value))
     }

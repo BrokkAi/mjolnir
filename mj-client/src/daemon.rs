@@ -904,6 +904,10 @@ pub enum DaemonAction {
     /// environment. A client in another placement asks its daemon instead of
     /// writing the client's `config.toml`.
     RunFirstRunSetup,
+    /// Use the client's directory when both processes can see the same paths.
+    RunFirstRunSetupIn {
+        project_directory: PathBuf,
+    },
     /// Run the doctor in the daemon's own environment and return the
     /// actionable errors, which a client shows after first-run setup.
     RunDoctor,
@@ -2296,6 +2300,12 @@ impl DaemonClient {
         }
     }
 
+    /// Whether the connected daemon can resolve paths from this client.
+    pub fn shares_client_filesystem(&self, identity: &DaemonIdentity) -> bool {
+        !self.connector().is_some_and(|connector| connector.is_ssh())
+            && identity.placement.container() == mj_core::placement::daemon_container().as_deref()
+    }
+
     pub async fn first_run_setup_due(&mut self) -> Result<bool> {
         match self.request(DaemonAction::FirstRunSetupDue).await? {
             DaemonReply::FirstRunSetupDue(due) => Ok(due),
@@ -2303,8 +2313,15 @@ impl DaemonClient {
         }
     }
 
-    pub async fn run_first_run_setup(&mut self) -> Result<Option<FirstRunSetupReport>> {
-        match self.request(DaemonAction::RunFirstRunSetup).await? {
+    pub async fn run_first_run_setup(
+        &mut self,
+        project_directory: Option<PathBuf>,
+    ) -> Result<Option<FirstRunSetupReport>> {
+        let action = match project_directory {
+            Some(project_directory) => DaemonAction::RunFirstRunSetupIn { project_directory },
+            None => DaemonAction::RunFirstRunSetup,
+        };
+        match self.request(action).await? {
             DaemonReply::FirstRunSetup(report) => Ok(report),
             reply => bail!("unexpected first-run setup reply {reply:?}"),
         }

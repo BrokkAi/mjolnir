@@ -19,11 +19,8 @@ fn homes(directory: &Path, kinds: &[HarnessKind]) -> Vec<DiscoveredHome> {
         .collect()
 }
 
-fn repository() -> GithubRepository {
-    GithubRepository {
-        owner: "BrokkAi".into(),
-        repository: "mjolnir".into(),
-    }
+fn repository() -> String {
+    "BrokkAi/mjolnir".to_owned()
 }
 
 #[test]
@@ -285,7 +282,7 @@ fn interrupted_setup_recovers_after_configuration_was_already_saved() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     let discovered = homes(directory.path(), &[HarnessKind::Claude]);
-    build_config(&discovered, Some(&repository()))
+    build_config(&discovered, Some(repository().as_str()))
         .save_to(&path)
         .unwrap();
     atomic_write(&directory.path().join("setup-state"), b"pending\n").unwrap();

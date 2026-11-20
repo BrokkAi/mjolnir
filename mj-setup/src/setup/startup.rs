@@ -8,8 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 
 use super::{
-    DiscoveredHome, GithubRepository, build_config, discover_github_repository, discover_profiles,
-    reference_secret_api_keys,
+    DiscoveredHome, build_config, discover_profiles, reference_secret_api_keys,
 };
 use crate::doctor::{CheckStatus, DoctorCheck};
 use crate::targets::CommandExecutor;
@@ -21,16 +20,32 @@ use mj_core::config::{Config, atomic_write};
 pub fn run_setup(
     config_path: &Path,
     instance_data: &Path,
+    project_directory: Option<&Path>,
     executor: &impl CommandExecutor,
     cancelled: &dyn Fn() -> bool,
     accepted: impl FnOnce(),
 ) -> Result<Option<FirstRunSetupReport>> {
-    run_setup_with_discovery(config_path, instance_data, cancelled, accepted, || {
-        let homes = discover_profiles(executor);
-        let cwd = std::env::current_dir().context("read current project directory")?;
-        let repository = discover_github_repository(executor, &cwd);
-        Ok((homes, repository))
-    })
+    run_setup_with_discovery(
+        config_path,
+        instance_data,
+        cancelled,
+        accepted,
+        || {
+            let homes = discover_profiles(executor);
+            let cwd = project_directory
+                .map(Path::to_path_buf)
+                .or_else(|| std::env::current_dir().ok());
+            let repository = cwd.and_then(|cwd| {
+                let (source, stripped) =
+                    mj_core::local_git::discover_project_source(&cwd, executor).ok()?;
+                if stripped {
+                    tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
+                }
+                Some(source)
+            });
+            Ok((homes, repository))
+        },
+    )
 }
 
 /// Whether automatic setup has work to do: a new installation, or one whose
@@ -62,7 +77,7 @@ fn run_setup_with_discovery(
     instance_data: &Path,
     cancelled: &dyn Fn() -> bool,
     accepted: impl FnOnce(),
-    discover: impl FnOnce() -> Result<(Vec<DiscoveredHome>, Option<GithubRepository>)>,
+    discover: impl FnOnce() -> Result<(Vec<DiscoveredHome>, Option<String>)>,
 ) -> Result<Option<FirstRunSetupReport>> {
     std::fs::create_dir_all(instance_data).context("create setup state directory")?;
     let _owner = acquire_setup_lock(&instance_data.join("setup.lock"), cancelled)?;
@@ -82,7 +97,7 @@ fn run_setup_with_discovery(
         // This preserves simultaneous Settings edits and makes reruns additive.
         let mut discovered = build_config(
             &super::without_conventional_duplicates(latest, &homes),
-            repository.as_ref(),
+            repository.as_deref(),
         );
         reference_secret_api_keys(&mut discovered, config_path);
         let additions = latest.setup_additions(&discovered);
@@ -99,7 +114,7 @@ fn run_setup_with_discovery(
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect(),
-        repository: repository.map(|repository| repository.source()),
+        repository,
     }))
 }
 

@@ -1217,38 +1217,45 @@ fn bundle_requires_existing_primary_repository() {
 }
 
 #[test]
-fn bundle_rejects_non_github_sources() {
+fn bundle_config_round_trip_removes_http_userinfo_and_keeps_ssh_user() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
     let mut config = sample_config();
-    config.bundles.get_mut("hel").unwrap().repositories[0].github =
-        Some("https://example.com/owner/repo".into());
-    assert!(
-        config
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("not a supported GitHub source")
+    let repository = &mut config.bundles.get_mut("hel").unwrap().repositories[0];
+    repository.github = Some("https://gitlab.example/team/hel.git?token=route#checkout".into());
+    let mut ssh = repository.clone();
+    ssh.id = "ssh".into();
+    ssh.destination = "ssh".into();
+    ssh.github = Some("ssh://build@gitlab.example/team/hel.git".into());
+    config
+        .bundles
+        .get_mut("hel")
+        .unwrap()
+        .repositories
+        .push(ssh);
+    config.save_to(&path).unwrap();
+
+    // Loading keeps the old source usable, and an ordinary save must also
+    // remove the credentials from the actual file when preserving comments.
+    let body = fs::read_to_string(&path).unwrap().replace(
+        "https://gitlab.example",
+        "https://user:password@gitlab.example",
     );
+    fs::write(&path, format!("# keep this comment\n{body}")).unwrap();
+    let loaded = Config::load_from(&path).unwrap();
+    assert_eq!(loaded.bundles, config.bundles);
+    loaded.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.starts_with("# keep this comment"));
+    assert!(!saved.contains("user:password"));
+    assert_eq!(Config::load_from(&path).unwrap().bundles, config.bundles);
 }
 
-/// A rejected `github` value fails the whole configuration, so every value
-/// that loaded before the shared GitHub parser must keep loading, including
-/// ones the parser does not call GitHub (the last three).
 #[test]
 fn bundle_keeps_loading_github_values_accepted_before_the_shared_parser() {
-    for source in [
-        "BrokkAi/hel",
-        "https://github.com/BrokkAi/hel.git",
-        "ssh://git@github.com/BrokkAi/hel.git",
-        "git@gitlab.example:BrokkAi/hel.git",
-        "BrokkAi/hel+fork",
-        "https://github.com/BrokkAi/hel?ref=main",
-    ] {
-        let mut config = sample_config();
-        config.bundles.get_mut("hel").unwrap().repositories[0].github = Some(source.into());
-        config
-            .validate()
-            .unwrap_or_else(|error| panic!("{source}: {error:#}"));
-    }
+    let mut config = sample_config();
+    config.bundles.get_mut("hel").unwrap().repositories[0].github = Some("BrokkAi/hel+fork".into());
+    config.validate().unwrap();
 }
 
 #[test]

@@ -480,7 +480,7 @@ pub(super) async fn create_bundle(
             for source in &sources {
                 validate_bundle_source(source)?;
             }
-            request_bundle(&state, String::new(), Some(sources)).await?
+            request_bundle(&state, String::new(), Some(sources), false).await?
         }
         _ => {
             return Err(ApiError::bad_request(
@@ -499,7 +499,7 @@ pub(super) async fn create_quick_bundle(
     source: String,
 ) -> Result<String, ApiError> {
     validate_bundle_source(&source)?;
-    request_bundle(state, source, None).await
+    request_bundle(state, source, None, false).await
 }
 
 fn validate_bundle_source(source: &str) -> Result<(), ApiError> {
@@ -514,10 +514,11 @@ fn validate_bundle_source(source: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn request_bundle(
+pub(super) async fn request_bundle(
     state: &ServerState,
     source: String,
     exact_sources: Option<Vec<String>>,
+    discovered: bool,
 ) -> Result<String, ApiError> {
     let (reply, result) = tokio::sync::oneshot::channel();
     state
@@ -525,6 +526,7 @@ async fn request_bundle(
         .send(BundleRequest {
             source,
             exact_sources,
+            discovered,
             reply,
         })
         .await
@@ -534,7 +536,7 @@ async fn request_bundle(
         .map_err(|_| ApiError::controller_unavailable())?
         .map_err(|failure| match failure {
             BundleFailure::InvalidSource => ApiError::bad_request(
-                "use a GitHub owner/repository or an existing Git checkout on the controller host",
+                "use a Git URL, GitHub owner/repository, or an existing Git checkout on the controller host",
             ),
             BundleFailure::Controller => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,

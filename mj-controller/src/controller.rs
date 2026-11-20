@@ -70,8 +70,8 @@ use mj_core::config::{
     data_dir, is_bare_project_target, mount_history_host,
 };
 
-use crate::import::github_repository_from_origin;
 use crate::import::{RepositoryIdentity, setup_style_id};
+use mj_core::remote_git::{Shorthand, display_url, project_source};
 
 const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
 
@@ -282,9 +282,16 @@ pub fn create_quick_bundle_in_config(config: &mut Config, source: &str) -> Resul
 pub fn create_bundle_from_sources(
     sources: &[String],
 ) -> std::result::Result<QuickBundleCreation, QuickBundleFailure> {
+    persist_project_sources(sources, false)
+}
+
+pub fn persist_project_sources(
+    sources: &[String],
+    discovered: bool,
+) -> std::result::Result<QuickBundleCreation, QuickBundleFailure> {
     let (config, bundle_id) = Config::update(|config| {
         let previous = config.bundles.clone();
-        let id = create_bundle_from_sources_in_config(config, sources)
+        let id = add_project_sources(config, sources, discovered)
             .map_err(|error| anyhow::Error::new(QuickBundleFailure::InvalidSource(error)))?;
         if let Some(old) = previous.get(&id)
             && config.bundles.get(&id) != Some(old)
@@ -314,7 +321,10 @@ pub fn create_bundle_from_sources(
                 .find(|entry| entry.bundle_id == canonical)
                 .context("canonical project is missing")?
                 .project;
-            for repository in &mut saved.bundle.repositories {
+            if discovered && let Some(configured) = config.bundles.get(&canonical) {
+                saved.bundle = configured.clone();
+            }
+            for repository in saved.bundle.repositories.iter_mut().filter(|_| !discovered) {
                 let identity = saved
                     .identities
                     .get(&repository.id)
@@ -332,7 +342,9 @@ pub fn create_bundle_from_sources(
                 .insert(canonical.clone(), saved.bundle.clone());
             config.bundles.remove(&id);
             config.images.consolidate_bundle(&id, &canonical);
-            crate::database::store_catalog_project(&canonical, &saved, true)?;
+            if !discovered {
+                crate::database::store_catalog_project(&canonical, &saved, true)?;
+            }
         }
         Ok(canonical)
     })
@@ -373,9 +385,23 @@ pub fn create_bundle_from_sources_in_config(
     config: &mut Config,
     sources: &[String],
 ) -> Result<String> {
+    add_project_sources(config, sources, false)
+}
+
+fn add_project_sources(
+    config: &mut Config,
+    sources: &[String],
+    discovered: bool,
+) -> Result<String> {
     let sources = sources
         .iter()
-        .map(|source| interpret_repository_source(source))
+        .map(|source| {
+            if discovered {
+                interpret_network_source(source, Shorthand::Rejected)
+            } else {
+                interpret_repository_source(source)
+            }
+        })
         .collect::<Result<Vec<_>>>()?;
     if sources.is_empty() {
         bail!("at least one repository source is required");
@@ -389,6 +415,9 @@ pub fn create_bundle_from_sources_in_config(
     }
 
     if let Some(existing) = exact_configured_bundle(config, &sources)? {
+        if discovered {
+            return Ok(existing);
+        }
         let bundle = config
             .bundles
             .get_mut(&existing)
@@ -444,7 +473,7 @@ pub fn create_bundle_from_sources_in_config(
 
 #[derive(Debug, Clone)]
 enum RepositorySourceKind {
-    Github(crate::import::GithubRepository),
+    Network(String),
     Local(PathBuf),
 }
 
@@ -463,10 +492,7 @@ impl InterpretedRepositorySource {
 
     fn into_project_repository(self, id: String) -> ProjectRepository {
         let (github, local) = match self.kind {
-            RepositorySourceKind::Github(repository) => (
-                Some(format!("{}/{}", repository.owner, repository.repository)),
-                None,
-            ),
+            RepositorySourceKind::Network(source) => (Some(source), None),
             RepositorySourceKind::Local(root) => (None, Some(root)),
         };
         ProjectRepository {
@@ -507,17 +533,25 @@ fn interpret_repository_source(source: &str) -> Result<InterpretedRepositorySour
     if candidate.is_absolute() || source.starts_with('.') || source.starts_with('~') {
         bail!("local repository path {source:?} does not exist");
     }
-    let repository = github_repository_from_origin(source).context(format!(
-        "{source:?} is not a GitHub owner/repository or URL"
-    ))?;
+    interpret_network_source(source, Shorthand::Allowed)
+}
+
+fn interpret_network_source(
+    source: &str,
+    shorthand: Shorthand,
+) -> Result<InterpretedRepositorySource> {
+    let source = project_source(source, shorthand)
+        .context("use a Git URL, GitHub owner/repository, or an existing local repository")?;
+    if matches!(source, std::borrow::Cow::Owned(_)) {
+        tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
+    }
+    let identity = RepositoryIdentity::from_remote_with(&source, shorthand)
+        .context("Git source has no repository identity")?;
     Ok(InterpretedRepositorySource {
-        display_name: source.to_owned(),
-        name: repository.repository.clone(),
-        identity: RepositoryIdentity::Github(
-            repository.owner.to_ascii_lowercase(),
-            repository.repository.to_ascii_lowercase(),
-        ),
-        kind: RepositorySourceKind::Github(repository),
+        display_name: display_url(&source),
+        name: mj_core::remote_git::project_source_name(&source).unwrap_or_else(|| identity.name()),
+        identity,
+        kind: RepositorySourceKind::Network(source.into_owned()),
     })
 }
 

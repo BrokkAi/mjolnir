@@ -258,7 +258,7 @@ action: None
 │ Crea  │                                                                                  │       │
 │No se  │   Recent     GitHub     ●URL or Path                                             │       │
 │Creat  │                                                                                  │       │
-│       │ Paste a GitHub URL, owner/repository, or local repository path.                  │       │
+│       │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed.         │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
@@ -289,7 +289,7 @@ action: None
 │ Crea  │                                                                                  │       │
 │No se  │   Recent     GitHub     ●URL or Path                                             │       │
 │Creat  │                                                                                  │       │
-│       │ Paste a GitHub URL, owner/repository, or local repository path.                  │       │
+│       │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed.         │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
@@ -849,7 +849,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -874,7 +874,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -899,7 +899,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -924,7 +924,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -949,7 +949,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │ owner/visible                                                            │
   │                                                                          │
@@ -974,7 +974,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │ owner/visible                                                            │
   │                                                                          │
@@ -999,7 +999,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │ owner/visible                                                            │
   │                                                                          │
@@ -1024,7 +1024,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -1049,7 +1049,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -1074,7 +1074,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -1099,7 +1099,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -1124,7 +1124,7 @@ action: None
   │                                                                          │
   │   Recent     GitHub     ●URL or Path                                     │
   │                                                                          │
-  │ Paste a GitHub URL, owner/repository, or local repository path.          │
+  │ Git URL, GitHub owner/repo, or local path. HTTP credentials are removed. │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -1191,8 +1191,8 @@ action: None
   │                                                      │
   │   Recent     GitHub     ●URL or Path                 │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -1212,8 +1212,8 @@ action: None
   │                                                      │
   │   Recent     GitHub     ●URL or Path                 │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -1233,8 +1233,8 @@ action: None
   │                                                      │
   │   Recent     GitHub     ●URL or Path                 │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -1254,8 +1254,8 @@ action: None
   │                                                      │
   │   Recent     GitHub     ●URL or Path                 │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -1275,8 +1275,8 @@ action: None
   │                                                      │
   │   Recent     GitHub     ●URL or Path                 │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │ owner/visible                                        │
   │                                                      │
@@ -1296,8 +1296,8 @@ action: None
   │                                                      │
   │   Recent     GitHub     ●URL or Path                 │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │ owner/visible                                        │
   │                                                      │
@@ -1317,8 +1317,8 @@ action: None
   │                                                      │
   │   Recent     GitHub     ●URL or Path                 │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │ owner/visible                                        │
   │                                                      │
@@ -1338,8 +1338,8 @@ action: None
   │                                                      │
   │   Recent     GitHub     ●URL or Path                 │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -1359,8 +1359,8 @@ action: None
   │                                                      │
   │   Recent     GitHub     ●URL or Path                 │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -1380,8 +1380,8 @@ action: None
   │                                                      │
   │   Recent     GitHub     ●URL or Path                 │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -1400,8 +1400,8 @@ action: None
   ╭ × Choose a project ──────────────────────────────────╮
   │                                                      │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -1421,8 +1421,8 @@ action: None
   ╭ × Choose a project ──────────────────────────────────╮
   │                                                      │
   │                                                      │
-  │ Paste a GitHub URL, owner/repository, or local       │
-  │ repository path.                                     │
+  │ Git URL, GitHub owner/repo, or local path. HTTP      │
+  │ credentials are removed.                             │
   │                                                      │
   │                                                      │
   │                                                      │

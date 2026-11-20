@@ -335,6 +335,8 @@ pub struct StartSessionRequest {
     pub target_id: Option<String>,
     #[serde(default)]
     pub bundle_id: Option<String>,
+    /// A directory on the bare target, or a checkout on the controller host
+    /// from which to discover a bundle for an isolated target.
     #[serde(default)]
     pub project_directory: Option<PathBuf>,
     #[serde(default)]
@@ -999,7 +1001,7 @@ pub struct LaunchBundle {
 #[serde(deny_unknown_fields)]
 pub struct LaunchRepository {
     pub id: String,
-    /// The GitHub source, when this repository has one. A repository sourced
+    /// The Git URL or GitHub shorthand, when this repository has one. A repository sourced
     /// from a local directory publishes nothing here, because that source is a
     /// path on the controller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1019,6 +1021,63 @@ pub struct LaunchHost {
     pub stale: bool,
     pub refreshing: bool,
     pub has_error: bool,
+}
+
+/// Decide the profile and target of a new session from what the caller named,
+/// the saved default, and what is configured. The daemon's start route and
+/// `mj new` both call it, so a caller that is told what to name is told by
+/// the rule that would have chosen for it.
+///
+/// A choice left unnamed takes the saved default, else the only candidate.
+/// Every choice that remains open is reported together, each with its
+/// candidates, so the caller can fix them in one step. `need_profile` is false
+/// for a model-first request, where the profile is only a quota tie-break and
+/// the saved profile, when there is one, is returned as it stands.
+pub fn resolve_launch_choices<'a>(
+    profile: Option<&str>,
+    target: Option<&str>,
+    need_profile: bool,
+    profiles: impl IntoIterator<Item = &'a str>,
+    targets: impl IntoIterator<Item = &'a str>,
+    saved: Option<&LaunchDefault>,
+) -> Result<(Option<String>, String), Vec<String>> {
+    let mut open = Vec::new();
+    let mut choose =
+        |field: &str, named: Option<&str>, saved: Option<&str>, candidates: Vec<&str>| {
+            if let Some(value) = named.or(saved) {
+                return Some(value.to_owned());
+            }
+            if let [only] = candidates[..] {
+                return Some(only.to_owned());
+            }
+            open.push(match candidates.is_empty() {
+                true => format!("a {field} (none is configured)"),
+                false => format!("a {field} (one of: {})", candidates.join(", ")),
+            });
+            None
+        };
+    let profile_id = if need_profile {
+        choose(
+            "profile_id",
+            profile,
+            saved.map(|saved| saved.profile_id.as_str()),
+            profiles.into_iter().collect(),
+        )
+    } else {
+        profile
+            .map(str::to_owned)
+            .or_else(|| saved.map(|saved| saved.profile_id.clone()))
+    };
+    let target_id = choose(
+        "target_id",
+        target,
+        saved.map(|saved| saved.target_id.as_str()),
+        targets.into_iter().collect(),
+    );
+    match target_id {
+        Some(target_id) if open.is_empty() => Ok((profile_id, target_id)),
+        _ => Err(open),
+    }
 }
 
 /// The pair a caller may leave unnamed when it starts a session.

@@ -6677,6 +6677,70 @@ async fn options_report_the_saved_default_and_publish_only_its_two_identifiers()
     assert!(!body.to_string().contains("/private/project"));
 }
 
+// Integration: the API chooses the controller-side fetch remote, then uses
+// the canonical project identifier returned by the controller.
+#[tokio::test]
+async fn isolated_directory_start_uses_the_discovered_project_and_reports_removed_credentials() {
+    use mj_core::targets::{CommandExecutor, CommandSpec, ProcessExecutor};
+
+    let repository = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let mut command = CommandSpec::new("git", args.iter().copied());
+        command.cwd = Some(repository.path().to_owned());
+        let result = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(result.status, 0, "{result:?}");
+    };
+    git(&["init", "--quiet"]);
+    git(&[
+        "remote",
+        "add",
+        "upstream",
+        "https://user:secret@gitlab.example/team/hel.git",
+    ]);
+    git(&[
+        "remote",
+        "set-url",
+        "--push",
+        "upstream",
+        "https://gitlab.example/fork/hel.git",
+    ]);
+    let (app, mut actions, _snapshot, mut bundles) =
+        api_app(Arc::new(FakeBackend::default()), |_| {});
+    let body = serde_json::json!({
+        "profile_id": "codex-1",
+        "target_id": "podman",
+        "project_directory": repository.path(),
+    });
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(body.to_string())));
+    let request = bundles.recv().await.unwrap();
+    assert!(request.discovered);
+    assert_eq!(request.source, "https://gitlab.example/team/hel.git");
+    request.reply.send(Ok("hel".into())).unwrap();
+    let ControllerRequest { action, reply } = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        bundle_id,
+        project_directory,
+        ..
+    } = action
+    else {
+        panic!("expected a new session");
+    };
+    assert_eq!(bundle_id, "hel");
+    assert!(project_directory.is_none());
+    reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("s1".into()),
+            notice: None,
+        })
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        json_body(response).await["notice"],
+        mj_core::remote_git::HTTP_USERINFO_REMOVED
+    );
+}
+
 /// Save a fast-start default the way `mj go --global-default` does.
 fn save_global_default(path: &std::path::Path, profile_id: &str, target_id: &str) {
     mj_core::go::GoPreferences::save_recipe(

@@ -89,12 +89,17 @@ pub(super) async fn handle_action(
             .context("daemon first-run check task panicked")??;
             Ok(DaemonReply::FirstRunSetupDue(due))
         }
-        DaemonAction::RunFirstRunSetup => {
-            let report = blocking(|| {
+        DaemonAction::RunFirstRunSetup | DaemonAction::RunFirstRunSetupIn { .. } => {
+            let project_directory = match action {
+                DaemonAction::RunFirstRunSetupIn { project_directory } => Some(project_directory),
+                _ => None,
+            };
+            let report = blocking(move || {
                 let executor = mj_controller::targets::ProcessExecutor;
                 mj_setup::setup::run_setup(
                     &mj_core::config::config_path(),
                     &mj_core::config::data_dir(),
+                    project_directory.as_deref(),
                     &executor,
                     &|| false,
                     || {},

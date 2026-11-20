@@ -221,6 +221,64 @@ pub fn default_branch(
 /// is expected. They would make a target checkout depend on the controller's
 /// filesystem or execute an unbounded helper, so they are rejected here.
 pub fn validate_network_url(url: &str) -> Result<()> {
+    network_url(url, false).map(drop)
+}
+
+/// Parse a project source and remove HTTP userinfo before it can be saved.
+/// Return the accepted spelling verbatim except for its HTTP credentials.
+pub fn project_source(source: &str, shorthand: Shorthand) -> Result<std::borrow::Cow<'_, str>> {
+    let source = source.trim();
+    if parse_github_remote(source, shorthand)
+        .is_some_and(|remote| remote.spelling == GithubSpelling::Shorthand)
+    {
+        return Ok(source.into());
+    }
+    network_url(source, true)
+}
+
+/// Preserve legacy config entries that look like shorthand but have a name
+/// GitHub would reject. They still fail when selected, as older builds did.
+pub(crate) fn validate_configured_project_source(source: &str) -> Result<()> {
+    let parsed = project_source(source, Shorthand::Allowed);
+    let source = source.trim();
+    if parsed.is_err()
+        && let Some((owner, repository)) = source.split_once('/')
+        && !owner.is_empty()
+        && !repository.is_empty()
+        && !source.starts_with(['-', '.', '~'])
+        && !source.contains([':', '@', '\\'])
+        && !repository.contains('/')
+        && !source.chars().any(char::is_whitespace)
+    {
+        return Ok(());
+    }
+    parsed.map(drop)
+}
+
+/// Label derived from the repository path, independent of HTTP query data.
+pub fn project_source_name(source: &str) -> Option<String> {
+    let remote = parse_github_remote(source, Shorthand::Allowed);
+    if let Some(remote) = remote {
+        return Some(remote.repository);
+    }
+    let parsed = if source.contains("://") {
+        Url::parse(source).ok()
+    } else {
+        None
+    };
+    let path = parsed.as_ref().map_or(source, Url::path);
+    path.trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit(['/', ':'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+pub const HTTP_USERINFO_REMOVED: &str =
+    "Removed credentials from the HTTP Git URL. Configure Git credentials on the target.";
+
+fn network_url(url: &str, strip_http_userinfo: bool) -> Result<std::borrow::Cow<'_, str>> {
     let value = url.trim();
     if value.is_empty() {
         bail!("Git URL is empty");
@@ -268,7 +326,21 @@ pub fn validate_network_url(url: &str) -> Result<()> {
                 display_url(value)
             );
         }
-        return Ok(());
+        if strip_http_userinfo && matches!(scheme, "http" | "https") {
+            // Keep the path, query, fragment and escape spelling exactly as
+            // entered. The parsed URL establishes its transport and host.
+            let (_, endpoint) = value.split_once("://").expect("validated URL scheme");
+            let authority = endpoint.trim_start_matches(['/', '\\']);
+            let start = value.len() - authority.len();
+            let authority = authority
+                .split(['/', '?', '#', '\\'])
+                .next()
+                .unwrap_or_default();
+            if let Some(at) = authority.rfind('@') {
+                return Ok(format!("{}{}", &value[..start], &value[start + at + 1..]).into());
+            }
+        }
+        return Ok(value.into());
     }
 
     // The remaining network spelling Git accepts is scp-like SSH, for
@@ -303,7 +375,7 @@ pub fn validate_network_url(url: &str) -> Result<()> {
             display_url(value)
         );
     }
-    Ok(())
+    Ok(value.into())
 }
 
 /// Return a URL suitable for diagnostics or persistence in user-visible state.
@@ -335,7 +407,7 @@ pub fn display_url(url: &str) -> String {
     url.to_owned()
 }
 
-fn expand_github_source(source: &str) -> Result<String> {
+pub fn expand_github_source(source: &str) -> Result<String> {
     let source = source.trim();
     let shorthand = !source.contains("://")
         && !source.contains('@')

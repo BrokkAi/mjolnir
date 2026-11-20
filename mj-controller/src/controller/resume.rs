@@ -1273,12 +1273,12 @@ fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectR
         );
         (None, Some(mj_core::local_git::canonical_repository(path)?))
     } else {
-        let github = crate::import::github_repository_from_origin(replacement)
-            .context("origin must be a GitHub repository or an absolute local repository path")?;
-        (
-            Some(format!("{}/{}", github.owner, github.repository)),
-            None,
-        )
+        let source = mj_core::remote_git::project_source(replacement, mj_core::remote_git::Shorthand::Allowed)
+            .context("origin must be a Git URL, GitHub owner/repository, or an absolute local repository path")?;
+        if matches!(source, std::borrow::Cow::Owned(_)) {
+            tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
+        }
+        (Some(source.into_owned()), None)
     };
     Ok(ProjectRepository {
         id: id.to_owned(),
@@ -1393,17 +1393,25 @@ fn fetch_source_commit(
             .github
             .as_deref()
             .context("repository source is missing")?;
-        let github = crate::import::github_repository_from_origin(source)
-            .context("configured repository is not a GitHub source")?;
-        if github_token.is_some() {
-            token_auth = true;
-            arguments.extend(mj_core::remote_git::github_token_credential_config());
-            format!(
-                "https://github.com/{}/{}.git",
-                github.owner, github.repository
-            )
+        let source = mj_core::remote_git::expand_github_source(source)?;
+        if let Some(github) = mj_core::remote_git::parse_github_remote(
+            &source,
+            mj_core::remote_git::Shorthand::Rejected,
+        )
+        .filter(|github| github.is_default_endpoint())
+        {
+            if github_token.is_some() {
+                token_auth = true;
+                arguments.extend(mj_core::remote_git::github_token_credential_config());
+                format!(
+                    "https://github.com/{}/{}.git",
+                    github.owner, github.repository
+                )
+            } else {
+                source
+            }
         } else {
-            format!("git@github.com:{}/{}.git", github.owner, github.repository)
+            source
         }
     };
     if accepted_source.is_some() && github_token.is_some() && is_github_https_url(&source) {

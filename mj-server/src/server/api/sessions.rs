@@ -115,6 +115,31 @@ fn new_session_allocation(
     }
 }
 
+async fn discover_project(
+    directory: &std::path::Path,
+    target_id: &str,
+) -> Result<(String, bool), ApiFailure> {
+    mj_core::path_input::validate_absolute_input(directory).map_err(|error| {
+        ApiFailure::bad_request(format!("invalid project_directory: {error:#}"))
+    })?;
+    let path = directory.to_owned();
+    mj_core::runtime::spawn_blocking(move || {
+        let executor = mj_core::targets::ProcessExecutor;
+        let path = mj_controller::controller::resolve_target_input_path(
+            &mj_core::config::TargetTemplate::LocalBare,
+            &path,
+            &executor,
+        )?;
+        mj_core::local_git::discover_project_source(&path, &executor)
+    })
+    .await
+    .map_err(|error| ApiFailure::unavailable(format!("project lookup failed: {error}")))?
+    .map_err(|error| ApiFailure::bad_request(format!(
+        "Could not discover a project in {} for target {target_id:?}: {error:#}. Supply a bundle_id, or use a bare target to open the directory.",
+        directory.display()
+    )))
+}
+
 /// Create a session, and hand its first prompt to the backend to submit once
 /// the harness is ready.
 ///
@@ -199,11 +224,30 @@ pub(super) async fn start_session(
             "`no_later_history` requires `at`: it limits the history of that checkout",
         ));
     }
+    let workspace_id = workspace_for_new_session(&backend, request.workspace_id.clone()).await?;
+    if let Some(title) = &request.title {
+        crate::server::validate_title(title)?;
+    }
+    let bare = crate::server::require_launchable_target(&state.snapshot_rx.borrow(), &target_id)?
+        .requires_project_directory;
+    let mut project_directory = request.project_directory.clone();
+    let mut stripped = false;
     let bundle_id = match (&request.bundle_id, &request.project_directory) {
         (Some(bundle_id), _) => bundle_id.clone(),
         // Bare directories belong to the selected target. The daemon validates
         // them there; a controller-local bundle lookup cannot resolve SSH paths.
-        (None, Some(_)) => String::new(),
+        (None, Some(_)) if bare => String::new(),
+        (None, Some(directory)) => {
+            let (source, removed) = discover_project(directory, &target_id).await?;
+            stripped = removed;
+            project_directory = None;
+            crate::server::request_bundle(&state, source, None, true).await?
+        }
+        (None, None) if !bare => {
+            return Err(ApiFailure::bad_request(
+                "supply bundle_id or a project_directory on the controller host containing a Git checkout with a network remote",
+            ));
+        }
         (None, None) => {
             return Err(ApiFailure::bad_request(
                 "supply bundle_id, project_directory, or both",
@@ -244,13 +288,13 @@ pub(super) async fn start_session(
         no_github_events: request.no_github_events,
         no_github_credentials: request.no_github_credentials,
         notifications_ignored: request.notifications_ignored,
-        workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
+        workspace_id,
         profile_id,
         bundle_id,
         target_id,
         resource_allocation: resource_allocation.map(Box::new),
         title: request.title.clone(),
-        project_directory: request.project_directory.clone(),
+        project_directory,
         additional_mounts: Vec::new(),
         dirty_ack: Vec::new(),
     };
@@ -298,7 +342,15 @@ pub(super) async fn start_session(
         Json(StartSessionResponse {
             session_id,
             turn_id: None,
-            notice,
+            notice: if stripped {
+                let credentials = mj_core::remote_git::HTTP_USERINFO_REMOVED;
+                Some(notice.map_or_else(
+                    || credentials.to_owned(),
+                    |notice| format!("{credentials}\n{notice}"),
+                ))
+            } else {
+                notice
+            },
         }),
     ))
 }
@@ -323,20 +375,24 @@ fn resolve_launch(
     let snapshot = state.snapshot_rx.borrow();
     let saved = saved_default(&state.preferences_path);
     let model_first = request.profile_id.is_none() && request.model.is_some();
-    let profile_id = if model_first {
-        saved.as_ref().map(|saved| saved.profile_id.clone())
-    } else {
-        Some(resolve_launch_id(
-            request.profile_id.as_deref(),
-            saved.as_ref().map(|saved| saved.profile_id.as_str()),
-            "profile_id",
-        )?)
-    };
-    let target_id = resolve_launch_id(
+    let (profile_id, target_id) = resolve_launch_choices(
+        request.profile_id.as_deref(),
         request.target_id.as_deref(),
-        saved.as_ref().map(|saved| saved.target_id.as_str()),
-        "target_id",
-    )?;
+        !model_first,
+        snapshot.profiles.iter().map(|profile| profile.id.as_str()),
+        snapshot
+            .targets
+            .iter()
+            .filter(|target| !target.runtime_missing)
+            .map(|target| target.id.as_str()),
+        saved.as_ref(),
+    )
+    .map_err(|open| {
+        ApiFailure::bad_request(format!(
+            "name {}; this instance has no saved default to fall back on",
+            open.join(" and ")
+        ))
+    })?;
     if !model_first
         && let Some(profile_id) = profile_id.as_deref()
         && let Err(error) = if request.profile_id.is_some() {
@@ -366,19 +422,6 @@ fn resolve_launch(
     // the reason, whether the caller named it or took it from the default.
     crate::server::require_launchable_target(&snapshot, &target_id)?;
     Ok((profile_id, target_id))
-}
-
-/// One launch identifier the caller may have left unnamed.
-fn resolve_launch_id(
-    named: Option<&str>,
-    saved: Option<&str>,
-    field: &str,
-) -> Result<String, ApiFailure> {
-    named.or(saved).map(str::to_owned).ok_or_else(|| {
-        ApiFailure::bad_request(format!(
-            "name a {field}; this instance has no saved default to fall back on"
-        ))
-    })
 }
 
 /// Resume a stopped session from its checkpoint.

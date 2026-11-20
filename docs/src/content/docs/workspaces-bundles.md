@@ -53,8 +53,8 @@ that already carries the name, so it is safe to run before every session. Both
 are thin clients for `GET` and `POST /api/v1/workspaces`; see the
 [HTTP API reference](/api-reference/#list-workspaces).
 
-`mj new` requires `--workspace <name>` or `--workspace-id <id>`, even when
-there is only one workspace. A fresh instance has none; create one first:
+`mj new` uses the workspace for the project directory or the sole workspace
+when no workspace is named. A fresh instance has none; create one first:
 
 ```console
 mj workspaces create agents
@@ -136,8 +136,11 @@ Bundle and repository IDs use 1–64 ASCII letters, digits, `.`, `-`, or `_`;
 
 Each repository declares exactly one source:
 
-- `github` accepts `owner/repository`, a GitHub HTTPS URL, or a supported GitHub
-  SSH URL.
+- `github` accepts a Git URL on any host over HTTP(S), SSH (including
+  `user@host:path`), or `git://`, plus GitHub `owner/repository` shorthand.
+  Mjolnir removes HTTP userinfo before saving the source. SSH usernames stay in
+  the address. Private repositories outside GitHub have no credential path in
+  containers yet.
 - `local` names an absolute controller-side Git repository whose network remote
   configuration is resolved at session creation. Its local commits and working
   tree are never copied into an isolated session.
@@ -145,6 +148,11 @@ Each repository declares exactly one source:
 `destination` is a non-empty relative path beneath the bundle root. It cannot
 contain `.` or `..`, and two destinations cannot overlap. For example, `api`
 and `api/generated` cannot coexist because one would contain the other.
+
+For an isolated `mj new --project-directory PATH` launch, Mjolnir reads the
+fetch URL from `origin` or the checkout's sole remote on the controller host.
+A project created this way uses that URL for both fetch and push. The launch
+preflight displays the push destination.
 
 See the [Configuration reference](/configuration/) for every accepted source
 form and validation rule.
@@ -159,7 +167,7 @@ You do not need to create or name a bundle first. The project picker offers:
 - **GitHub**: browse repositories available to the GitHub account already signed
   in on the computer running Mjolnir, or search by name. If needed, the picker
   explains how to install or sign in to GitHub CLI on that computer.
-- **URL or Path** (terminal) or **Paste URL** (browser): enter a GitHub URL,
+- **URL or Path** (terminal) or **Paste URL** (browser): enter a Git URL,
   `owner/repository`, or an existing local repository path. Local paths belong
   to the computer running Mjolnir, not the phone or browser device.
 - **Folders** (browser only): open folders, go up a level, and choose a Git

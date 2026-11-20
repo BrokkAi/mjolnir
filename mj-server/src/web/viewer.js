@@ -3755,7 +3755,7 @@ function renderProjectChooser(body) {
   for (const [mode, title, detail] of [
     ['github', 'GitHub', 'Your repositories and search'],
     ['directory', 'Browse folders', 'On your Mjolnir computer'],
-    ['url', 'Paste URL', 'GitHub URL or owner/repository'],
+    ['url', 'Paste URL', 'Git URL or GitHub owner/repository'],
   ]) {
     const button = projectButton('', () => setProjectMode(mode), `new-project-${mode}`);
     button.setAttribute('aria-pressed', String(picker.mode === mode));
@@ -3792,10 +3792,10 @@ function renderProjectChooser(body) {
   } else if (!home) {
     body.append(projectButton('Recent & saved projects', () => setProjectMode('home'), 'new-project-saved'));
     if (picker.mode === 'url') {
-      body.append(pathField('GitHub URL or owner/repository', 'new-project-source', newDraft.bundleSource, value => {
+      body.append(pathField('Git URL or GitHub owner/repository', 'new-project-source', newDraft.bundleSource, value => {
         newDraft.bundleSource = value;
       }));
-      body.append(el('p', 'dim', 'You can also enter a repository path on the computer running Mjolnir.'));
+      body.append(el('p', 'dim', 'HTTP credentials are removed. You can also enter a repository path on the computer running Mjolnir.'));
       const use = projectButton(newDraft.projectMultiple ? 'Add repository' : newDraft.creatingBundle ? 'Opening project…' : 'Use repository', () => selectProjectRepository(), 'new-project-use');
       body.append(use);
     } else {
@@ -3837,7 +3837,7 @@ function selectProjectRepository(selectedSource) {
   if (!draft || draft.creatingBundle) return;
   const source = (selectedSource ?? draft.bundleSource).trim();
   if (!source) {
-    newError.textContent = 'Paste a GitHub URL, owner/repository, or repository path.';
+    newError.textContent = 'Paste a Git URL, GitHub owner/repository, or repository path.';
     return;
   }
   if (!draft.projectMultiple) return createNewProject([source]);
@@ -3960,7 +3960,7 @@ function renderProjectBrowser(body) {
   }, 'new-project-cancel'));
   if (picker.error) browser.append(projectButton('Retry', () => discoverProjects(), 'new-project-retry'));
   if (github && !picker.error && picker.loaded && !picker.entries.length && !picker.loading) {
-    browser.append(el('p', 'dim', 'Try another search, browse folders, or paste a GitHub URL.'));
+    browser.append(el('p', 'dim', 'Try another search, browse folders, or paste a Git URL.'));
   }
   if (!picker.loading && !picker.error) {
     if (targetDirectory && picker.loaded) browser.append(projectButton('Use this folder', () => {
