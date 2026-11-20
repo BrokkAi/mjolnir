@@ -2,6 +2,7 @@
 import json
 from pathlib import PurePosixPath
 import re
+import shlex
 import subprocess
 import time
 from uuid import uuid4
@@ -15,6 +16,10 @@ MODEL = "fable"
 EFFORT = "high"
 CONTEXT_BOUNDARY = "context-cleared:"
 SESSION_ID = re.compile(r"[a-f0-9]{32}")
+TMP_ISOLATION_PROTOCOL = "recursive-tmp-inventory-v1"
+# Observed harness areas from rerun-b9ceb9627/residual-artifacts.json. The
+# Podman worker runtime lives under /var/lib/hel/workers, outside this scan.
+TMP_EXCLUSIONS = ("/tmp/.bun-*", "/tmp/cc-socks", "/tmp/claude-*", "/tmp/node-compile-cache")
 # Use the same readiness window as the shared driver's wait_idle.
 CONTEXT_TIMEOUT = 1200
 RUN_ERRORS = (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError)
@@ -73,37 +78,153 @@ elif scratch.exists():
 """
 
 TMP_ARTIFACTS = """
-import json, shutil, sys
+from fnmatch import fnmatchcase
+import json, os, stat, sys
 from pathlib import Path
 
 root = Path("/tmp")
-if len(sys.argv) > 1:
-    for name in json.loads(sys.argv[1]):
-        if not name or "/" in name or name in {".", ".."}:
-            raise ValueError("expected a top-level temporary entry")
-        path = root / name
-        if not path.is_symlink() and path.is_dir():
-            shutil.rmtree(path)
+request = json.load(sys.stdin)
+
+def excluded(path):
+    top = str(root / path.relative_to(root).parts[0])
+    return any(fnmatchcase(top, pattern) for pattern in request["exclusions"])
+
+def inventory(directory, entries):
+    try:
+        with os.scandir(directory) as children:
+            for child in children:
+                path = Path(child.path)
+                if excluded(path):
+                    continue
+                try:
+                    observed = child.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                kind = stat.filemode(observed.st_mode)[0]
+                entries[str(path)] = {"type": kind, "size": observed.st_size,
+                                      "mtime_ns": observed.st_mtime_ns, "inode": observed.st_ino}
+                if kind == "d":
+                    inventory(path, entries)
+    except FileNotFoundError:
+        if directory == root:
+            raise
+
+def remove_entry(name, expected):
+    path = Path(name)
+    parts = path.relative_to(root).parts
+    if not parts or ".." in parts or str(path) != name or excluded(path):
+        raise ValueError("expected an inventoried temporary entry")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent = os.open(root, flags)
+    try:
+        for part in parts[:-1]:
+            nested = os.open(part, flags, dir_fd=parent)
+            os.close(parent)
+            parent = nested
+        leaf = parts[-1]
+        observed = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+        kind = stat.filemode(observed.st_mode)[0]
+        if (observed.st_ino, kind) != (expected["inode"], expected["type"]):
+            return "entry changed since inventory"
+        if kind == "d":
+            os.rmdir(leaf, dir_fd=parent)
         else:
-            path.unlink(missing_ok=True)
+            os.unlink(leaf, dir_fd=parent)
+    finally:
+        os.close(parent)
+    return "removed"
+
+if request["remove"] is not None:
+    results = {}
+    # Remove children before parents and never recurse through a removal target.
+    for name, entry in sorted(request["remove"].items(), key=lambda item: (-item[0].count("/"), item[0])):
+        try:
+            results[name] = remove_entry(name, entry)
+        except FileNotFoundError:
+            results[name] = "absent"
+        except OSError as error:
+            results[name] = str(error)
+    print(json.dumps(results))
 else:
-    print(json.dumps(sorted(path.name for path in root.iterdir())))
+    entries = {}
+    inventory(root, entries)
+    print(json.dumps(entries))
 """
 
 
-def mentioned_tmp_entries(pages, after_seq, names):
-    from audit import call_parts
+def referenced_tmp_paths(pages, after_seq, cwd, home):
+    from audit import PATH_KEYS, resolve_path, shell_commands
 
-    calls = [call_parts(item)[0] for page in pages for item in page["items"]
-             if item["seq"] > after_seq and item["role"] in {"tool", "terminal"}
-             and (item.get("body") or {}).get("call")]
-    mentioned = set()
-    for name in names:
-        literal = json.dumps(f"/tmp/{name}")[1:-1]
-        pattern = re.compile(r"(?<![\w./-])" + re.escape(literal) + r"""(?=$|[/\s'"\`;&|()<>{},\\])""")
-        if any(pattern.search(call) for call in calls):
-            mentioned.add(name)
-    return mentioned
+    paths = set()
+
+    def add(path, directory):
+        if isinstance(path, str) and (resolved := resolve_path(path, directory)) and resolved.startswith("/tmp/"):
+            paths.add(resolved)
+
+    def command_paths(command, directory, home):
+        try:
+            for words, redirects, _, start in shell_commands(command, directory, home=home):
+                for _, operand in redirects:
+                    add(operand, start)
+                if not words or words[0] in {"echo", "printf"}:
+                    continue
+                if PurePosixPath(words[0]).name in {"sh", "bash"} and words[1:2] in (["-c"], ["-lc"]):
+                    if len(words) >= 3:
+                        command_paths(words[2], start, home)
+                    continue
+                for word in words:
+                    add(word, start)
+        except ValueError:
+            # The audit owns unsupported-shell findings. Cleanup uses inventories.
+            pass
+
+    for page in pages:
+        execution = page.get("execution")
+        execution = execution if isinstance(execution, dict) else {}
+        page_cwd = page.get("cwd") or execution.get("cwd") or cwd
+        page_home = page.get("home") or execution.get("home") or home
+        for item in page["items"]:
+            if item["seq"] <= after_seq or item["role"] not in {"tool", "terminal"}:
+                continue
+            call = (item.get("body") or {}).get("call") or {}
+            raw = call.get("rawInput")
+            directory = page_cwd
+            if isinstance(raw, dict):
+                workdir = raw.get("cwd") or raw.get("workdir")
+                if isinstance(workdir, str):
+                    directory = resolve_path(workdir, page_cwd)
+            for fields in (raw, *(call.get("locations") or [])):
+                if isinstance(fields, dict):
+                    for key in PATH_KEYS & fields.keys():
+                        values = fields[key] if isinstance(fields[key], list) else [fields[key]]
+                        for path in values:
+                            add(path, page_cwd if key in {"cwd", "workdir"} else directory)
+            if isinstance(raw, dict):
+                command = raw.get("command", raw.get("cmd", raw.get("argv")))
+            else:
+                command = raw
+            if command is None and call.get("kind") in {None, "execute"}:
+                command = call.get("title")
+                if isinstance(command, str) and command.startswith('"') and command.endswith('"'):
+                    try:
+                        command = json.loads(command)
+                    except ValueError:
+                        pass
+            if isinstance(command, list) and all(isinstance(word, str) for word in command):
+                command = shlex.join(command)
+            if isinstance(command, str) and call.get("kind") in {None, "execute", "other"}:
+                command_paths(command, directory, page_home)
+    return paths
+
+
+def has_tmp_baseline(directory, sid):
+    path = directory / "tmp-baseline.json"
+    try:
+        marker = json.loads(path.read_bytes())
+    except (FileNotFoundError, ValueError):
+        return False
+    return (isinstance(marker, dict) and marker.get("protocol") == TMP_ISOLATION_PROTOCOL
+            and marker.get("session_id") == sid and isinstance(marker.get("entries"), dict))
 
 
 class TurnFailure(RuntimeError):
@@ -231,6 +352,7 @@ class SealedRunner:
                     self.driver.wait_idle(sid)
                     time.sleep(5)
         self.verify(sid)
+        self.record_tmp_baseline(sid, directory)
 
     def start(self, snapshot, record_id):
         self.check_quota()
@@ -388,18 +510,20 @@ class SealedRunner:
 
     def tmp_admin(self, sid, remove=None):
         container = self.driver.container(sid)["container"]
-        args = [] if remove is None else [json.dumps(remove)]
-        proc = subprocess.run(["podman", "exec", "--user", "0", container,
-                               "python3", "-c", TMP_ARTIFACTS, *args], capture_output=True, timeout=300)
+        request = json.dumps({"exclusions": TMP_EXCLUSIONS, "remove": remove}).encode()
+        proc = subprocess.run(["podman", "exec", "--interactive", "--user", "0", container,
+                               "python3", "-c", TMP_ARTIFACTS], input=request, capture_output=True, timeout=300)
         if proc.returncode:
             raise RuntimeError(f"engine temporary file reset failed: {proc.stderr.decode(errors='replace').strip()}")
-        return json.loads(proc.stdout) if remove is None else None
+        return json.loads(proc.stdout)
 
-    def tmp_query_start(self, sid, directory):
+    def record_tmp_baseline(self, sid, directory):
+        if not has_tmp_baseline(directory, sid):
+            save_json(directory / "tmp-baseline.json", {"protocol": TMP_ISOLATION_PROTOCOL, "session_id": sid,
+                                                       "entries": self.tmp_admin(sid)})
+
+    def tmp_query_start(self, sid):
         before = self.tmp_admin(sid)
-        baseline = directory / "tmp-baseline.json"
-        if not baseline.exists():
-            save_json(baseline, before)
         cursor = self.driver.mj("transcript", "--session", sid, "--limit", 1)["latest_seq"]
         return {"before": before, "after_seq": cursor}
 
@@ -411,30 +535,50 @@ class SealedRunner:
         history = json.loads(history_path.read_bytes()) if history_path.exists() else []
         event = next((row for row in history if row["context_id"] == evidence.name), None)
         if event is None:
-            if transcript_path is None:
-                transcript_path = evidence / "reset-transcript.json"
-                if not transcript_path.exists():
-                    save_json(transcript_path, self.driver.transcript(sid))
-            pages = json.loads(transcript_path.read_bytes())
-            before, after = set(scope["before"]), set(self.tmp_admin(sid))
-            baseline = set(json.loads((directory / "tmp-baseline.json").read_bytes()))
+            before, after = scope["before"], self.tmp_admin(sid)
             prior = history[-1]["survivors"] if history else {}
-            candidates = after - baseline
-            mentions = mentioned_tmp_entries(pages, scope["after_seq"], candidates | (before & prior.keys()))
-            kept = candidates - mentions
-            survivors = {name: prior[name] for name in kept & before & prior.keys()}
-            survivors.update({name: evidence.name for name in kept - before})
-            event = {"context_id": evidence.name, "remove": sorted(candidates & mentions), "kept": sorted(kept),
-                     "survivors": survivors, "cleanup_complete": False,
-                     "cross_query_reuse": [{"path": f"/tmp/{name}", "prior_context_id": prior[name]}
-                                           for name in sorted(before & prior.keys() & mentions)]}
+            references = set()
+            if prior.keys() & before.keys():
+                if transcript_path is None:
+                    transcript_path = evidence / "reset-transcript.json"
+                    if not transcript_path.exists():
+                        save_json(transcript_path, self.driver.transcript(sid))
+                placement_path = directory / "placement.json"
+                placement = json.loads(placement_path.read_bytes()) if placement_path.exists() else {}
+                cwd = placement.get("cwd", f"/workspace/{sid}/{self.config['destination']}")
+                references = referenced_tmp_paths(json.loads(transcript_path.read_bytes()), scope["after_seq"],
+                                                  cwd, placement.get("home"))
+            modified = {}
+            for path in before.keys() & after.keys():
+                old, new = before[path], after[path]
+                if old == new or (old["type"] == new["type"] == "d" and old["inode"] == new["inode"]):
+                    # Child creation changes a directory's size and mtime.
+                    continue
+                modified[path] = {"before": old, "after": new}
+            survivors = {path: origin for path, origin in prior.items() if path in before and path in after}
+            for path in modified:
+                survivors.setdefault(path, evidence.name)
+            event = {"context_id": evidence.name, "after": after,
+                     "remove": {path: after[path] for path in after.keys() - before.keys()},
+                     "modified_baseline": modified, "survivors": survivors, "cleanup_complete": False,
+                     "cross_query_reuse": [{"path": path, "prior_context_id": prior[path]}
+                                           for path in sorted(before.keys() & prior.keys() & references)]}
             history.append(event)
             save_json(history_path, history)
         if not event["cleanup_complete"]:
-            if event["remove"]:
-                self.tmp_admin(sid, event["remove"])
+            results = self.tmp_admin(sid, event["remove"]) if event["remove"] else {}
+            event["removed"] = sorted(path for path, result in results.items() if result == "removed")
+            event["already_absent"] = sorted(path for path, result in results.items() if result == "absent")
+            event["failed_removals"] = {path: result for path, result in results.items()
+                                        if result not in {"removed", "absent"}}
+            for path in event["failed_removals"]:
+                event["survivors"][path] = evidence.name
             event["cleanup_complete"] = True
             save_json(history_path, history)
+        turn_path = evidence / "turn.json"
+        if turn_path.is_file():
+            turn = json.loads(turn_path.read_bytes())
+            save_json(turn_path, {**turn, "cross_query_reuse": event["cross_query_reuse"]})
         save_json(reset, event)
         return event["cross_query_reuse"]
 
@@ -443,19 +587,20 @@ class SealedRunner:
         for path in (directory / "answers").glob("*/pending.json"):
             record = json.loads(path.read_bytes())
             captured = (path.parent / "answer.raw").is_file() or (path.parent / "absent.json").is_file()
-            reset_due = "tmp_scope" in record and not (path.parent / "tmp-reset.json").is_file()
+            scope = record.get("tmp_scope", {})
+            reset_due = isinstance(scope.get("before"), dict) and not (path.parent / "tmp-reset.json").is_file()
             if not captured or reset_due:
-                pending.append((path, record, captured))
+                pending.append((path, record, captured, reset_due))
         if len(pending) > 1:
             raise RuntimeError("more than one engine answer is pending capture")
         if pending:
-            path, record, captured = pending[0]
+            path, record, captured, reset_due = pending[0]
             expected = f".rql-engine-{sid}/answer.json"
             if record["path"] != expected:
                 raise RuntimeError("pending engine answer path does not match its session")
             if not captured:
                 self.capture_answer(sid, expected, path.parent)
-            if "tmp_scope" in record:
+            if reset_due:
                 self.reset_query_tmp(sid, directory, path.parent, record["tmp_scope"])
 
     def capture_usage(self, sid, expected_model):
@@ -548,7 +693,7 @@ class SealedRunner:
         def record_pending():
             save_json(evidence / "pending.json", {"path": output_path, "query": query,
                                                  "prior_validation_errors": errors,
-                                                 "tmp_scope": self.tmp_query_start(sid, directory_on_host)})
+                                                 "tmp_scope": self.tmp_query_start(sid)})
 
         _, record = self.prompt(sid, prompt, context_id, before_send=record_pending)
         try:
@@ -563,7 +708,6 @@ class SealedRunner:
             scope = json.loads((evidence / "pending.json").read_bytes())["tmp_scope"]
             record["cross_query_reuse"] = self.reset_query_tmp(
                 sid, directory_on_host, evidence, scope, directory_on_host / f"turn-{record['turn']}-transcript.json")
-            save_json(evidence / "turn.json", record)
             self.clean_checkout(sid)
         except IsolationFailure:
             raise

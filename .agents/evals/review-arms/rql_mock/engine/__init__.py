@@ -11,8 +11,8 @@ import subprocess
 from .evidence import save_json, sync_directory
 from .grammar import MENU, parse
 from .prompt import CONTEXT_PROTOCOL, CONTEXT_RECALL, CONTEXT_SEED, PROMPT, REPAIR, semantics_only
-from .runner import (EFFORT, MODEL, RUN_ERRORS, SESSION_ID, IsolationFailure, LaunchHeld,
-                     QuotaTurnFailure, SealedRunner, TurnFailure)
+from .runner import (EFFORT, MODEL, RUN_ERRORS, SESSION_ID, TMP_ISOLATION_PROTOCOL, IsolationFailure, LaunchHeld,
+                     QuotaTurnFailure, SealedRunner, TurnFailure, has_tmp_baseline)
 from .snapshot import OID, blob_reader, eligible_diffs, manifest_sources, prepared_snapshot
 from .validation import canonical, ordered_rows, validate
 
@@ -64,7 +64,7 @@ def cache_key(commit, query, inputs):
 def input_hash(catalogue, menu, model_version, served_steps, menu_sha256):
     return digest(catalogue, menu, semantics_only(menu, served_steps), menu_sha256,
                   canonical(served_steps), MODEL, model_version, EFFORT, PROMPT, REPAIR,
-                  CONTEXT_PROTOCOL, CONTEXT_SEED, CONTEXT_RECALL)
+                  CONTEXT_PROTOCOL, CONTEXT_SEED, CONTEXT_RECALL, TMP_ISOLATION_PROTOCOL)
 
 
 def load(path):
@@ -140,7 +140,6 @@ class Engine:
                                                             served_steps, menu_sha256)}
 
     def session(self, commit, snapshot, record_path):
-        record_path.parent.mkdir(parents=True, exist_ok=True)
         identity = {"commit": commit, **snapshot}
         runner = self.runner()
         record = load(record_path) if record_path.exists() else None
@@ -149,7 +148,12 @@ class Engine:
                 raise RuntimeError(f"existing engine session belongs to a different snapshot: {record_path}")
             if not record.get("session_id"):
                 raise RuntimeError(f"uncertain launch for {commit}; reconcile {record_path} before retrying")
-        else:
+            if not has_tmp_baseline(record_path.parent, record["session_id"]):
+                runner.retire(record_path.parent, record)
+                move_to_retired(record_path.parent.parent)
+                record = None
+        if record is None:
+            record_path.parent.mkdir(parents=True, exist_ok=True)
             # An interrupted launch can leave a live engine even if mj never
             # returned its ID. Refuse duplicate engines until it is reconciled.
             save(record_path, identity)
