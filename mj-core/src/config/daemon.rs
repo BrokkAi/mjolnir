@@ -75,14 +75,28 @@ impl DaemonConfig {
         Ok(placement.daemon)
     }
 
-    /// Write this placement as the file's `[daemon]` table. Every other table,
-    /// comment and the order of the file stay as they are, and the rest of the
-    /// file is not loaded: an SSH client's config belongs to the daemon machine
-    /// and may hold tables this build must not reinterpret.
-    pub fn save_placement(&self, path: &std::path::Path) -> anyhow::Result<()> {
+    /// Write this placement as the file's `[daemon]` table, provided the file
+    /// still holds `expected`. The check and the write happen under one hold
+    /// of the config lock, so two launches that each decided from the same
+    /// file cannot both win: the second is refused instead of silently
+    /// replacing the first. Every other table, comment and the order of the
+    /// file stay as they are, and the rest of the file is not loaded: an SSH
+    /// client's config belongs to the daemon machine and may hold tables this
+    /// build must not reinterpret.
+    pub fn replace_placement(&self, path: &std::path::Path, expected: &Self) -> anyhow::Result<()> {
         use anyhow::Context;
         let _lock = super::ConfigLock::acquire(path)?;
         super::Config::ensure_writable(path)?;
+        let current = Self::load_placement(path)?;
+        anyhow::ensure!(
+            current == *expected,
+            "the daemon placement in {} changed while this was running: {}",
+            path.display(),
+            match current.host.as_deref() {
+                Some(host) => format!("it now names {host}"),
+                None => "it is now the default".to_owned(),
+            }
+        );
         let existing = match std::fs::read_to_string(path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -105,6 +119,15 @@ impl DaemonConfig {
             document["daemon"] = toml_edit::Item::Table(keys.as_table().clone());
         }
         super::atomic_write(path, document.to_string().as_bytes())
+    }
+
+    /// The instance the remote `mj` runs as: the configured one, else the
+    /// client's own. `None` is the remote's unnamed instance. It must not
+    /// become `--instance default`, which selects `instances/default`, a
+    /// different store from the one a plain `mj` on that machine uses.
+    #[must_use]
+    pub fn remote_instance(&self) -> Option<String> {
+        self.instance.clone().or_else(super::instance_name)
     }
 
     pub fn remote_command(&self) -> &str {
@@ -210,13 +233,22 @@ ssh_args = ["-p", "2222"]
             host: Some("test-box".into()),
             ..super::DaemonConfig::default()
         };
-        ssh.save_placement(&path).unwrap();
+        ssh.replace_placement(&path, &super::DaemonConfig::default())
+            .unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.starts_with(others), "{written}");
         assert_eq!(super::DaemonConfig::load_placement(&path).unwrap(), ssh);
 
+        // A launch that decided from an older file is refused, not applied.
+        let stale = super::DaemonConfig::default()
+            .replace_placement(&path, &super::DaemonConfig::default())
+            .unwrap_err();
+        assert!(
+            format!("{stale:#}").contains("it now names test-box"),
+            "{stale:#}"
+        );
         super::DaemonConfig::default()
-            .save_placement(&path)
+            .replace_placement(&path, &ssh)
             .unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap().trim_end(),

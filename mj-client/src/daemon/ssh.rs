@@ -17,7 +17,7 @@ pub enum DiscoveryIntent {
 /// is consulted. Dropping this future cancels the SSH process group.
 pub async fn discover(
     placement: &DaemonConfig,
-    remote_instance: &str,
+    remote_instance: Option<&str>,
     intent: DiscoveryIntent,
 ) -> Result<DaemonEndpoint> {
     let host = placement
@@ -28,14 +28,11 @@ pub async fn discover(
         !host.starts_with('-'),
         "[daemon] host cannot be an SSH option"
     );
-    let mut args = vec![
-        placement.remote_command().to_owned(),
-        "--instance".into(),
-        remote_instance.into(),
-        "daemon".into(),
-        "endpoint".into(),
-        "--json".into(),
-    ];
+    let mut args = vec![placement.remote_command().to_owned()];
+    if let Some(instance) = remote_instance {
+        args.extend(["--instance".into(), instance.into()]);
+    }
+    args.extend(["daemon".into(), "endpoint".into(), "--json".into()]);
     if matches!(intent, DiscoveryIntent::Existing) {
         args.push("--existing".into());
     }
@@ -107,7 +104,7 @@ impl SshLease {
 /// dropping this future) releases the process group without remote teardown.
 pub async fn open(
     placement: &DaemonConfig,
-    remote_instance: &str,
+    remote_instance: Option<&str>,
     intent: DiscoveryIntent,
     cancel: impl std::future::Future<Output = ()>,
 ) -> Result<SshLease> {
@@ -140,7 +137,7 @@ fn select_port() -> Result<u16> {
 
 async fn open_with_port(
     placement: &DaemonConfig,
-    remote_instance: &str,
+    remote_instance: Option<&str>,
     intent: DiscoveryIntent,
     mut port: impl FnMut() -> Result<u16>,
 ) -> Result<SshLease> {
@@ -371,7 +368,7 @@ mod tests {
         drop(connector);
         let endpoint = super::discover(
             &placement,
-            "ssh-discovery-e2e",
+            Some("ssh-discovery-e2e"),
             super::DiscoveryIntent::Start,
         )
         .await
@@ -379,7 +376,7 @@ mod tests {
         assert!(endpoint.control_address.ip().is_loopback());
         let existing = super::discover(
             &placement,
-            "ssh-discovery-e2e",
+            Some("ssh-discovery-e2e"),
             super::DiscoveryIntent::Existing,
         )
         .await
@@ -388,7 +385,7 @@ mod tests {
         assert_eq!(existing.instance_id, endpoint.instance_id);
         let mut lease = super::open(
             &placement,
-            "ssh-discovery-e2e",
+            Some("ssh-discovery-e2e"),
             super::DiscoveryIntent::Existing,
             std::future::pending(),
         )
@@ -402,7 +399,7 @@ mod tests {
         let mut first = true;
         let mut second = super::open_with_port(
             &placement,
-            "ssh-discovery-e2e",
+            Some("ssh-discovery-e2e"),
             super::DiscoveryIntent::Existing,
             || {
                 if first {
@@ -423,7 +420,7 @@ mod tests {
         missing.remote_command = Some("/missing/mj-discovery-test".into());
         let error = super::discover(
             &missing,
-            "ssh-discovery-e2e",
+            Some("ssh-discovery-e2e"),
             super::DiscoveryIntent::Existing,
         )
         .await

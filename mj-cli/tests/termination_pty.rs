@@ -599,6 +599,13 @@ image = "ubuntu:24.04"
     // inside the isolated test tree so availability checks see a real home.
     let profile_home = storage.path().join("codex-profile");
     fs::create_dir_all(&profile_home).expect("create fixture Codex home");
+    // An existing installation has run a daemon here, which is what keeps
+    // the first-launch placement question away; a new one has no store.
+    if setup != Setup::FirstRun {
+        let data_directory = storage.path().join("data/hel");
+        fs::create_dir_all(&data_directory).unwrap();
+        fs::write(data_directory.join("mj.sqlite3"), b"").unwrap();
+    }
     let config_path = config_root.join("hel/config.toml");
     let mut config = mj_core::config::Config::load_from(&config_path).unwrap();
     config.profiles.get_mut("codex").unwrap().home = profile_home;

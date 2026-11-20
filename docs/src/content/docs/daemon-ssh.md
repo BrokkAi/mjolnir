@@ -21,7 +21,7 @@ destination (`user@host`, or a Host from your SSH configuration). Mjolnir
 connects to it, starts its daemon if needed, and saves the `[daemon]` table
 below only after that connection works. If it cannot connect, it shows the
 SSH error and asks again; you can go back and start a daemon on this computer
-instead. SSH must already work without a password prompt. To pass options such
+instead. SSH must already work without a password prompt. Press Ctrl-C to cancel a connection attempt, or at the first question to leave without choosing. To pass options such
 as `-i` or a port, set them in your SSH configuration or in `ssh_args` below.
 
 To set the placement yourself, or to change it later, set this in your
@@ -31,7 +31,7 @@ desktop's Mjolnir configuration:
 [daemon]
 runtime = "ssh"
 host = "linux-box"             # an SSH destination or ~/.ssh/config alias
-instance = "remote-dev"        # optional; defaults to the client's instance
+instance = "remote-dev"        # optional; defaults to the client's instance (none: the remote's own)
 ssh_args = []                  # for example ["-i", "C:/Users/me/.ssh/id_ed25519"]
 remote_command = "mj"           # or the installed executable's absolute Linux path
 ```

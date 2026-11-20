@@ -1002,6 +1002,22 @@ async fn run_command(
     update_notice: Option<StartupUpdateNotice>,
     no_splash: bool,
 ) -> Result<DashboardExit> {
+    // A computer that has never run a daemon is asked where it runs before
+    // anything connects to one. `go` and `simple` prepare their project
+    // against the daemon, so the answer has to come before they do.
+    if matches!(
+        command,
+        None | Some(Command::Go(_) | Command::Simple(_))
+            | Some(Command::Workspaces(WorkspacesArgs { command: None }))
+    ) && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && matches!(
+            daemon::choice::ask_where_daemon_runs().await?,
+            daemon::choice::PlacementChoice::Cancelled
+        )
+    {
+        return Ok(DashboardExit::Interrupted);
+    }
     match command {
         None => {
             run_workspace_dashboard(
@@ -1911,17 +1927,6 @@ async fn run_workspace_dashboard(
             mj_core::workspace::new_workspace_id()?
         )
     };
-    // A computer that has never run a daemon is asked where it runs before
-    // anything starts one, so the answer decides which daemon this launch uses.
-    if interactive
-        && resume.is_none()
-        && matches!(
-            daemon::choice::ask_where_daemon_runs().await?,
-            daemon::choice::PlacementChoice::Cancelled
-        )
-    {
-        return Ok(DashboardExit::Interrupted);
-    }
     let (go_mode, go_setup) = go.map_or((None, false), |(mode, setup)| (Some(mode), setup));
     let startup = mj_core::runtime::spawn(start_dashboard(
         resume.as_ref().map(|resume| resume.workspace_id.clone()),

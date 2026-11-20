@@ -3,7 +3,7 @@
 
 import signal
 import argparse
-import os, pathlib, pty, re, select, shlex, socket, subprocess, tempfile, time, json
+import fcntl, os, pathlib, pty, re, select, shlex, socket, struct, subprocess, tempfile, termios, time, json
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mj", required=True)
@@ -20,6 +20,8 @@ class Terminal:
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.execve(argv[0], argv, env)
+        # A full-screen dashboard needs a real size; a new pty is 0x0.
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
 
     def pump(self, timeout):
         ready, _, _ = select.select([self.fd], [], [], timeout)
@@ -32,6 +34,9 @@ class Terminal:
         self.output += data
         if b"\x1b[6n" in data:
             os.write(self.fd, b"\x1b[1;1R")
+        # The dashboard waits for the terminal's background colour.
+        if b"\x1b]11;?" in data:
+            os.write(self.fd, b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\\x1b[?1;2c")
 
     def expect(self, text, seconds=120):
         end = time.time() + seconds
@@ -47,7 +52,20 @@ class Terminal:
     def screen(self):
         return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", self.output.decode(errors="replace"))
 
+    def wait_exit(self, seconds=60):
+        """Whether the process exited, reaping it when it did."""
+        end = time.time() + seconds
+        while time.time() < end:
+            done, _ = os.waitpid(self.pid, os.WNOHANG)
+            if done:
+                self.pid = None
+                return True
+            self.pump(0.2)
+        return False
+
     def kill(self):
+        if self.pid is None:
+            return
         try:
             os.killpg(os.getpgid(self.pid), signal.SIGKILL)
         except ProcessLookupError:
@@ -201,6 +219,7 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     f"args = {['/usr/bin/ssh', *direct]!r} + sys.argv[1:]\n"
                     "args[-1] = args[-1].replace(\"'\\\\''mj'\\\\''\", "
                     f"\"'\\\\''{wrapper}'\\\\''\", 1)\n"
+                    f"open({str(p / 'ssh-commands.log')!r}, 'a').write(args[-1] + '\\n')\n"
                     f"if 'daemon' in args[-1] and {str(wrapper)!r} not in args[-1]:\n"
                     "    sys.exit('shim: the remote mj was not rewritten; refusing to run the installed mj')\n"
                     "os.execv(args[0], args)\n"
@@ -218,7 +237,46 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     PATH=f"{shim}:{os.environ['PATH']}",
                     TERM="xterm-256color",
                 )
-                terminal = Terminal([binary, "--instance", options.instance, "--no-splash"], env)
+                def launch(*arguments, environment=env):
+                    return Terminal(
+                        [binary, "--instance", options.instance, "--no-splash", *arguments],
+                        environment,
+                    )
+
+                def assert_no_local_daemon(data):
+                    assert not list(data.rglob("daemon.json")), "a local daemon started"
+                    assert not list(data.rglob("*.sqlite3")), "a local store was created"
+
+                # Ctrl-C at the menu leaves; it must not take the default and
+                # start a local daemon. `simple` and `go` prepare against the
+                # daemon, so the question has to come before they run.
+                for arguments in ([], ["simple", str(p)], ["go", "--path", "/remote-only"]):
+                    terminal = launch(*arguments)
+                    try:
+                        terminal.expect("Choose 1 or 2")
+                        terminal.send("\x03")
+                        assert terminal.wait_exit(), terminal.screen()[-1500:]
+                    finally:
+                        terminal.kill()
+                    assert_no_local_daemon(fresh_data)
+                    assert not (fresh_config / "config.toml").exists()
+
+                # A configuration copied from another computer is not a daemon.
+                copied_config = p / "copied-config"
+                copied_config.mkdir()
+                (copied_config / "config.toml").write_text(
+                    'version = 14\n[phone]\nenabled = false\n\n[targets.docker]\nkind = "docker"\nmachine = "local"\nimage = "ubuntu:24.04"\n'
+                )
+                terminal = launch(environment=dict(env, MJ_CONFIG_DIR=str(copied_config)))
+                try:
+                    terminal.expect("Where should it run?")
+                    terminal.send("\x03")
+                    assert terminal.wait_exit(), terminal.screen()[-1500:]
+                finally:
+                    terminal.kill()
+                assert_no_local_daemon(fresh_data)
+
+                terminal = launch()
                 try:
                     terminal.expect("Where should it run?")
                     terminal.expect("Choose 1 or 2")
@@ -233,12 +291,35 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     terminal.expect("This computer will use the daemon on 127.0.0.1")
                     saved = (fresh_config / "config.toml").read_text()
                     assert 'runtime = "ssh"' in saved and 'host = "127.0.0.1"' in saved, saved
-                    # The remote daemon runs; no daemon or store was made here.
+                    # The dashboard starts on the saved placement: the remote
+                    # daemon answers, and quitting ends the process. Only then
+                    # is the absence of a local daemon or store meaningful.
                     assert (p / "data" / "daemon.json").exists()
-                    assert not list(fresh_data.rglob("daemon.json"))
-                    assert not list(fresh_data.rglob("*.sqlite3"))
+                    terminal.expect("No live session")
+                    terminal.send("\x02q")
+                    assert terminal.wait_exit(), terminal.screen()[-1500:]
+                except BaseException:
+                    for log in [*fresh_data.rglob("*.log"), *(p / "data").rglob("*.log")]:
+                        print(f"--- {log}\n" + "\n".join(log.read_text(errors="replace").splitlines()[-25:]))
+                    raise
                 finally:
                     terminal.kill()
+                assert_no_local_daemon(fresh_data)
+                # Hard-won: first-launch review: a client with no instance asked
+                # the remote for `--instance default`, which is a different
+                # store from the remote's own plain `mj`. It must send none.
+                (p / "ssh-commands.log").write_text("")
+                result = subprocess.run(
+                    [binary, "daemon", "status"],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=120,
+                )
+                assert result.returncode == 0, result.stderr
+                assert "Daemon instance: unnamed\n" in result.stdout, result.stdout
+                sent = (p / "ssh-commands.log").read_text().splitlines()
+                assert sent and not any("--instance" in command for command in sent), sent
                 print("PASS: first launch asks, rejects a bad host, saves a working one")
             elif options.scenario == "dispatch":
                 base = [binary, "--instance", options.instance]
