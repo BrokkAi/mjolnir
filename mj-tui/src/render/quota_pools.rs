@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::thread::JoinHandle;
 
 use mj_client::quota::{ProfileQuota, QuotaWindow};
-use mj_core::config::{Config, HarnessKind, HarnessProfile, QuotaProvider};
+use mj_core::config::{AntigravityQuotaPool, Config, HarnessKind, HarnessProfile, QuotaProvider};
 
 use super::quota_remaining_percent;
 
@@ -500,11 +500,11 @@ pub(crate) fn provider_pools(
                     .unwrap_or_else(|| {
                         group.pools.push(QuotaPool {
                             key,
-                            label: match scope.as_deref() {
-                                Some("gemini") => "Gemini".into(),
-                                Some("claude,gpt") => "Claude & GPT".into(),
-                                _ => String::new(),
-                            },
+                            label: scope
+                                .as_deref()
+                                .and_then(AntigravityQuotaPool::of_scope)
+                                .map(|pool| pool.name().to_owned())
+                                .unwrap_or_default(),
                             members: Vec::new(),
                             remaining: 0,
                             unweighted: false,

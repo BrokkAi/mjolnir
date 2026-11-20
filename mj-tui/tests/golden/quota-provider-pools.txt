@@ -2239,3 +2239,37 @@ background runs (x..end, colour):
 7: 0..100 Rgb(22, 27, 30) NONE
 8: 0..100 Rgb(22, 27, 30) NONE
 9: 0..100 Rgb(22, 27, 30) NONE
+=== Antigravity with and without a separate Argon pool (132x16) ===
+╭ Profiles (refreshed 16s ago)─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│GOOGLE                                                                                                                            │
+│>- Gemini avg 90%                                                                                                    ▉  6d5h▉ 6d6h│
+│          12:26   16:26   20:26   00:26   04:26   08:26                                                                           │
+│  gemini2          5                                        week 89%, resets in 6d5h · 5H 100%, resets in 4h59m                   │
+│  gemini   5                                                week 91%, resets in 6d6h · 5H 97%, resets in 58m                      │
+│ - Claude & GPT avg 49%                                               ▉                        6d5h▉                          6d6h│
+│          12:26   16:26   20:26   00:26   04:26   08:26                                                                           │
+│  gemini2          5                                        week 50%, resets in 6d5h · 5H 100%, resets in 4h59m                   │
+│  gemini           5                                        week 47%, resets in 6d6h · 5H 100%, resets in 4h59m                   │
+│ - Argon avg 64%                                                                     ▉                                       6d23h│
+│         12:26   16:26   20:26   00:26   04:26   08:26                                                                            │
+│  gemini                                                   week 64%, resets in 6d23h                                              │
+│                                                                                                                                  │
+│                                                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+background runs (x..end, colour):
+0: 0..1 Rgb(22, 27, 30) NONE, 1..30 Rgb(22, 27, 30) BOLD, 30..132 Rgb(22, 27, 30) NONE
+1: 0..1 Rgb(22, 27, 30) NONE, 1..7 Rgb(22, 27, 30) BOLD, 7..132 Rgb(22, 27, 30) NONE
+2: 0..1 Rgb(22, 27, 30) NONE, 1..11 Rgb(42, 58, 57) BOLD, 11..118 Rgb(66, 133, 244) NONE, 118..119 Rgb(22, 27, 30) NONE, 119..125 Rgb(27, 46, 74) NONE, 125..126 Rgb(22, 27, 30) NONE, 126..131 Rgb(27, 46, 74) NONE, 131..132 Rgb(22, 27, 30) NONE
+3: 0..132 Rgb(22, 27, 30) NONE
+4: 0..11 Rgb(22, 27, 30) NONE, 11..21 Rgb(66, 133, 244) NONE, 21..59 Rgb(24, 39, 60) NONE, 59..132 Rgb(22, 27, 30) NONE
+5: 0..11 Rgb(22, 27, 30) NONE, 11..13 Rgb(65, 130, 239) NONE, 13..59 Rgb(24, 39, 60) NONE, 59..132 Rgb(22, 27, 30) NONE
+6: 0..17 Rgb(22, 27, 30) NONE, 17..71 Rgb(66, 133, 244) NONE, 71..72 Rgb(22, 27, 30) NONE, 72..100 Rgb(27, 46, 74) NONE, 100..101 Rgb(22, 27, 30) NONE, 101..131 Rgb(27, 46, 74) NONE, 131..132 Rgb(22, 27, 30) NONE
+7: 0..132 Rgb(22, 27, 30) NONE
+8: 0..11 Rgb(22, 27, 30) NONE, 11..21 Rgb(66, 133, 244) NONE, 21..59 Rgb(24, 39, 60) NONE, 59..132 Rgb(22, 27, 30) NONE
+9: 0..11 Rgb(22, 27, 30) NONE, 11..21 Rgb(66, 133, 244) NONE, 21..59 Rgb(24, 39, 60) NONE, 59..132 Rgb(22, 27, 30) NONE
+10: 0..10 Rgb(22, 27, 30) NONE, 10..86 Rgb(66, 133, 244) NONE, 86..87 Rgb(22, 27, 30) NONE, 87..131 Rgb(27, 46, 74) NONE, 131..132 Rgb(22, 27, 30) NONE
+11: 0..132 Rgb(22, 27, 30) NONE
+12: 0..10 Rgb(22, 27, 30) NONE, 10..58 Rgb(24, 39, 60) NONE, 58..132 Rgb(22, 27, 30) NONE
+13: 0..132 Rgb(22, 27, 30) NONE
+14: 0..132 Rgb(22, 27, 30) NONE
+15: 0..132 Rgb(22, 27, 30) NONE

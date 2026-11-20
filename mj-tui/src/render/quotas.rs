@@ -2108,6 +2108,50 @@ mod tests {
                 10,
             );
         });
+        // A Pro plan reports Gemini 4 Argon as its own pool; a plan that does
+        // not keeps its Gemini reading in the same Gemini pool and is not
+        // missing from Argon's.
+        theme::with_symbols(SymbolSet::Unicode, || {
+            use mj_core::config::AntigravityQuotaPool;
+            let (mut dashboard, now) = fixture();
+            dashboard
+                .config
+                .profiles
+                .retain(|id, _| id.starts_with("gemini"));
+            let separate = dashboard.quotas.get_mut("gemini").unwrap();
+            for window in &mut separate.windows {
+                if mj_client::quota::antigravity_pool_of_window(window)
+                    == Some(AntigravityQuotaPool::Gemini)
+                {
+                    window.model_scope =
+                        Some(AntigravityQuotaPool::Gemini.reported_scope(true).into());
+                }
+            }
+            separate.windows.push(mj_client::quota::QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(64),
+                duration_seconds: Some(604800),
+                model_scope: Some(AntigravityQuotaPool::Argon.reported_scope(true).into()),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: Some(now as i64 + 6 * 86400 + 23 * 3600),
+            });
+            dashboard.quota_expanded = dashboard
+                .quota_pools()
+                .into_iter()
+                .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                .collect();
+            dashboard.set_selection_for(Focus::Quota, 0);
+            capture(
+                &mut output,
+                "Antigravity with and without a separate Argon pool",
+                &mut dashboard,
+                now,
+                132,
+                16,
+            );
+        });
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "quota-provider-pools", &output);
     }
 }

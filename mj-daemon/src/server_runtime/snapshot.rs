@@ -614,6 +614,16 @@ pub(super) fn viewer_snapshot_selected(
         if let Ok(config) = controller.config.named_profile(&profile.id) {
             quota.retain_antigravity_pools(&config.antigravity_pools());
         }
+        // Only plans that keep Argon apart report its pool. A reading lists
+        // the pools the account has; a failed one shows every pool as failed.
+        if quota.harness == mj_core::config::HarnessKind::Antigravity && !quota.windows.is_empty() {
+            profile.quota_pools.retain(|label| {
+                quota.windows.iter().any(|window| {
+                    mj_client::quota::antigravity_pool_of_window(window)
+                        .is_some_and(|pool| pool.label() == label)
+                })
+            });
+        }
         let master_weekly = quota.weekly_window();
         let fable_remaining = master_weekly.and_then(|master| {
             master.remaining_percent?;
