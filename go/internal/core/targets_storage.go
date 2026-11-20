@@ -14,8 +14,14 @@
 package core
 
 import (
+	"cmp"
 	"encoding/json"
+	"fmt"
+	"log/slog"
+	"math"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -39,7 +45,45 @@ func ReportsNoSpace(text string) bool {
 // one: scp's `write remote "PATH"`, coreutils' `cp: error writing 'PATH'`, or
 // a `PATH: No space left on device` prefix.
 func NoSpacePath(text string) (string, bool) {
-	panic("unported: mj-core/src/targets/storage.rs no_space_path")
+	var line string
+	found := false
+	for _, candidate := range targetsLines(text) {
+		if ReportsNoSpace(candidate) {
+			line, found = candidate, true
+			break
+		}
+	}
+	if !found {
+		return "", false
+	}
+	quoted := func(open string, close byte) (string, bool) {
+		start := strings.Index(line, open)
+		if start < 0 {
+			return "", false
+		}
+		start += len(open)
+		end := strings.IndexByte(line[start:], close)
+		if end < 0 {
+			return "", false
+		}
+		return line[start : start+end], true
+	}
+	if path, ok := quoted("write remote \"", '"'); ok {
+		return path, true
+	}
+	if path, ok := quoted("error writing '", '\''); ok {
+		return path, true
+	}
+	if path, ok := quoted("error writing \"", '"'); ok {
+		return path, true
+	}
+	// `cat: /path: No space left on device`, `write /path: no space left`.
+	for _, word := range strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == ':' }) {
+		if strings.HasPrefix(word, "/") && len(word) > 1 {
+			return word, true
+		}
+	}
+	return "", false
 }
 
 // StorageHostOfDestination is the host a target command ran on, as the
@@ -126,20 +170,92 @@ func (p *SessionStoragePaths) All() []string {
 // (Rust: session_storage_paths). projectDirectory is the session's checkout
 // on a local bare target; empty means none.
 func SessionStoragePathsOf(locator TargetLocator, sessionID string, projectDirectory *string) SessionStoragePaths {
-	panic("unported: mj-core/src/targets/storage.rs session_storage_paths")
+	remoteProfile := RemoteProfilesDirectory + "/" + sessionID
+	paths := SessionStoragePaths{Host: LocalStorageHost, Others: []string{}}
+	switch locator := locator.(type) {
+	case TargetLocatorLocalBare:
+		paths.WorkerRoot = locator.WorkerRoot
+		if projectDirectory != nil {
+			paths.Others = append(paths.Others, *projectDirectory)
+		}
+		paths.Others = append(paths.Others, TemporaryDirectory)
+	case TargetLocatorLocalPodman:
+		paths.WorkerRoot = LocalHomePath(ContainerStoragePodman.Path())
+	case TargetLocatorLocalDocker:
+		paths.WorkerRoot = ContainerStorageDocker.Path()
+	case TargetLocatorAppleContainer:
+		// Apple's container runtime keeps its storage in a VM disk image.
+	case TargetLocatorAwsEc2:
+		paths.Host = locator.InstanceID
+		if locator.Address != nil {
+			paths.Host = *locator.Address
+		}
+		paths.WorkerRoot = RemoteWorkersDirectory + "/" + sessionID
+		paths.Others = []string{".local/share/hel/workspaces/" + sessionID, remoteProfile, TemporaryDirectory}
+	case TargetLocatorSshBare:
+		paths.Host = SSHHostName(locator.Host)
+		worker := sessionID
+		if locator.WorkerID != nil {
+			worker = *locator.WorkerID
+		}
+		paths.WorkerRoot = RemoteWorkersDirectory + "/" + worker
+		paths.Others = []string{locator.Workspace, remoteProfile, TemporaryDirectory}
+	case TargetLocatorSshPodman:
+		paths.Host = SSHHostName(locator.Host)
+		paths.WorkerRoot = ContainerStoragePodman.Path()
+	case TargetLocatorSshDocker:
+		paths.Host = SSHHostName(locator.Host)
+		paths.WorkerRoot = ContainerStorageDocker.Path()
+	case TargetLocatorSshAppleContainer:
+		// Apple's container runtime keeps its storage in a VM disk image on
+		// the remote host, so there is no directory to board (as locally).
+		paths.Host = SSHHostName(locator.Host)
+	case TargetLocatorSshNitro:
+		// A Nitro sandbox's disks are sparse files the engine keeps on the
+		// host.
+		paths.Host = SSHHostName(locator.Host)
+		paths.WorkerRoot = ContainerStorageMicrovm.Path()
+	}
+	return paths
 }
 
 // LocalHomePath is a home-relative path made absolute against this machine's
 // home.
 func LocalHomePath(relative string) string {
-	panic("unported: mj-core/src/targets/storage.rs local_home_path")
+	home, ok := UserHome()
+	if !ok {
+		return relative
+	}
+	if filepath.IsAbs(relative) {
+		return relative
+	}
+	return filepath.Join(home, relative)
 }
 
 // NormalizeTargetPath is a target path as the board compares it: absolute
 // against home, without a trailing slash. `~/x` and `x` are home-relative, as
 // for ssh and scp.
 func NormalizeTargetPath(path string, home *string) string {
-	panic("unported: mj-core/src/targets/storage.rs normalize_target_path")
+	path = strings.TrimSpace(path)
+	var joined string
+	if strings.HasPrefix(path, "/") {
+		joined = path
+	} else {
+		relative := strings.TrimPrefix(path, "~/")
+		relative = strings.TrimPrefix(relative, "./")
+		switch {
+		case home != nil && (relative == "" || relative == "~" || relative == "."):
+			joined = *home
+		case home != nil:
+			joined = strings.TrimRight(*home, "/") + "/" + relative
+		default:
+			joined = relative
+		}
+	}
+	if len(joined) > 1 {
+		return strings.TrimRight(joined, "/")
+	}
+	return joined
 }
 
 // pathWithin reports whether path is base or lies under it, by whole
@@ -182,7 +298,15 @@ func ReportIfNoSpace(host, detail string) bool {
 // observeCommandOutput is called by every process executor once a command
 // has finished.
 func observeCommandOutput(command *CommandSpec, output *CommandOutput) {
-	panic("unported: mj-core/src/targets/storage.rs observe_command_output")
+	if output.Status == 0 {
+		return
+	}
+	stderr := targetsLossyText(output.Stderr)
+	host := StorageHostOfDestination(command.SSHDestination)
+	if ReportIfNoSpace(host, stderr) {
+		slog.Warn("target command failed because the disk is full: "+strings.TrimSpace(stderr),
+			"host", host, "purpose", command.Purpose)
+	}
 }
 
 // FilesystemSpace is one filesystem Mjolnir writes to on a target, as
@@ -340,23 +464,86 @@ func TargetStorageViewEvaluate(
 	noSpace func(space *FilesystemSpace) *string,
 	unattributedNoSpace *string,
 ) TargetStorageView {
-	panic("unported: mj-core/src/targets/storage.rs TargetStorageView::evaluate")
+	views := make([]FilesystemView, 0, len(filesystems))
+	for i := range filesystems {
+		space := &filesystems[i]
+		noSpaceDetail := noSpace(space)
+		condition := StorageConditionOk
+		switch {
+		case noSpaceDetail != nil || unattributedNoSpace != nil || space.AvailableBytes < WriteReserveBytes:
+			condition = StorageConditionFull
+		case space.AvailableBytes < LowSpaceBytes:
+			condition = StorageConditionLow
+		}
+		copied := *space
+		copied.Paths = append([]string(nil), space.Paths...)
+		views = append(views, FilesystemView{FilesystemSpace: copied, Condition: condition, NoSpaceDetail: noSpaceDetail})
+	}
+	return TargetStorageView{
+		Host:                  host,
+		Home:                  home,
+		Filesystems:           views,
+		SampledAtEpochSeconds: sampledAtEpochSeconds,
+		UnattributedNoSpace:   unattributedNoSpace,
+	}
 }
 
 // FilesystemFor is the filesystem path lands on: the one holding the longest
 // measured path that contains it.
 func (v *TargetStorageView) FilesystemFor(path string) *FilesystemView {
-	panic("unported: mj-core/src/targets/storage.rs TargetStorageView::filesystem_for")
+	path = NormalizeTargetPath(path, v.Home)
+	var best *FilesystemView
+	bestLength := -1
+	for i := range v.Filesystems {
+		filesystem := &v.Filesystems[i]
+		for _, base := range filesystem.Paths {
+			// Rust's max_by_key keeps the last of equal maxima.
+			if pathWithin(path, base) && len(base) >= bestLength {
+				best, bestLength = filesystem, len(base)
+			}
+		}
+	}
+	return best
 }
 
 // WorstFor is the worst filesystem among those paths land on.
 func (v *TargetStorageView) WorstFor(paths []string) *FilesystemView {
-	panic("unported: mj-core/src/targets/storage.rs TargetStorageView::worst_for")
+	var worst *FilesystemView
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		filesystem := v.FilesystemFor(path)
+		if filesystem == nil {
+			continue
+		}
+		// Rust's max_by_key keeps the last of equal maxima.
+		if worst == nil || filesystem.Condition.rank() >= worst.Condition.rank() {
+			worst = filesystem
+		}
+	}
+	return worst
 }
 
 // Worst is the worst filesystem on the host, for a one-line summary.
 func (v *TargetStorageView) Worst() *FilesystemView {
-	panic("unported: mj-core/src/targets/storage.rs TargetStorageView::worst")
+	var worst *FilesystemView
+	for i := range v.Filesystems {
+		filesystem := &v.Filesystems[i]
+		if worst == nil {
+			worst = filesystem
+			continue
+		}
+		order := cmp.Compare(filesystem.Condition.rank(), worst.Condition.rank())
+		if order == 0 {
+			order = cmp.Compare(worst.AvailableBytes, filesystem.AvailableBytes)
+		}
+		// Rust's max_by keeps the last of equal maxima.
+		if order >= 0 {
+			worst = filesystem
+		}
+	}
+	return worst
 }
 
 // FullFor is the full filesystem one of paths lands on, or every
@@ -372,25 +559,75 @@ func (v *TargetStorageView) FullFor(paths []string) *FilesystemView {
 // Explanation reads "precision-3260 has 0 B free on /home (the filesystem
 // reserves 24.69 GB more for root)".
 func (v *TargetStorageView) Explanation(filesystem *FilesystemView) string {
-	panic("unported: mj-core/src/targets/storage.rs TargetStorageView::explanation")
+	text := fmt.Sprintf("%s has %s free on %s", v.Host, FormatBytes(filesystem.AvailableBytes), filesystem.Mount)
+	if filesystem.ReservedBytes >= WriteReserveBytes {
+		text += fmt.Sprintf(" (the filesystem reserves %s more for root)", FormatBytes(filesystem.ReservedBytes))
+	}
+	if filesystem.Condition == StorageConditionFull && filesystem.AvailableBytes >= WriteReserveBytes {
+		detail := filesystem.NoSpaceDetail
+		if detail == nil {
+			detail = v.UnattributedNoSpace
+		}
+		if detail != nil {
+			text += "; a write failed: " + *detail
+		}
+	}
+	return text
 }
 
 // FilesystemLines is one line per filesystem: mount, free space, root
 // reserve, and a flag on the full or low ones.
 func (v *TargetStorageView) FilesystemLines() []string {
-	panic("unported: mj-core/src/targets/storage.rs TargetStorageView::filesystem_lines")
+	lines := make([]string, 0, len(v.Filesystems))
+	for _, filesystem := range v.Filesystems {
+		line := fmt.Sprintf("%s: %s free", filesystem.Mount, FormatBytes(filesystem.AvailableBytes))
+		if filesystem.ReservedBytes >= WriteReserveBytes {
+			line += fmt.Sprintf(", %s reserved for root", FormatBytes(filesystem.ReservedBytes))
+		}
+		switch filesystem.Condition {
+		case StorageConditionFull:
+			line += " (full)"
+		case StorageConditionLow:
+			line += " (low)"
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // ShortStatus is a short summary of every filesystem, such as "/: 41.0 GB ·
 // /home: 0 B full".
 func (v *TargetStorageView) ShortStatus() string {
-	panic("unported: mj-core/src/targets/storage.rs TargetStorageView::short_status")
+	if len(v.Filesystems) == 0 {
+		return "free space unknown"
+	}
+	parts := make([]string, 0, len(v.Filesystems))
+	for _, filesystem := range v.Filesystems {
+		free := FormatBytes(filesystem.AvailableBytes)
+		switch filesystem.Condition {
+		case StorageConditionFull:
+			parts = append(parts, fmt.Sprintf("%s %s full", filesystem.Mount, free))
+		case StorageConditionLow:
+			parts = append(parts, fmt.Sprintf("%s %s low", filesystem.Mount, free))
+		default:
+			parts = append(parts, fmt.Sprintf("%s %s", filesystem.Mount, free))
+		}
+	}
+	return strings.Join(parts, " · ")
 }
 
 // ProblemFor is "disk full: precision-3260 has 0 B free on /home …" when one
 // of paths lands on a full filesystem.
 func (v *TargetStorageView) ProblemFor(paths []string) (string, bool) {
-	panic("unported: mj-core/src/targets/storage.rs TargetStorageView::problem_for")
+	if filesystem := v.FullFor(paths); filesystem != nil {
+		return "disk full: " + v.Explanation(filesystem), true
+	}
+	// A failure no measurement has placed yet holds every path.
+	explanation, ok := v.unattributedExplanation()
+	if !ok || !slices.ContainsFunc(paths, func(path string) bool { return path != "" }) {
+		return "", false
+	}
+	return "disk full: " + explanation, true
 }
 
 // unattributedExplanation is "host ran out of disk space: …" for a failure no
@@ -406,7 +643,29 @@ func (v *TargetStorageView) unattributedExplanation() (string, bool) {
 // unknown) to path, or false when it fits beside WriteReserveBytes or the
 // path's filesystem has not been measured.
 func (v *TargetStorageView) RefuseWrite(path string, bytes uint64, what string) (string, bool) {
-	panic("unported: mj-core/src/targets/storage.rs TargetStorageView::refuse_write")
+	var explanation string
+	if filesystem := v.FilesystemFor(path); filesystem != nil {
+		needed := bytes + WriteReserveBytes
+		if needed < bytes {
+			needed = math.MaxUint64
+		}
+		if filesystem.Condition != StorageConditionFull && filesystem.AvailableBytes >= needed {
+			return "", false
+		}
+		explanation = v.Explanation(filesystem)
+	} else {
+		unattributed, ok := v.unattributedExplanation()
+		if !ok {
+			return "", false
+		}
+		explanation = unattributed
+	}
+	size := ""
+	if bytes > 0 {
+		size = fmt.Sprintf(" (%s)", FormatBytes(bytes))
+	}
+	return fmt.Sprintf("Cannot %s%s: %s. Mjolnir keeps %s free for running sessions; free space on %s to continue.",
+		what, size, explanation, FormatBytes(WriteReserveBytes), v.Host), true
 }
 
 // CapacityStorageHosts are the storage hosts a capacity row stands for: the
@@ -461,7 +720,56 @@ done
 // ParseStorageLines parses StorageProbeScript output into the probing user's
 // home and one entry per filesystem, each listing the measured paths on it.
 func ParseStorageLines(output []byte) (home *string, filesystems []FilesystemSpace) {
-	panic("unported: mj-core/src/targets/storage.rs parse_storage_lines")
+	text := targetsLossyText(output)
+	lines := targetsLines(text)
+	for _, line := range lines {
+		if value, ok := strings.CutPrefix(line, "home="); ok {
+			value = strings.TrimSpace(value)
+			if strings.HasPrefix(value, "/") {
+				home = &value
+			}
+			break
+		}
+	}
+	saturatingMul := func(value uint64) uint64 {
+		if value > math.MaxUint64/1024 {
+			return math.MaxUint64
+		}
+		return value * 1024
+	}
+	saturatingSub := func(left, right uint64) uint64 {
+		if right > left {
+			return 0
+		}
+		return left - right
+	}
+	for _, line := range lines {
+		row, ok := strings.CutPrefix(line, "storage=")
+		if !ok {
+			continue
+		}
+		fields := strings.Split(row, "\t")
+		if len(fields) != 5 {
+			continue
+		}
+		available, err1 := strconv.ParseUint(fields[0], 10, 64)
+		total, err2 := strconv.ParseUint(fields[1], 10, 64)
+		used, err3 := strconv.ParseUint(fields[2], 10, 64)
+		if err1 != nil || err2 != nil || err3 != nil {
+			continue
+		}
+		placeMeasuredPath(&filesystems, FilesystemSpace{
+			Mount:          fields[3],
+			AvailableBytes: saturatingMul(available),
+			TotalBytes:     saturatingMul(total),
+			ReservedBytes:  saturatingMul(saturatingSub(saturatingSub(total, used), available)),
+			Paths:          []string{NormalizeTargetPath(fields[4], home)},
+		})
+	}
+	if filesystems == nil {
+		filesystems = []FilesystemSpace{}
+	}
+	return home, filesystems
 }
 
 // placeMeasuredPath adds one measurement, a filesystem holding one path,
