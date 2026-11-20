@@ -8,8 +8,9 @@ import re
 from statistics import mean, median
 
 from pilot_judge import (DEFAULT_MANIFEST, DEFAULT_ROOT, JUDGMENT_FIELDS, KEY_PATH, artifact, brief_binding,
-                         group_jobs, isolation_report, load, load_snapshot, records, run_artifact, save, sha,
-                         stored_isolation)
+                         group_jobs, isolation_evidence, isolation_report, load, load_snapshot, read_egress, records,
+                         run_artifact, save, sha)
+from pilot_lock import pilot_lock
 
 ARMS = ("N", "G", "R", "R-loc")
 CONTRASTS = (("R", "G"), ("R-loc", "R"))
@@ -356,7 +357,7 @@ def main():
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="root containing stored judgments")
     parser.add_argument("--runs", type=Path, help="writer delivery logs under this runs directory")
-    parser.add_argument("--egress-log", type=Path, help="stored record_egress.py JSONL (default: egress.jsonl in the run root)")
+    parser.add_argument("--egress-log", type=Path, help="live probe JSONL (default: path recorded in the judge key)")
     parser.add_argument("--archived", action="store_true",
                         help="reproduce frozen judgments and deliveries without checking live run artifacts")
     parser.add_argument("--output", type=Path)
@@ -380,14 +381,19 @@ def main():
     judgments = {"key": key, "judge": records(args.root, key, "judge"),
                  "hand_check": records(args.root, key, "hand-check")}
     runs = args.runs or args.root / "runs"
-    isolation = key.get("isolation")
-    if args.archived and isolation is None:
-        raise ValueError("archived readout requires isolation evidence frozen by judge preparation")
-    if isolation is None or args.egress_log is not None:
-        isolation = stored_isolation(args.root, runs, args.egress_log)
-    stale = set() if args.archived else stale_judged_diffs(runs, key)
-    result = readout(manifest, judgments, load_deliveries(runs, key, stale_diffs=stale), snapshot,
-                     isolation=isolation, stale_diffs=stale)
+    if args.archived:
+        isolation = key.get("isolation")
+        if isolation is None:
+            raise ValueError("archived readout requires isolation evidence frozen by judge preparation")
+        stale, deliveries = set(), load_deliveries(runs, key)
+    else:
+        default_egress = key.get("egress_source", {}).get("path", args.root / "egress.jsonl")
+        with pilot_lock(runs.parent):
+            _, egress = read_egress(args.egress_log or Path(default_egress), required=args.egress_log is not None)
+            isolation = isolation_report(egress, isolation_evidence(args.root, runs))
+            stale = stale_judged_diffs(runs, key)
+            deliveries = load_deliveries(runs, key, stale_diffs=stale)
+    result = readout(manifest, judgments, deliveries, snapshot, isolation=isolation, stale_diffs=stale)
     if args.output:
         save(args.output, result)
     else:
