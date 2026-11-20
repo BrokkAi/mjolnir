@@ -339,6 +339,106 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(failure["pending_elicitations"], [question])
         self.assertFalse((path / "done.json").exists())
 
+    # Hard-won: 2ac06cf: input-required writer replaced
+    def test_pending_writer_resume_waits_and_collects_the_original_turn(self):
+        runner = pilot.Pilot.__new__(pilot.Pilot)
+        runner.args = SimpleNamespace(run_root=self.root)
+        runner.writer_model, runner.gate, runner.attested = ("sol", "high"), None, set()
+        job = {"job": "mjolnir/first/R/r1/writer", "diff": "mjolnir/first",
+               "arm": "R", "replicate": 1, "kind": "writer"}
+        path = pilot.job_path(self.root, job)
+        runner.render = lambda job: {"path": path, "bug": {"id": "first"}, "inputs": {"rql_tools": ["rql_query"]}}
+        question = {"id": "permission-1", "message": "May I read the source file?", "fields": []}
+        status = {"lifecycle": "live", "is_idle": False, "pending_elicitations": [question]}
+        launches, submissions = [], []
+
+        def write(bug_id, gate, *, pilot):
+            if not (path / "launch.json").exists():
+                launches.append("original")
+                brief_driver.save(path / "launch.json", {"session_id": "original"})
+                brief_driver.save(path / "tool-assignment.json", {"session_id": "original", "arm": "R"})
+                brief_driver.save(path / "prompt-completion.json", {"command_id": "initial-command"})
+            _, problems, rounds = brief_driver.write_brief(
+                path, "original", "writer-command", "Write the brief.", {}, limit=None)
+            self.assertFalse(problems)
+            brief_driver.save(path / "done.json", {"session_id": "original", "fix_rounds": rounds})
+            return "done"
+
+        def message(operation, *args):
+            self.assertEqual(operation, "message")
+            submissions.append(args[args.index("--command-id") + 1])
+            return {"session_id": "original", "via": "turn", "turn_id": 1}
+
+        with (unittest.mock.patch.object(brief_driver, "run", write),
+              unittest.mock.patch.object(brief_driver, "mj", message),
+              unittest.mock.patch.object(brief_driver, "session", lambda sid: status),
+              unittest.mock.patch.object(brief_driver, "fetch_brief", lambda sid: "fixed" if status["is_idle"] else "rough"),
+              unittest.mock.patch.object(brief_driver, "lint", lambda text, bug: [] if text == "fixed" else ["rough"]),
+              unittest.mock.patch.object(pilot.subprocess, "run", side_effect=AssertionError("assignment revoked"))):
+            self.assertIn("original writer needs input. May I read the source file?", runner.execute(job))
+            # Simulate the receipt written before command IDs were added to failures.
+            failure = pilot.read_json(path / "failed.json")
+            del failure["command_id"]
+            pilot.driver.save(path / "failed.json", failure)
+            self.assertIn("original writer needs input. May I read the source file?", runner.execute(job))
+            self.assertFalse((path / "done.json").exists())
+            status.update(is_idle=True, pending_elicitations=[], last_turn_outcome={
+                "command_id": "brief-fix1-writer-command", "outcome": {"kind": "completed"},
+            })
+            self.assertEqual(runner.execute(job), "done")
+        self.assertEqual(launches, ["original"])
+        self.assertEqual(submissions, ["brief-fix1-writer-command"])
+        self.assertEqual(pilot.read_json(path / "done.json"), {"session_id": "original", "fix_rounds": 1})
+        self.assertEqual(pilot.read_json(path / "lint-0.json"), ["rough"])
+        self.assertEqual(pilot.read_json(path / "lint-1.json"), [])
+        self.assertFalse((path / "failed.json").exists())
+        self.assertFalse(list(path.parent.glob(f"{path.name}.superseded-*")))
+
+    # Hard-won: 546ebd4: resumed writer failure skipped its audit
+    def test_terminal_failure_after_writer_input_captures_and_audits_before_retry(self):
+        runner = pilot.Pilot.__new__(pilot.Pilot)
+        runner.args = SimpleNamespace(run_root=self.root)
+        job = {"job": "mjolnir/first/G/r1/writer", "diff": "mjolnir/first",
+               "arm": "G", "replicate": 1, "kind": "writer"}
+        path = pilot.job_path(self.root, job)
+        runner.render = lambda job: {"path": path, "bug": {"id": "first"}, "inputs": {"rql_tools": []}}
+        sid = "original"
+        prompt = "Write a brief."
+        for name, value in {
+            "launch": {"session_id": sid},
+            "prompt-intent": {"session_id": sid, "command_id": "original-command",
+                              "prompt_sha256": pilot.digest(prompt.encode())},
+            "prompt-request": {"session_id": sid, "via": "turn", "turn_id": 1},
+            "failed": {"retained_session": sid, "command_id": "original-command",
+                       "status": "input_required", "reason": "writer needs input"},
+            "pre-inventory": {"commits": ["a" * 40], "head_tree": "b" * 40, "base_tree": "c" * 40},
+        }.items():
+            pilot.driver.save(path / f"{name}.json", value)
+        (path / "prompt.txt").write_text(prompt)
+        turn = {"command_id": "original-command", "outcome": {"kind": "failed"}}
+        transcript = [{"session_id": sid, "items": [
+            {"seq": 1, "role": "tool", "body": {"call": {"title": "ls /run/hel/git-cache"}}},
+        ]}]
+
+        def usage(operation, *args):
+            self.assertEqual((operation, *args), ("usage", "--session", sid))
+            return {"session_id": sid}
+
+        with (unittest.mock.patch.object(brief_driver, "session", lambda sid: {
+                  "lifecycle": "live", "is_idle": True, "last_turn_outcome": turn}),
+              unittest.mock.patch.object(brief_driver, "mj", usage),
+              unittest.mock.patch.object(brief_driver.driver, "transcript", lambda sid: transcript),
+              unittest.mock.patch.object(brief_driver, "run", side_effect=AssertionError("writer replaced"))):
+            self.assertEqual(runner.execute(job), "retained-failure")
+        self.assertEqual(pilot.read_json(path / "transcript.json"), transcript)
+        self.assertEqual(pilot.read_json(path / "usage.json"), {"session_id": sid})
+        audit = pilot.read_json(path / "audit.json")
+        self.assertFalse(audit["passed"])
+        self.assertTrue(audit["hits"])
+        failure = pilot.read_json(path / "failed.json")
+        self.assertEqual(failure["void_reason"], audit["hits"])
+        self.assertIn("did not complete", failure["reason"])
+
     # Hard-won: 49e16b8: startup refusal retained a session and charged a replacement.
     def test_config_startup_refusal_retries_same_session(self):
         calls, waits = [], []

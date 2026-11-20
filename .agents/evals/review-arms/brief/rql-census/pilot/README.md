@@ -122,7 +122,7 @@ The default root is `/mnt/optane/review-arms-pilot`. Under
 and accepted `output.md` is in `reviewers/<slot>/`. Each job saves
 `usage.json`, the prompt, model settings, transcript, inventory,
 `audit.json` and provenance in `done.json`. The writer's RQL delivery
-log is `writer/queries.jsonl`. The audit screens the recorded commands
+log is `writer/queries-<session_id>.jsonl`. The audit screens the recorded commands
 and arguments. Network egress stays under the target's existing policy.
 It cannot establish unobserved activity.
 
@@ -141,3 +141,13 @@ and reports the retained sessions and their receipt paths. Completed
 attempts whose inputs changed use the same archive layout. A launch intent
 without a returned session ID is ambiguous. Reconcile it before starting a
 replacement.
+
+A writer's pending question holds the diff on its recorded session. After
+answering it, rerun the same selection to collect the original turn.
+
+Use `pilot_readout.py --archived` with the judge key, judgments, delivery logs,
+manifest and label snapshot when the original outputs are no longer present.
+Judge preparation freezes the isolation findings and the attempt set in the
+key. If the engine probe wrote outside the run root, pass `--egress-log` to
+the judge commands so they freeze that file. The default readout also checks
+the current outputs for staleness.

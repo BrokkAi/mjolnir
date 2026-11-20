@@ -107,7 +107,8 @@ class PromptUncertain(RuntimeError):
 
 
 class WriterNeedsInput(RuntimeError):
-    def __init__(self, questions):
+    def __init__(self, command, questions):
+        self.command = command
         self.questions = questions
         summary = "\n".join(question.get("message") or question.get("title") or question["id"]
                             for question in questions)
@@ -127,7 +128,7 @@ def wait_command(sid, command, limit=1800, *, awaiting_receipt=False):
                 raise WriterTurnFailed(f"writer turn did not complete: {json.dumps(outcome)[:600]}")
             return outcome
         if questions := s.get("pending_elicitations"):
-            raise WriterNeedsInput(questions)
+            raise WriterNeedsInput(command, questions)
         if s.get("lifecycle") == "failed":
             raise WriterTurnFailed(f"session {sid} failed: {json.dumps(s)[:600]}")
         if awaiting_receipt and s.get("is_idle") and s.get("lifecycle") == "live":
@@ -148,7 +149,7 @@ def fetch_brief(sid):
     return r.stdout.decode()
 
 
-def send(d, sid, name, command, text, limit=1800):
+def send(d, sid, name, command, text, limit=1800, *, reconcile=False):
     prompt = d / f"{name}.txt"
     intent = d / f"{name}-intent.json"
     request = d / f"{name}-request.json"
@@ -160,6 +161,8 @@ def send(d, sid, name, command, text, limit=1800):
         if intent.exists() and json.loads(intent.read_text()) != identity:
             raise PromptUncertain(f"{sid}: inputs changed for pending command {command}")
         if not (request.exists() or intent.exists()):
+            if reconcile:
+                raise PromptUncertain(f"{sid}: missing command receipt for {command}")
             if prompt.exists():
                 # Older attempts recorded the prompt before submission but had no intent receipt.
                 if prompt.read_text() != text:
@@ -180,11 +183,33 @@ def send(d, sid, name, command, text, limit=1800):
                         or type(receipt.get("turn_id")) is not int):
                     raise PromptUncertain(f"{sid}: missing acceptance receipt for {command}")
                 save(request, receipt)
-        save(completion, wait_command(sid, command, limit, awaiting_receipt=not request.exists()))
+        save(completion, wait_command(sid, command, limit, awaiting_receipt=reconcile or not request.exists()))
     except (WriterTurnFailed, WriterNeedsInput, PromptUncertain):
         raise
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         raise PromptUncertain(f"{sid}: could not confirm {command}: {error}") from error
+
+
+def resume_input_required(d, sid, failure):
+    if failure["retained_session"] != sid:
+        raise PromptUncertain(f"{sid}: the pending question belongs to another session")
+    command = failure.get("command_id")
+    candidates = []
+    for path in sorted(d.glob("*-intent.json")):
+        intent = json.loads(path.read_text())
+        stage = path.name.removesuffix("-intent.json")
+        recorded = intent.get("command_id")
+        if intent.get("session_id") != sid or not recorded:
+            continue
+        if recorded == command or (command is None and not (d / f"{stage}-completion.json").exists()):
+            candidates.append((stage, recorded))
+    if len(candidates) != 1:
+        raise PromptUncertain(f"{sid}: unable to identify the command that requested input")
+    stage, recorded = candidates[0]
+    if command is None:
+        # Bind older input receipts before saving completion so a restart can still find it.
+        save(d / "failed.json", {**failure, "command_id": recorded})
+    send(d, sid, stage, recorded, (d / f"{stage}.txt").read_text(), limit=None, reconcile=True)
 
 
 def wait_pilot_ready(sid):
@@ -373,11 +398,7 @@ def run(bug_id, gate, *, pilot=None):
     except (WriterTurnFailed, WriterBriefMissing) as error:
         if not pilot:
             raise
-        save(d / "transcript.json", driver.transcript(sid))
-        save(d / "usage.json", mj("usage", "--session", sid))
-        verdict = pilot_audit(d, sid, bool(pilot["inputs"]["rql_tools"]))
-        return driver.retain_pilot_session(d, sid, str(error),
-                                           **({"void_reason": verdict["hits"]} if not verdict["passed"] else {}))
+        return retain_pilot_writer_failure(pilot, sid, error)
     # brief.md is where the oracle builder and the blind arms read; it is written only on success.
     (d / "brief-candidate.md").write_text(text)
     if not (d / "inventory-check.json").exists():
@@ -428,9 +449,21 @@ def pilot_audit(d, sid, allow_rql):
     return verdict
 
 
+def retain_pilot_writer_failure(pilot, sid, error):
+    d = pilot["path"]
+    save(d / "transcript.json", driver.transcript(sid))
+    save(d / "usage.json", mj("usage", "--session", sid))
+    verdict = pilot_audit(d, sid, bool(pilot["inputs"]["rql_tools"]))
+    return driver.retain_pilot_session(d, sid, str(error),
+                                       **({"void_reason": verdict["hits"]} if not verdict["passed"] else {}))
+
+
 def write_brief(d, sid, tag, prompt, bug, limit=1800):
     send(d, sid, "prompt", "brief-" + tag[:32], prompt, limit)
     for rounds in range(FIX_ROUNDS + 1):
+        # The workspace is already past this lint result after a resolved repair.
+        if (d / f"fix-{rounds + 1}-completion.json").exists():
+            continue
         text = fetch_brief(sid)
         problems = lint(text, bug)
         save(d / f"lint-{rounds}.json", problems)
