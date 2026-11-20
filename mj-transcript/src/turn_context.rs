@@ -107,9 +107,10 @@ impl TurnContext {
                 state.summary.push_user(prompt);
                 state.summary.entries.rotate_right(1);
             }
-            // Recovery continues the same request and partial answer. Advance
-            // generation to reject stale classifier replies without erasing
-            // the latest user correction or the evidence from before restart.
+            // Recovery keeps the request, but delivery closes the interrupted
+            // message just as the transcript does. An unlabelled chunk from
+            // the new harness must not inherit the old message ID.
+            complete_message(&mut state);
             state.generation = generation;
             state.parent_activity = Some(std::time::Instant::now());
             return false;
@@ -147,6 +148,13 @@ impl TurnContext {
             | RelayObservation::MailboxEventsDelivered {
                 steering: Some(_), ..
             } => {
+                // A steering confirmation proves delivery even after its
+                // queue body was collected. Keep the reply boundary without
+                // inventing the missing prompt text.
+                let prompt = prompt.or(match observation {
+                    RelayObservation::CommandStarted { .. } => None,
+                    _ => Some(""),
+                });
                 if let Some(prompt) = prompt
                     && self.reset_request(delivered_prompt_command_id(observation), prompt)
                 {

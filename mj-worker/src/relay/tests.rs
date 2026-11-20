@@ -10669,42 +10669,58 @@ fn old_bridge_retirement_preserves_replacement_terminal_admission() {
 // Hard-won: bd33e3913: pruning a queued prompt lost its later delivery boundary on replay.
 #[test]
 fn replayed_delivery_without_queue_event_resets_the_previous_reply() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "first-turn").unwrap();
-    submit_relay(&mut relay, "first-prompt", prompt("first request"));
-    relay.claim_pending_commands(true).unwrap();
-    submit_relay(&mut relay, "second-prompt", prompt("second request"));
-    let through = relay.latest_ordinal();
-    acknowledge_relay(&mut relay, "collect-queue", through);
-    relay.record_session_update(serde_json::from_value(serde_json::json!({
+    for steered in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "first-turn").unwrap();
+        submit_relay(&mut relay, "first-prompt", prompt("first request"));
+        relay.claim_pending_commands(true).unwrap();
+        submit_relay(&mut relay, "second-prompt", prompt("second request"));
+        let through = relay.latest_ordinal();
+        acknowledge_relay(&mut relay, "collect-queue", through);
+        relay.record_session_update(serde_json::from_value(serde_json::json!({
         "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"first answer"}
     })).unwrap()).unwrap();
-    finish_prompt(&mut relay, "first-prompt");
-    relay.claim_pending_commands(true).unwrap();
-    assert_eq!(
-        relay.snapshot.active_prompt.as_ref().unwrap().command_id,
-        "second-prompt"
-    );
-    drop(relay);
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "second-turn").unwrap();
-    let context = relay.turn_context();
-    let evidence = || {
-        context.evidence(
-            mj_core::config::HarnessKind::Codex,
-            mj_core::activity::verdict::TurnPhase::Running,
-            &Default::default(),
-            0,
-        )
-    };
-    assert_eq!(evidence().user_prompt_tail, "second request");
-    assert!(evidence().assistant_text_tail.is_empty());
-    relay
-        .record_observation(RelayObservation::SessionConfigured {
-            config_options: Vec::new(),
-        })
-        .unwrap();
-    relay.claim_pending_commands(true).unwrap();
-    assert!(evidence().assistant_text_tail.is_empty());
+        if steered {
+            submit_relay(&mut relay, "confirm-correction", RelayCommand::Cancel);
+            relay.claim_pending_commands(true).unwrap();
+            relay
+                .record_command_completed(
+                    "confirm-correction",
+                    RelayCommandOutcome::Steered {
+                        queued_command_id: "second-prompt".into(),
+                    },
+                )
+                .unwrap();
+            assert!(!relay.snapshot.dispatches.contains_key("second-prompt"));
+        } else {
+            finish_prompt(&mut relay, "first-prompt");
+            relay.claim_pending_commands(true).unwrap();
+            assert_eq!(
+                relay.snapshot.active_prompt.as_ref().unwrap().command_id,
+                "second-prompt"
+            );
+        }
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "second-turn").unwrap();
+        let context = relay.turn_context();
+        let evidence = || {
+            context.evidence(
+                mj_core::config::HarnessKind::Codex,
+                mj_core::activity::verdict::TurnPhase::Running,
+                &Default::default(),
+                0,
+            )
+        };
+        assert_eq!(evidence().user_prompt_tail, "second request");
+        assert!(evidence().assistant_text_tail.is_empty());
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        relay.claim_pending_commands(true).unwrap();
+        assert!(evidence().assistant_text_tail.is_empty());
+    }
 }
 
 // Hard-won: bd33e3913: a recovery question inherited the interrupted reply's explicit ID.
@@ -10737,6 +10753,14 @@ fn restart_continuation_starts_a_new_authorization_message_for_an_unlabelled_que
     relay.record_session_update(serde_json::from_value(serde_json::json!({
         "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"Which option?"}
     })).unwrap()).unwrap();
+    // Hard-won: 798a9157c: the auxiliary tail still inherited the old explicit message ID.
+    let evidence = relay.turn_context().evidence(
+        mj_core::config::HarnessKind::Codex,
+        mj_core::activity::verdict::TurnPhase::Running,
+        &Default::default(),
+        0,
+    );
+    assert_eq!(evidence.assistant_text_tail, "Which option?");
     let history = relay.snapshot.authorization_context().unwrap();
     let question = history.messages.last().unwrap();
     assert_eq!(question.text, "Which option?");
