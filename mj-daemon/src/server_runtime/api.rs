@@ -906,6 +906,19 @@ impl ApiBackend {
             })
             .await?
         };
+        // A child's handback is final only once the review host can say
+        // whether the child's review is open. While it restores reviews or the
+        // daemon stops, the request stays unanswered: this error is a task
+        // failure, which the dispatcher retries with backoff, and no refusal
+        // is stored for a child that may never read it.
+        if matches!(
+            prepared.request.action,
+            mj_core::subagent::SubagentToolAction::Handback { .. }
+        ) && self.exports.child_review(parent.clone()).await
+            == crate::daemon::ChildReview::Unknown
+        {
+            bail!("the review host cannot yet say whether this child's review is open; the handback will be retried");
+        }
         blocking("mark delegation delivering", {
             let parent = parent.clone();
             let id = prepared.request.request_id.clone();
