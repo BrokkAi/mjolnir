@@ -872,16 +872,16 @@ pub(super) async fn serve_session(
         .await?;
         if let Some(request) = session_config_recovery_request(&dropped_selectors, &config_options)
         {
+            let request = pending_elicitations.register_command_loop(request);
             emit_runtime_event(
                 events,
                 RuntimeEvent::ElicitationRequested {
-                    request: request.clone(),
+                    request: (*request).clone(),
                 },
             )
             .await?;
-            // Deliberately not in `pending_elicitations`: that map is for
-            // requests an ACP responder is waiting on. This one is Hel's own,
-            // and the command loop below answers it.
+            // Its local wrapper registers liveness with the shared owner;
+            // the command loop below still owns the recovery answer path.
             config_recovery = Some(request);
         }
     }
@@ -892,6 +892,7 @@ pub(super) async fn serve_session(
         &session_id,
         spec,
         events,
+        pending_elicitations,
         config_recovery.is_some(),
     )
     .await?;
@@ -983,13 +984,6 @@ pub(super) async fn serve_session(
                     .await?;
                     continue;
                 }
-                emit_runtime_event(
-                    events,
-                    RuntimeEvent::ContextClearing {
-                        request_id: request_id.clone(),
-                    },
-                )
-                .await?;
                 let mut options: Vec<_> = config_options.iter().collect();
                 options.sort_by_key(|option| match option.category {
                     Some(SessionConfigOptionCategory::Model) => 0,
@@ -1480,7 +1474,7 @@ pub(super) async fn serve_session(
                             Some(CommandRequest::GoalControl { request_id, action }) => {
                                 if goal::prepare_control(spec, events, &mut goal_question, config_recovery.is_some(), &request_id, action).await? {
                                     let expected = goal::control_identity(spec, &request_id);
-                                    goal_controls.start(connection, &session_id, request_id, action, expected);
+                                    goal_controls.start(spec, events, connection, &session_id, (request_id, action), expected);
                                 }
                             }
                             Some(CommandRequest::ClearContext { request_id }) |
@@ -1621,7 +1615,14 @@ pub(super) async fn serve_session(
                 .await?
                 {
                     let expected = goal::control_identity(spec, &request_id);
-                    goal_controls.start(connection, &session_id, request_id, action, expected);
+                    goal_controls.start(
+                        spec,
+                        events,
+                        connection,
+                        &session_id,
+                        (request_id, action),
+                        expected,
+                    );
                 }
             }
             CommandRequest::SetConfig {

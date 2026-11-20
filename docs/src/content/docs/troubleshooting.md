@@ -298,9 +298,9 @@ See [Web viewer](/web-viewer/) for setup,
 [Security boundaries](/security/) for its authentication model, and
 [Configuration reference](/configuration/) for `[phone]`.
 
-## Checkpoints or upgrades keep waiting
+## Bundle exports or upgrades keep waiting
 
-Automatic checkpoints and worker replacement require a quiet boundary. A
+Live bundle exports and worker replacement require a quiet boundary. A
 session is not quiet while any of these remain:
 
 - an active user prompt or autonomous harness turn;
@@ -311,8 +311,8 @@ session is not quiet while any of these remain:
 
 Inspect the selected session and its queue. Cancel only work you are willing to
 interrupt; a background command can be real agent work even after the last
-visible response. Once all work ends, the recovery and upgrade coordinators
-observe the idle state automatically. Read
+visible response. Once all work ends, worker upgrades
+observe the idle state automatically; retry a deferred bundle export. Read
 [Durability and recovery](/durability/) for the exact guarantees.
 
 ## Suspension failed or a session needs recovery
@@ -320,14 +320,8 @@ observe the idle state automatically. Read
 A normal suspension will not destroy a target unless its recovery archive
 passes the checksum and frontier gates. A suspension failure is therefore normally
 non-destructive: read the exact checkpoint or target error, repair the storage
-or connection problem, and try a manual checkpoint:
-
-```console
-mj checkpoint --session <session-id>
-```
-
-Then choose **Retry suspension** in the failure dialog, or run **Suspend
-session…** again from the command palette. If a fresh checkpoint remains
+or connection problem, then choose **Retry suspension** in the failure dialog,
+or run **Suspend session…** again from the command palette. If a fresh checkpoint remains
 impossible but an older verified archive exists, the failure dialog also offers
 **Discard changes since checkpoint…**. That removes the live target without a new archive and can lose every
 change after the older checkpoint, but leaves the session resumable. **Destroy session…** is different: it removes the target, archive, and record

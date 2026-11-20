@@ -308,6 +308,15 @@ proptest! {
             append_warning(&mut relay, &mut truth, size);
         }
 
+        prop_assert!(
+            journal_files(&temp)
+                .iter()
+                .filter(|path| path.extension().is_some_and(|extension| extension == "gz"))
+                .count()
+                >= 2,
+            "generated history must cross multiple sealed segments"
+        );
+
         let acknowledged = if checkpoint_prune {
             let ready = ready_checkpoint(&mut relay, "model-checkpoint");
             capture_new_records(&relay, &mut truth);
@@ -335,14 +344,6 @@ proptest! {
         for size in tail_sizes {
             append_warning(&mut relay, &mut truth, size);
         }
-        prop_assert!(
-            journal_files(&temp)
-                .iter()
-                .filter(|path| path.extension().is_some_and(|extension| extension == "gz"))
-                .count()
-                >= 2,
-            "generated history must cross multiple sealed segments"
-        );
         drop(relay);
 
         let active = active_path(&temp);

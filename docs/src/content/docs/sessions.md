@@ -190,13 +190,7 @@ The daemon shuts down gracefully, but detached workers keep running. Starting `m
 
 ## Checkpoints
 
-After a completed turn becomes idle, Mjolnir creates a recovery checkpoint when the previous one is roughly ten minutes old. “Idle” includes agent-initiated follow-up work: Mjolnir waits for the worker to become quiet instead of capturing a moving conversation.
-
-Force a checkpoint when you need a known recovery point:
-
-```sh
-mj checkpoint --session <session-id>
-```
+Suspend saves a verified recovery checkpoint before releasing the environment. Running sessions do not receive automatic recovery copies. To save a recovery point, suspend the session and resume it when you want to continue.
 
 Mjolnir verifies the archive byte-for-byte against the target's SHA-256 and verifies its internal manifest and payload hashes before using it. Credentials and live GitHub tokens are not written into checkpoints.
 

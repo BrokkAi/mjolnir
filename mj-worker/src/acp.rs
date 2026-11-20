@@ -518,6 +518,15 @@ async fn run_inner(
             spec.native_session_history = NativeSessionHistory::MayHaveHistory;
         }
         if let Some((request_id, previous)) = restart.clear_context {
+            // run_bridge has reaped the old process. Retire its relay-owned
+            // work before either the replacement or rollback bridge opens.
+            emit_runtime_event(
+                &events,
+                RuntimeEvent::ContextClearing {
+                    request_id: request_id.request_id.clone(),
+                },
+            )
+            .await?;
             rollback = Some((
                 previous,
                 spec.native_session_history,
@@ -635,14 +644,16 @@ async fn run_bridge(
     let stderr_task = mj_core::runtime::spawn(read_stderr_tail(stderr));
     let transport = ByteStreams::new(stdin.compat_write(), skip_stdout_preamble(stdout).compat());
 
+    let terminals = TerminalRegistry::new()?;
     let (mut result, child_reaped) = {
-        let drive = drive_bridge(
+        let drive = drive_with_terminals(
             transport,
             spec.clone(),
             requests,
             events.clone(),
             opened.clone(),
             session_open,
+            terminals.clone(),
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -722,6 +733,16 @@ async fn run_bridge(
             }
         }
     }
+    // The bridge lifetime owner also covers cancellation of drive before its
+    // ordinary shutdown path; no terminal from this connection may outlive it.
+    terminals.shutdown(events).await;
+    emit_runtime_event(
+        events,
+        RuntimeEvent::BridgeRetired {
+            terminal_connection_id: terminals.connection_id().to_owned(),
+        },
+    )
+    .await?;
     let stderr_tail = match stderr_task.await {
         Ok(Ok(tail)) => tail,
         Ok(Err(error)) => {

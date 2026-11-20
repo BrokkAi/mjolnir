@@ -23,6 +23,17 @@ from reliability_lab import ScenarioFailure, process_is_running
 
 
 class ResumeRegression(Regression):
+    def save_recovery_point(self, session):
+        # A live bundle export saves the archive before deciding whether the
+        # repository has new commits to export. Fresh fixtures have none.
+        before = self.record(session).get("checkpoint")
+        result = self.cli("export", "--session", session, "--kind", "bundle", "--out",
+                          str(self.root / f"{session}-recovery.bundle"), check=False)
+        if result.returncode and "no commits beyond the session base" not in result.stderr:
+            raise ScenarioFailure(f"save recovery point: {result.stderr}")
+        checkpoint = self.record(session).get("checkpoint")
+        assert checkpoint and checkpoint != before, "bundle export did not save a fresh recovery point"
+
     def worker_python(self, session, script, *arguments):
         target = self.record(session).get("target")
         if not target:
@@ -135,7 +146,7 @@ with socket.socket(socket.AF_UNIX) as connection:
         checkout = Path(record["managed_worktree"]["worktree_root"])
         root = Path(record["target"]["worker_root"])
         native_home = Path(json.loads((root / "launch.json").read_text())["environment"]["CODEX_HOME"])
-        self.cli("checkpoint", "--session", parent)
+        self.save_recovery_point(parent)
         (checkout / "resume-worktree-sentinel").write_text("newer work")
         (native_home / "resume-native-sentinel").write_text("newer native state")
         pid = (root / "worker.pid").read_text()
@@ -235,7 +246,7 @@ with socket.socket(socket.AF_UNIX) as connection:
         container = self.container(parent)
         root = self.record(parent)["container_workspace"]
         self.podman("exec", container, "sh", "-c", 'printf archived-second >"$1/second/README.md"', "fixture", root)
-        self.cli("checkpoint", "--session", parent)
+        self.save_recovery_point(parent)
         self.podman("exec", container, "sh", "-c", 'printf current-third >"$1/current/README.md"', "fixture", root)
         text = "hold parent work while its checkout is reconstructed"
         command = self.prompt(parent, text)
@@ -282,7 +293,7 @@ with socket.socket(socket.AF_UNIX) as connection:
                          if row.get("title") == "resume-bound" and row.get("state") == "running"), None)
         parent = self.wait(ready, "bound checkout parent ready")
         self.sessions.append(parent)
-        self.cli("checkpoint", "--session", parent)
+        self.save_recovery_point(parent)
         copy_time = self.record(parent)["checkpoint"]["created_at"]
         checkout = directory / Path(self.record(parent)["container_workspace"]).relative_to("/workspace") / "fixture"
         readme = checkout / "README.md"
@@ -398,7 +409,7 @@ else:
         snapshot = self.wait(parent_ready, "parent ready")
         parent = next(row["id"] for row in snapshot["sessions"] if row.get("title") == "resume-parent")
         self.sessions.append(parent)
-        self.cli("checkpoint", "--session", parent)
+        self.save_recovery_point(parent)
         before = self.inspect(parent)
         native = self.worker_status(parent)["state"]["native_session_id"]
         workspace_path = self.record(parent)["container_workspace"]
@@ -465,7 +476,7 @@ else:
         assert self.podman("exec", self.container(parent), "cat", workspace_path + "/resume-sentinel") == "newer"
         self.finish_child_turn(child, active, self.runtime_root / "child-prompt.txt")
         # A missing container does not authorize replacing a surviving volume.
-        self.cli("checkpoint", "--session", parent)
+        self.save_recovery_point(parent)
         volume = self.record(parent)["target"]["workspace_storage"]["name"]
         copy_time = self.record(parent)["checkpoint"]["created_at"]
         old_container = self.inspect(parent)["Id"]

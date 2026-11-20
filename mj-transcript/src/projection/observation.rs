@@ -5,6 +5,26 @@ use super::*;
 /// an event key, so the two can never share an identity.
 const EXTERNAL_EVENTS_ITEM_PREFIX: &str = "system:mailbox:delivered:";
 
+/// Queue presentation shared by ordinary replay and current-state recovery.
+pub fn queued_command_content(command: &RelayCommand) -> Result<Vec<Value>> {
+    if matches!(command, RelayCommand::MailboxWake { .. }) {
+        return Ok(Vec::new());
+    }
+    if let RelayCommand::SetConfig { key, value } = command {
+        return Ok(vec![serde_json::to_value(ContentBlock::Text(
+            TextContent::new(config_command_text(key, value)),
+        ))?]);
+    }
+    let prompt = command
+        .prompt_blocks()
+        .context("command is not a queued prompt")?;
+    prompt
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<serde_json::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 fn project_steered_prompt(
     current: &MaterializedSession,
     index: &ProjectionIndex,
@@ -66,7 +86,6 @@ pub(super) fn project_observation(
         }
         RelayObservation::AgentInitialized { .. } => {}
         RelayObservation::SessionOpened { resumed, .. } => {
-            mutation.pending_elicitations = Some(Vec::new());
             if !resumed {
                 push_system(mutation, event, "harness session started");
             }
@@ -216,7 +235,6 @@ pub(super) fn project_observation(
             // transcript shows what the harness was told. Mjolnir's own
             // prompts (a handback reminder, a quota resume) included.
             command if command.prompt_blocks().is_some() => {
-                let prompt = command.prompt_blocks().expect("prompt command");
                 if let RelayCommand::ContinueAuthorizedWork { attempt, .. } = command {
                     push_system(
                         mutation,
@@ -229,14 +247,7 @@ pub(super) fn project_observation(
                     delivered_messages(index, event, events, mutation);
                     delivered_external_events(index, event, events, mutation);
                 }
-                let content = if mailbox_wake {
-                    Vec::new()
-                } else {
-                    prompt
-                        .iter()
-                        .map(serde_json::to_value)
-                        .collect::<serde_json::Result<Vec<_>>>()?
-                };
+                let content = queued_command_content(command)?;
                 if current.session_title.is_none() && !mailbox_wake {
                     let prompt_text = crate::transcript::materialized_content_text(&content);
                     if let Some(title) = current
@@ -268,9 +279,7 @@ pub(super) fn project_observation(
                         key: key.clone(),
                         value: value.clone(),
                     },
-                    content: vec![serde_json::to_value(ContentBlock::Text(TextContent::new(
-                        config_command_text(key, value),
-                    )))?],
+                    content: queued_command_content(command)?,
                     queued_at_ms: *created_at_ms,
                     accepted_ordinal: Some(event.ordinal),
                 });
@@ -542,7 +551,12 @@ pub(super) fn project_observation(
                     .config_results
                     .push((command_id.clone(), Some(message.clone())));
             }
-            let prompt_was_started = index.get(&format!("user:{command_id}")).is_some();
+            let active = current
+                .active_turn
+                .as_ref()
+                .filter(|turn| turn.belongs_to(command_id));
+            let prompt_was_started =
+                active.is_some() || index.get(&format!("user:{command_id}")).is_some();
             let queued_entry = current
                 .queued_prompts
                 .iter()
@@ -550,10 +564,6 @@ pub(super) fn project_observation(
                 .cloned();
             let mut queue = current.queued_prompts.clone();
             queue.retain(|queued| queued.command_id != *command_id);
-            let active = current
-                .active_turn
-                .as_ref()
-                .filter(|turn| turn.belongs_to(command_id));
             let accepted_ordinal = active.and_then(|turn| turn.accepted_ordinal).or_else(|| {
                 queued_entry
                     .as_ref()
@@ -597,15 +607,22 @@ pub(super) fn project_observation(
             if queue != current.queued_prompts {
                 mutation.queued_prompts = Some(queue);
             }
-            // The active turn names the command it belongs to. Stores
-            // projected before turn identity was kept (revision 28) have no
-            // active turn, so their started user row is the evidence instead.
+            // WorkerRestarted proves the bridge stopped; its last native
+            // execution update cannot keep this interrupted prompt running.
+            let bridge_stopped = matches!(
+                event.observation,
+                RelayObservation::CommandInterrupted {
+                    reason: Some(mj_core::event_outcome::OutcomeReason::WorkerRestarted),
+                    ..
+                }
+            );
             if (active.is_some() || (current.active_turn.is_none() && prompt_was_started))
-                && !current
-                    .configuration
-                    .goal
-                    .as_deref()
-                    .is_some_and(mj_core::goal::GoalState::running)
+                && (bridge_stopped
+                    || !current
+                        .configuration
+                        .goal
+                        .as_deref()
+                        .is_some_and(mj_core::goal::GoalState::running))
             {
                 close_streams(index, mutation, event.recorded_at_ms);
                 mutation.execution = Some(MaterializedExecutionState::Idle);
@@ -824,6 +841,7 @@ pub(super) fn project_observation(
             push_system(mutation, event, format!("warning: {message}"));
         }
         RelayObservation::SessionRestarted => {
+            mutation.pending_elicitations = Some(Vec::new());
             let mut configuration = current.configuration.clone();
             if let Some(goal) = configuration.goal.as_mut() {
                 goal.restart();
@@ -845,7 +863,8 @@ pub(super) fn project_observation(
             if matches!(
                 current.execution,
                 MaterializedExecutionState::Running { .. }
-            ) {
+            ) && current.active_turn.is_none()
+            {
                 push_system_with_id(
                     mutation,
                     event,

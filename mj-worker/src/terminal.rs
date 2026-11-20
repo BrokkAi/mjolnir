@@ -181,6 +181,36 @@ impl TerminalRegistry {
         spawn: TerminalSpawn,
         events: mpsc::Sender<RuntimeEvent>,
     ) -> Result<String> {
+        self.create_with_id(self.allocate_id(), spawn, events)
+    }
+
+    pub(crate) fn connection_id(&self) -> &str {
+        &self.connection
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn owns_terminal(connection_id: &str, terminal_id: &str) -> bool {
+        terminal_id
+            .strip_prefix("term-")
+            .and_then(|id| id.strip_prefix(connection_id))
+            .is_some_and(|suffix| suffix.starts_with('-'))
+    }
+
+    pub(crate) fn allocate_id(&self) -> String {
+        format!(
+            "term-{}-{}",
+            self.connection,
+            self.next_id.fetch_add(1, Ordering::Relaxed) + 1
+        )
+    }
+
+    /// The caller registered this identity with its relay owner before spawn.
+    pub(crate) fn create_with_id(
+        &self,
+        terminal_id: String,
+        spawn: TerminalSpawn,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) -> Result<String> {
         let line = shell_line(&spawn.command, &spawn.args);
         let mut child = spawn_shell(&line, &spawn)?;
         let pid = child
@@ -197,11 +227,6 @@ impl TerminalRegistry {
             .context("client terminal stderr unavailable")?;
         let buffer = Arc::new(Mutex::new(TerminalBuffer::new(spawn.output_byte_limit)));
         let (exit_tx, exit_rx) = watch::channel(None);
-        let terminal_id = format!(
-            "term-{}-{}",
-            self.connection,
-            self.next_id.fetch_add(1, Ordering::Relaxed) + 1
-        );
         let supervisor = mj_core::runtime::spawn(supervise(
             terminal_id.clone(),
             child,

@@ -4091,6 +4091,74 @@ fn harness_restarting_interrupts_in_flight_commands() {
 }
 
 #[test]
+fn harness_restarting_retires_dead_questions_before_a_live_cut() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-1", prompt("go"));
+    let relay = Arc::new(RelayCell::new(durable));
+    let mut in_flight = BTreeMap::new();
+    in_flight.insert("prompt-1".into(), prompt("go"));
+
+    // Hard-won: d9dcf7c: interruption exposed a cut with a dead question responder.
+    let question = mj_core::elicitation::ElicitationRequest::from_acp_params("dead-responder", serde_json::json!({
+        "mode":"form", "sessionId":SESSION_ID, "message":"Approve?", "requestedSchema":{"type":"object","properties":{}}
+    })).unwrap();
+    {
+        let mut owner = relay.lock().unwrap();
+        owner.claim_pending_commands(true).unwrap();
+        owner
+            .record_observation(RelayObservation::ElicitationRequested { request: question })
+            .unwrap();
+    }
+    let mut cut = relay.lock().unwrap().reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
+    unix::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::HarnessRestarting {
+            message: "ACP bridge exited; reloading the native session".into(),
+        },
+    )
+    .unwrap();
+
+    assert!(
+        in_flight.is_empty(),
+        "the in-flight prompt must be interrupted"
+    );
+    let events = relay
+        .lock()
+        .unwrap()
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.observation,
+        RelayObservation::Warning { message } if message.contains("reloading the native session")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.observation,
+        RelayObservation::CommandInterrupted { command_id, .. } if command_id == "prompt-1"
+    )));
+    let interrupted = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.observation,
+                RelayObservation::CommandInterrupted { .. }
+            )
+        })
+        .unwrap();
+    let restarted = events
+        .iter()
+        .position(|event| matches!(event.observation, RelayObservation::SessionRestarted))
+        .unwrap();
+    assert!(interrupted < restarted);
+    let cut = cut.try_recv().unwrap().unwrap();
+    assert!(cut.questions.is_empty());
+    assert!(cut.state.open_request.is_none());
+}
+
+// Hard-won: de056ae: late TerminalStarted reopened a completed fallback card and blocked recovery.
+#[test]
 fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     let temp = tempfile::tempdir().unwrap();
     let relay = Arc::new(RelayCell::new(
@@ -4142,6 +4210,8 @@ fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     output.push_str("error: the last line is the one that matters\n");
     let produced = output.len();
 
+    let mut cut = relay.lock().unwrap().reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
     unix::record_runtime_event(
         &relay,
         &mut in_flight,
@@ -4155,6 +4225,21 @@ fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     )
     .unwrap();
 
+    let cut = cut.try_recv().unwrap().unwrap();
+    let completed_frontier = relay.lock().unwrap().latest_ordinal();
+    assert_eq!(cut.state.latest_ordinal, completed_frontier);
+    unix::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::TerminalStarted {
+            terminal_id: "term-1".into(),
+            command: "cargo test".into(),
+            started_at_ms: 1_000,
+        },
+    )
+    .unwrap();
+    assert_eq!(relay.lock().unwrap().latest_ordinal(), completed_frontier);
+    assert!(relay.lock().unwrap().tools_in_flight().is_empty());
     assert!(
         relay
             .lock()

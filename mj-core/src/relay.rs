@@ -178,7 +178,12 @@ pub const RELAY_NOTIFICATION_STACK_PROTOCOL: u32 = 71;
 /// 72 atomically transfers an interrupted prompt into restart recovery. The
 /// continuation ID is digest-covered, so older readers must not consume it.
 pub const RELAY_RESTART_RECOVERY_PROTOCOL: u32 = 72;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_RESTART_RECOVERY_PROTOCOL;
+
+/// Operation-owned command retention and acknowledgement-only journal GC.
+pub const RELAY_COMMAND_RETENTION_PROTOCOL: u32 = 73;
+/// 74 reserves the next quiescent boundary for cancellable adoption cuts.
+pub const RELAY_LIVE_BASELINE_PROTOCOL: u32 = 74;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_LIVE_BASELINE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -219,7 +224,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 25 is breaking: older readers reject it. Upgrading seeds `withdrawn_ordinal` from the legacy flag.
 // Revision 26 is breaking: an older writer drops `set_aside_through`, so a dismissed ask would count again.
 // Revision 27 is breaking: older writers cannot preserve notification entries or replay their commands.
-pub const RELAY_STATE_VERSION: u32 = 27;
+// Revision 28 is breaking: older writers lose command pins and native-use evidence.
+pub const RELAY_STATE_VERSION: u32 = 28;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";
@@ -446,3 +452,6 @@ pub fn clear_native_session_identity(root: &Path) -> Result<()> {
         Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
     }
 }
+
+mod live_baseline;
+pub use live_baseline::*;

@@ -10,6 +10,191 @@ use crate::relay::{
     RelayProtocolError, RelayRequest, RelayResponseBody, RelayResponsePayload,
 };
 
+// Hard-won: b62fe3b: later notices evicted the turn facts still read by the process watcher.
+#[test]
+fn current_turn_work_receipt_survives_acknowledged_control_flood_and_restart() {
+    use mj_core::work_facts::{Observed, ProcessFacts, ProcessIdentity, WorkFacts};
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    submit_relay(&mut relay, "watched-turn", prompt("start background work"));
+    relay.claim_pending_commands(true).unwrap();
+    let process = ProcessIdentity {
+        pid: 4242,
+        start: "same-process".into(),
+    };
+    relay
+        .record_command_completed(
+            "watched-turn",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                diagnostic: None,
+                usage: None,
+                work_facts: Some(Box::new(WorkFacts {
+                    observed_at_ms: 77,
+                    processes: Observed::Known(ProcessFacts {
+                        running: 1,
+                        shown: Vec::new(),
+                        omitted: 1,
+                        identities: vec![process.clone()],
+                        unattributed: 0,
+                    }),
+                    worktree: Observed::unavailable("not inspected"),
+                })),
+            },
+        )
+        .unwrap();
+    for index in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+        submit_relay(
+            &mut relay,
+            &format!("work-notice-{index}"),
+            RelayCommand::RecordNotice {
+                text: "later notice".into(),
+            },
+        );
+    }
+    let through = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "ack-work-notices", through);
+    assert!(
+        !relay
+            .snapshot
+            .handled_commands
+            .contains_key("work-notice-0")
+    );
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    assert_eq!(relay.watched_work().unwrap().1, vec![process]);
+}
+
+// Hard-won: 806b123: a crash during ACK cleanup left sealed history below the durable cut.
+#[test]
+fn acknowledged_worker_reopens_after_interrupted_sealed_segment_cleanup() {
+    for replacement_installed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+        for _ in 0..40 {
+            relay
+                .record_observation(RelayObservation::Warning {
+                    message: "x".repeat(64 * 1024),
+                })
+                .unwrap();
+        }
+        let old_segment = relay.journal_spans.first().unwrap().path.clone();
+        assert_eq!(old_segment.extension().unwrap(), "gz");
+        let leftover = fs::read(&old_segment).unwrap();
+        let old_active = fs::read(
+            temp.path()
+                .join(RELAY_JOURNAL_DIR)
+                .join(RELAY_ACTIVE_SEGMENT),
+        )
+        .unwrap();
+        let frontier = relay.latest_ordinal();
+        let digest = relay.latest_digest().to_owned();
+        let response = acknowledge_relay(&mut relay, "collect-before-crash", frontier);
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Acknowledged { .. }
+            }
+        ));
+        assert_eq!(
+            fs::metadata(
+                temp.path()
+                    .join(RELAY_JOURNAL_DIR)
+                    .join(RELAY_ACTIVE_SEGMENT)
+            )
+            .unwrap()
+            .len(),
+            0
+        );
+        drop(relay);
+        // The snapshot and empty active replacement are durable, but deletion of
+        // this already covered sealed file did not finish before the worker died.
+        fs::write(&old_segment, leftover).unwrap();
+        if !replacement_installed {
+            fs::write(
+                temp.path()
+                    .join(RELAY_JOURNAL_DIR)
+                    .join(RELAY_ACTIVE_SEGMENT),
+                old_active,
+            )
+            .unwrap();
+        }
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+        assert_eq!(relay.latest_ordinal(), frontier);
+        assert_eq!(relay.latest_digest(), digest);
+        let retried = acknowledge_relay(&mut relay, "retry-identical-ack", frontier);
+        assert!(matches!(
+            retried.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Acknowledged { .. }
+            }
+        ));
+        assert!(
+            !old_segment.exists(),
+            "the same ACK must remove physical leftovers after reopen"
+        );
+        assert_eq!(
+            fs::metadata(
+                temp.path()
+                    .join(RELAY_JOURNAL_DIR)
+                    .join(RELAY_ACTIVE_SEGMENT)
+            )
+            .unwrap()
+            .len(),
+            0
+        );
+        relay
+            .record_observation(RelayObservation::Warning {
+                message: "after restart".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            relay.events_after(frontier, &digest).unwrap()[0].ordinal,
+            frontier + 1
+        );
+    }
+}
+
+// Hard-won: 581ae9e: catch-up ACK decompressed damaged segments already covered by its cursor.
+#[test]
+fn acknowledgement_discards_unreadable_covered_segments_without_reading_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    for _ in 0..80 {
+        relay
+            .record_observation(RelayObservation::Warning {
+                message: "x".repeat(64 * 1024),
+            })
+            .unwrap();
+    }
+    let covered = relay.journal_spans.first().unwrap();
+    assert_eq!(covered.path.extension().unwrap(), "gz");
+    let through = relay.latest_ordinal() - 1;
+    let digest = relay.digest_at(through).unwrap().unwrap();
+    fs::write(&covered.path, b"damaged compressed history").unwrap();
+    let response = relay.handle(relay_request(
+        "ack-damaged-prefix",
+        RelayRequest::Acknowledge {
+            through_ordinal: through,
+            through_digest: digest.clone(),
+        },
+    ));
+    assert!(
+        matches!(
+            response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Acknowledged { .. }
+            }
+        ),
+        "{response:?}"
+    );
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    let events = relay.events_after(through, &digest).unwrap();
+    assert_eq!(events.first().unwrap().ordinal, through + 1);
+    assert_eq!(events.last().unwrap().ordinal, 80);
+}
+
 /// Streamed chunk cost, measured both ways in one process so a loaded
 /// machine cannot flatter either policy. Run with
 /// `cargo test --lib worker::journal::tests::streamed_chunk_append_cost
@@ -227,6 +412,7 @@ fn revision_16_snapshot_and_journal_replay_legacy_mailbox_text() {
 
 /// A relay that dies mid-turn keeps every chunk it acknowledged, and the
 /// relay that reopens republishes the frontier it replayed.
+// Hard-won: ce467bc6f: restoring tails closed an open reply and lost its prefix on the next chunk.
 #[test]
 fn a_relay_that_dies_mid_stream_recovers_its_unpersisted_chunks() {
     let temp = tempfile::tempdir().unwrap();
@@ -247,7 +433,7 @@ fn a_relay_that_dies_mid_stream_recovers_its_unpersisted_chunks() {
     // No teardown: the process is gone before anything else is written.
     drop(relay);
 
-    let reopened = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let mut reopened = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     assert_eq!(reopened.latest_ordinal(), frontier);
     assert_eq!(reopened.latest_digest(), digest);
     assert_eq!(
@@ -261,6 +447,23 @@ fn a_relay_that_dies_mid_stream_recovers_its_unpersisted_chunks() {
         persisted_relay_snapshot(temp.path()).latest_ordinal,
         frontier,
         "recovery must republish the frontier it replayed"
+    );
+    reopened
+        .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+            ContentBlock::from("chunk 8"),
+        )))
+        .unwrap();
+    let evidence = reopened.turn_context().evidence(
+        mj_core::config::HarnessKind::Codex,
+        mj_core::activity::verdict::TurnPhase::Running,
+        &mj_core::activity::ActivityFacts::default(),
+        0,
+    );
+    assert_eq!(
+        evidence.assistant_text_tail,
+        (0..9)
+            .map(|index| format!("chunk {index}"))
+            .collect::<String>()
     );
 }
 
@@ -674,7 +877,7 @@ fn restart_adopts_a_config_accepted_outside_the_durable_queue() {
 }
 
 #[test]
-fn acknowledgement_only_garbage_collects_through_a_verified_checkpoint() {
+fn acknowledgement_garbage_collects_without_a_checkpoint() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     relay
@@ -705,8 +908,8 @@ fn acknowledgement_only_garbage_collects_through_a_verified_checkpoint() {
     ));
     assert_eq!(
         retained_events(&relay).len(),
-        1,
-        "ACK alone is not a recovery cut"
+        0,
+        "ACK is the durable journal retention boundary"
     );
 
     let ready = ready_checkpoint(&mut relay, "gc-barrier");
@@ -1278,7 +1481,7 @@ fn relay_journal_files_and_directories_are_owner_only() {
 }
 
 #[test]
-fn sealed_relay_segments_replay_and_are_removed_after_checkpointed_ack() {
+fn sealed_relay_segments_replay_and_are_removed_after_acknowledgement() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     relay
@@ -1314,24 +1517,6 @@ fn sealed_relay_segments_replay_and_are_removed_after_checkpointed_ack() {
     );
     let _ = attach_relay(&mut relay, "attach-sealed", 0);
     let _ = acknowledge_relay(&mut relay, "ack-sealed", 1);
-    assert!(
-        fs::read_dir(temp.path().join(RELAY_JOURNAL_DIR))
-            .unwrap()
-            .filter_map(|entry| entry.ok())
-            .any(|entry| entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "gz"))
-    );
-    let ready = ready_checkpoint(&mut relay, "sealed-barrier");
-    acknowledge_relay(&mut relay, "ack-sealed-checkpoint", ready.ordinal);
-    submit_relay(
-        &mut relay,
-        "sealed-complete",
-        RelayCommand::CompleteCheckpoint {
-            barrier_command_id: "sealed-barrier".into(),
-        },
-    );
     assert!(
         !fs::read_dir(temp.path().join(RELAY_JOURNAL_DIR))
             .unwrap()
@@ -1561,6 +1746,7 @@ fn reopening_does_not_decompress_historical_sealed_segments() {
     );
 }
 
+// Hard-won: ce467bc6f: absent restored assessment history erased evidence replayed from the journal.
 #[test]
 fn restored_relay_continues_after_canonical_event_frontier() {
     let temp = tempfile::tempdir().unwrap();
@@ -1604,6 +1790,71 @@ fn restored_relay_continues_after_canonical_event_frontier() {
             .unwrap()[0]
             .ordinal,
         42
+    );
+    // Hard-won: 7211dfd7b: an unavailable saved prompt became an initialized empty tail.
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "recovery-still-queued").unwrap();
+    let recovery = relay
+        .snapshot
+        .queued_prompts
+        .first()
+        .unwrap()
+        .command_id
+        .clone();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    relay.claim_pending_commands(true).unwrap();
+    assert_eq!(
+        relay
+            .turn_context()
+            .evidence(
+                mj_core::config::HarnessKind::Codex,
+                mj_core::activity::verdict::TurnPhase::Running,
+                &Default::default(),
+                0,
+            )
+            .user_prompt_tail,
+        "continue offline"
+    );
+
+    relay
+        .record_command_completed(
+            &recovery,
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                diagnostic: None,
+                usage: None,
+                work_facts: None,
+            },
+        )
+        .unwrap();
+    submit_relay(
+        &mut relay,
+        "post-restore-prompt",
+        prompt("new work after restoration"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+            ContentBlock::from("actual restored-session reply"),
+        )))
+        .unwrap();
+    assert!(relay.snapshot.assessment_context.is_none());
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "reopened-without-assessment").unwrap();
+    let evidence = relay.turn_context().evidence(
+        mj_core::config::HarnessKind::Codex,
+        mj_core::activity::verdict::TurnPhase::Running,
+        &mj_core::activity::ActivityFacts::default(),
+        0,
+    );
+    assert_eq!(evidence.user_prompt_tail, "new work after restoration");
+    assert_eq!(
+        evidence.assistant_text_tail,
+        "actual restored-session reply"
     );
 }
 

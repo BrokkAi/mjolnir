@@ -27,7 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use mj_controller::database::StoreSchemaMismatch;
-use mj_controller::recovery_gate::RecoveryObserver;
+use mj_controller::recovery_gate::RecoveryGate;
 use mj_controller::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor,
     ProvisionStage, ProvisionStageGuard,
@@ -35,7 +35,7 @@ use mj_controller::targets::{
 use mj_core::config::Config;
 use mj_core::refusal::Refusal;
 use mj_core::relay::RelayCommand;
-use mj_core::state::{RecoveryObservation, SessionRecord, SessionState};
+use mj_core::state::{SessionRecord, SessionState};
 
 use crate::review_host::TurnReviewHost;
 use crate::worker_upgrade::{WorkerUpgradeObservation, WorkerUpgradeObserver};
@@ -294,7 +294,7 @@ pub struct RuntimeState {
     mbx_install_wake: crate::daemon::mbx_service::InstallWake,
     projects: Arc<mj_controller::project_catalog::Catalog>,
     profile_catalog: crate::review_host::SharedProfileCatalog,
-    recovery_observer: RecoveryObserver,
+    session_gate: Arc<RecoveryGate>,
     worker_upgrade_observer: WorkerUpgradeObserver,
     /// Recent background notices, newest last, with the id of the next one.
     /// Bounded: a surface that never attaches must not make this grow.

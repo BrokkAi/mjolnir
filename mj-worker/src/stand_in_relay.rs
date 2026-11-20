@@ -1244,3 +1244,11 @@ pub fn seed_source_relay(worker_root: &Path) -> PathBuf {
     drop(seed);
     source_relay
 }
+
+/// Keep a stand-in harness's real responder registration alive across relay requests.
+pub fn keep_question_live(
+    relay: &crate::relay::DurableRelay,
+    question: mj_core::elicitation::ElicitationRequest,
+) -> Box<dyn Send> {
+    relay.operator_away.keep_fixture_question_live(question)
+}

@@ -80,6 +80,7 @@ for line in sys.stdin:
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
+                terminal_owner: None,
                 turn_context: Default::default(),
                 verdict: Some(crate::acp::VerdictSource::Disabled),
                 stall_policy: None,
@@ -207,6 +208,7 @@ for line in sys.stdin:
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
+                terminal_owner: None,
                 turn_context: Default::default(),
                 verdict: Some(crate::acp::VerdictSource::Disabled),
                 stall_policy: None,
@@ -359,6 +361,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -1311,6 +1314,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -1414,6 +1418,7 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -1515,6 +1520,7 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: None,
         stall_policy: None,
@@ -1637,6 +1643,7 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
             login_identity: Default::default(),
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -2166,6 +2173,7 @@ async fn answer_to_ext_request(
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -2372,6 +2380,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -2897,6 +2906,7 @@ async fn policy_is_enforced_before_session_is_reported(
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -3181,6 +3191,7 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -3250,6 +3261,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -3536,6 +3548,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -3956,6 +3969,7 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: Some(stall_policy),
@@ -4545,6 +4559,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -4880,6 +4895,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -5023,6 +5039,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -5120,6 +5137,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -5405,6 +5423,19 @@ mod terminals {
     }
 
     fn start_scripted_runtime() -> ScriptedRuntime {
+        start_scripted_runtime_with_owner(None)
+    }
+
+    fn start_scripted_runtime_with_owner(
+        terminal_owner: Option<std::sync::Weak<crate::relay::RelayCell>>,
+    ) -> ScriptedRuntime {
+        start_scripted_runtime_with_pause(terminal_owner, None)
+    }
+
+    fn start_scripted_runtime_with_pause(
+        terminal_owner: Option<std::sync::Weak<crate::relay::RelayCell>>,
+        mut pause: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    ) -> ScriptedRuntime {
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
         let (scripted_tx, scripted_rx) = mpsc::unbounded_channel();
         let (answers_tx, answers_rx) = mpsc::unbounded_channel();
@@ -5417,19 +5448,40 @@ mod terminals {
         let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
 
         let (request_tx, mut request_rx) = mpsc::channel(4);
-        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let (event_tx, mut event_rx) = mpsc::channel::<RuntimeEvent>(64);
         // Drain events so a full channel can never be mistaken for silence,
         // and keep them so a test can read what the runtime reported.
         let observed = Arc::new(Mutex::new(Vec::new()));
         let recorder = observed.clone();
+        let event_owner = terminal_owner.clone();
         let events = mj_core::runtime::spawn(async move {
+            let mut in_flight = BTreeMap::new();
             while let Some(event) = event_rx.recv().await {
+                if matches!(&event, RuntimeEvent::SessionUpdate { update } if update.get("sessionUpdate").and_then(serde_json::Value::as_str) == Some("agent_message_chunk"))
+                    && let Some((reached, release)) = pause.take()
+                {
+                    reached.send(()).unwrap();
+                    release.await.unwrap();
+                }
+                if let Some(owner) = event_owner.as_ref().and_then(std::sync::Weak::upgrade) {
+                    crate::worker_runtime::record_runtime_event(
+                        &owner,
+                        &mut in_flight,
+                        event.clone(),
+                    )
+                    .unwrap();
+                }
                 recorder
                     .lock()
                     .expect("observed events lock poisoned")
                     .push(event);
             }
         });
+        let tools_in_flight = terminal_owner
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .map(|owner| owner.lock().unwrap().tools_in_flight())
+            .unwrap_or_default();
         let spec = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
@@ -5458,7 +5510,8 @@ mod terminals {
             claude_permission_mode: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
-            tools_in_flight: Default::default(),
+            tools_in_flight,
+            terminal_owner,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -5532,6 +5585,147 @@ mod terminals {
             .as_str()
             .unwrap_or_else(|| panic!("terminal/create must return a terminal id: {created}"))
             .to_owned()
+    }
+
+    // Hard-won: 1f0ee89: synchronous terminal card admission overtook an earlier ACP chunk.
+    #[tokio::test]
+    async fn terminal_admission_preserves_queued_assistant_output_order() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = Arc::new(crate::relay::RelayCell::new(
+            crate::relay::DurableRelay::open(root.path(), "terminal-order", "test").unwrap(),
+        ));
+        let (reached, paused) = oneshot::channel();
+        let (release, resumed) = oneshot::channel();
+        let mut runtime = start_scripted_runtime_with_pause(
+            Some(Arc::downgrade(&owner)),
+            Some((reached, resumed)),
+        );
+        runtime.agent.scripted.send(serde_json::json!({
+            "jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"scripted", "update":{
+                "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"Introducing the terminal"}
+            }}
+        })).unwrap();
+        tokio::time::timeout(ANSWER_TIMEOUT, paused)
+            .await
+            .unwrap()
+            .unwrap();
+        let terminal = create_terminal(
+            &mut runtime.agent,
+            serde_json::json!({
+                "sessionId":"scripted", "command":"/bin/sh", "args":["-c", "sleep 600"]
+            }),
+        )
+        .await;
+        let mut cut = owner.lock().unwrap().reserve_live_baseline();
+        assert!(
+            cut.try_recv().is_err(),
+            "inventory blocks the cut before the FIFO is drained"
+        );
+        release.send(()).unwrap();
+        runtime
+            .agent
+            .call("terminal/kill", terminal_params(&terminal))
+            .await;
+        tokio::time::timeout(ANSWER_TIMEOUT, cut)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let events = owner
+            .lock()
+            .unwrap()
+            .events_after(0, crate::relay::RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap();
+        let chunk = events.iter().position(|event| matches!(&event.observation, mj_core::relay::RelayObservation::SessionUpdate { update } if matches!(update.as_ref(), SessionUpdate::AgentMessageChunk(_)))).unwrap();
+        let card = events.iter().position(|event| matches!(&event.observation, mj_core::relay::RelayObservation::SessionUpdate { update } if matches!(update.as_ref(), SessionUpdate::ToolCall(_)))).unwrap();
+        assert!(
+            chunk < card,
+            "a later terminal card cannot precede the queued introduction"
+        );
+        runtime.stop().await;
+    }
+
+    // Hard-won: 9a72411: a failed synthetic terminal opened an idle Claude turn with no result.
+    #[tokio::test]
+    async fn terminal_spawn_failure_releases_its_cut_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = Arc::new(crate::relay::RelayCell::new(
+            crate::relay::DurableRelay::open(root.path(), "terminal-adoption", "test").unwrap(),
+        ));
+        owner
+            .lock()
+            .unwrap()
+            .set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+        let mut runtime = start_scripted_runtime_with_owner(Some(Arc::downgrade(&owner)));
+        let terminal = create_terminal(
+            &mut runtime.agent,
+            serde_json::json!({
+                "sessionId":"scripted", "command":"/bin/sh", "args":["-c", "sleep 600"]
+            }),
+        )
+        .await;
+        let mut cut = owner.lock().unwrap().reserve_live_baseline();
+        assert!(cut.try_recv().is_err());
+        let failed = runtime.agent.call("terminal/create", serde_json::json!({
+            "sessionId":"scripted", "command":"/bin/sh", "args":["-c", "exit 0"], "cwd":root.path().join("missing-directory")
+        })).await;
+        assert!(failed.get("error").is_some(), "{failed}");
+        tokio::time::timeout(ANSWER_TIMEOUT, async {
+            while owner
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_agent_terminals
+                .len()
+                != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            owner
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_agent_terminals
+                .len(),
+            1
+        );
+        assert!(cut.try_recv().is_err());
+        let stopped = runtime
+            .agent
+            .call("terminal/kill", terminal_params(&terminal))
+            .await;
+        assert!(stopped.get("result").is_some(), "{stopped}");
+        let cut = tokio::time::timeout(ANSWER_TIMEOUT, cut)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(cut.state.active_agent_terminals.is_empty());
+        assert!(owner.lock().unwrap().tools_in_flight().is_empty());
+        runtime.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_disappeared_terminal_owner_refuses_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = Arc::new(crate::relay::RelayCell::new(
+            crate::relay::DurableRelay::open(root.path(), "terminal-adoption", "test").unwrap(),
+        ));
+        let weak = Arc::downgrade(&owner);
+        drop(owner);
+        let mut runtime = start_scripted_runtime_with_owner(Some(weak));
+        let marker = root.path().join("must-not-spawn");
+        let failed = runtime.agent.call("terminal/create", serde_json::json!({
+            "sessionId":"scripted", "command":"/bin/sh", "args":["-c", format!("touch {}", mj_core::targets::posix_quote(&marker.to_string_lossy()))]
+        })).await;
+        assert!(failed.get("error").is_some(), "{failed}");
+        assert!(failed.to_string().contains("relay owner is gone"));
+        assert!(!marker.exists());
+        runtime.stop().await;
     }
 
     #[tokio::test]
@@ -5917,6 +6111,7 @@ for line in sys.stdin:
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -6142,6 +6337,7 @@ for line in sys.stdin:
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -6306,6 +6502,7 @@ while True:
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -6450,6 +6647,7 @@ while True:
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -6564,6 +6762,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -6645,6 +6844,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -6898,6 +7098,7 @@ pub(super) fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -6984,6 +7185,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -7142,6 +7344,7 @@ fn missing_native_session_spec(
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -7524,6 +7727,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             login_identity: Default::default(),
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -7787,6 +7991,17 @@ for line in sys.stdin:
         })
         .await
         .unwrap();
+    // Hard-won: ad4c24b: bridge retirement must be published before replacement startup.
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::BridgeRetired { .. })
+    })
+    .await;
+    // Hard-won: 2a0aae9: rollback skipped the old bridge's retirement signal.
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event,
+        RuntimeEvent::ContextClearing { request_id } if request_id == "clear-request")
+    })
+    .await;
     if fail_replacement {
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, message , ..} if request_id == "clear-request" && message.contains("replacement refused"))).await;
         if harness == HarnessKind::Codex {
@@ -8023,6 +8238,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -8432,6 +8648,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -8945,6 +9162,72 @@ async fn opencode_reloads_its_session_for_changed_logins_only_between_turns() {
     }
     assert!(finished, "the turn finished before the reload");
     bridge.abort();
+}
+
+// Hard-won: ad4c24b: worker-local retirement must traverse the real FIFO without serialization.
+#[cfg(unix)]
+#[tokio::test]
+async fn real_bridge_retirement_runs_through_worker_fifo_without_serialization() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(crate::relay::RelayCell::new(
+        crate::relay::DurableRelay::open(temp.path(), "retirement-fifo", "test").unwrap(),
+    ));
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.harness = HarnessKind::Codex;
+    spec.command = "python3".into();
+    spec.args = vec!["-u".into(), "-c".into(), r#"
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'method' not in request or 'id' not in request: continue
+    method = request['method']
+    result = {'protocolVersion':1} if method == 'initialize' else {'sessionId':'retirement-native', 'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Agent'},{'id':'plan','name':'Plan'}]}} if method == 'session/new' else {}
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
+"#.into()];
+    spec.cwd = temp.path().to_owned();
+    spec.terminal_owner = Some(Arc::downgrade(&relay));
+    let (commands, requests) = mpsc::channel(1);
+    drop(commands);
+    let (events, received) = mpsc::channel(64);
+    let (_wake, wakes) = mpsc::channel(1);
+    let (unused_commands, _unused_requests) = mpsc::channel(1);
+    let (shell_events, _shell_received) = mpsc::channel(1);
+    let shells = crate::user_shell::UserShellRegistry::new(
+        temp.path().to_owned(),
+        BTreeMap::new(),
+        shell_events,
+    );
+    let coordinator =
+        mj_core::runtime::spawn(crate::worker_runtime::run_relay_coordinator_with_verdict(
+            relay.clone(),
+            received,
+            wakes,
+            unused_commands,
+            shells,
+            None,
+            None,
+            None,
+        ));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events));
+    // Join both even if either fails, so the fixture leaves no runtime behind.
+    let (runtime_result, coordinator_result) = tokio::join!(runtime, coordinator);
+    runtime_result.unwrap().unwrap();
+    coordinator_result.unwrap().unwrap();
+    let state = relay.lock().unwrap();
+    assert!(state.operational_state().active_agent_terminals.is_empty());
+    assert!(
+        state
+            .events_after(0, crate::relay::RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap()
+            .iter()
+            .any(|event| matches!(
+                event.observation,
+                mj_core::relay::RelayObservation::SessionOpened { .. }
+            ))
+    );
 }
 
 /// Replay pinned-adapter lifecycle replies (Claude source-derived) against real driver requests.

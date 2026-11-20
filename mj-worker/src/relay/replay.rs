@@ -60,6 +60,14 @@ pub struct DeferredRelayAttach {
 impl DurableRelay {
     /// Capture everything a replay page needs from this relay, so the file
     /// reads and gzip decompression behind it can run without the relay lock.
+    /// Startup-only view of the pre-upgrade retained prefix, before ACK-only GC.
+    pub(super) fn legacy_native_replay_plan(&self, ordinal: u64, digest: &str) -> RelayReplayPlan {
+        let mut plan = self.replay_plan();
+        plan.retained_through = ordinal;
+        plan.retained_digest = digest.to_owned();
+        plan
+    }
+
     pub(super) fn replay_plan(&self) -> RelayReplayPlan {
         RelayReplayPlan {
             spans: self.journal_spans.clone(),

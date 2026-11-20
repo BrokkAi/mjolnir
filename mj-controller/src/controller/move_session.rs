@@ -2712,7 +2712,7 @@ impl Controller {
             );
             relay
         };
-        if operation.queue == ResumeQueueDisposition::Start {
+        if !operation.queue_admission_finished && operation.queue == ResumeQueueDisposition::Start {
             let _starting_queue = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
             executor.notify_notice("Starting queued work");
             let checkpoint = operation
@@ -2723,6 +2723,13 @@ impl Controller {
                 verified.archive_sha256 == checkpoint.sha256 && verified.manifest.session.id == *id,
                 "move queue checkpoint verification failed"
             );
+            relay
+                .update_command_retention(
+                    Some(operation.operation_id.clone()),
+                    operation.queue_command_ids(&verified.canonical_session),
+                    false,
+                )
+                .await?;
             if operation.quota_stop_reason.is_some() && !operation.queue_admission_finished {
                 ensure!(
                     !executor.cancellation_requested(),
@@ -2808,6 +2815,19 @@ impl Controller {
                 RelayCommand::RecordNotice { text },
             )
             .await?;
+        // Queue completion is already durable. Pin release is cleanup, retried
+        // by ordinary attachment from this operation's finished record.
+        if let Err(error) = relay
+            .update_command_retention(
+                Some(operation.operation_id.clone()),
+                Default::default(),
+                false,
+            )
+            .await
+        {
+            tracing::warn!(operation_id = operation.operation_id, session_id = operation.selection.session_id,
+                %error, "Move completed; receipt-pin cleanup will retry on attachment");
+        }
         Ok(())
     }
 
