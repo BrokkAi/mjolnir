@@ -620,6 +620,7 @@ async fn harness_failures_persist_legacy_expiry_and_worker_reports() {
         assert!(error.contains("Restart agent"), "{error}");
         if worker_deadline {
             assert!(error.contains("mj login --profile codex"), "{error}");
+            assert!(error.contains("OPENAI_API_KEY"), "{error}");
             assert!(
                 error.ends_with("Your access token could not be refreshed"),
                 "{error}"

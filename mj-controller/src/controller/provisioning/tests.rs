@@ -1103,7 +1103,9 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let mut cleaned = State::default();
     cleaned.sessions.insert(session_id.into(), session.clone());
 
-    let original = "create ACP session: Authentication required";
+    let original = "create ACP session: Authentication required
+ACP bridge stderr:
+initialize ACP bridge: invalid_grant";
     let recorded = format!("worker bootstrap failed: {original}");
     let home = tempfile::tempdir().unwrap();
     let mut config = mj_core::config::Config::default();
@@ -1114,14 +1116,8 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
             home.path().to_owned(),
         ),
     );
-    let recorded_with_remedy = launch_failure_text(&config, "kimi", &recorded, "retry the launch");
-    let failure = apply_failed_new_session_rollback(
-        &mut cleaned,
-        session_id,
-        original,
-        &recorded_with_remedy,
-        None,
-    );
+    let failure_text = launch_failure_text(&config, "kimi", original, "retry the launch");
+    let failure = apply_failed_new_session_rollback(&mut cleaned, session_id, &failure_text, None);
 
     let retained = &cleaned.sessions[session_id];
     assert_eq!(retained.state, SessionState::Error);
@@ -1132,11 +1128,15 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     session.state = SessionState::Disconnected;
     let mut cleanup_failed = State::default();
     cleanup_failed.sessions.insert(session_id.into(), session);
+    let auth_error = format!(
+        "create ACP session ({}): Authentication required",
+        mj_core::acp::PROMPT_AUTH_REQUIRED_MARKER
+    );
+    let failure_text = launch_failure_text(&config, "kimi", &auth_error, "retry the launch");
     let failure = apply_failed_new_session_rollback(
         &mut cleanup_failed,
         session_id,
-        original,
-        &recorded,
+        &failure_text,
         Some("ssh unavailable".into()),
     );
     let retained = cleanup_failed.sessions.get(session_id).unwrap();
@@ -1144,6 +1144,11 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     assert!(retained.target.is_some());
     assert_eq!(retained.target_runtime, runtime);
     assert!(failure.to_string().contains("cleanup"));
+    assert!(failure.to_string().contains("mj login --profile kimi"));
+    assert_eq!(
+        retained.last_error.as_deref(),
+        Some(format!("worker bootstrap failed: {failure}").as_str()),
+    );
 }
 
 /// Stands in for the target cleanup, and records what the store said about

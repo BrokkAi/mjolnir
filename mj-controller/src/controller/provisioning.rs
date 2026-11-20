@@ -677,7 +677,6 @@ impl Controller {
         // later daemon keeps reconnecting to. A failed record that still
         // names its target is one Destroy knows how to clean up.
         let original = note_new_session_launch_failure(session_id, &error);
-        let recorded = format!("worker bootstrap failed: {original}");
         let recorded = if error.is::<super::readiness::WorkerStartupFailure>()
             || error.is::<super::readiness::HarnessPreparationFailure>()
             || error.is::<mj_core::relay::WorkerHarnessStartupFailure>()
@@ -685,11 +684,11 @@ impl Controller {
             launch_failure_text(
                 &self.config,
                 &session.last_profile,
-                &recorded,
+                &original,
                 "retry the launch",
             )
         } else {
-            recorded
+            original
         };
         apply_failed_new_session_launch(&mut self.state, session_id, &recorded);
         self.persist_session_transition_or_restore(
@@ -699,7 +698,7 @@ impl Controller {
         )
         .map_err(|persist_error| {
             persist_error.context(format!(
-                "{original}; its target was left in place because the failure could not be recorded"
+                "{recorded}; its target was left in place because the failure could not be recorded"
             ))
         })?;
         let target_cleanup = match session.target.as_ref() {
@@ -733,7 +732,6 @@ impl Controller {
         let failure = apply_failed_new_session_rollback(
             &mut self.state,
             session_id,
-            &original,
             &recorded,
             cleanup_error,
         );
@@ -1436,9 +1434,11 @@ pub(super) fn launch_failure_text(
     let Some(profile) = config.profiles.get(profile_id) else {
         return detail.to_owned();
     };
-    let typed = detail.contains(&format!(
+    // The worker puts the failure before the bridge's stderr tail.
+    let cause = detail.lines().next().unwrap_or(detail);
+    let typed = cause.contains(&format!(
         "initialize ACP bridge ({PROMPT_AUTH_REQUIRED_MARKER}):"
-    )) || detail.contains(&format!(
+    )) || cause.contains(&format!(
         "create ACP session ({PROMPT_AUTH_REQUIRED_MARKER}):"
     ));
     // Older workers flatten ACP responses without a code. Only the known
@@ -1449,9 +1449,8 @@ pub(super) fn launch_failure_text(
         "ACP protocol failed: ",
     ]
     .into_iter()
-    .find_map(|context| detail.split_once(context))
-    .and_then(|(_, cause)| cause.lines().next())
-    .is_some_and(|cause| {
+    .find_map(|context| cause.split_once(context))
+    .is_some_and(|(_, cause)| {
         mj_core::credentials::text_reports_auth_failure(cause)
             || (profile.kind == mj_core::config::HarnessKind::Muse
                 && cause.starts_with("Muse Code is not logged in"))
@@ -1467,8 +1466,11 @@ pub(super) fn launch_failure_text(
     let remedy = match profile.auth_scheme() {
         AuthScheme::ApiKey { env_key } => update_key(&env_key),
         AuthScheme::InlineApiKey => format!(
-            "Update experimental_bearer_token in {}",
-            profile.home.join("config.toml").display()
+            "Update the selected provider's experimental_bearer_token in {}",
+            mj_core::codex_provider::describe_config(
+                &profile.home,
+                profile.codex_profile.as_deref()
+            )
         ),
         AuthScheme::AwsCredentialChain => {
             "Refresh the AWS credentials used by the profile".to_owned()
@@ -1478,17 +1480,37 @@ pub(super) fn launch_failure_text(
             let claude_auth = (profile.kind == mj_core::config::HarnessKind::Claude)
                 .then(|| claude_environment_auth(profile.environment.resolved()))
                 .flatten();
+            let mut stored_login =
+                format!("For a stored login, run `mj login --profile {profile_id}`");
+            if profile.kind == mj_core::config::HarnessKind::Claude {
+                stored_login.push_str(&format!(
+                    ". For a stored setup token, run `mj login --profile {profile_id} --setup-token`"
+                ));
+            }
             match claude_auth {
-                Some(ClaudeEnvironmentAuth::Token(env_key)) => update_key(env_key),
+                Some(ClaudeEnvironmentAuth::Token(env_key)) => format!(
+                    "If the launch uses {env_key}, refresh it in Settings > Agent Profiles > {profile_id} > Environment variables. {stored_login}. If the target selects a Claude cloud provider, refresh that provider's credentials"
+                ),
                 Some(ClaudeEnvironmentAuth::ExternalProvider) => {
-                    "Refresh the credentials for the Claude cloud provider".to_owned()
+                    "Refresh the credentials for the configured Claude cloud provider".to_owned()
                 }
-                _ => format!("Run `mj login --profile {profile_id}`"),
+                _ => match profile.kind {
+                    mj_core::config::HarnessKind::Claude => format!(
+                        "{stored_login}. For credentials supplied by the profile or target, update ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN where it is set, or refresh the selected Claude cloud provider's credentials"
+                    ),
+                    mj_core::config::HarnessKind::Codex => format!(
+                        "{stored_login}. If the profile or target supplies credentials, update OPENAI_API_KEY, CODEX_API_KEY or CODEX_ACCESS_TOKEN where it is set"
+                    ),
+                    mj_core::config::HarnessKind::Kimi => format!(
+                        "{stored_login}. If the profile or target supplies KIMI_API_KEY, update it where it is set"
+                    ),
+                    _ => format!("Run `mj login --profile {profile_id}`"),
+                },
             }
         }
     };
     format!(
-        "Authentication failed while starting profile {profile_id}. {remedy}, then {retry}.\n{detail}"
+        "Authentication failed while starting profile {profile_id}. {remedy}. Then {retry}.\n{detail}"
     )
 }
 
@@ -1498,13 +1520,12 @@ fn apply_failed_new_session_launch(state: &mut State, session_id: &str, recorded
     let record = state.sessions.get_mut(session_id).unwrap();
     record.state = SessionState::StartupCleanup;
     record.updated_at = now();
-    record.last_error = Some(recorded_error.to_owned());
+    record.last_error = Some(format!("worker bootstrap failed: {recorded_error}"));
 }
 
 pub(super) fn apply_failed_new_session_rollback(
     state: &mut State,
     session_id: &str,
-    original_error: &str,
     recorded_error: &str,
     cleanup_error: Option<String>,
 ) -> anyhow::Error {
@@ -1514,16 +1535,18 @@ pub(super) fn apply_failed_new_session_rollback(
             record.state = SessionState::Error;
             record.target = None;
             record.updated_at = now();
-            record.last_error = Some(recorded_error.to_owned());
-            anyhow::anyhow!("{original_error}; partial target removed and failed session retained")
+            record.last_error = Some(format!("worker bootstrap failed: {recorded_error}"));
+            anyhow::anyhow!("{recorded_error}; partial target removed and failed session retained")
         }
         Some(cleanup_error) => {
             let cleanup = format!("; cleanup of the failed session target failed: {cleanup_error}");
             let record = state.sessions.get_mut(session_id).unwrap();
             record.state = SessionState::StartupCleanup;
             record.updated_at = now();
-            record.last_error = Some(format!("{recorded_error}{cleanup}"));
-            anyhow::anyhow!("{original_error}{cleanup}")
+            record.last_error = Some(format!(
+                "worker bootstrap failed: {recorded_error}{cleanup}"
+            ));
+            anyhow::anyhow!("{recorded_error}{cleanup}")
         }
     }
 }
