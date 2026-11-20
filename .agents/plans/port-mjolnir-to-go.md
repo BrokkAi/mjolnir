@@ -21,6 +21,7 @@ Until then, `python3 go/port/status.py` always says exactly how far the port is.
 - [x] (2026-11-20 10:38Z) Milestone 0, instruments: `go/port/oracle` with every planned module registered, the Go oracle helper, `go/port/status.py`, `go/port/gotest.sh`, `scripts/go/build.sh`, `.github/workflows/go.yml`.
 - [x] (2026-11-20 10:37Z) Milestone 0, declarations generator: `portmap.py declarations` writes a Go skeleton for all 849 production files (974 Go files, about 181,000 lines) with no syntax errors; about 1,200 places are marked `PORT:` for a person to settle, of which about 400 are ACP types awaiting `acp-mapping.md`.
 - [ ] Milestone 0, remaining: a check that every `rs.Format` string parses and its arguments match (the `rsfmt` vet), the `exhaustruct` and `go-check-sumtype` checks in the Go lane.
+- [x] (2026-11-20 11:41Z) First checkpoint of Milestone 1 pushed (`e641657c7`): fifteen runtime packages as far as they have got, about 114,000 lines, each green as far as it goes. None is finished.
 - [ ] Milestone 1: runtime packages. Started 2026-11-20 10:10Z with twenty parallel units (the harness runs at most twenty at once; eight more assignments wait in `.agents/docs/go-port/briefs/`): the formatter; clone, equality, ordering and counted references; numbers, sorting and slices; `strs`; `collections`; `rspath` and `rsenv`; `rsio` and `rsfs`; `rssync`, `rsthread` and `rstime`; `serde` and `serdejson`; `toml` and `tomledit`; `anyhow`, `tracing`; the `tokio` core; `clap`; `chrono`; `similar`, `linkify`, `semver`, `bytesize`, `base64`; `unicodewidth`, `unicodesegmentation`; `vt100`, `vte`; `pulldowncmark`; `url`, `qrcode`, `regex`; and four analysis documents (`acp-mapping.md`, `counted-arcs.md`, `compressed-bytes.md`, `library-usage.md`). None is merged yet.
 - [ ] Milestone 2: foundation crates (`mj-core`, `mj-review`, `mj-transcript`, `mj-checkpoint`, `mj-build-id`).
 - [ ] Milestone 3: the Go worker (`mj-worker`, `mj-worker-bin`), driven by the Rust daemon.
@@ -46,6 +47,10 @@ Until then, `python3 go/port/status.py` always says exactly how far the port is.
   Evidence: the job failed from commit `1c3f41552` (the first push of `go/port/oracle`) until `63fe420b3` listed the oracle's dependencies under `package.metadata.cargo-machete`. Reproduced and verified with cargo-machete 0.9.2 on an export of the commit.
 - Observation: The "Tests (worker-cli)" job on `master` was already failing before the port's first commit, so a red CI run on a port commit needs its failing jobs compared with the run before it.
   Evidence: runs for `63c80bc5a` and `bedb7fcae` fail only in that job.
+- Observation: All twenty parallel units stopped at the same moment, about ninety minutes in, when the account's model usage limit was reached. Nothing they had written was committed, and three packages were mid-edit and did not build.
+  Evidence: twenty "You've hit your Fable limit" failures at 11:25Z. Each unit resumed from its own transcript when sent a message once requests were accepted again, so no work was repeated. Since then `go/port/checkpoint.py` commits whatever is green at intervals, so a stop costs at most the work since the last checkpoint.
+- Observation: Recorded oracle corpora are large. Fifteen unfinished packages had 22 MB of them.
+  Evidence: `git diff --cached` at the first checkpoint. Stored gzip-compressed they are 6.9 MB with all the source.
 - Observation: The owner's `github.com/BrokkAi/acp-go` (v0.14.0, Apache-2.0, no dependencies) already reproduces the Rust ACP crate's JSON exactly and exposes `jsonvalue`, an exact `serde_json::Value`.
   Evidence: its README: "Over 14,000 decode and encode cases, captured from the Rust schema crate itself".
 
@@ -206,6 +211,8 @@ When testing a built Go program, isolate it exactly as a Rust development build 
 
 and stop the instance's daemon when done (`mj --instance go-port-test daemon stop`).
 
+Resuming after a stop. The units run as background agents of one coordinating session, at most twenty at once. If they stop (a usage limit, a closed session), the state is: committed work on `origin/master`; uncommitted work in the session's clone if it still exists; and the assignments under `.agents/docs/go-port/briefs/`. A stopped agent that still exists is resumed by sending it a message. Otherwise start a new one on the same assignment and tell it that the package is partly written: it should read what is there, run its tests, and finish it, not start again. `python3 go/port/checkpoint.py` stages every package directory that is green (formatted, builds on three platforms, vets, passes its tests); run it and commit at intervals.
+
 How work is handed out. A unit is either one runtime package or a set of Rust files of one crate. The person or agent doing it is given: this plan, the rulebook, the catalogue, the exact files, and the command that must pass. They write only those files, do not commit, and hand back the report the rulebook describes. The coordinator runs the checks again, reads the diff against the Rust source for the kinds of mistake the rulebook warns about (missing drops, reordered arms, changed text, values copied where Rust borrows), commits, and pushes. A second reader who did not write the port compares each product file with its Rust file before it is counted as done.
 
 ## Validation and Acceptance
@@ -273,5 +280,7 @@ Go modules the port depends on, all pure Go: `github.com/BrokkAi/acp-go` (Agent 
 The interfaces every product package relies on are fixed by the rulebook and must exist at the end of Milestone 1: `rs.Option[T]`, `rs.Format`, `rs.Clone`, `rs.Eq`, `rs.Cmp`, `rs.Todo`, `rs.RegisterStruct` and `rs.RegisterEnum` in `go/rs`; `collections.BTreeMap[K, V]` and its siblings; `rspath`, `rsfs`, `rsio`, `rssync`, `rstime`, `rsthread`, `rsprocess`; `rstest.AssertEq` and the oracle helper; `serde` and `serdejson`; `anyhow`; `tracing`; and in `go/crates/tokio`: `tokio.Fn[T]`, `tokio.Spawn`, `tokio.Select` with `Arm`, `ArmIf`, `ArmMatch`, `ArmFn`, `ArmElse`, `tokio.Start`, `tokio.Test`, the `Sync*` channel types and the `Time*` functions.
 
 Change note (2026-11-20): initial version, written after the survey and the first two port tools.
+
+Change note (2026-11-20 11:41Z): recorded the stop at the usage limit, the first checkpoint, the checkpoint tool and compressed corpora, and how to resume.
 
 Change note (2026-11-20, later): Progress records Milestone 0 and the start of Milestone 1. The naming rule changed from joined PascalCase to `<ModulePrefix>_<rust name>` after generated declarations were type-checked; the Decision Log and Surprises say why. The rule for which functions take `ctx` and the decision to generate declarations were added.
