@@ -189,6 +189,13 @@ pub fn observe_no_space(host: &str, detail: &str) {
 /// now, so an old failure, such as a dead worker's exit record, does not
 /// override it.
 pub fn observe_no_space_at(host: &str, path: Option<&str>, detail: &str, at: u64) {
+    observe_no_space_on(host, path.as_slice(), detail, at);
+}
+
+/// A write to one of `paths` on `host` failed for lack of space at `at`, and
+/// the failure does not say which: every filesystem they land on is held
+/// until a later measurement. When none of them is placed, the whole host is.
+pub fn observe_no_space_on(host: &str, paths: &[&str], detail: &str, at: u64) {
     let board = board();
     let changed = {
         let mut hosts = board.hosts();
@@ -198,16 +205,16 @@ pub fn observe_no_space_at(host: &str, path: Option<&str>, detail: &str, at: u64
             return;
         }
         let before = entry.view(host);
-        let mount = path.and_then(|path| {
-            before
-                .filesystem_for(path)
-                .map(|filesystem| filesystem.space.mount.clone())
-        });
-        match mount {
-            Some(mount) => {
-                entry.no_space.insert(mount, (at, detail.to_owned()));
-            }
-            None => entry.unattributed = Some((at, detail.to_owned())),
+        let mounts = paths
+            .iter()
+            .filter_map(|path| before.filesystem_for(path))
+            .map(|filesystem| filesystem.space.mount.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if mounts.is_empty() {
+            entry.unattributed = Some((at, detail.to_owned()));
+        }
+        for mount in mounts {
+            entry.no_space.insert(mount, (at, detail.to_owned()));
         }
         let changed = before != entry.view(host);
         if changed {
@@ -218,7 +225,7 @@ pub fn observe_no_space_at(host: &str, path: Option<&str>, detail: &str, at: u64
         }
         changed
     };
-    tracing::warn!(%host, ?path, %detail, "a write failed because the target's disk is full");
+    tracing::warn!(%host, ?paths, %detail, "a write failed because the target's disk is full");
     if changed {
         board.changed();
     }
@@ -366,47 +373,30 @@ pub fn full_problem<'a>(host: &str, paths: impl IntoIterator<Item = &'a str>) ->
     view(host)?.problem_for(paths)
 }
 
-/// The host and worker root of a session's recorded target: where its
-/// worker keeps its journal, and where a restart stages and writes.
-pub fn session_worker_root(
+/// The host and sentence while any filesystem a session's worker and
+/// harness write to is full: its worker root (journal, staged worker),
+/// workspace, staged profile home or `/tmp`. Recovery waits on exactly this,
+/// because a restart needs room on all of them.
+pub fn worker_restart_problem(
     locator: &mj_core::state::TargetLocator,
     session_id: &str,
-) -> (String, String) {
-    let paths = mj_core::targets::storage::session_storage_paths(locator, session_id, None);
-    (paths.host, paths.worker_root)
-}
-
-/// The host and sentence while the filesystem a session's worker root is on
-/// is full: recovery waits on exactly this.
-pub fn worker_root_problem(
-    locator: &mj_core::state::TargetLocator,
-    session_id: &str,
+    workspace: Option<&std::path::Path>,
 ) -> Option<(String, String)> {
-    let (host, worker_root) = session_worker_root(locator, session_id);
-    let problem = full_problem(&host, [worker_root.as_str()])?;
-    Some((host, problem))
+    let paths = mj_core::targets::storage::session_storage_paths(locator, session_id, workspace);
+    let problem = full_problem(&paths.host, paths.all())?;
+    Some((paths.host, problem))
 }
 
 /// The sentence a session shows instead of "unreachable" while one of its
-/// own filesystems is full: its worker root, workspace, profile home or
-/// `/tmp`.
+/// own filesystems is full.
 pub fn session_problem(session: &mj_core::state::SessionRecord) -> Option<String> {
     let checkout = session.checkout();
-    located_session_problem(
+    worker_restart_problem(
         session.target.as_ref()?,
         &session.id,
         checkout.project_directory(),
     )
-}
-
-fn located_session_problem(
-    locator: &mj_core::state::TargetLocator,
-    session_id: &str,
-    project_directory: Option<&std::path::Path>,
-) -> Option<String> {
-    let paths =
-        mj_core::targets::storage::session_storage_paths(locator, session_id, project_directory);
-    full_problem(&paths.host, paths.all())
+    .map(|(_, problem)| problem)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -568,11 +558,11 @@ pub mod tests {
             worker_id: None,
         };
         record_samples(&[sample(host, 40 << 30, 0)], now_epoch_seconds());
-        let problem = located_session_problem(&session, "abc", None).unwrap();
+        let problem = worker_restart_problem(&session, "abc", None).unwrap().1;
         assert!(
             problem.starts_with("disk full: session-3260 has 0 B free on /home/jonathan/Projects"),
             "{problem}"
         );
-        assert!(located_session_problem(&elsewhere, "abc", None).is_none());
+        assert!(worker_restart_problem(&elsewhere, "abc", None).is_none());
     }
 }

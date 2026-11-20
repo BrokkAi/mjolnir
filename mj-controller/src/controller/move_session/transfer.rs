@@ -2554,7 +2554,10 @@ mod tests {
             IsolatedTest::new(name)
                 .isolated_store(directory.path())
                 .env("MJ_MOVE_TRANSFER_LIFECYCLE_TEST", "1")
-                .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+                .env(
+                    "MJ_WORKER_BINARY",
+                    mj_core::worker_build::test_worker_executable(),
+                )
                 .run();
             return;
         }

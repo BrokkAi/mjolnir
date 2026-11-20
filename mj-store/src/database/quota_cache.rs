@@ -17,6 +17,43 @@ fn load(connection: &Connection, identity: &str) -> Result<Option<ProfileQuota>>
         .transpose()
 }
 
+/// The probes saved for one configuration of a profile at or after `since`,
+/// newest first, failed ones included.
+pub fn load_quota_history_since(
+    identity: &str,
+    profile_id: &str,
+    since: u64,
+) -> Result<Vec<ProfileQuota>> {
+    history_since(
+        &*open_reader(&database_path())?,
+        identity,
+        profile_id,
+        since,
+    )
+}
+
+fn history_since(
+    connection: &Connection,
+    identity: &str,
+    profile_id: &str,
+    since: u64,
+) -> Result<Vec<ProfileQuota>> {
+    let bodies = connection
+        .prepare(
+            "SELECT body FROM quota_history
+             WHERE profile_id = ?1 AND sampled_at_epoch_seconds >= ?2 AND identity = ?3
+             ORDER BY sampled_at_epoch_seconds DESC, id DESC",
+        )?
+        .query_map(params![profile_id, since, identity], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    bodies
+        .iter()
+        .map(|body| serde_json::from_str(body).context("decode stored quota probe"))
+        .collect()
+}
+
 /// Save a fresh probe and, on success, its reset cache in one transaction.
 /// Called on a blocking task through the only database writer.
 pub fn save_quota_report(identity: &str, report: &ProfileQuota) -> Result<()> {

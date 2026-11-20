@@ -126,13 +126,15 @@ def session(sid):
     return value["sessions"][0] if "sessions" in value else value
 
 
-def quota_hold(scope=None):
+def quota_hold(scope=None, *, floor=None, weekly=False, strict=False):
     """Why a new job must not start, or None. REVIEW_ARMS_QUOTA_FLOOR="codex4=25,..." names
     shared profiles whose least window must keep that many percent (a coordinator's limit,
     2026-11-16: codex4 is shared with other sessions). Checked once per launch, from the
     daemon's stored report; a missing or unreadable report holds the job, since unknown is
-    not "enough"."""
-    floor = os.environ.get("REVIEW_ARMS_QUOTA_FLOOR")
+    not "enough". A caller can supply its own floor, restrict it to weekly windows, and
+    require the remaining percentage to strictly exceed the floor."""
+    if floor is None:
+        floor = os.environ.get("REVIEW_ARMS_QUOTA_FLOOR")
     if not floor:
         return None
     for spec in floor.split(","):
@@ -145,11 +147,20 @@ def quota_hold(scope=None):
         if scope:
             windows = [w for w in windows if not w.get("model_scope")
                        or scope in w["model_scope"].split(",")]
+        if weekly:
+            windows = [w for w in windows if w.get("duration_seconds") == 7 * 24 * 60 * 60]
         left = [w.get("remaining_percent") for w in windows]
         if not left or None in left or report.get("error"):
             return f"{profile}: no usable quota report ({json.dumps(report)[:300]})"
-        if min(left) < float(percent):
-            return f"{profile}: {min(left)}% left, below the floor of {percent}%"
+        least = min(windows, key=lambda w: w["remaining_percent"])
+        remaining = least["remaining_percent"]
+        if remaining < float(percent) or (strict and remaining == float(percent)):
+            if weekly:
+                threshold = "above" if strict else "at least"
+                return (f"{profile}: {remaining}% weekly remaining, requires {threshold} {percent}% "
+                        f"(resets {least.get('resets', 'unknown')}, "
+                        f"epoch {least.get('resets_at_epoch_seconds')})")
+            return f"{profile}: {remaining}% left, below the floor of {percent}%"
     return None
 
 

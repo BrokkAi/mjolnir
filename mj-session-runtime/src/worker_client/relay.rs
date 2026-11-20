@@ -26,10 +26,7 @@ impl ProjectMemoryTransfer<'_> {
 
     async fn abort(mut self, error: anyhow::Error) -> anyhow::Error {
         let client = self.client.as_ref().unwrap();
-        if client.abandoned.is_some()
-            || client.cancelled()
-            || error.downcast_ref::<RelayTransportDead>().is_some()
-        {
+        if client.abandoned.is_some() || error.downcast_ref::<RelayTransportDead>().is_some() {
             // Drop closes the connection and lets its worker clean up staging.
             // An abort cannot succeed here and would obscure the primary cause.
             return error;
@@ -887,6 +884,132 @@ impl RelayClient {
                 ..
             } => bail!("relay accepted command under ID {accepted_id}, expected {command_id}"),
             _ => bail!("relay returned an unexpected command response"),
+        }
+    }
+
+    pub async fn read_queued_command(
+        &mut self,
+        command_id: String,
+    ) -> Result<(Option<RelayCommand>, Option<u64>)> {
+        match self
+            .call(RelayRequest::ReadQueuedCommand { command_id })
+            .await?
+        {
+            RelayResponsePayload::QueuedCommand {
+                command,
+                accepted_ordinal,
+            } => Ok((command, accepted_ordinal)),
+            _ => bail!("relay returned an unexpected queued command response"),
+        }
+    }
+
+    pub async fn read_pending_elicitation(
+        &mut self,
+        elicitation_id: String,
+    ) -> Result<Option<mj_core::elicitation::ElicitationRequest>> {
+        match self
+            .call(RelayRequest::ReadPendingElicitation { elicitation_id })
+            .await?
+        {
+            RelayResponsePayload::PendingElicitation { request } => Ok(request),
+            _ => bail!("relay returned an unexpected pending question response"),
+        }
+    }
+
+    pub fn set_adoption_wait_progress(
+        &mut self,
+        progress: Option<tokio::sync::watch::Sender<Option<Vec<String>>>>,
+    ) {
+        self.adoption_wait_progress = progress;
+    }
+
+    pub async fn live_session_baseline(&mut self) -> Result<mj_core::relay::LiveSessionBaseline> {
+        if self.protocol_version() < mj_core::relay::RELAY_LIVE_BASELINE_PROTOCOL {
+            return Err(LiveBaselineUnsupported.into());
+        }
+        let RelayResponsePayload::LiveBaselineStarted { total_bytes } =
+            self.call(RelayRequest::BeginLiveBaseline).await?
+        else {
+            bail!("relay returned an unexpected live baseline response")
+        };
+        let mut bytes = Vec::new();
+        let mut offset = 0;
+        loop {
+            let RelayResponsePayload::LiveBaselinePage { page } = self
+                .call(RelayRequest::ReadLiveBaselinePage { offset })
+                .await?
+            else {
+                bail!("relay returned an unexpected live baseline page")
+            };
+            anyhow::ensure!(
+                page.offset == offset && page.next_offset <= total_bytes,
+                "live baseline page cursor mismatch"
+            );
+            use base64::Engine as _;
+            let chunk = mj_core::runtime::spawn_blocking(move || {
+                base64::engine::general_purpose::STANDARD.decode(page.chunk)
+            })
+            .await
+            .context("decode live baseline page task failed")??;
+            anyhow::ensure!(
+                page.next_offset == offset + u64::try_from(chunk.len())?,
+                "live baseline page length mismatch"
+            );
+            anyhow::ensure!(
+                page.complete || !chunk.is_empty(),
+                "live baseline download made no progress"
+            );
+            bytes.extend(chunk);
+            offset = page.next_offset;
+            if page.complete {
+                anyhow::ensure!(offset == total_bytes, "live baseline download ended early");
+                break;
+            }
+            anyhow::ensure!(
+                offset < total_bytes,
+                "live baseline download made no progress"
+            );
+        }
+        mj_core::runtime::spawn_blocking(move || {
+            serde_json::from_slice(&bytes).context("decode live recovery baseline")
+        })
+        .await
+        .context("live recovery baseline decode task failed")?
+    }
+
+    pub async fn command_retention_status(&mut self) -> Result<Option<(bool, BTreeSet<String>)>> {
+        if self.protocol_version() < mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL {
+            return Ok(None);
+        }
+        match self.call(RelayRequest::CommandRetentionStatus).await? {
+            RelayResponsePayload::CommandRetentionState {
+                legacy_pending,
+                operation_ids,
+            } => Ok(Some((legacy_pending, operation_ids))),
+            _ => bail!("relay returned an unexpected command-retention status"),
+        }
+    }
+
+    pub async fn update_command_retention(
+        &mut self,
+        operation_id: Option<String>,
+        command_ids: BTreeSet<String>,
+        reconcile_legacy: bool,
+    ) -> Result<()> {
+        if self.protocol_version() < mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL {
+            // Older workers retain receipts behind their recovery floor.
+            return Ok(());
+        }
+        match self
+            .call(RelayRequest::UpdateCommandRetention {
+                operation_id,
+                command_ids,
+                reconcile_legacy,
+            })
+            .await?
+        {
+            RelayResponsePayload::CommandRetentionUpdated => Ok(()),
+            _ => bail!("relay returned an unexpected command-retention response"),
         }
     }
 

@@ -1591,87 +1591,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     );
 }
 
-/// The profile table marks a harness that cannot guard risky actions with the
-/// warning triangle and explains the marker once below the table.
-#[test]
-fn profile_picker_marks_harnesses_without_guardian_approvals() {
-    let profile_step = |kind: HarnessKind| {
-        let mut config = config();
-        config.profiles = BTreeMap::from([(
-            "profile".into(),
-            HarnessProfile {
-                enabled: true,
-                context_window_bytes: None,
-                models: Default::default(),
-                legacy_subagents: Default::default(),
-                guardian_review_model: None,
-                legacy_muse_auto_review: None,
-                load_balancing_may_consume_credits: false,
-                claude_permission_mode: None,
-                aws: None,
-                codex_profile: None,
-                environment: Default::default(),
-                ..mj_core::config::HarnessProfile::new(kind, PathBuf::from("/profiles/harness"))
-            },
-        )]);
-        config
-            .profiles
-            .insert("profile-2".into(), config.profiles["profile"].clone());
-        config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
-        let mut state = State::default();
-        state.remember_project_directory("local", std::path::Path::new("/home/me/project"));
-        let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
-        ready_open_new_wizard(&mut dashboard);
-        let mut terminal = Terminal::new(TestBackend::new(180, 32)).unwrap();
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>()
-    };
-
-    // OpenCode prompts for permission but runs commands on the host without
-    // a sandbox, so a prompt is not a guardian.
-    for kind in [HarnessKind::Kimi, HarnessKind::OpenCode, HarnessKind::Dsh] {
-        let marked = profile_step(kind);
-        assert!(
-            marked.contains(mj_chat::theme::glyphs().warning),
-            "{kind:?}: {marked}"
-        );
-        assert!(
-            marked.contains("No guardian approval mode"),
-            "{kind:?}: {marked}"
-        );
-        assert!(
-            marked.contains("do not run on a raw, unsandboxed target"),
-            "{kind:?}: {marked}"
-        );
-    }
-
-    for kind in [
-        HarnessKind::Codex,
-        HarnessKind::Claude,
-        HarnessKind::Grok,
-        HarnessKind::Muse,
-    ] {
-        let quiet = profile_step(kind);
-        assert!(
-            !quiet.contains(mj_chat::theme::glyphs().warning),
-            "{kind:?}: {quiet}"
-        );
-        assert!(
-            !quiet.contains("No guardian approval mode"),
-            "{kind:?}: {quiet}"
-        );
-    }
-}
-
-/// The profile step reads as a table: the marker, profile, harness, and quota
+/// The profile step reads as a table: the profile, harness, and quota
 /// columns start at the same cell on the heading and on every row.
 /// A profile whose installation is gone is not offered: the profile step
 /// lists only what is there and names the missing one under the table, with
@@ -1755,17 +1675,6 @@ fn new_session_profile_step_aligns_its_columns() {
         cell_column(kimi, "Kimi Code"),
         cell_column(headings, "HARNESS")
     );
-
-    // The triangle occupies the marker column, then the table gap, then the
-    // profile id; only the harness without guardian approvals carries it.
-    assert!(!claude.contains(mj_chat::theme::glyphs().warning));
-    assert!(kimi.contains(mj_chat::theme::glyphs().warning));
-    assert_eq!(
-        cell_column(kimi, mj_chat::theme::glyphs().warning)
-            + 1
-            + u16::try_from(COLUMN_GAP).unwrap(),
-        profile_column
-    );
 }
 
 /// The profile step reports quota as two percentages remaining, one per
@@ -1836,7 +1745,7 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
 }
 
 #[test]
-fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
+fn raw_localhost_uses_local_project_history() {
     let mut config = config();
     config.profiles = BTreeMap::from([(
         "kimi".into(),
@@ -1857,15 +1766,6 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .unwrap();
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("No guardian approval mode"));
-
     // Both single-choice selectors were skipped when the wizard opened.
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected local project directory step")
@@ -2956,7 +2856,7 @@ fn resume_starts_a_new_check_once_the_first_fails_or_the_wizard_closes() {
     );
 }
 
-fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
+fn resume_profile_step_aligns_its_columns() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.config.profiles.insert(
         "kimi-1".into(),
@@ -3011,18 +2911,6 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
             assert!(!line.contains("(lossy"), "{id}: {line}");
         }
     }
-
-    // Only the Kimi row lacks guardian approvals, and the row below the table
-    // explains the marker it carries.
-    assert!(row("kimi-1").contains(mj_chat::theme::glyphs().warning));
-    assert!(!row("claude-1").contains(mj_chat::theme::glyphs().warning));
-    assert!(!row("codex-1").contains(mj_chat::theme::glyphs().warning));
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("No guardian approval mode; do not run on a raw")),
-        "{lines:?}"
-    );
 }
 
 #[test]
@@ -5921,8 +5809,8 @@ fn golden_profile_picker_table() {
             new_session_profile_step_shows_weekly_and_five_hour_percentages,
         ),
         (
-            "resume_profile_step_aligns_its_columns_and_explains_the_marker",
-            resume_profile_step_aligns_its_columns_and_explains_the_marker,
+            "resume_profile_step_aligns_its_columns",
+            resume_profile_step_aligns_its_columns,
         ),
         (
             "a_missing_profile_is_left_out_of_the_profile_step_and_named",

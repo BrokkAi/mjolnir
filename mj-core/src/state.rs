@@ -791,18 +791,6 @@ impl ManagedSessionSnapshot {
     }
 }
 
-/// One session's activity, reported to the recovery coordinator.
-#[derive(Debug, Clone)]
-pub struct RecoveryObservation {
-    pub session: SessionRecord,
-    pub config: Config,
-    pub latest_completed_turn_ordinal: Option<u64>,
-    /// Why a routine checkpoint has to wait, or `None` when one may start now:
-    /// [`crate::activity::routine_checkpoint_wait`] on the worker's
-    /// operational state, the same answer checkpoint admission gives.
-    pub checkpoint_wait: Option<crate::activity::CheckpointWait>,
-}
-
 /// The position where the session's most recent finished turn began, or
 /// `None` while it is still working. A turn starts at a user message or at the
 /// marker for a turn the harness began on its own, so autonomous work is

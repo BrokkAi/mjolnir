@@ -44,29 +44,6 @@ HERE = pathlib.Path(__file__).resolve().parent
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 SEV = {"high": 3, "medium": 2, "low": 1}
 
-p = argparse.ArgumentParser()
-p.add_argument("step", choices=["build", "collect", "build-pass2", "collect-pass2", "build-second", "collect-second"])
-p.add_argument("--verify", default="verify3")
-p.add_argument("--batch-size", type=int, default=5)
-p.add_argument("--corpus", type=pathlib.Path, default=HERE / "corpus/corpus.jsonl")
-p.add_argument("--diffs", type=pathlib.Path, default=HERE / "corpus/diffs.jsonl")
-p.add_argument("--groups", type=pathlib.Path, help="defaults to results/stage3/groups.csv for verify3, otherwise results/groups.csv")
-p.add_argument("--known-only", action="store_true", help="build only canonical defects; do not read sampled findings or verification")
-p.add_argument("--labels-dir", type=pathlib.Path, default=ROOT / "label-facts")
-p.add_argument("--results-dir", type=pathlib.Path, default=HERE / "results")
-p.add_argument("--second-sources", default="hard-won", help="comma-separated canonical sources included in the independent second census")
-p.add_argument("--task-dir", type=pathlib.Path, help="collect/collect-second: task units containing batch.json and label-out.json")
-a = p.parse_args()
-if a.batch_size <= 0:
-    p.error("--batch-size must be positive")
-if a.task_dir is not None and a.step not in ("collect", "collect-second"):
-    p.error("--task-dir applies only to collect and collect-second")
-L = a.labels_dir
-SECOND_SOURCES = set(a.second_sources.split(","))
-if not all(SECOND_SOURCES):
-    p.error("--second-sources must name nonempty sources")
-
-
 def save(path, value):
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(value, indent=2) + "\n")
@@ -81,6 +58,11 @@ def stratification(item):
 def batch_item(item):
     private = {"source", "group", "severity"} | stratification(item).keys()
     return {k: v for k, v in item.items() if k not in private}
+
+
+def batches(items, size):
+    for offset in range(0, len(items), size):
+        yield [batch_item(item) for item in items[offset:offset + size]]
 
 
 def indexed(items, context):
@@ -217,11 +199,8 @@ def build():
     random.Random(20261114).shuffle(items)
     L.mkdir(parents=True, exist_ok=True)
     save(L / "items.json", items)
-    for n in range(0, len(items), a.batch_size):
-        # Batch files carry only what the labeler needs.
-        batch = [batch_item(it)
-                 for it in items[n:n + a.batch_size]]
-        save(L / f"batch-{n // a.batch_size}.json", batch)
+    for n, batch in enumerate(batches(items, a.batch_size)):
+        save(L / f"batch-{n}.json", batch)
     (L / "SPEC.md").write_text((HERE / "label/SPEC.md").read_text())
     print(json.dumps({"items": len(items), "batches": -(-len(items) // a.batch_size),
                       "by_source": collections.Counter(i["source"] for i in items)}))
@@ -304,5 +283,33 @@ def collect_second():
     print(json.dumps(summary, indent=1))
 
 
-{"build": build, "collect": collect, "build-pass2": build_pass2, "collect-pass2": collect_pass2,
- "build-second": build_second, "collect-second": collect_second}[a.step]()
+def main():
+    global a, L, SECOND_SOURCES
+    p = argparse.ArgumentParser()
+    p.add_argument("step", choices=["build", "collect", "build-pass2", "collect-pass2", "build-second", "collect-second"])
+    p.add_argument("--verify", default="verify3")
+    p.add_argument("--batch-size", type=int, default=5)
+    p.add_argument("--corpus", type=pathlib.Path, default=HERE / "corpus/corpus.jsonl")
+    p.add_argument("--diffs", type=pathlib.Path, default=HERE / "corpus/diffs.jsonl")
+    p.add_argument("--groups", type=pathlib.Path, help="defaults to results/stage3/groups.csv for verify3, otherwise results/groups.csv")
+    p.add_argument("--known-only", action="store_true", help="build only canonical defects; do not read sampled findings or verification")
+    p.add_argument("--labels-dir", type=pathlib.Path, default=ROOT / "label-facts")
+    p.add_argument("--results-dir", type=pathlib.Path, default=HERE / "results")
+    p.add_argument("--second-sources", default="hard-won", help="comma-separated canonical sources included in the independent second census")
+    p.add_argument("--task-dir", type=pathlib.Path, help="collect/collect-second: task units containing batch.json and label-out.json")
+    a = p.parse_args()
+    if a.batch_size <= 0:
+        p.error("--batch-size must be positive")
+    if a.task_dir is not None and a.step not in ("collect", "collect-second"):
+        p.error("--task-dir applies only to collect and collect-second")
+    L = a.labels_dir
+    SECOND_SOURCES = set(a.second_sources.split(","))
+    if not all(SECOND_SOURCES):
+        p.error("--second-sources must name nonempty sources")
+
+    {"build": build, "collect": collect, "build-pass2": build_pass2, "collect-pass2": collect_pass2,
+     "build-second": build_second, "collect-second": collect_second}[a.step]()
+
+
+if __name__ == "__main__":
+    main()

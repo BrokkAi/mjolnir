@@ -29,7 +29,7 @@ pub fn reserve(root: &Path) -> Result<()> {
 
 /// Write the exit record: over a reservation in place, or as a new file.
 pub fn write(root: &Path, reason: &str, refusal: Option<&str>) -> Result<()> {
-    write_with_recent_log(root, reason, refusal, &[])
+    write_with_recent_log(root, reason, refusal, None, &[])
 }
 
 /// Include the newest diagnostics, fitting escaped JSON into the existing blocks.
@@ -37,6 +37,7 @@ pub fn write_with_recent_log(
     root: &Path,
     reason: &str,
     refusal: Option<&str>,
+    startup_failure: Option<&mj_core::relay::WorkerHarnessStartupFailure>,
     recent_log: &[String],
 ) -> Result<()> {
     let path = root.join(mj_core::relay::WORKER_EXIT_FILE);
@@ -50,15 +51,7 @@ pub fn write_with_recent_log(
     let mut reason = reason.to_owned();
     let mut refusal = refusal.map(str::to_owned);
     let mut recent_log = recent_log.to_vec();
-    let body = |reason: &str, refusal: &Option<String>, recent_log: &[String]| -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(&serde_json::json!({
-            "reason": reason,
-            "refusal": refusal,
-            "at": at,
-            "version": env!("CARGO_PKG_VERSION"),
-            "recent_log": recent_log,
-        }))?)
-    };
+    let mut startup_failure = startup_failure.cloned();
     // Keep reason/refusal first, but reserve most of the record for the tail.
     // JSON escaping can make a bounded in-memory line six times larger on disk.
     let shorten = |text: &mut String, limit: usize| {
@@ -67,12 +60,29 @@ pub fn write_with_recent_log(
             text.push('…');
         }
     };
+    // Even control characters in the marker must fit the reservation.
+    if let Some(failure) = &mut startup_failure {
+        shorten(&mut failure.message, budget / 8);
+    }
     if !recent_log.is_empty() {
         shorten(&mut reason, budget / 8);
         if let Some(refusal) = &mut refusal {
             shorten(refusal, budget / 8);
         }
     }
+    let body = |reason: &str, refusal: &Option<String>, recent_log: &[String]| -> Result<Vec<u8>> {
+        let mut record = serde_json::json!({
+            "reason": reason,
+            "refusal": refusal,
+            "at": at,
+            "version": env!("CARGO_PKG_VERSION"),
+            "recent_log": recent_log,
+        });
+        if let Some(failure) = &startup_failure {
+            record["harness_startup_failure"] = serde_json::to_value(failure)?;
+        }
+        Ok(serde_json::to_vec(&record)?)
+    };
     let mut bytes = body(&reason, &refusal, &recent_log)?;
     while bytes.len() > budget {
         if let Some(first) = recent_log.first_mut() {
@@ -152,13 +162,23 @@ mod tests {
             use std::os::unix::fs::MetadataExt;
             std::fs::metadata(&path).unwrap().ino()
         };
-        write(
+        let failure = mj_core::relay::WorkerHarnessStartupFailure {
+            message: "could not open the native ACP session".into(),
+        };
+        write_with_recent_log(
             root.path(),
             "relay coordinator failed: No space left on device (os error 28)",
             None,
+            Some(&failure),
+            &[],
         )
         .unwrap();
         let bytes = std::fs::read(&path).unwrap();
+        let marked: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            marked["harness_startup_failure"]["message"],
+            failure.message
+        );
         assert_eq!(bytes.len(), RESERVED_EXIT_RECORD_BYTES);
         let record: Option<Record> = serde_json::from_slice(&bytes).unwrap();
         assert!(record.unwrap().reason.contains("No space left on device"));
@@ -171,6 +191,10 @@ mod tests {
                 "the record must be written in place, not as a new file"
             );
         }
+        reserve(root.path()).unwrap();
+        let next_boot: Option<Record> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(next_boot.is_none(), "the next boot must clear the marker");
     }
 
     #[test]
@@ -179,7 +203,7 @@ mod tests {
         reserve(root.path()).unwrap();
         let reason = format!("journal write failed: {}", "é".repeat(20_000));
         let tail = vec![format!("{}newest diagnostic\n", "\0\"é".repeat(5000))];
-        write_with_recent_log(root.path(), &reason, None, &tail).unwrap();
+        write_with_recent_log(root.path(), &reason, None, None, &tail).unwrap();
         let bytes = std::fs::read(root.path().join(mj_core::relay::WORKER_EXIT_FILE)).unwrap();
         assert_eq!(bytes.len(), RESERVED_EXIT_RECORD_BYTES);
         let record: Option<Record> = serde_json::from_slice(&bytes).unwrap();

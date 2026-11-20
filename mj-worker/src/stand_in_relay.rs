@@ -148,31 +148,10 @@ pub fn serve_latch_relay() {
             continue;
         }
         // A checkpoint carries project memory on a second connection while
-        // the first still owns the control journal. A worker serves memory at
-        // the connection layer, without the journal; this stand-in has no
-        // memory endpoint, so it answers as `DurableRelay` does instead of
-        // opening a second journal writer.
-        if matches!(
-            &request.request,
-            mj_core::relay::RelayRequest::ProjectMemorySnapshot
-                | mj_core::relay::RelayRequest::ProjectMemoryTransfer { .. }
-                | mj_core::relay::RelayRequest::InstallProjectMemorySnapshot { .. }
-                | mj_core::relay::RelayRequest::ReplaceProjectMemoryTree { .. }
-        ) {
-            mj_core::relay::write_relay_frame(
-                &mut writer,
-                &mj_core::relay::RelayResponseEnvelope {
-                    request_id: request.request_id,
-                    protocol_version: request.protocol_version,
-                    body: mj_core::relay::relay_error(
-                        mj_core::relay::RelayErrorCode::InvalidState,
-                        "connection-only requests must be handled by the live relay transport",
-                        false,
-                        None,
-                    ),
-                },
-            )
-            .expect("answer a project-memory request");
+        // the first still owns the control journal.
+        if let Some(refusal) = project_memory_refusal(&request) {
+            mj_core::relay::write_relay_frame(&mut writer, &refusal)
+                .expect("answer a project-memory request");
             continue;
         }
         let relay = relay.get_or_insert_with(|| {
@@ -589,6 +568,35 @@ fn record_test_subagent_admission(relay_root: &Path, open: bool) {
     mj_core::config::atomic_write(&queue_path, &serde_json::to_vec(&queue).unwrap())
         .expect("persist fake worker sub-agent admission");
 }
+
+/// A project-memory connection runs beside the session's own, which owns the
+/// control journal. A worker serves memory at the connection layer, without
+/// the journal; these stand-ins have no memory endpoint, so they answer as
+/// `DurableRelay` does without opening a second journal writer. Opening one
+/// is not read-only: it saves the snapshot and settles interrupted work.
+fn project_memory_refusal(
+    request: &mj_core::relay::RelayRequestEnvelope,
+) -> Option<mj_core::relay::RelayResponseEnvelope> {
+    use mj_core::relay::RelayRequest;
+    matches!(
+        &request.request,
+        RelayRequest::ProjectMemorySnapshot
+            | RelayRequest::ProjectMemoryTransfer { .. }
+            | RelayRequest::InstallProjectMemorySnapshot { .. }
+            | RelayRequest::ReplaceProjectMemoryTree { .. }
+    )
+    .then(|| mj_core::relay::RelayResponseEnvelope {
+        request_id: request.request_id.clone(),
+        protocol_version: request.protocol_version,
+        body: mj_core::relay::relay_error(
+            mj_core::relay::RelayErrorCode::InvalidState,
+            "connection-only requests must be handled by the live relay transport",
+            false,
+            None,
+        ),
+    })
+}
+
 fn subagent_connection_response(
     request: &mj_core::relay::RelayRequestEnvelope,
 ) -> Option<mj_core::relay::RelayResponseEnvelope> {
@@ -741,7 +749,9 @@ pub fn serve_leased_relay() {
     // trailing newline before the body runs. End that line first so it
     // cannot glue itself onto the first protocol frame.
     println!();
-    let mut relay = None;
+    // The journal opens only together with its owner lock, which is held from
+    // the first session request to this process's exit.
+    let mut owned: Option<(std::fs::File, crate::relay::DurableRelay)> = None;
     {
         let marker = std::env::var_os("MJ_TEST_BLOCKED_REVIEWER");
         let mut input = std::io::stdin().lock();
@@ -1015,7 +1025,26 @@ pub fn serve_leased_relay() {
                 .unwrap();
                 continue;
             }
-            let relay = relay.get_or_insert_with(|| {
+            if let Some(refusal) = project_memory_refusal(&request) {
+                mj_core::relay::write_relay_frame(&mut output, &refusal).unwrap();
+                continue;
+            }
+            // Each connection to this fake is its own process with its own
+            // copy of the relay, where the real worker is one process that
+            // holds `worker.lock`. So the session's connection owns the
+            // journal the same way, and its successor waits here until the
+            // connection it replaced has finished its last request and
+            // exited: the client abandons a connection that timed out while
+            // the fake is still holding that request. Only the owner opens
+            // the journal, so it reads everything earlier owners wrote.
+            let (_, relay) = owned.get_or_insert_with(|| {
+                let lock = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .open(PathBuf::from(&root).join("journal-owner.lock"))
+                    .expect("open the test relay journal's owner lock");
+                lock.lock().expect("wait to own the test relay journal");
                 let mut relay = crate::relay::DurableRelay::open(
                     std::path::Path::new(&root),
                     LEASED_RELAY_SESSION,
@@ -1064,7 +1093,7 @@ pub fn serve_leased_relay() {
                             .unwrap();
                     }
                 }
-                relay
+                (lock, relay)
             });
             let complete_clear = PathBuf::from(&root).join("complete-clear");
             if std::env::var_os(CLEAR_MAILBOX_CONTROL).is_some() && complete_clear.exists() {
@@ -1214,4 +1243,12 @@ pub fn seed_source_relay(worker_root: &Path) -> PathBuf {
     .unwrap();
     drop(seed);
     source_relay
+}
+
+/// Keep a stand-in harness's real responder registration alive across relay requests.
+pub fn keep_question_live(
+    relay: &crate::relay::DurableRelay,
+    question: mj_core::elicitation::ElicitationRequest,
+) -> Box<dyn Send> {
+    relay.operator_away.keep_fixture_question_live(question)
 }

@@ -336,15 +336,6 @@ pub(crate) fn render_new_wizard(
         );
         let field_row = intro.len() as u16 + 1;
         let mut details = vec![Line::raw("")];
-        if wizard.profile_step_skipped
-            && dashboard
-                .offered_profiles()
-                .nth(wizard.profile)
-                .is_some_and(|(_, profile)| needs_guardian_warning(profile.kind))
-        {
-            details.extend(wrap_lines([guardian_footnote()], width));
-            details.push(Line::raw(""));
-        }
 
         if let Some(error) = &wizard.project_directory_error {
             details.extend(wrap_lines(
@@ -585,13 +576,6 @@ pub(crate) fn render_new_wizard(
                 ),
             );
         }
-    }
-    if wizard.step == WizardStep::Profile
-        && dashboard
-            .offered_profiles()
-            .any(|(_, profile)| needs_guardian_warning(profile.kind))
-    {
-        help.push(guardian_footnote());
     }
     if wizard.step == WizardStep::Profile {
         help.extend(missing_profile_help(dashboard));
@@ -981,24 +965,6 @@ pub(crate) fn render_review_wizard(
     if let Some(label) = &queue_label {
         lines.push(Line::raw(""));
         lines.push(Line::raw(label.clone()));
-    }
-    // Guardian targets rely on the harness's own approval mode rather than
-    // Hel-managed isolation.
-    if target.permission_mode() == Some(mj_core::config::PermissionMode::Guardian)
-        && let Some(kind) = dashboard
-            .config
-            .profiles
-            .get(profile_id)
-            .map(|profile| profile.kind)
-        && let Some(warning) = kind.unsandboxed_guardian_warning()
-    {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            format!("{} {warning}", theme::glyphs().warning),
-            Style::default()
-                .fg(theme::palette().error)
-                .add_modifier(Modifier::BOLD),
-        ));
     }
     lines.push(Line::raw(""));
     if can_attach {
@@ -1892,12 +1858,6 @@ pub(crate) fn render_resume_wizard(
                 help.push(picker_help(
                     "Same agent: the conversation continues natively.",
                 ));
-            }
-            if profiles
-                .iter()
-                .any(|(_, harness)| needs_guardian_warning(*harness))
-            {
-                help.push(guardian_footnote());
             }
             help.extend(missing_profile_help(dashboard));
             let step = format!(

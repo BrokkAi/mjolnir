@@ -4,7 +4,6 @@
 pub mod daemon;
 mod github_watch;
 pub mod pollers;
-pub mod recovery;
 pub mod review_host;
 pub use mj_server::server;
 pub mod server_runtime;

@@ -76,6 +76,19 @@ pub(super) async fn handle_action(
         DaemonAction::Configuration => Ok(DaemonReply::Configuration(Box::new(
             state.with_config(Clone::clone),
         ))),
+        DaemonAction::FirstRunSetupDue => {
+            // Not `blocking`: this only reads the setup marker and the
+            // configuration, so it takes no upgrade admission.
+            let due = mj_core::runtime::spawn_blocking(|| {
+                mj_setup::setup::automatic_setup_due(
+                    &mj_core::config::config_path(),
+                    &mj_core::config::data_dir(),
+                )
+            })
+            .await
+            .context("daemon first-run check task panicked")??;
+            Ok(DaemonReply::FirstRunSetupDue(due))
+        }
         DaemonAction::RunFirstRunSetup => {
             let report = blocking(|| {
                 let executor = mj_controller::targets::ProcessExecutor;
@@ -539,9 +552,9 @@ pub(super) async fn handle_action(
             // revision; a client-supplied detail may already be stale.
             Ok(DaemonReply::OptionalSessionState(None))
         }
-        DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
-            state.checkpoint_session_now(&session_id).await?,
-        )),
+        DaemonAction::CheckpointSession { .. } => {
+            anyhow::bail!(mj_client::daemon::REMOVED_CHECKPOINT_MESSAGE)
+        }
         DaemonAction::ProjectCatalog { refresh, retry } => Ok(DaemonReply::ProjectCatalog(
             state.project_catalog(refresh, retry).await?,
         )),
@@ -624,27 +637,8 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::RecoveryScan(scan))
         }
-        DaemonAction::AdoptRecovery {
-            session_id,
-            target_id,
-            profile,
-            bundle,
-            all_instances,
-        } => {
-            ensure_no_active_lifecycle(state)?;
-            let mut controller = blocking(Controller::load).await?;
-            controller
-                .adopt_orphan_worker(
-                    &session_id,
-                    &target_id,
-                    profile.as_deref(),
-                    bundle.as_deref(),
-                    all_instances,
-                    &ProcessExecutor,
-                )
-                .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
+        DaemonAction::AdoptRecovery(_) => {
+            bail!("adoption requires its dedicated cancellable connection")
         }
         DaemonAction::DestroyRecovery {
             session_id,
@@ -654,8 +648,7 @@ pub(super) async fn handle_action(
         } => {
             ensure_no_active_lifecycle(state)?;
             let admission = state
-                .recovery_observer
-                .gate
+                .session_gate
                 .enter_foreground(
                     &session_id,
                     "destroy recovered environment",
@@ -1198,8 +1191,7 @@ pub(super) async fn handle_action(
             let admission = if cleanup_operation_id.is_some() {
                 Some(
                     state
-                        .recovery_observer
-                        .gate
+                        .session_gate
                         .enter_foreground(
                             &session_id,
                             "retained Move source cleanup",
@@ -1352,6 +1344,7 @@ pub(super) fn upgrade_request_activity(
             // Answered from durable state, so it holds no daemon work and a
             // handoff does not wait for it; the client asks again.
             | DaemonAction::WaitCreateSession { .. }
+            | DaemonAction::AdoptRecovery(_)
             | DaemonAction::WikiSyncWatch { .. }
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
@@ -1366,6 +1359,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::ImportSession { .. }
             // Read-only and repeatable; the client reports an interrupted run.
             | DaemonAction::RunDoctor
+            | DaemonAction::FirstRunSetupDue
     ) {
         Ok(None)
     } else {

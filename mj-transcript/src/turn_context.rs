@@ -21,7 +21,24 @@ struct TurnContextState {
     background_inventory: Vec<mj_core::relay::BackgroundCommand>,
     native_agent_ids: Vec<String>,
     session_id: String,
+    /// Mjolnir guardian reviews in this request. A new request starts with
+    /// none; a recovery continues the same request and keeps them.
+    guardian_reviews: GuardianReviews,
 }
+
+/// Codex's per-turn guardian denial circuit breaker
+/// (`ext/guardian-reviewer/src/circuit_breaker.rs`): it trips once per request
+/// on 3 consecutive denials or 10 denials among the last 50 reviews.
+#[derive(Debug, Default)]
+struct GuardianReviews {
+    consecutive_denials: u32,
+    recent: std::collections::VecDeque<bool>,
+    tripped: bool,
+}
+
+const MAX_CONSECUTIVE_GUARDIAN_DENIALS: u32 = 3;
+const MAX_RECENT_GUARDIAN_DENIALS: usize = 10;
+const GUARDIAN_DENIAL_WINDOW: usize = 50;
 
 /// The prompt that became visible to the harness at this durable observation.
 /// A queued or unconfirmed steering prompt has not been delivered yet.
@@ -85,31 +102,35 @@ impl TurnContext {
     /// person's latest request, and Jev scored those turns better without it
     /// (.agents/docs/jev-still-open-20261106.md).
     pub fn reset(&self, command_id: Option<&str>, prompt: &str) {
-        self.reset_request(command_id, prompt);
+        self.reset_request(command_id, Some(prompt));
     }
 
     /// Returns whether this delivery establishes a request in the context.
-    fn reset_request(&self, command_id: Option<&str>, prompt: &str) -> bool {
+    fn reset_request(&self, command_id: Option<&str>, prompt: Option<&str>) -> bool {
         let recovery = command_id.is_some_and(mj_core::continuation::is_restart_continuation);
-        let user_prompt_tail =
+        let user_prompt_tail = prompt.map(|prompt| {
             if recovery || mj_core::continuation::is_user_authored_message(command_id, prompt) {
                 tail(prompt, USER_PROMPT_BYTES)
             } else {
                 String::new()
-            };
+            }
+        });
         let mut state = self.0.lock().expect("turn context lock poisoned");
         let generation = state.generation.wrapping_add(1);
         if recovery {
-            if state.user_prompt_tail.is_none() {
+            if state.user_prompt_tail.is_none()
+                && let (Some(user_prompt_tail), Some(prompt)) = (user_prompt_tail, prompt)
+            {
                 state.user_prompt_tail = Some(user_prompt_tail);
                 // The carried request precedes the retained replay suffix.
                 // Preserve that suffix and its partially observed answer.
                 state.summary.push_user(prompt);
                 state.summary.entries.rotate_right(1);
             }
-            // Recovery continues the same request and partial answer. Advance
-            // generation to reject stale classifier replies without erasing
-            // the latest user correction or the evidence from before restart.
+            // Recovery keeps the request, but delivery closes the interrupted
+            // message just as the transcript does. An unlabelled chunk from
+            // the new harness must not inherit the old message ID.
+            complete_message(&mut state);
             state.generation = generation;
             state.parent_activity = Some(std::time::Instant::now());
             return false;
@@ -119,7 +140,7 @@ impl TurnContext {
             parent_activity: Some(std::time::Instant::now()),
             decision_log: state.decision_log.clone(),
             authorization: state.authorization.clone(),
-            user_prompt_tail: Some(user_prompt_tail),
+            user_prompt_tail,
             background_commands: state.background_commands,
             queued_commands: state.queued_commands,
             background_inventory: std::mem::take(&mut state.background_inventory),
@@ -129,6 +150,28 @@ impl TurnContext {
             ..Default::default()
         };
         true
+    }
+
+    /// A known prompt delivery whose body may no longer be retained.
+    pub fn observe_prompt_delivery(&self, command_id: Option<&str>, prompt: Option<&str>) {
+        if self.reset_request(command_id, prompt)
+            && let Some(prompt) = prompt
+        {
+            self.0
+                .lock()
+                .expect("turn context lock poisoned")
+                .summary
+                .push_user(prompt);
+        }
+    }
+
+    /// Begin a turn the relay owner has identified as autonomous.
+    pub fn observe_autonomous_turn_start(&self) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        state.assistant_text_tail.clear();
+        state.last_completed_message.clear();
+        state.message_id = None;
+        state.generation = state.generation.wrapping_add(1);
     }
 
     /// Record durable transcript observations through the same path during live work and replay.
@@ -147,15 +190,31 @@ impl TurnContext {
             | RelayObservation::MailboxEventsDelivered {
                 steering: Some(_), ..
             } => {
-                if let Some(prompt) = prompt
-                    && self.reset_request(delivered_prompt_command_id(observation), prompt)
+                // A steering confirmation proves delivery even after its
+                // queue body was collected. Keep the reply boundary without
+                // inventing the missing prompt text.
+                if prompt.is_some()
+                    || !matches!(observation, RelayObservation::CommandStarted { .. })
                 {
-                    self.0
-                        .lock()
-                        .expect("turn context lock poisoned")
-                        .summary
-                        .push_user(prompt);
+                    self.observe_prompt_delivery(delivered_prompt_command_id(observation), prompt);
                 }
+            }
+            // ACP completion may precede native execution's actual end.
+            // Deliveries, autonomous starts and these durable bridge/native
+            // boundaries own the reply stream instead.
+            RelayObservation::SessionRestarted
+            | RelayObservation::HarnessTurnSettled {
+                prompt_in_flight: false,
+                ..
+            } => {
+                complete_message(&mut self.0.lock().expect("turn context lock poisoned"));
+            }
+            RelayObservation::ElicitationResolved {
+                reply: Some(_),
+                action,
+                ..
+            } if action != mj_core::elicitation::OPERATOR_AWAY_ACTION => {
+                complete_message(&mut self.0.lock().expect("turn context lock poisoned"));
             }
             RelayObservation::SessionUpdate { update } => self.observe(update),
             RelayObservation::TerminalOutput {
@@ -238,6 +297,21 @@ impl TurnContext {
         }
     }
 
+    /// Restore the latest human instructions without changing replayed reply boundaries.
+    pub fn restore_user_prompt_tail(&self, history: &mj_core::assessment::ContextHistory) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        state.user_prompt_tail = Some(
+            history
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "user")
+                .map(|message| tail(&message.text, USER_PROMPT_BYTES))
+                .unwrap_or_default(),
+        );
+        state.generation = state.generation.wrapping_add(1);
+    }
+
     pub fn authorization_context(&self) -> Option<mj_core::assessment::ContextHistory> {
         self.0
             .lock()
@@ -277,7 +351,13 @@ impl TurnContext {
         state.summary.observe(update);
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
-                let id = chunk.message_id.as_ref().map(ToString::to_string);
+                // Like authorization history, an omitted ID continues the
+                // current message; explicit IDs establish a new boundary.
+                let id = chunk
+                    .message_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .or_else(|| state.message_id.clone());
                 if id != state.message_id {
                     complete_message(&mut state);
                     state.message_id = id;
@@ -305,6 +385,49 @@ impl TurnContext {
         let mut state = self.0.lock().expect("turn context lock poisoned");
         state.summary.observe_terminal(record);
         state.generation = state.generation.wrapping_add(1);
+    }
+
+    /// The retained transcript as the guardian reviewer reads it: recent
+    /// context first, within `limit` bytes.
+    pub fn render_transcript(&self, limit: usize) -> String {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .summary
+            .render(limit)
+    }
+
+    /// Whether the guardian's denials tripped the breaker in this request, so
+    /// its remaining approvals go to the person.
+    pub fn guardian_tripped(&self) -> bool {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .guardian_reviews
+            .tripped
+    }
+
+    /// Record one completed guardian review in this request. Returns whether
+    /// this denial tripped the breaker.
+    pub fn record_guardian_review(&self, denied: bool) -> bool {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        let reviews = &mut state.guardian_reviews;
+        reviews.consecutive_denials = if denied {
+            reviews.consecutive_denials.saturating_add(1)
+        } else {
+            0
+        };
+        reviews.recent.push_back(denied);
+        if reviews.recent.len() > GUARDIAN_DENIAL_WINDOW {
+            reviews.recent.pop_front();
+        }
+        let recent_denials = reviews.recent.iter().filter(|denied| **denied).count();
+        let trips = denied
+            && !reviews.tripped
+            && (reviews.consecutive_denials >= MAX_CONSECUTIVE_GUARDIAN_DENIALS
+                || recent_denials >= MAX_RECENT_GUARDIAN_DENIALS);
+        reviews.tripped |= trips;
+        trips
     }
 
     pub fn mark_earlier_history_omitted(&self) {

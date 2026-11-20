@@ -24,6 +24,135 @@ pub enum HarnessKind {
     Antigravity,
 }
 
+/// The independent subscription pools returned by Antigravity's `/usage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AntigravityQuotaPool {
+    Gemini,
+    Claude,
+    /// Gemini 4 Argon's weekly allowance. Pro plans report it as its own
+    /// group, and an Argon turn draws on it alone; agy says Ultra plans count
+    /// Argon in the Gemini pool instead.
+    Argon,
+}
+
+impl AntigravityQuotaPool {
+    pub const ALL: [Self; 3] = [Self::Gemini, Self::Claude, Self::Argon];
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Gemini => "Ge",
+            Self::Claude => "Cl",
+            Self::Argon => "Ar",
+        }
+    }
+    /// The pool's name where there is room for one, as on a quota bar.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Gemini => "Gemini",
+            Self::Claude => "Claude & GPT",
+            Self::Argon => "Argon",
+        }
+    }
+    /// The start of this pool's bucket ids. Argon's (`gemini-argon-`) also
+    /// starts with Gemini's, so a bucket belongs to the longest match.
+    pub const fn bucket_prefix(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini-",
+            Self::Claude => "3p-",
+            Self::Argon => "gemini-argon-",
+        }
+    }
+    /// The pool's own scope, which also names it in a profile's settings.
+    pub const fn model_scope(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini",
+            Self::Claude => "claude,gpt",
+            // Orchestrator (Argon) is `gemini-pro-orchestrator-g1-pro`. Its
+            // turns draw on the Argon bucket, and it hands implementation to
+            // Gemini 4 Hydrogen, so Gemini's scope keeps it as well.
+            Self::Argon => "argon,g1-pro",
+        }
+    }
+    /// The scope a reading of this pool carries. When the account reports a
+    /// separate Argon pool, Gemini 4 Argon draws only on that pool, so
+    /// Gemini's allowance leaves it out.
+    pub const fn reported_scope(self, separate_argon: bool) -> &'static str {
+        match self {
+            Self::Gemini if separate_argon => "gemini,!argon",
+            _ => self.model_scope(),
+        }
+    }
+    /// The pool whose reading carries `scope`.
+    pub fn of_scope(scope: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|pool| scope == pool.reported_scope(false) || scope == pool.reported_scope(true))
+    }
+}
+
+/// True when `model` contains one of the comma-separated scope fragments and
+/// none of the fragments written with a leading `!`.
+pub fn model_matches_scope(model: &str, scope: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    let contains = |fragment: &str| model.contains(&fragment.to_ascii_lowercase());
+    let fragments = scope
+        .split(',')
+        .map(str::trim)
+        .filter(|fragment| !fragment.is_empty());
+    let mut included = false;
+    for fragment in fragments {
+        match fragment.strip_prefix('!') {
+            Some(excluded) if !excluded.is_empty() && contains(excluded) => return false,
+            Some(_) => {}
+            None => included |= contains(fragment),
+        }
+    }
+    included
+}
+
+/// The models Mjolnir offers from a profile: its `models` allow-list (empty
+/// offers everything) minus models in scopes the profile turned off. Built by
+/// [`HarnessProfile::model_offer`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelOffer {
+    pub models: Vec<String>,
+    pub excluded_scopes: Vec<String>,
+}
+
+impl ModelOffer {
+    /// Whether this offer leaves every advertised model in place.
+    pub fn is_unrestricted(&self) -> bool {
+        self.models.is_empty() && self.excluded_scopes.is_empty()
+    }
+
+    /// Whether `model` is offered, before the current-model exemption.
+    pub fn allows(&self, model: &str) -> bool {
+        (self.models.is_empty() || self.models.iter().any(|listed| listed == model))
+            && !self.excludes(model)
+    }
+
+    /// Whether `model` is in a scope the profile turned off. Only the
+    /// current-model exemption in [`crate::worker_launch::ProfileConfig::restricted_to`]
+    /// still offers such a model: a session already on it, or a harness whose
+    /// own default is in the scope, keeps it until someone switches.
+    pub fn excludes(&self, model: &str) -> bool {
+        self.excluded_scopes
+            .iter()
+            .any(|scope| model_matches_scope(model, scope))
+    }
+
+    /// Why a profile named `profile` refuses `model`, naming the setting.
+    pub fn refusal(&self, profile: &str, model: &str) -> String {
+        if self.excludes(model) {
+            format!(
+                "model {model:?} uses profile {profile:?}'s third-party quota pool, which \
+                 `third_party_models = false` turns off"
+            )
+        } else {
+            format!("model {model:?} is hidden by profile {profile:?}'s models setting")
+        }
+    }
+}
+
 /// The operating system of the machine a harness's own CLI runs on, as far as
 /// where that harness keeps its login is concerned. See
 /// [`HarnessKind::keeps_login_in_home`].
@@ -141,6 +270,16 @@ impl PermissionMode {
             Self::Yolo => ExecutionPolicy::Unconstrained,
         }
     }
+}
+
+/// Who answers a harness's tool approvals on a target that keeps configured
+/// approvals. See [`HarnessKind::guardian`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardianReviewer {
+    /// The harness's own reviewer (Codex's guardian, Claude's Auto mode, …).
+    Harness,
+    /// The Mjolnir worker reviews each permission request the harness sends.
+    Mjolnir,
 }
 
 /// The Claude Code permission mode a Claude profile's sessions run in on
@@ -1187,28 +1326,22 @@ impl HarnessKind {
         Ok(())
     }
 
-    /// Whether this harness confines what it runs and reviews an action that
-    /// would leave that confinement before running it. Only such a harness is
-    /// fit for a raw target, where nothing else contains it.
+    /// Who reviews this harness's tool approvals under configured approvals
+    /// (a raw target), so the person is not asked about every action.
     ///
-    /// A permission prompt alone is not a guardian. OpenCode asks before
-    /// tools according to its permission rules, but runs every command
-    /// directly on the host; its own `SECURITY.md` says its permission system
-    /// is not a sandbox.
-    pub const fn supports_guardian_approvals(self) -> bool {
-        matches!(self, Self::Codex | Self::Claude | Self::Grok | Self::Muse)
-    }
-
-    /// Shared warning for selecting a harness without guardian approvals on a
-    /// raw target. Containers and remote instances run unconstrained by design
-    /// and rely on target isolation instead.
-    pub fn unsandboxed_guardian_warning(self) -> Option<String> {
-        (!self.supports_guardian_approvals()).then(|| {
-            format!(
-                "DANGER: {} has no guardian approval mode. Do not run it on a raw, unsandboxed target.",
-                self.display_name()
-            )
-        })
+    /// Codex, Claude Code, Grok Build, Muse Code and Antigravity ship their
+    /// own reviewer, selected through [`Self::execution_enforcement`]. Kimi
+    /// Code, OpenCode and DSH ship none: they only ask, and a permission
+    /// prompt alone is not a guardian. The Mjolnir worker answers their
+    /// permission requests with Codex's guardian policy instead, on a
+    /// read-only session of the same harness and model.
+    pub const fn guardian(self) -> GuardianReviewer {
+        match self {
+            Self::Codex | Self::Claude | Self::Grok | Self::Muse | Self::Antigravity => {
+                GuardianReviewer::Harness
+            }
+            Self::Kimi | Self::OpenCode | Self::Dsh => GuardianReviewer::Mjolnir,
+        }
     }
 
     /// The launch flag the bridge command line carries, if any.
@@ -1575,6 +1708,12 @@ pub struct HarnessProfile {
     /// own allow-lists. The profile's current model is always offered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+    /// Whether an Antigravity profile uses its third-party quota pool (the
+    /// `3p-` buckets in `agy /usage`), which serves Claude and GPT models.
+    /// False offers only Gemini models and hides that pool's quota. Only
+    /// valid on an Antigravity profile.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub third_party_models: bool,
     /// Consume legacy per-profile choices without migrating them to global settings.
     #[serde(default, rename = "subagents", skip_serializing)]
     pub legacy_subagents: Option<serde_json::Value>,
@@ -1706,6 +1845,7 @@ impl HarnessProfile {
     pub fn new(kind: HarnessKind, home: impl Into<PathBuf>) -> Self {
         Self {
             enabled: true,
+            third_party_models: true,
             kind,
             home: home.into(),
             environment: Default::default(),
@@ -1976,13 +2116,6 @@ impl HarnessProfile {
         }
     }
 
-    /// Whether this profile can review actions that leave the sandbox before
-    /// running them. Codex runs its Guardian reviewer against whatever provider
-    /// the profile names, so the answer depends only on the harness kind.
-    pub fn supports_guardian_approvals(&self) -> bool {
-        self.kind.supports_guardian_approvals()
-    }
-
     pub(super) fn validate(&self, id: &str) -> Result<()> {
         validate_id("profile", id)?;
         if self.kind.nested_home() {
@@ -2054,10 +2187,37 @@ impl HarnessProfile {
         if self.claude_permission_mode.is_some() && self.kind != HarnessKind::Claude {
             bail!("profile {id:?}: `claude_permission_mode` applies only to a Claude profile");
         }
+        if !self.third_party_models && self.kind != HarnessKind::Antigravity {
+            bail!("profile {id:?}: `third_party_models` applies only to an Antigravity profile");
+        }
         if let Some(aws) = &self.aws {
             aws.validate(id)?;
         }
         Ok(())
+    }
+
+    /// The Antigravity quota pools this profile uses; empty for other harnesses.
+    pub fn antigravity_pools(&self) -> Vec<AntigravityQuotaPool> {
+        if self.kind != HarnessKind::Antigravity {
+            return Vec::new();
+        }
+        AntigravityQuotaPool::ALL
+            .into_iter()
+            .filter(|pool| self.third_party_models || *pool != AntigravityQuotaPool::Claude)
+            .collect()
+    }
+
+    /// The single interpretation of `models` and `third_party_models` that
+    /// catalogues, pickers and model refusals share.
+    pub fn model_offer(&self) -> ModelOffer {
+        ModelOffer {
+            models: self.models.clone(),
+            excluded_scopes: if self.kind == HarnessKind::Antigravity && !self.third_party_models {
+                vec![AntigravityQuotaPool::Claude.model_scope().to_owned()]
+            } else {
+                Vec::new()
+            },
+        }
     }
 
     /// Supply the provider keys this profile's harness reads from its

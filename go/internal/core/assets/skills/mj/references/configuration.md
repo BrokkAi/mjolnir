@@ -1,0 +1,1359 @@
+# Configuration reference
+
+Mjolnir keeps per-user configuration in `config.toml`. Workspaces, sessions,
+prompt history, per-session resource choices, drafts, and read markers live in
+Mjolnir's state database instead; they are not fields in this file.
+
+Open **Settings** with **prefix+s** to add or edit agent profiles, SSH and EC2
+connections, projects, runtime overrides, and interface options. The command
+palette (**prefix+:**) also provides **Manage agent profiles**, **Manage
+machines**, and **Manage runtimes**. No setup command or file editing is
+required. **Detect profiles** on the **Agent Profiles** page can import existing
+agent accounts for review.
+
+Standard local targets are supplied automatically: localhost, Podman, Docker,
+and Apple container on macOS. Saved entries override their defaults. The new,
+resume, and move target pickers check every target in the background, including
+SSH connectivity and AWS credentials and launch templates. Pending or failed
+checks block Next and show the reason; press **prefix+shift+r** to recheck after fixing it.
+Checks do not start stopped services, and launch performs a final preflight.
+
+Settings refuses to remove or rewrite configuration used by an active session;
+add an alternative entry or stop the session first. Global defaults and profile
+enablement remain editable. `mj setup` reruns automatic agent and repository
+discovery; direct `config.toml` editing also remains available.
+
+If an active session references a missing profile, bundle, or target, Mjolnir
+still opens and marks that session as needing configuration repair. Select it
+and press Enter for repair details, its retained transcript, or Settings.
+The web session menu also provides repair guidance. Restore the named entry in
+Settings and retry. **Detect profiles** can rediscover installations, but cannot
+reconstruct an arbitrary deleted bundle or custom target. Other
+sessions remain accessible, and configuration diagnostics do not change the
+affected session's stored lifecycle state.
+
+See [Profiles and harnesses](/profiles/), [Workspaces and bundles](/workspaces-bundles/),
+and [Targets](/targets/) for the concepts behind these fields.
+
+## Location and version
+
+The default paths follow the operating system's configuration and data directories:
+
+| File | Linux (default XDG directories) | macOS |
+| --- | --- | --- |
+| Configuration | `~/.config/mjolnir/config.toml` | `~/Library/Application Support/mjolnir/config.toml` |
+| State database | `~/.local/share/mjolnir/mj.sqlite3` | `~/Library/Application Support/mjolnir/mj.sqlite3` |
+
+Set `MJ_CONFIG_DIR` to replace the configuration directory; Mjolnir appends
+`config.toml` to it. `MJ_DATA_DIR` replaces the data directory.
+
+Pass `--instance <name>` (short `-i`, or `MJ_INSTANCE=<name>`) to run a fully
+isolated copy: configuration, database, daemon, and logs move under
+`instances/<name>` inside the default directories. For `--instance dev`:
+
+| File | Linux | macOS |
+| --- | --- | --- |
+| Configuration | `~/.config/mjolnir/instances/dev/config.toml` | `~/Library/Application Support/mjolnir/instances/dev/config.toml` |
+| State database | `~/.local/share/mjolnir/instances/dev/mj.sqlite3` | `~/Library/Application Support/mjolnir/instances/dev/mj.sqlite3` |
+
+On macOS, configuration and data share the same instance directory under
+`Application Support`. Quote paths containing spaces when using them in a shell.
+Each instance runs its own daemon, so parallel instances never share sessions.
+The name may only use ASCII
+letters, digits, `.`, `-`, and `_`. Explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR`
+still take precedence over the instance directories.
+
+Every current file starts with the required schema version:
+
+```toml
+version = 23
+```
+
+The top-level keys are listed below. The legacy `[mailbox] enabled` switch is
+also accepted when reading and is saved under `[github.watch] enabled`.
+
+| Key | TOML type | Required | Default | Purpose |
+| --- | --- | --- | --- | --- |
+| `version` | integer | yes | none | Configuration schema version; use `23`. |
+| `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
+| `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed in the resume dialog. A stopped session whose failure needs you also stays in Sessions until dismissed, resumed, or destroyed. |
+| `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
+| `theme` | string enum | no | `"midnight"` | Terminal color palette: `auto`, `midnight`, `light`, `darcula`, `high-contrast`, `high-contrast-light`, `colorblind-dark`, `colorblind-light`, `catppuccin-mocha`, `catppuccin-latte`, `campbell`, `one-half-dark`, `one-half-light`, `solarized-dark`, `solarized-light`, `terminal-dark`, `terminal-light`, or `mono` (no colors). `auto` asks the terminal for its background color at startup and uses `midnight` on a dark background and `light` on a light one, or `midnight` when the terminal does not answer. The colorblind palettes keep failures distinct from success and warnings with red-green or blue-yellow color blindness. The Campbell, One Half, and Solarized palettes match the Windows Terminal schemes of the same name; `terminal-dark` and `terminal-light` use the terminal's own background and 16 ANSI colors, with a neutral gray for secondary text. A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
+| `phone` | table | no | default `[phone]` values | Browser viewer settings. |
+| `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
+| `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
+| `review` | table | no | default `[review]` values | Reviewer settings for push review. |
+| `jev` | table | no | enabled | Hosted turn classification and the quota recovery that depends on it. |
+| `daemon` | table | no | runs on the host | Where the daemon runs: on this computer or in a Podman or Docker container. |
+| `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
+| `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
+| `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
+| `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
+| `github` | table | no | App absent; watcher enabled | GitHub App credentials and event watcher settings. |
+| `machines` | table of named tables | no | empty | Named hosts sessions run on. `local` is implied even when it is absent. |
+| `targets` | table of named tables | no | empty | Named runtimes, each naming the machine it runs on. |
+| `subagents` | table | no | default `[subagents]` values | Global task choices and limits for Mjolnir-owned child agents. |
+| `build_cache` | table | no | none | Legacy compatibility input. A global opt-out is migrated to the existing machines and omitted on save. |
+
+The terminal Settings screen groups the prefix key, `sessions_side`, `spinner`,
+and `theme` under **Interface**. This is a presentation grouping: the prefix
+remains at `keys.prefix`, while the other three fields remain at the top level
+in `config.toml`.
+
+A missing or empty file is treated as an empty version 22 configuration. Older
+versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
+fields in the current top-level, viewer, review, profile, bundle, and repository
+schemas are errors. If a file declares a version newer than this build
+understands, Mjolnir salvages the sections it can read but treats the file as
+read-only. `mj doctor` reports that state; update Mjolnir before changing it.
+
+Profile, bundle, repository, machine, and runtime IDs all use the same rule: 1–64 ASCII
+letters, digits, `.`, `-`, or `_`. The IDs `.` and `..` are not allowed. IDs are
+the TOML table names, for example `work` in `[profiles.work]`.
+
+Sessions are created explicitly through the New session wizard or the CLI/API.
+Opening an empty workspace does not create a session. Older `[startup]` settings
+are ignored and removed the next time configuration is saved.
+
+## Advanced display options `[advanced]`
+
+The optional `[advanced]` table controls detail that is useful while diagnosing
+activity without changing how sessions run:
+
+```toml
+[advanced]
+detailed_activity_clocks = false
+session_order = "project"
+# symbols = "ascii"
+```
+
+| Field | TOML type | Default | Behavior |
+| --- | --- | --- | --- |
+| `detailed_activity_clocks` | boolean | `false` | When enabled, normal session rows and the conversation header show separate turn, step, and background clocks. |
+| `session_order` | `"project"` or `"priority"` | `"project"` | `project` groups sessions under a heading per project in creation order. `priority` lists sessions that need you first (waiting, failed, unread, working, idle) with no project headings. |
+| `symbols` | `"unicode"` or `"ascii"` | unset | Which glyphs the dashboard draws status marks, borders, chart bars, and separators with. Unset follows the terminal: ASCII when `TERM` is `linux` or the locale (`LC_ALL`, `LC_CTYPE`, `LANG`) names no UTF-8 encoding, Unicode otherwise. |
+
+The terminal Settings screen edits these settings under **Advanced**. Detailed
+clocks do not change how sessions run: the normal `Running` status continues
+across the originating turn and its background work.
+
+## Keys `[keys]`
+
+The optional `[keys]` table rebinds the prefix key and every command it
+drives. Mjolnir follows tmux's model, described in [Terminal
+surface](/terminal-surface/#prefix-key): press the prefix, release it, then
+press a second key. An edit here takes effect the next time the daemon reloads
+the file, within about a second. The terminal Settings screen exposes the prefix
+under **Interface**; edit the command bindings by hand.
+
+```toml
+[keys]
+prefix = "ctrl+b"
+new_session = "prefix+c"
+refresh = ["prefix+shift+r", "f5"]
+switch_workspace = "prefix+1..9"
+pane_preset = ""
+```
+
+Each field takes one key string or a list of them; a list binds every string
+in it to the same command. An empty string (`""`) unbinds a default. The
+`1..9` range form, optionally with a leading modifier such as `ctrl+1..9`, is
+accepted only for `switch_workspace`; it expands to nine bindings, one per
+digit.
+
+A key string is modifier tokens joined by `+`, then a key name. Modifiers are
+`ctrl`/`control`, `alt`/`option`/`meta`, `shift`, and `cmd`/`command`/`super`.
+Key names include `space`, `enter`/`return`, `esc`/`escape`, `tab`,
+`backspace`/`bs`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown`, the
+arrow keys, `f1`–`f12`, punctuation names such as `slash`, `semicolon`, and
+`backtick`, and any single character. An uppercase letter is read as the
+lowercase letter plus `shift`. A binding that should fire only after the
+prefix key carries a `prefix+` marker, for example `prefix+shift+n`; a
+binding written without that marker fires directly, with no prefix.
+
+The default bindings:
+
+| Field | Default | Action |
+| --- | --- | --- |
+| `prefix` | `ctrl+b` | The prefix key itself |
+| `help` | `prefix+?` | Open the command palette (legacy alias) |
+| `settings` | `prefix+s` | Open Settings |
+| `detach` | `prefix+q` | Detach this terminal |
+| `new_session` | `prefix+c` | Open the session creation wizard |
+| `resume` | `prefix+g` | Open the session dialog on every running session, with the resume, import, and archive lists on its other tabs |
+| `workspace_manager` | `prefix+shift+n` | Open workspace management |
+| `focus_workspaces` | `prefix+w` | Focus the workspace tab row |
+| `next_workspace` | `prefix+n` | Select the next workspace |
+| `previous_workspace` | `prefix+p` | Select the previous workspace |
+| `switch_workspace` | `prefix+1..9` | Select a workspace by number |
+| `next_pane` | `prefix+tab` | Focus the next support pane |
+| `previous_pane` | `prefix+shift+tab` | Focus the previous support pane |
+| `pane_size` | `prefix+shift+z` | Cycle the focused support pane's size |
+| `pane_preset` | `prefix+b` | Toggle the dashboard pane preset |
+| `refresh` | `prefix+shift+r` | Refresh target capacity and profile quota |
+| `palette` | `prefix+:` | Open the command palette |
+| `cancel_operation` | `prefix+shift+c` | Cancel an in-flight launch, resume, or stop |
+| `mark_all_read` | `prefix+a` | Mark unread session activity as read |
+| `next_attention` | `prefix+o` | Visit the next session that needs you |
+| `previous_attention` | `prefix+shift+o` | Visit the previous session that needs you |
+| `web_viewer` | `prefix+u` | Show the web viewer address and access code |
+| `rename_session` | `prefix+shift+t` | Rename the selected session |
+| `toggle_transcript_rendering` | `prefix+t` | Toggle rendered/raw transcript |
+| `toggle_dictation` | `prefix+m` | Start or stop dictation |
+| `changed_files` | `prefix+d` | List the selected session's changed files |
+| `open_subagents` | `prefix+shift+a` | Show the selected session's sub-agents |
+| `session_actions` | `prefix+.` | Open the selected session's actions menu (also `.` on the Sessions pane) |
+| `interrupt_turn` | `prefix+i` | Interrupt the selected session's running turn (Esc in the composer does the same) |
+| `split_vertical` | `prefix+v` | Open the selected session in a pane beside this one |
+| `split_horizontal` | `prefix+-` | Open the selected session in a pane below this one |
+| `close_pane` | `prefix+x` | Close the conversation pane you are in |
+| `focus_pane_left` | `prefix+h` | Move the keyboard to the pane on the left |
+| `focus_pane_down` | `prefix+j` | Move the keyboard to the pane below |
+| `focus_pane_up` | `prefix+k` | Move the keyboard to the pane above |
+| `focus_pane_right` | `prefix+l` | Move the keyboard to the pane on the right |
+| `zoom` | `prefix+z` | Fill the conversation area with the pane you are in, or put the others back |
+| `last_pane` | `prefix+;` | Move the keyboard back to the pane it was in before |
+| `resize_mode` | `prefix+r` | Enter resize mode: arrow keys or `h`/`j`/`k`/`l` move the pane border until Esc |
+| `swap_pane_left` | `prefix+shift+h` | Swap the pane you are in with the pane on the left |
+| `swap_pane_down` | `prefix+shift+j` | Swap the pane you are in with the pane below |
+| `swap_pane_up` | `prefix+shift+k` | Swap the pane you are in with the pane above |
+| `swap_pane_right` | `prefix+shift+l` | Swap the pane you are in with the pane on the right |
+| `rename_workspace` | `prefix+shift+w` | Rename the current workspace in the workspace dialog |
+| `close_workspace` | `prefix+shift+d` | Close the current workspace from the workspace dialog |
+| `suspend_session` | `prefix+shift+x` | Suspend the selected session (asks first) |
+| `restart_session` | unbound | Restart the selected session |
+| `move_session` | unbound | Move the selected session to another target |
+| `destroy_session` | unbound | Delete the selected session |
+| `container_settings` | unbound | Edit container settings for the selected session |
+| `manage_profiles` | unbound | Open profile management |
+| `manage_targets` | unbound | Open target management |
+| `manage_machines` | unbound | Open machine management |
+| `restart_daemon` | unbound | Restart the Mjolnir daemon |
+| `notice_log` | unbound | Show the last notices the footer reported |
+| `change_go_setup` | unbound | Change the `mj go` fast-start setup |
+| `cycle_spinner` | unbound | Cycle the activity spinner style |
+| `resize_pane_left` | unbound | Move the conversation pane's border left |
+| `resize_pane_down` | unbound | Move the conversation pane's border down |
+| `resize_pane_up` | unbound | Move the conversation pane's border up |
+| `resize_pane_right` | unbound | Move the conversation pane's border right |
+
+The actions listed as unbound have no default key because they are
+destructive, infrequent, or fine adjustments that a mis-hit key should not run;
+use the command palette (`prefix+:`) instead, or bind them here.
+
+The conversation-pane keys follow herdr and tmux; see [Conversation
+panes](/terminal-surface/#conversation-panes). `prefix+-` can also be written
+`prefix+minus`.
+
+`Config::validate` rejects an invalid `[keys]` table fatally, the same as any
+other configuration error, with one exception: a binding you write silently
+displaces a default binding on the same key, because rebinding a command onto
+a key another command defaults to is the normal way to move a key.
+
+- The prefix must be a modified chord (carrying `ctrl`, `alt`, or `super`) or
+  a function key; a bare letter or a `shift`-only combination is rejected.
+- A direct binding (no `prefix+` marker) on an unmodified printable character
+  is rejected, because the composer reads that key as text; write
+  `"prefix+<key>"` instead.
+- A direct binding on `ctrl+c` or `ctrl+v` is rejected: the dashboard and
+  composer already treat them as cancel and paste.
+- A direct binding whose key equals the prefix is rejected with `the prefix
+  key cannot also be a direct binding`, because that key already arms the
+  prefix and would never reach the command.
+- A prefix binding whose key equals the prefix itself is rejected, because
+  that combination is reserved for sending the literal prefix key through
+  (see [Terminal surface](/terminal-surface/#prefix-key)).
+- Two user-written bindings on the same key is rejected with an error naming
+  both fields, for example `keys.pane_preset = "prefix+space": already bound
+  by keys.help`.
+
+This key-string syntax matches [herdr](https://github.com/herdrdev/herdr)'s
+own `[keys]` table, so a line can be copied between the two configuration
+files unchanged.
+
+## Notifications `[notify]`
+
+The optional `[notify]` table controls how the terminal dashboard reports a
+session you are not looking at when it asks a question, fails, or finishes
+with an answer you have not read. The session whose conversation is on
+screen never notifies.
+
+```toml
+[notify]
+mode = "terminal"
+bell = true
+delay_seconds = 2
+title = true
+```
+
+| Field | TOML type | Default | Behavior |
+| --- | --- | --- | --- |
+| `mode` | `"off"`, `"terminal"`, or `"system"` | `"terminal"` | `terminal` rings the terminal bell, which reaches you through SSH and multiplexers. `system` also posts a desktop notification through `osascript` on macOS, `notify-send` on Linux, or a PowerShell toast on Windows. `off` reports nothing. |
+| `bell` | boolean | `true` | Whether each notification rings the terminal bell. Turn it off with `mode = "system"` for silent desktop notifications. |
+| `delay_seconds` | integer | `2` | How long a session must keep needing you before it is reported, so a question the agent answers itself stays quiet. |
+| `title` | boolean | `true` | Keep the terminal window title showing the counts, for example `mj · 2 waiting · 1 unread`, independently of `mode`. |
+
+The terminal Settings screen edits these settings under **Notifications**.
+
+## Web viewer `[phone]`
+
+The historical section name remains `phone`, although it controls the web
+viewer.
+
+```toml
+[phone]
+enabled = true
+bind = "127.0.0.1:3765"
+tailscale_detect = true
+# tls_cert = "/absolute/path/fullchain.pem"
+# tls_key = "/absolute/path/private-key.pem"
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `true` | Starts the viewer with the daemon. |
+| `bind` | string | no | `"127.0.0.1:3765"`; a named instance uses a port in 38000–38999 | Must parse as a numeric socket address, including a port. |
+| `tailscale_detect` | boolean | no | `true` | Allows automatic trusted `ts.net` certificate discovery and renewal. |
+| `tls_cert` | path string | no | unset | Certificate-chain path. Must be paired with `tls_key`. |
+| `tls_key` | path string | no | unset | Private-key path. Must be paired with `tls_cert`. |
+
+A named instance (`MJ_INSTANCE=<name>` or `mj --instance <name>`) that does not
+set `bind` listens on `127.0.0.1` at a port from 38000 to 38999 computed from
+its name. The port stays the same across daemon restarts, so a bookmarked
+login link keeps working, and it does not collide with the default instance's
+port 3765. If the port is taken anyway, for example by another named instance
+whose name maps to the same port, the viewer reports the conflict and gives the
+exact `bind` line to add under `[phone]`. The `mj` commands that use the HTTP API,
+such as `mj sessions`, `mj prompt` and `mj message`, need the viewer's listener and fail until
+the conflict is resolved.
+
+A non-loopback `bind` is rejected unless both explicit TLS paths are present.
+When Tailscale detection succeeds, Mjolnir may advertise a secure non-loopback
+listener without changing the configured loopback fallback. Explicit TLS takes
+precedence. See [Web viewer](/web-viewer/) for access and login.
+
+## Automatic review `[review]`
+
+```toml
+[review]
+[[review.reviewers]]
+model = "gpt-6.10-terra"
+effort = "high"
+
+[[review.reviewers]]
+model = "gpt-6.1-sol"
+effort = "medium"
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `reviewers` | array of tables | no | empty | Up to three choices, each with a nonempty `model` and optional `effort`. Each choice is served by an enabled profile offering that model and effort. |
+
+An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: Terra at high effort plus Sol at medium effort; two Sonnet reviewers at high effort; two DeepSeek Pro reviewers at high effort; two Grok reviewers at high effort; or two Kimi reviewers at high effort. Other providers, including Gemini, GLM, and Muse, use two copies of their best advertised full model at high effort. When Terra and Sol are available, Anthropic models are not added. Within a family, full models are preferred over reduced variants such as Flash or Mini, then subscription offerings win over usage-priced offerings, then models offered by more enabled profiles, then the newest advertised version. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
+
+Push review is available for Claude Code, Codex, DSH, Antigravity, and Kimi primaries. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
+
+Older `enabled`, `count`, `profile`, `model`, `effort`, and `tier` settings remain readable. Saving writes the new reviewer list. An old explicit model becomes up to three reviewer choices. On daemon startup, an old Auto selection is upgraded once after capability discovery and saved as chosen reviewer rows, or as an empty list when no model qualifies.
+
+`mj new` and `mj import <harness>` accept `--review off|push` and repeatable `--reviewer MODEL[:EFFORT]` (up to three). A session-level reviewer choice replaces `[review]` for that session and enables review unless the session uses `--review off`. `/review` starts a push review of committed work.
+
+In the terminal, these review fields are edited inside **Settings** so one Save or
+Cancel applies to the entire configuration draft. Settings can discover the
+selected review profile's supported model and effort choices and filters the
+profile list to compatible reviewer profiles.
+
+## Where the daemon runs `[daemon]`
+
+In the terminal or the web UI this is **Settings → Setup → Daemon**. Saving a
+change moves the daemon at once; running sessions keep going.
+
+```toml
+[daemon]
+runtime = "podman"
+image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+mounts = ["/srv/projects"]
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `runtime` | string | no | `"host"` | `"host"` runs `mj daemon-run` as a process on this computer. `"podman"` or `"docker"` runs it in a container of that engine. Container runtimes need Linux; elsewhere the daemon runs on the host and says so. |
+| `image` | string | no | this release's agent-dev image | The daemon container's image. |
+| `mounts` | array of absolute paths | no | `[]` | Further host directories the daemon container sees at the same path. |
+
+The daemon in the container is the image's own `mj`, built in the image
+from the same commit as your `mj`. Mjolnir uses an image only when its
+`org.brokk.mjolnir.revision` label is your build's revision: the configured
+`image`, or with none configured this release's agent-dev image or any local
+image carrying that label. Release images always match their release. For a
+development build, `scripts/build-agent-dev-image.sh docker` (or `podman`)
+builds a matching image from the checkout. Without one the daemon runs on
+this computer and says why.
+
+The daemon container is one long-lived container per instance. It uses this
+computer's network and process namespaces and runs as your own user, so
+clients reach the daemon at the same loopback address and the same process ID
+as a host daemon. It mounts your home directory, Mjolnir's data and settings
+directories, `/tmp` and your runtime directory at their host paths, plus
+`mounts`. Local sessions run in the container too, with the image's tools and
+worker, and keep running when the daemon is replaced. Container sessions reach
+the host's engine through its socket: Docker's `/var/run/docker.sock`, or your
+Podman socket, which Mjolnir starts with `systemctl --user start podman.socket`
+when it is not running. A change of image or mounts gets a new container. The
+previous container is removed once no session runs in it.
+
+## Hosted Jev service `[jev]`
+
+```toml
+[jev]
+enabled = false
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `true` | `false` stops every request to the hosted Jev service: turn classification and quota recovery. |
+
+GLiDE (Fastino), through the hosted proxy, classifies current requests. The
+completed-turn verdict uses recent conversation and activity evidence; other
+classifiers receive their task-specific evidence. [Security
+boundaries](/security/#what-leaves-this-machine-by-default) lists exactly what
+each request sends and where.
+
+With `enabled = false`:
+
+- Workers do not classify turns. A turn ends when the harness ends it. A
+  turn that goes quiet while the agent waits for an answer stays **Working**
+  until the harness reports the end of the turn, and after a reply the
+  session's state follows the harness's own background-task reports.
+- Quota recovery does not run: a session stopped by a quota limit is not
+  resumed after the reset.
+
+Workers read the switch when they start, so a running session follows the
+new value after it is next resumed or restarted. In the terminal the switch
+is **Settings → Privacy → Jev (hosted service)**.
+
+## GitHub events `[github.watch]`
+
+`local_inference` defaults to `false`: every GitHub relevance classification
+goes to the hosted GLiDE classifier through the public proxy, and no local
+model or native runtime is downloaded or loaded. Set `local_inference = true`
+to opt in to local scoring with GLiDE handling the middle band and unavailable
+local scoring. Changes apply on the next watcher poll; disabling local inference
+also stops model preparation and retries and releases the loaded model.
+
+`use_gpu` defaults to `true` and applies only when local inference is enabled.
+The local relevance model selects DirectML on Windows, CoreML on Apple-silicon
+macOS, and CUDA on Linux x64 when its libraries are installed. Other supported
+hosts use CPU. Linux CUDA requires the NVIDIA driver, CUDA 12 and cuDNN 9 libraries
+installed by the administrator; the daemon reports missing libraries and uses CPU.
+The model and runtime are fetched lazily on the first classification request.
+Its native-runtime choice is fixed at the first preparation, so installing libraries
+or enabling GPU scoring on Linux/Windows after CPU preparation requires the next
+daemon start. A GPU must beat the CPU
+on measured real-pair latency; otherwise the preparation owner retains CPU and
+reports why. Set `use_gpu = false` for CPU-only scoring. Device failures also
+select CPU with a visible notice.
+
+`enabled` is a boolean that defaults to `true`. Together with `[jev] enabled`,
+it controls the GitHub watcher as an event source. The hosted GLiDE service classifies GitHub
+activity. Neither setting disables mailbox delivery, peer messages, child
+reports, drain hooks or idle wakes. The old `[mailbox] enabled` key still loads
+silently. If either key is `false`, the watcher stays off. Saving writes only
+`[github.watch] enabled`, preserving an older `false` setting.
+
+`mj new --no-github-events` prevents the GitHub watcher from registering the session
+as a delivery target. Sub-agents inherit the flag. This is the flag's only effect.
+
+The watcher records updated issues and pull requests before processing them.
+At most once an hour, it rereads recorded activity that is at least an hour
+old. Saved progress preserves unfinished ranges across pauses and failed
+requests. An item can still be missed if page movement affects both reads.
+The watcher also overlaps processing times by 30 seconds to allow for response
+timing and clock differences. Repeated event IDs deliver only once.
+GLiDE classifies new items only for sessions that were already running when the
+item was created. When GLiDE identifies a session as the creator, that session
+receives new comments, reviews and pull request lifecycle events from the item's
+timeline. Pull request line comments are read separately and saved with the
+timeline events. Each source keeps its own cursor, and both are saved in one
+item transaction. A failed item does not block delivery for other items. Failed
+classifications retry with a delay that grows from one minute to one hour; new
+work is classified before retries. Notices always include the repository name. Comments and reviews
+written by the token owner during that session's turn do not wake it.
+
+## Session index `[sessionwiki]`
+
+[SessionWiki](https://github.com/jbellis/sessionwiki) is a separate tool that
+indexes AI coding sessions from many tools into one full-text SQLite index. The
+daemon always writes Mjolnir's sessions into that index under the tool name
+`mjolnir`, and Resume searches it. This section only chooses whether old
+sessions are archived, because archiving is the only part that deletes
+anything.
+
+```toml
+[sessionwiki]
+archive_after_days = 30
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `archive_after_days` | integer | no | unset (keep every session) | Suspended sessions older than this many days are removed from Mjolnir once SessionWiki has indexed them. `0` is rejected. |
+
+An `enabled` key written by an earlier build is still read and then ignored;
+indexing is no longer optional.
+
+Because indexing is always on and Resume searches the index and nothing else,
+the first upgrade to this build builds the index before Resume can be searched.
+The search box says **Indexing…** until that first build finishes, which on a
+large corpus of other tools' sessions can take several minutes. The list and the
+tabs work throughout, and the box opens by itself when the build ends.
+
+The index is the user's own SessionWiki index, in SessionWiki's default
+location. There is no index path setting; set `SESSIONWIKI_DATA` if you move it.
+A daemon running against an overridden `MJ_DATA_DIR` indexes into
+`$MJ_DATA_DIR/sessionwiki` instead, so a test or lab daemon never writes your
+own index. Each Mjolnir instance indexes only its own sessions, and every
+instance shares the one tool name, so a single search covers them all.
+
+See [Search and restore archived sessions](/sessions/#search-and-restore-archived-sessions)
+for what archiving deletes and keeps, and for the rule that the `sessionwiki`
+command-line tool must match the version Mjolnir links.
+
+## Sub-agents `[subagents]`
+
+A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn` tool. Create and Move offer
+Native or Mjolnir. Native uses the harness's own delegation. OpenCode gets the tools
+as `mj-agents_spawn` and so on, learns of finished children at the end of its turn (it has
+no steering), and loses its own `subagent` tool unless the choice is Native. DSH has none, so
+for a DSH profile they offer Mjolnir or None, starting on Mjolnir only when the
+last choice was Mjolnir and it is configured; a DSH session's None does not
+change the remembered choice that Claude and Codex sessions start from. Mjolnir needs a
+straightforward choice, configured in Settings → Sub-agents or config.toml, or a
+session override. A YOLO target uses `[subagents.yolo.straightforward]` when
+the split is enabled. The subtle choice is optional, but cannot be configured
+without straightforward:
+
+```toml
+[subagents]
+max_concurrent = 6
+
+[subagents.straightforward]
+model = "your-codex-model"
+effort = "high"
+
+[subagents.subtle]
+model = "your-claude-model"
+effort = "high"
+
+[subagents.oracle]
+model = "your-strongest-model"
+effort = "high"
+```
+
+`max_concurrent` is shared by every target. By default the task choices above
+are shared too. To give YOLO targets, where the harness runs without
+approvals (container runtimes, and SSH bare targets with `permissions = "yolo"`),
+their own choices, turn off **Use the same subagents on all targets** in Settings, which
+writes `use_same_on_all_targets = false`, and set the `[subagents.yolo.*]`
+tables:
+
+```toml
+[subagents]
+use_same_on_all_targets = false
+
+[subagents.yolo.straightforward]
+model = "your-cheaper-model"
+effort = "high"
+
+[subagents.yolo.oracle]
+model = "your-strongest-model"
+```
+
+The YOLO set starts empty when the box is first unchecked. An empty YOLO set
+means Mjolnir sub-agents and the oracle are unavailable on YOLO targets; it
+does not fall back to the shared choices. While `use_same_on_all_targets` is
+true, any `[subagents.yolo.*]` values are ignored but retained, so checking
+the box again hides and disables them, and unchecking restores them. A
+session uses this set when its harness runs without approvals: every container
+runtime, and an SSH bare target with `permissions = "yolo"`. Localhost and
+guardian SSH bare targets use the shared choices.
+
+`[subagents.oracle]` is optional and independent of the other two: it can be set
+without straightforward. It names the read-only advisor behind the `ask_oracle`
+tool, which every top-level session is offered whatever its delegation choice.
+
+Each choice requires a non-empty model. Effort is optional and must be offered
+by that model when specified; omitted effort uses the harness default. Adaptive
+effort is no longer supported. Each configured choice must be offered by an enabled profile before Mjolnir can be selected. Legacy per-profile subagent
+settings are ignored and dropped on save, with no migration to global choices.
+
+With both types configured, `spawn` takes `task_type`: `straightforward` for
+work with a clear method, such as locating code, running commands or tests, or
+implementing a settled design; `subtle` for judgment, ambiguous diagnosis,
+design choices, or risk of subtle bugs. A subtle task gets a smarter, more
+expensive agent. Judge difficulty, not brief length. With only straightforward
+configured, `spawn` has no `task_type` and every child uses the straightforward
+choice. The parent is told to delegate straightforward work and to do work
+that needs judgment itself. Mjolnir chooses the enabled profile offering that
+task type's model and effort with the strongest quota headroom paced against
+its reset times. The agent cannot override the selection.
+Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
+Native, or to None for DSH, which refuses `native`; `mj move --subagents native|mjolnir|none` retains the recorded policy when
+omitted, including any session override. `--subagent-straightforward M` and `--subagent-subtle M` independently override
+their matching task type and imply Mjolnir. An unspecified type uses its global
+choice, so one override can be combined with one global choice. Each model and
+optional effort must be offered by an enabled profile. Each effort flag requires
+its matching model flag; `adaptive` and combining an override with `native` or
+`none` are rejected. Omitted effort uses the harness default. The retired
+`--subagent-model` and `--subagent-effort` flags fail with guidance to use the
+four per-type flags. `none` (CLI only) gives a session no
+delegation tools, whatever its harness.
+
+`mj new` and `mj move` take `--oracle enabled|disabled` and `--subagent-oracle M`
+(with optional `--subagent-oracle-effort E`, which requires the model and rejects
+`adaptive`). The model flag implies `enabled` and is refused with
+`--oracle disabled`; none of them needs `--subagents mjolnir`. `mj new` without
+`--oracle` uses the choice last made for the profile, starting enabled; `mj move`
+without it retains the session's choice, and turning the oracle off keeps its
+model override. Asking for the oracle when no model is configured or given starts
+or moves the session with the oracle off and a notice.
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `max_concurrent` | integer | no | `6` | Most live sub-agents one session may have at once; between `1` and `64`. A sub-agent counts while it holds processes on the target, including while it is idle. A parked sub-agent, one whose turn ended and whose worker Mjolnir stopped, does not count (see [Parked sub-agents](/sessions/#parked-sub-agents)). |
+
+A configuration file written before the per-session choice existed may still
+have an `enabled` key here. It is read and ignored, and a save drops it.
+
+Mjolnir runs each child with the configured model and effort on an enabled
+profile that supports that selection. Profiles with quota to spare are more
+likely to be chosen. Each quota window (for example the 5-hour and weekly
+ones) is compared with an even spend over the window: 5% left three minutes
+before a 5-hour reset is plenty, while 5% left six days before a weekly reset
+is not. The window furthest behind decides. A limit for one model, such as a
+weekly Fable limit, counts only for that model. A pay-per-use profile counts as
+exactly on pace, so a subscription with quota to spare comes first. A profile
+with no quota left, then one with no quota report, comes last. Profiles named
+in `[quota] prefer` lead, most preferred first, while their quota tier allows.
+On a tie, the parent's own profile wins. `mj doctor` shows, for each profile, where its quota
+comes from and that sub-agents may use it.
+
+A sub-agent ends its task by handing its report back to the session that
+started it. Suspending that session stops its sub-agents and removes them,
+without a recovery copy of their own; only the parent session is saved.
+Mjolnir warns when a sub-agent has not handed back yet, because the work it
+has not reported is lost. Each stopped sub-agent's conversation stays
+searchable through SessionWiki (`mj sessions --session <id>`). When the parent
+resumes, its agent is told which sub-agents were stopped and whether each had
+handed back, so it can start them again if it still needs their work. See
+[Sessions](/sessions/#sub-agents-and-suspend).
+
+## Profiles `[profiles.<id>]`
+
+Each profile names one harness installation or account on the controller:
+
+```toml
+[profiles.codex-work]
+kind = "codex"
+home = "/home/me/.codex-work"
+# enabled = false
+# context_window_bytes = 131072
+# guardian_review_model = "newest-flash"
+# models = ["openrouter/deepseek/deepseek-v4.1-flash-1017"]
+
+[profiles.codex-work.environment]
+# PATH = "/opt/node/bin:/usr/local/bin:/usr/bin:/bin"
+# PROVIDER_SETTING = "value"
+# PROVIDER_API_KEY = { from_secret = "PROVIDER_API_KEY" }
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
+| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `muse`, `open-code` (OpenCode), or `dsh`. `deepseek`, the removed DeepSeek harness, fails to load. A profile whose kind is `mimo`, the removed MiMo Code harness, is ignored with a warning when the configuration loads and is removed from the file on the next save. |
+| `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
+| `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile takes `DEEPSEEK_API_KEY` from the key saved in DSH (`.credentials.yaml` in its home) first, then the environment Mjolnir started with, then `.env` in its home, and only then from this table. |
+| `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
+| `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
+| `models` | array of strings | no | empty (offer everything) | Exact model values, as `mj models --profile <id> --unrestricted` lists them, that Mjolnir offers from this profile in session model pickers, sub-agent choices, review slots and Autoconfigure. The profile's current model is always offered. Edits apply without rediscovery. `mj doctor` warns when a profile advertises more than 50 models without this list, and about entries the profile does not advertise. See [Profiles](/profiles/#limit-the-models-a-profile-offers). |
+
+The profile's harness-home variable cannot appear in `environment`; set `home`
+instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+`KIMI_CODE_HOME`, `GROK_HOME`, DSH's
+`DSH_ACP_DATA_DIR`, and `XDG_CONFIG_HOME` for Muse and OpenCode. Muse and
+OpenCode also reserve `XDG_DATA_HOME`; their homes must end in `/muse` and `/opencode`,
+respectively. A DSH profile also cannot set `DSH_ACP_SYSTEM_PROMPT`
+(put instructions in `AGENTS.md` in the profile home) or
+`DSH_ACP_PERMISSION_MODE` (the target's permission mode decides it); a profile
+that sets either fails to load. Other dsh-acp settings may go in
+`environment`: `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`),
+`DEEPSEEK_MODEL` (default `deepseek-flash`), and `DSH_ACP_MODELS` (default
+`deepseek-flash,deepseek-v4-pro`).
+
+Profiles do not select target-side executables. All bare workers, including
+localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
+cache, except DSH, which has no managed runtime and runs a target `dsh-acp`
+only when it is 0.4.0 or newer, otherwise the pinned npm package. Containers
+use their image-provided runtime or the documented installer fallback. The
+`mj login` command invokes the harness's canonical controller-side command from
+`PATH`.
+
+Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
+or `/config` inside a session, or configure the harness's own defaults in its
+home. For example, an OpenCode profile's default model and OpenRouter provider
+routing go in `opencode.json` in its home, which sessions receive unchanged
+except for `permission`. For
+credential files, staging allowlists, skills, quotas, and harness limitations,
+see [Profiles and harnesses](/profiles/).
+
+## Secrets `secrets.toml`
+
+`config.toml` is copied into isolated instances, pasted into bug reports, and
+read by agents diagnosing a setup. A credential written into it as a plain
+string travels with it. Keep credentials out of it by writing a reference
+instead of a value in any `environment` table:
+
+```toml
+[profiles.dsh.environment]
+DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
+GITHUB_TOKEN = { from_env = "GITHUB_TOKEN" }
+```
+
+| Form | Value passed to the harness |
+| --- | --- |
+| `"text"` | The text as written. |
+| `{ from_secret = "NAME" }` | The `NAME` entry of `secrets.toml` beside this `config.toml`. |
+| `{ from_env = "NAME" }` | The variable `NAME` in the environment of the process that reads the configuration: the daemon for sessions, the CLI or TUI for their own commands. Start the daemon with the variable set, or use `from_secret`. |
+
+`secrets.toml` is a flat table of string values, in the same directory as
+`config.toml`, so each `--instance` has its own and copying a configuration
+never copies a secret:
+
+```toml
+DEEPSEEK_API_KEY = "sk-..."
+```
+
+Make it readable only by you (`chmod 600 secrets.toml`). References are
+resolved when the configuration is read. An entry that names a missing
+variable or secret does not stop the configuration from loading: the profile or
+target that holds it cannot start until the value exists, its sessions are
+refused with the entry and file named, and `mj doctor` reports it. Saving a
+setting writes the reference back as written, never the value it stood for.
+`mj doctor` warns about a `secrets.toml` other users can read, and about any
+environment value written as plain text under a name that suggests a
+credential, such as `*_API_KEY` or `*_TOKEN`.
+
+A configuration that uses a reference needs a Mjolnir that understands it;
+an older build reports the entry as an invalid type. Plain strings keep
+working everywhere.
+
+## Session GitHub token `[github]`
+
+Use `mj new --no-github-credentials` to withhold GitHub authentication from a
+session and all its Mjolnir children, including oracles and reviewers. The API
+creation payload and child `spawn` tool accept `no_github_credentials: true`.
+A child can also opt out individually; it cannot undo its parent's opt-out.
+This choice is saved with the session and survives restart, resume and Move.
+`--no-github-events` independently controls watcher delivery.
+
+To withhold credentials by default from new sessions in this instance:
+
+```toml
+[github]
+session_credentials = false
+```
+
+Changing this default does not change existing sessions. Opted-out workers
+receive no GitHub token environment or token file, refuse token refreshes,
+and use separate unauthenticated `gh` and Git configurations. Git author
+name and email remain available. Public repositories and API data can still be
+read anonymously. A bare target shares the Unix account's readable files; this
+setting does not isolate the filesystem or prevent deliberate use of other
+credentials on that account. A child also shares its parent's filesystem.
+The daemon may still authenticate its own repository provisioning without
+passing the credential to the worker.
+
+
+Set a controller-side token file to give sessions a dedicated GitHub PAT instead
+of the host GitHub CLI login:
+
+```toml
+[github]
+session_token_path = "~/.secrets/gh_agents_pat"
+```
+
+The path must be absolute or start with `~/`; it is read on the daemon host.
+The file contains just the token, optionally followed by a newline. The token
+is never written into configuration or checkpoints. A configured file that
+cannot be read or validated reports an error instead of falling back to a
+broader credential.
+
+This override takes precedence over GitHub App session tokens and the host
+`GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token` lookup. It applies to local bare,
+SSH, EC2, local container, remote container, and sub-agent sessions. Every
+start, restart, and resume reads the latest file contents. Ordinary credential
+sync can also update running sessions, normally within 60 seconds. Containers
+continue receiving the selected credential as `GH_TOKEN` at creation.
+Removing the setting restores the previous App/host credential selection.
+The host's GitHub CLI login and explicit `mj github-token` App tokens are
+unchanged.
+
+## GitHub App `[github.app]`
+
+An optional GitHub App can provide installation tokens for private bundle
+repositories without putting a long-lived user token in the daemon environment.
+The daemon reads the App's private PEM key from the controller host. The key
+and installation tokens are not stored in the database or session checkpoints.
+Without this section, Mjolnir keeps using `GH_TOKEN`, `GITHUB_TOKEN`, or
+`gh auth token` as before.
+
+```toml
+[github.app]
+app_id = 1234
+private_key_path = "/home/me/.config/mjolnir/github-app.pem"
+
+[github.app.installations]
+acme = 987654
+```
+
+`app_id` is the GitHub App ID, and `private_key_path` names its RSA PEM private
+key on the controller host. The optional `installations` table maps GitHub
+owner logins (organizations or users) to installation IDs. Owners not listed
+there are discovered through GitHub's API and cached by the daemon. Find the
+installation ID on the installed App's settings page.
+
+Each managed session may use repositories from only one App installation. A
+bundle that resolves to multiple installations is rejected when the session is
+created. App tokens are refreshed before they approach expiry and are delivered
+to running remote/container sessions during credential sync. Local bare
+sessions also receive periodic refresh when session credentials are configured.
+
+See [GitHub App credentials](/github-app/) for creating an App and setting up
+its repository permissions.
+
+## Bundles `[bundles.<id>]`
+
+A bundle is a non-empty repository set. The primary repository becomes the
+agent's working directory; other repositories are additional workspace roots.
+
+```toml
+[bundles.product]
+primary_repo = "app"
+
+[[bundles.product.repositories]]
+id = "app"
+github = "acme/app"
+destination = "app"
+
+[[bundles.product.repositories]]
+id = "shared"
+local = "/home/me/src/shared"
+destination = "shared"
+```
+
+Bundle fields:
+
+| Field | TOML type | Required | Validation and behavior |
+| --- | --- | --- | --- |
+| `primary_repo` | string | yes | Must exactly match one repository `id` in this bundle. |
+| `repositories` | array of tables | yes | Must contain at least one repository. |
+
+Repository fields:
+
+| Field | TOML type | Required | Validation and behavior |
+| --- | --- | --- | --- |
+| `id` | string | yes | Valid, unique ID within the bundle. |
+| `github` | string | exactly one source | GitHub source in a supported form; cannot be combined with `local`. |
+| `local` | path string | exactly one source | Absolute controller-side Git path used to resolve its network remotes; cannot be combined with `github`. |
+| `destination` | path string | yes | Non-empty relative path below the target workspace; no `.` or `..` components. |
+
+Supported GitHub forms are `owner/repository`,
+`https://github.com/owner/repository`, `git@github.com:owner/repository`, and
+`ssh://git@github.com/owner/repository`, with an optional `.git` suffix. Sources
+cannot contain whitespace or begin with `-`. At session creation, Mjolnir uses
+the source's default network fetch remote and preserves its configured push
+destination(s). A `local` path is inspected for that configuration; its local
+commits, staged changes, unstaged changes, and untracked files are excluded
+from an isolated clone. Repository destinations may not be equal, ancestors,
+or descendants of one another.
+
+Bundles are used by container and EC2 sessions. New bare sessions select an
+existing directory instead: a local bare directory may be a plain folder, while
+an SSH bare directory must be a committed Git project. `git_ref` is no longer
+accepted; remove it and use the source remote's default branch. See
+[Workspaces and bundles](/workspaces-bundles/) for network remotes, isolated
+clones, and project memory.
+
+## Machines `[machines.<id>]`
+
+A machine is a host sessions run on: this computer, an SSH host, or an EC2
+launch template. It owns the connection details, the remote workspace
+directory bare runtimes use, and the mbx build cache every runtime on it
+shares.
+
+The machine `local` is this computer. It always exists, so a file only names
+it when it carries a setting of its own.
+
+| Field | TOML type | Required | Default | Accepted values |
+| --- | --- | --- | --- | --- |
+| `kind` | string enum | yes | none | `local` or `ssh`. Only the id `local` may hold `kind = "local"`. |
+
+### `local`
+
+```toml
+[machines.local]
+kind = "local"
+
+[machines.local.build_cache]
+max_size = "50GiB"
+```
+
+The only setting is the shared build cache below. Omit the table entirely to
+use this machine's own defaults.
+
+### `ssh`
+
+```toml
+[machines.builder]
+kind = "ssh"
+host = "builder.example.com"
+user = "ubuntu"
+identity_file = "/home/me/.ssh/mjolnir"
+extra_args = ["-o", "ServerAliveInterval=30"]
+workspace_prefix = ".local/share/hel/workspaces"
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `host` | string | yes | none | OpenSSH host or config alias; non-blank and contains no whitespace. |
+| `user` | string | no | unset (SSH/config default) | Cannot be empty, contain whitespace, or contain `@`. |
+| `identity_file` | path string | no | unset (SSH/config default) | Private-key path passed to SSH; it is not required to be absolute. |
+| `extra_args` | array of strings | no | empty | Additional OpenSSH arguments, passed in order. |
+| `workspace_prefix` | path string | no | `".local/share/hel/workspaces"` | Per-session lifecycle/cleanup path prefix for bare runtimes on this machine. It does not select or relocate the remote Git project. May be home-relative or safely absolute. |
+
+`host` and `user` are combined as `user@host`; put only the host or alias in
+`host`. `workspace_prefix` cannot be empty, `/`, `.`, bare `~`/`~/`, or contain
+`..`. A leading `~/` on a longer path is interpreted relative to the remote
+login home.
+
+Two machines may not describe the same SSH connection; one machine is one
+host.
+
+### Persistent EC2 hosts
+
+`mj ec2 create <instance-type> --zone <zone>` provisions an SSH machine with a
+Podman target. `mj ec2 list --region <region>` lists hosts and
+`mj ec2 destroy <name> --region <region>` removes one. Instances outlive sessions.
+The former `aws-ec2` machine kind is read only for historical records and cannot
+launch sessions. Use [AWS EC2](/aws/) for command and storage options.
+
+### Build cache `[machines.<id>.build_cache]`
+
+Linux raw local/SSH sessions and Podman/Docker sessions share native Go,
+Gradle, Turbo, Nx and Bazel build caches by default. Mjolnir detects the tools
+from manifests in the checkout root; it does not adopt or install a build
+system. Native caches do not require mbx. Set `enabled = false` to disable
+Mjolnir's cache setup for new sessions on the machine. Existing containers keep
+their recorded mounts until recreated.
+
+Rust and C/C++ also use the machine's mbx 1.22.0 or newer. Container mbx needs
+a Linux host and a local filesystem with reflinks; install or upgrade it from
+**Settings › Setup › Machines**. Raw Rust builds keep the host's existing Cargo
+configuration. In C/C++ projects, private `cmake`, `make`, `gmake` and `ninja`
+launchers use `mbx exec`, including the CMake configuration step.
+For Autoconf projects, run `mbx exec ./configure` so configuration records the
+cached compiler launchers before running `make`.
+The host executable is atomically refreshed at `<cache>/.mjolnir/bin/mbx` inside
+the read-write shared cache mount. Mjolnir checks that copy in the container
+before adding its marked Cargo and `mbx` launchers; periodic reconciliation
+refreshes it after host upgrades without interrupting running processes.
+In Settings, open **Machines → [machine] → Build caches**, or search for
+**mbx**, **cache**, or **build cache**. The machine row shows its configured
+state and total budget; opening it resolves the host's actual defaults and
+reports any compatibility limitations. See [Container targets](/containers/)
+for cache prerequisites.
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | enabled for supported tools and local filesystems | `false` runs sessions on this machine without the cache. |
+| `tools_directory` | path string | no | `~/.cache/mjolnir/build` on the machine | Absolute path on a local filesystem for Go, Gradle, Turbo and Bazel. Independent of mbx's directory and budget. |
+| `directory` | path string | no | the host's native mbx cache directory | Must be absolute. It is a path on that machine, not on the controller. New sessions use the directory reported by native mbx; a missing or too-old mbx does not get a fallback cache. |
+| `max_size` | string | no | the host's native mbx configuration | An mbx size such as `100GiB`. Configure limits on the machine with mbx. |
+
+Go shares `GOCACHE` and adds `-trimpath` to `GOFLAGS`, which makes package cache
+keys independent of checkout paths. Explicit environment overrides, including
+`-trimpath=false`, win. Gradle uses a private user home for each checkout and
+shares only task outputs. Existing user properties and initialization scripts
+are preserved; repository cache settings and `--no-build-cache` still apply.
+Turbo uses a per-project `TURBO_CACHE_DIR`. Bazel/Bazelisk launchers add a private
+rc file with `build --disk_cache=...`; explicit command-line flags take
+precedence, and `--ignore_all_rc_files` disables this configuration too.
+
+Nx 23.2 or newer owns coordinated artifact and database sharing under the host's
+`~/.nx`. Mjolnir mounts that real directory at the container's `HOME/.nx`;
+checkout-specific state remains private. The standard image uses
+`HOME=/home/hel`; custom Docker images with another home must declare `HOME`
+in their target environment. Existing Nx cache overrides remain untouched and
+may opt out of Nx's automatic sharing. Older Nx versions need an upgrade for
+sharing between independent clones. Mjolnir never disables Nx cache validation.
+
+These caches reuse completed outputs. Each tool manages its own retention and
+locking; mbx's size and scheduler settings do not limit native caches. Task
+caches require correctly declared inputs and outputs in the repository. Cache
+stores persist when a session is destroyed. Private Gradle dependency caches
+are not shared across containers.
+
+The optional `scheduler` table controls mbx's shared compiler scheduler:
+
+```toml
+[machines.builder.build_cache.scheduler]
+cpus = 8
+memory = "24GiB"
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `scheduler.cpus` | integer | no | unset (mbx uses the logical CPUs visible to it) | Must be a positive integer. Sets the machine-wide compiler permit pool shared by all builds. |
+| `scheduler.memory` | string | no | unset (mbx uses 85% of detected memory, constrained by a Linux cgroup limit) | An mbx size such as `24GiB`, `24GB`, or `1.5GiB`, or `none` to disable memory weighting. This is a shared admission budget for compiles, not a hard memory cap. |
+
+mbx shares this pool across independent builds on the machine. Compiler work
+uses permits according to its estimated memory demand, so a compile can use
+more than one permit. Configure scheduler values in the host's mbx
+configuration; Mjolnir does not install a private mbx or create a fallback
+cache configuration.
+
+A section with every field unset is the same as no section at all.
+
+Version 14 removes the global build-cache switch. Older configurations with
+`[build_cache] enabled = false` load with caching explicitly disabled on every
+existing local and SSH machine, including implicit `local`. This preserves the
+old global override even when a machine explicitly requested caching. The next
+save writes those machine settings and removes the global section. Machines
+added afterward use the normal enabled default.
+
+## Runtimes `[targets.<id>]`
+
+A runtime says how a session runs on a machine: a bare checkout, Podman,
+Docker, or Apple `container`. Every runtime requires a `kind` and names the
+machine it runs on; `machine` defaults to `local` and is omitted from the file
+when it is `local`.
+
+| Field | TOML type | Required | Default | Accepted values |
+| --- | --- | --- | --- | --- |
+| `kind` | string enum | yes | none | `bare`, `podman`, `docker`, `apple-container`, or `nitro`. |
+| `machine` | string | no | `"local"` | The id of a `[machines.<id>]` entry, or `local`. |
+| `enabled` | boolean | no | `true` | `false` keeps the runtime configured but out of every picker; launch, resume and move refuse it, and running sessions continue. Written only when `false`. Detection never adds a kind its machine already has configured, enabled or not. |
+
+Mjolnir checks what is there when the dashboard starts and whenever the
+new-session or resume picker opens: this computer directly, and each SSH
+machine with one SSH call. It adds each runtime kind a machine newly runs and
+leaves out of the pickers any runtime that is gone, naming it under the list.
+Version 19 added `enabled`; older builds refuse a version 19 file.
+
+`permissions` is valid only on `bare`; setting it on another runtime is an
+error. Build cache settings are valid only on a machine; setting them on a
+runtime is an error.
+
+### `bare`
+
+```toml
+[targets.localhost]
+kind = "bare"
+```
+
+```toml
+[targets.builder]
+kind = "bare"
+machine = "builder"
+permissions = "guardian"
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks and approval checks. Muse runs without permission checks under `yolo` too. It has no meaning on `local`, where the harness keeps its configured approvals, on other machines. |
+
+The new-session wizard asks for an existing absolute project directory on the
+runtime's machine. A local bare directory may be a plain folder and does not
+require Git. On `local` supported harnesses retain configured approvals because
+there is no container or instance boundary; Muse's guardian is muse-acp's
+auto-review, see [Harness limitations](/profiles/#harness-limitations). On an
+SSH machine the wizard separately asks for an existing absolute remote Git
+directory; when **Create isolated checkout** is checked on the final review,
+the new checkout is created below the repository's own `.mj/clones/` tree. For EC2 hosts, `mj ec2 create` configures a persistent Podman runtime. See
+[SSH and SSH Podman](/ssh/) and [AWS EC2](/aws/).
+
+Review needs a committed Git checkout to capture changes. A local directory
+session without one is created with review off for that session, and `mj new`
+prints a notice saying so; `/review` explains that it cannot capture changes.
+Git 2.39.5 or later is required on the controller and on SSH bare targets.
+`mj doctor` checks both locations. Before-push review cannot review merged
+work when Git is older.
+
+### Common container fields
+
+`podman`, `docker`, `apple-container`, and `nitro` accept the same container fields.
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `image` | string | no | the running Mjolnir's agent-dev image | Non-blank image reference. A release uses the immutable image published for its own version, such as `ghcr.io/brokkai/mjolnir/agent-dev:2.36.0`; a development build uses `ghcr.io/brokkai/mjolnir/agent-dev:latest`. Omitting the field follows the running build at every upgrade; an explicit value pins that reference. |
+| `pull_policy` | string enum | no | `"auto"` | `auto`, `always`, `newer`, `missing`, or `never`. |
+| `platform` | string | no | unset (runtime selection) | Image platform such as `linux/amd64` or `linux/arm64`; it also determines the required worker architecture when recognizable. |
+| `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |
+| `memory` | string | no | unset (no template override) | Runtime memory value, for example `"32g"`. Per-session selection can override it. |
+| `environment` | table of strings or references | no | empty | Environment placed inside the target container. Values take the same forms as a profile's; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. |
+| `workspace_storage` | table | no | `{ kind = "podman-volume" }` | Podman accepts all variants. Docker and Apple Container reject non-default variants. |
+
+The schema checks that `image` is non-blank but leaves CPU, memory, and platform
+syntax to the selected runtime. A key a target table does not use is ignored,
+and the daemon log names it once. Profile `environment` and target `environment`
+are different: profile values configure the harness and profile commands, while
+target values become container environment variables.
+
+Pull-policy behavior:
+
+- `auto` starts from an existing image and pulls only when absent. The daemon
+  refreshes eligible moving tags for Podman, Docker, and Apple Container in the background.
+  Versioned tags, digest references, and local images remain pinned or cached.
+  Apple Container resolves `auto` during provisioning.
+- `always` and `newer` request a launch-time refresh; Docker treats `newer` like
+  `always` because it has no distinct newer-only mode.
+- `missing` pulls only when no local copy exists.
+- `never` requires a local copy.
+
+The Podman workspace-storage table can be written inline:
+
+```toml
+workspace_storage = { kind = "podman-volume" }
+# workspace_storage = { kind = "container-layer" }
+# workspace_storage = { kind = "host-helper", root = "/srv/mj-workspaces", helper = ["sudo", "-n", "/usr/local/libexec/mj-workspace-helper"] }
+```
+
+The inline table's `kind` is a required string enum:
+
+| `kind` value | Additional fields and TOML types | Validation and behavior |
+| --- | --- | --- |
+| `podman-volume` | none | Default; a named Podman volume backs `/workspace`. |
+| `container-layer` | none | Stores `/workspace` in the disposable container layer. |
+| `host-helper` | `root` (path string), `helper` (array of strings) | Both fields are required. `root` must be absolute. `helper` must contain at least one non-empty argument. The helper owns host storage lifecycle. |
+
+See [Container targets](/containers/) and [Custom images](/custom-images/) for
+runtime behavior.
+
+### `podman`
+
+```toml
+[targets.podman]
+kind = "podman"
+pull_policy = "auto"
+platform = "linux/amd64"
+cpus = "8"
+memory = "32g"
+workspace_storage = { kind = "podman-volume" }
+
+[targets.podman.environment]
+EXAMPLE = "value"
+```
+
+All common container fields are accepted, and `workspace_storage` supports all
+three Podman variants. A local Podman target runs rootless Podman on Linux,
+WSL2, or macOS with a rootless `podman machine`; rootful machines and manually
+configured remote connections are not supported. On an SSH machine the
+container and any workspace volume live on that host, so supplemental
+directory sources are paths on it rather than on the controller. It always
+runs the harness unconstrained inside the container boundary. See
+[Podman](/podman/) and [SSH and SSH Podman](/ssh/).
+
+```toml
+[targets.remote-podman]
+kind = "podman"
+machine = "builder"
+```
+
+### `docker`
+
+```toml
+[targets.docker]
+kind = "docker"
+pull_policy = "auto"
+platform = "linux/amd64"
+cpus = "8"
+memory = "32g"
+
+[targets.docker.environment]
+EXAMPLE = "value"
+```
+
+All common fields except a non-default `workspace_storage` are supported, on
+this machine or on an SSH machine. See [Docker](/docker/).
+
+### `apple-container`
+
+```toml
+[targets.apple]
+kind = "apple-container"
+pull_policy = "auto"
+platform = "linux/arm64"
+cpus = "8"
+memory = "32g"
+
+[targets.apple.environment]
+EXAMPLE = "value"
+```
+
+All common fields except a non-default `workspace_storage` are supported. With
+`machine = "local"` the container runs on this Mac; with an `ssh` machine it
+runs on that remote Apple-silicon Mac, which must run macOS 26 or newer. See
+[Apple container](/apple-container/).
+
+### `nitro`
+
+```toml
+[machines.ec2]
+kind = "ssh"
+host = "ec2-host.example.com"
+
+[targets.nitro]
+kind = "nitro"
+machine = "ec2"
+cpus = "4"
+memory = "8g"
+```
+
+A session runs in its own Firecracker microVM (an AWS Nitro Sandbox) on an EC2
+host reached over SSH; `machine` must name an `ssh` machine, and
+`mj ec2 create --runtime nitro` writes both tables. All common fields except a
+non-default `workspace_storage` are supported, but a sandbox cannot attach host
+directories or share the host's mbx build cache: a session that asks for them
+starts without and says so. RAM is a hard limit, taken from the memory pool the
+host reserved at boot.
+
+### Files written before version 12
+
+Before version 12 one `[targets.<id>]` table fused the machine and the runtime,
+with kinds named `local-bare`, `local-podman`, `local-docker`,
+`apple-container`, `ssh-bare`, `ssh-podman`, `ssh-docker`, and `aws-ec2`.
+Mjolnir still reads such a file when its `version` is 11 or lower: it derives
+the machines, moves each container's `build_cache` onto the machine that owns
+it, and writes the new shape on the next save. A file that says
+`version = 12` or later must use the new kinds; an old one is refused with the spelling
+to write instead.
+
+## Complete compact example
+
+This example contains the sections most installations need. Add other machine
+and runtime kinds from the examples above rather than mixing fields between
+variants.
+
+```toml
+version = 23
+
+[phone]
+enabled = true
+bind = "127.0.0.1:3765"
+tailscale_detect = true
+
+[review]
+trigger = "off"
+
+[[review.reviewers]]
+model = "claude-haiku-4.5"
+effort = "high"
+
+[profiles.codex-work]
+kind = "codex"
+home = "/home/me/.codex"
+
+[profiles.claude-review]
+kind = "claude"
+home = "/home/me/.claude"
+
+[bundles.product]
+primary_repo = "product"
+
+[[bundles.product.repositories]]
+id = "product"
+github = "acme/product"
+destination = "product"
+
+[machines.local.build_cache]
+max_size = "100GiB"
+
+[targets.localhost]
+kind = "bare"
+
+[targets.podman]
+kind = "podman"
+pull_policy = "auto"
+```
+
+## Process and path overrides
+
+These variables affect the running controller or its companion processes. Set
+them in the environment that starts the daemon, then run `mj daemon restart`.
+
+| Variable | Purpose |
+| --- | --- |
+| `MJ_CONFIG_DIR` | Directory containing `config.toml`. |
+| `MJ_DATA_DIR` | Directory containing the SQLite store, recovery archives, logs, viewer state, diagnostics, and project memory. |
+| `MJ_WORKER_BINARY` | Exact worker binary; highest-priority worker override and must name a file. |
+| `MJ_WORKER_DIR` | Directory containing architecture-named portable Linux workers. |
+| `MJ_WORKER_URL` | Fallback worker URL template; `{target}` expands to the target triple. Requires `MJ_WORKER_SHA256`. |
+| `MJ_WORKER_SHA256` | Required 64-character hexadecimal digest for `MJ_WORKER_URL`. |
+| `MJ_VOICE_WORKER` | Path to the local dictation helper. |
+| `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
+| `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. Mjolnir learns how many sessions each shared connection carries from the server's refusal and has no setting for it; see the [SSH guide](/ssh/#sharing-connections-per-host). |
+| `MJ_DEV_RESTART_STALE_DAEMON` | When set to any value, a client restarts a running daemon whose executable was replaced, or whose development workers changed, since it started, unless the daemon's build is newer than the client's. For development checkouts. |
+| `MJ_TURN_STALL_TIMEOUT_MS` | Milliseconds of harness silence, with no tool call open, after which the worker ends the turn with the reason `harness_inactive`. Off unless set to a positive value. |
+| `MJ_TURN_TOOL_STALL_TIMEOUT_MS` | Milliseconds one tool call may run before the worker ends the turn the same way. Off unless set to a positive value. |
+| `MJ_GITHUB_CLI_BIN` | Path or command name for the GitHub CLI used to read tokens. |
+| `RUST_LOG` | Tracing/log filter for Mjolnir processes. |
+| `GH_TOKEN`, `GITHUB_TOKEN` | GitHub token source, checked in that order before `gh auth token`, for private clones and live non-local session sync when no session token override or App is configured. |
+| `GIT_SSH_COMMAND` | Overrides Mjolnir's non-interactive SSH command for the Git the daemon runs to reach a remote: the clone cache, checkpoint base checks, managed worktree and publication checks on this computer, and a Move's read of its source. Git that runs on a target follows that target's own SSH settings. |
+
+Worker lookup checks `MJ_WORKER_BINARY`, `MJ_WORKER_DIR`, packaged or sibling
+workers, the native `mj-worker` companion for a bare runtime on this machine,
+and finally the verified URL fallback.
+The normal release installer already supplies both supported portable Linux
+worker architectures.
+
+Harness-home variables influence automatic first-run discovery and explicit
+`mj setup` reruns. Existing profiles retain their configured homes:
+
+| Harness | Discovery variable | Conventional home |
+| --- | --- | --- |
+| Codex | `CODEX_HOME` | `~/.codex` |
+| Claude Code | `CLAUDE_CONFIG_DIR` | `~/.claude` |
+| Kimi Code | `KIMI_CODE_HOME` | `~/.kimi-code` |
+| Grok Build | `GROK_HOME` | `~/.grok` |
+| Muse Code | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` |
+| OpenCode | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` |
+| DSH | `DSH_ACP_DATA_DIR` | `~/.dsh` |
+
+The release installer separately accepts `MJOLNIR_INSTALL_DIR` (preferred over
+`INSTALL_DIR`), `MJOLNIR_GITHUB_OWNER`, `MJOLNIR_VERSION`, `GITHUB_TOKEN`, and
+`PROFILE`. See [Install Mjolnir](/install/).
+
+## Data that is not in `config.toml`
+
+The platform data directory, or `MJ_DATA_DIR`, contains operational state:
+
+- `mj.sqlite3` for sessions, workspaces, drafts, read frontiers, remembered
+  resource choices, and prompt history;
+- `sessions/` for recovery archives;
+- `projects/<project-key>/memory/` for canonical project memory;
+- `logs/` and `daemon.log` for logs;
+- `daemon.json` for daemon discovery;
+- `api-token`, `phone-cookie-key`, and `phone-cookie-revocations.json` for API
+  and viewer credentials and logout records; and
+- `diagnostics/` for diagnostic reports.
+
+Session replicas sync with canonical project memory at checkpoints using a
+line-by-line three-way merge, including deletions. If sessions change the same
+lines, an available utility model merges them; otherwise the session being
+merged wins. Mjolnir does not create a conflicts folder.
+
+Claude Code uses native project memory. Other harnesses read and write their
+session replica directly with their own file tools; startup context gives them
+its path and describes the `MEMORY.md` index convention.
+
+Do not hand-edit the database or daemon files. Use the TUI, viewer, and commands
+in the [CLI reference](/cli-reference/). See [Durability and recovery](/durability/)
+before moving or deleting session archives.

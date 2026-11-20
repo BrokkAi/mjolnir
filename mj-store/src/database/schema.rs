@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 141;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 142;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -387,9 +387,9 @@ pub(super) fn forget_verified_schema(path: &Path) {
 /// retain the complete migration path, even when users skip many releases.
 fn migrate_origin_delta_archives(connection: &Connection) -> Result<()> {
     connection.execute_batch("BEGIN IMMEDIATE;
-        UPDATE schema_compatibility SET minimum_compatible_version = 141 WHERE singleton = 1;
-        INSERT INTO schema_migrations(version, applied_at) VALUES (141, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-        PRAGMA user_version = 141;
+        UPDATE schema_compatibility SET minimum_compatible_version = 142 WHERE singleton = 1;
+        INSERT INTO schema_migrations(version, applied_at) VALUES (142, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+        PRAGMA user_version = 142;
         COMMIT;")?;
     Ok(())
 }
@@ -2697,9 +2697,54 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
             PRAGMA user_version=140;
             COMMIT;")?;
     }
+    // Compatible: these non-unique indexes change only access paths. Older
+    // daemons do not name the replaced index, and SQLite maintains the new
+    // indexes on their writes. Constraints and stored data are unchanged.
+    if version < 141 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE INDEX IF NOT EXISTS environment_workers_environment
+                 ON environment_workers(environment_id, worker_session_id, lease_id);
+
+             -- Session deletion also runs environment and watch cleanup.
+             CREATE INDEX IF NOT EXISTS api_idempotency_session
+                 ON api_idempotency(session_id);
+             CREATE INDEX IF NOT EXISTS environments_owner
+                 ON environments(owner_session_id, phase);
+             CREATE INDEX IF NOT EXISTS environments_target_lease
+                 ON environments(target_lease_id) WHERE target_lease_id IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS environment_bindings_environment
+                 ON environment_bindings(environment_id);
+             CREATE INDEX IF NOT EXISTS retained_move_sources_environment
+                 ON retained_move_sources(environment_id) WHERE environment_id IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS session_moves_source_environment
+                 ON session_moves(source_environment_id) WHERE source_environment_id IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS github_watch_items_creator
+                 ON github_watch_items(creator_session_id);
+             CREATE INDEX IF NOT EXISTS github_watch_classifications_session
+                 ON github_watch_classifications(session_id);
+             CREATE INDEX IF NOT EXISTS github_watch_classification_failures_session
+                 ON github_watch_classification_failures(session_id);
+
+             CREATE INDEX IF NOT EXISTS mailbox_outbox_subagent_messages
+                 ON mailbox_outbox(target_session_id) WHERE event_key LIKE 'subagent-message-%';
+             -- Only unaccepted rows are polled, in per-target delivery order.
+             DROP INDEX IF EXISTS mailbox_outbox_pending;
+             CREATE INDEX IF NOT EXISTS mailbox_outbox_pending_target
+                 ON mailbox_outbox(target_session_id, created_at, event_key)
+                 WHERE accepted_at IS NULL;
+             CREATE INDEX IF NOT EXISTS materialized_sessions_pending_elicitations
+                 ON materialized_sessions(session_id) WHERE pending_elicitations_json != '[]';
+
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (141, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 141;
+             COMMIT;",
+        )?;
+    }
     // Breaking: older archive readers cannot restore an origin-delta archive
     // after suspend removes its independent clone.
-    if version < 141 {
+    if version < 142 {
         migrate_origin_delta_archives(connection)?;
     }
     let recorded: Option<i64> =
@@ -3413,12 +3458,17 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
     forget_verified_schema(path);
 }
 
-/// Revision 121's triggers name tables that historical fixtures drop or
-/// reshape, so a fixture older than 121 removes them first.
+/// Rewind environment ownership and remove indexes on the columns it added.
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn drop_environment_schema(connection: &Connection) {
     // These historical fixtures also predate removal of the size columns.
     legacy_schema::ensure_session_container_override_columns(connection).unwrap();
+    connection
+        .execute_batch(
+            "DROP INDEX IF EXISTS session_moves_source_environment;
+             DROP INDEX IF EXISTS retained_move_sources_environment;",
+        )
+        .unwrap();
     for (table, column) in [
         ("session_moves", "source_environment_id"),
         ("retained_move_sources", "environment_id"),
@@ -4515,9 +4565,9 @@ mod reader_tests {
         migrate_origin_delta_archives(&connection).unwrap();
 
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.minimum_compatible, Some(141));
-        assert!(state.ensure_supported_by(140).is_err());
-        state.ensure_supported_by(141).unwrap();
+        assert_eq!(state.minimum_compatible, Some(142));
+        assert!(state.ensure_supported_by(141).is_err());
+        state.ensure_supported_by(142).unwrap();
     }
 
     /// Revision 130 is breaking. Build a store at revision 129 with a watch, its

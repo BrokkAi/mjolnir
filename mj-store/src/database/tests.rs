@@ -1680,7 +1680,10 @@ fn display_updates_cannot_restore_a_stale_checkpoint() {
         created_at: "2026-08-14T12:00:00Z".into(),
         event_frontier: 42,
     };
-    record_recovery_success_to(&database, "session-1", "native-recovered", &recovered).unwrap();
+    let mut saved = stale.clone();
+    saved.native_session_id = Some("native-recovered".into());
+    saved.checkpoint = Some(Box::new(recovered.clone()));
+    save_checkpointed_session_to(&database, &saved).unwrap();
 
     set_session_title_override_to(
         &database,
@@ -1761,7 +1764,10 @@ fn lifecycle_write_preserves_independently_owned_session_fields() {
         created_at: "2026-08-14T12:00:00Z".into(),
         event_frontier: 42,
     };
-    record_recovery_success_to(&database, "session-1", "native-recovered", &recovered).unwrap();
+    let mut saved = stale.clone();
+    saved.native_session_id = Some("native-recovered".into());
+    saved.checkpoint = Some(Box::new(recovered.clone()));
+    save_checkpointed_session_to(&database, &saved).unwrap();
     set_session_title_override_to(
         &database,
         "session-1",
@@ -2235,6 +2241,30 @@ fn materialized_summary_loads_messages_without_deserializing_full_history() {
     assert!(summary.interruption_event_ordinals.is_empty());
     assert_eq!(summary.execution, materialized.execution);
     assert!(load_materialized_session_from(&database, "session-1").is_err());
+
+    // `/clear` starts a new conversation: the dashboard preview must not
+    // carry the earlier conversation's messages past the boundary.
+    open(&database)
+        .unwrap()
+        .execute(
+            "INSERT INTO materialized_transcript_items(session_id, stable_id, position,
+                 created_at_ms, last_changed_at_ms, body_json)
+             VALUES ('session-1', ?1, 8, 1900, 1900, ?2)",
+            params![
+                format!("{}clear-1", mj_core::archive::CONTEXT_BOUNDARY_PREFIX),
+                serde_json::to_string(&TranscriptBody::System {
+                    text: "Context cleared".into()
+                })
+                .unwrap()
+            ],
+        )
+        .unwrap();
+    let summary = load_materialized_session_summary_from(&database, "session-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.last_user_message, None);
+    assert_eq!(summary.last_agent_message, None);
+    assert!(!summary.last_agent_message_follows_last_user);
 }
 
 #[test]
@@ -8686,4 +8716,240 @@ fn agent_message_through_an_ordinal_ignores_newer_replies() {
     assert_eq!(through(Some(7)).as_deref(), Some("Newer reply"));
     assert_eq!(through(None).as_deref(), Some("Newer reply"));
     assert_eq!(through(Some(1)), None);
+}
+
+// Hard-won: c4688b4: an interrupted or slower adoption must not replace a committed cut.
+#[test]
+fn live_baseline_install_rolls_back_and_retries_without_overwriting_a_winner() {
+    use mj_core::native_agent::{NativeAgent, NativeAgentCapabilities, NativeAgentState};
+    use mj_core::relay::{LiveSessionBaseline, RelaySnapshot};
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let mut state = RelaySnapshot::new("session-1".into()).operational_state();
+    state.latest_ordinal = 7;
+    state.latest_digest = event_digest(7);
+    let child = NativeAgent {
+        owner_session_id: "session-1".into(),
+        session_id: "child".into(),
+        parent_session_id: None,
+        name: "child".into(),
+        task: "work".into(),
+        capabilities: NativeAgentCapabilities::default(),
+        state: NativeAgentState::Running,
+        availability: Default::default(),
+        availability_reason: None,
+        stable_id: None,
+    };
+    state.native_agents.push(child.clone());
+    let mut wrong_owner = child.clone();
+    wrong_owner.owner_session_id = "wrong-owner".into();
+    let question = mj_core::elicitation::ElicitationRequest::from_acp_params("recovered-question", serde_json::json!({
+        "mode":"form", "sessionId":"session-1", "message":"Approve?", "requestedSchema":{"type":"object","properties":{}}
+    })).unwrap();
+    let mut baseline = LiveSessionBaseline {
+        delivered_initial_prompts: Vec::new(),
+        state,
+        queue: Vec::new(),
+        questions: vec![question.clone()],
+        unavailable_questions: 0,
+        native_agent_replay: Some(vec![wrong_owner]),
+        native_use_evidence: None,
+    };
+    let projection =
+        mj_transcript::projection::materialized_session_from_live_baseline(&baseline).unwrap();
+    assert_eq!(projection.execution, MaterializedExecutionState::Idle);
+    // Fail after published identities were written but before the cut commits.
+    assert!(
+        materialized::install_live_session_baseline_to(&database, &projection, &baseline).is_err()
+    );
+    let saved = load_materialized_session_from(&database, "session-1").unwrap();
+    assert!(saved.is_none_or(|saved| saved.applied_event_ordinal == 0));
+    let connection = open(&database).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM native_agents WHERE owner='session-1'",
+                [],
+                |row| row.get::<_, u64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    let filter = ApiEventFilter {
+        session_id: Some("session-1".into()),
+        ..Default::default()
+    };
+    assert!(
+        !events::load_api_events_from(&database, &filter, Some(0), 100)
+            .unwrap()
+            .events
+            .iter()
+            .any(|event| matches!(event.event, ApiEventData::InputRequired { .. }))
+    );
+    baseline.native_agent_replay = Some(vec![child]);
+    assert!(
+        materialized::install_live_session_baseline_to(&database, &projection, &baseline).unwrap()
+    );
+    assert!(
+        !materialized::install_live_session_baseline_to(&database, &projection, &baseline).unwrap()
+    );
+    let required = events::load_api_events_from(&database, &filter, Some(0), 100).unwrap();
+    assert_eq!(required.events.iter().filter(|event| matches!(&event.event, ApiEventData::InputRequired { request: Some(request), .. } if request.id == question.id)).count(), 1);
+    assert_eq!(connection.query_row("SELECT count(*) FROM operator_away_requests WHERE session_id='session-1' AND elicitation_id='recovered-question'", [], |row| row.get::<_, u64>(0)).unwrap(), 1);
+    assert_eq!(
+        load_materialized_session_from(&database, "session-1")
+            .unwrap()
+            .unwrap(),
+        projection
+    );
+}
+
+// Dropping an unaccepted enqueue must not leave a blocked sender behind.
+#[tokio::test]
+async fn cancelled_writer_enqueue_cannot_commit_after_queue_space_returns() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let owner = start_database_writer_at(&database, false).unwrap();
+    let writer = owner.writer.clone();
+    let (entered, waiting) = sync_channel(1);
+    let (release, blocked) = sync_channel(1);
+    writer
+        .sender
+        .send(writer::DatabaseWriterMessage::Run {
+            label: "block writer",
+            job: Box::new(move |_| {
+                entered.send(()).unwrap();
+                blocked.recv().unwrap();
+            }),
+        })
+        .unwrap();
+    waiting.recv().unwrap();
+    for _ in 0..writer::DATABASE_WRITE_QUEUE_CAPACITY {
+        writer
+            .sender
+            .try_send(writer::DatabaseWriterMessage::Run {
+                label: "fill writer",
+                job: Box::new(|_| {}),
+            })
+            .map_err(|_| "queue unexpectedly full")
+            .unwrap();
+    }
+    let ran = Arc::new(AtomicBool::new(false));
+    let operation_ran = ran.clone();
+    {
+        let guard = Arc::new(());
+        let enqueue = writer.enqueue("cancelled adoption", guard.clone(), move |_| {
+            operation_ran.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        tokio::pin!(enqueue);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                std::future::Future::poll(enqueue.as_mut(), cx).is_pending()
+            ))
+            .await
+        );
+        // Cancel without spawning a blocked sender which might later accept it.
+        // The pinned future is dropped at this scope's end, before queue release.
+        drop(guard);
+    }
+    release.send(()).unwrap();
+    let finish = writer.enqueue("barrier", (), |_| Ok(())).await.unwrap();
+    finish.finish().await.unwrap().0.unwrap();
+    assert!(!ran.load(Ordering::SeqCst));
+    owner.shutdown().unwrap();
+}
+
+// Hard-won: 282a657: a slower repair replaced transcript already committed and acknowledged by another attachment.
+#[test]
+fn projection_repair_yields_to_a_concurrent_committed_frontier() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let observed = materialized_session("session-1");
+    save_materialized_session_to(&database, &observed).unwrap();
+    let replacement = observed.clone();
+    // Both repairs observed the same broken cursor. The first repairs and
+    // catches up before the second reaches the serialized replacement write.
+    assert!(
+        materialized::repair_materialized_session_if_current_to(
+            &database,
+            &replacement,
+            observed.applied_event_ordinal,
+            &observed.applied_event_digest
+        )
+        .unwrap()
+    );
+    let mut winner = observed.clone();
+    winner.applied_event_ordinal += 1;
+    winner.applied_event_digest = event_digest(winner.applied_event_ordinal);
+    winner.session_title = Some("concurrent recovered transcript".into());
+    save_materialized_session_to(&database, &winner).unwrap();
+    assert!(
+        !materialized::repair_materialized_session_if_current_to(
+            &database,
+            &replacement,
+            observed.applied_event_ordinal,
+            &observed.applied_event_digest
+        )
+        .unwrap()
+    );
+    let saved = load_materialized_session_from(&database, "session-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(saved).unwrap(),
+        serde_json::to_value(&winner).unwrap()
+    );
+    // A changed digest at the same ordinal is also a different owner state.
+    assert!(
+        !materialized::repair_materialized_session_if_current_to(
+            &database,
+            &replacement,
+            winner.applied_event_ordinal,
+            &observed.applied_event_digest
+        )
+        .unwrap()
+    );
+}
+
+// Hard-won: c1da39f: a pending ACK could prune the good prefix after repair rewound its durable projection.
+#[test]
+fn projection_repair_never_rewinds_a_frontier_an_attachment_can_acknowledge() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let durable = materialized_session("session-1");
+    assert!(durable.applied_event_ordinal > 0);
+    save_materialized_session_to(&database, &durable).unwrap();
+    // Both a genesis probe and a checkpoint probe may succeed on their first
+    // replay page while the later journal tail is corrupt. Neither permits
+    // deleting a prefix another connection has committed and can now ACK.
+    for ordinal in [0, durable.applied_event_ordinal - 1] {
+        let mut candidate = MaterializedSession::empty("session-1");
+        candidate.applied_event_ordinal = ordinal;
+        if ordinal > 0 {
+            candidate.applied_event_digest = event_digest(ordinal);
+        }
+        let error = materialized::repair_materialized_session_if_current_to(
+            &database,
+            &candidate,
+            durable.applied_event_ordinal,
+            &durable.applied_event_digest,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains(&format!(
+            "durable frontier {}:",
+            durable.applied_event_ordinal
+        )));
+        let saved = load_materialized_session_from(&database, "session-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(saved).unwrap(),
+            serde_json::to_value(&durable).unwrap()
+        );
+    }
 }

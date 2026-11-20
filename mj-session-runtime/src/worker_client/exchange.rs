@@ -1,7 +1,4 @@
 use super::*;
-use crate::session_manager::RelayJobDeferred;
-
-const CANCELLED: &str = "the credential sync was cancelled by a lifecycle operation";
 
 /// How long a request may wait before it counts as slow. A change wait is a
 /// long poll: the worker holds it for up to `RELAY_CHANGE_WAIT_BOUND` (the
@@ -17,12 +14,13 @@ fn slow_operation_warning_after(request: &RelayRequest) -> Duration {
 impl RelayClient {
     pub async fn call(&mut self, request: RelayRequest) -> Result<RelayResponsePayload> {
         // Memory RPCs include filesystem work and worker-side queueing. Neither
-        // has a measured deadline; lifecycle cancellation still interrupts them.
+        // has a measured deadline.
         let timeout = match &request {
             RelayRequest::ProjectMemoryTransfer { .. }
             | RelayRequest::ProjectMemorySnapshot
             | RelayRequest::InstallProjectMemorySnapshot { .. }
-            | RelayRequest::ReplaceProjectMemoryTree { .. } => None,
+            | RelayRequest::ReplaceProjectMemoryTree { .. }
+            | RelayRequest::BeginLiveBaseline => None,
             _ => Some(self.request_timeout),
         };
         self.call_with_deadline(request, timeout).await
@@ -122,11 +120,6 @@ impl RelayClient {
         if let Some(reason) = &self.abandoned {
             bail!("{reason}");
         }
-        // Between calls the connection is in step, so a cancelled job stops
-        // here without touching it.
-        if self.cancelled() {
-            return Err(anyhow::Error::new(RelayJobDeferred(CANCELLED)));
-        }
         let mut frame = serde_json::to_vec(envelope)?;
         if frame.len() > MAX_FRAME_BYTES {
             bail!("relay {operation} request frame is too large");
@@ -135,6 +128,7 @@ impl RelayClient {
         let session_id = self.session_id.clone();
         let warning_after = slow_operation_warning_after(&envelope.request);
         let started = Instant::now();
+        let progress = self.adoption_wait_progress.clone();
         let exchange = async {
             self.input
                 .as_mut()
@@ -150,39 +144,55 @@ impl RelayClient {
                 .await
                 .map_err(|error| RelayTransportDead::from_io(error, kind))
                 .with_context(|| format!("flush relay {operation} request"))?;
-            let response = read_bounded_frame(&mut self.output, kind);
-            tokio::pin!(response);
-            let response = tokio::select! {
-                response = &mut response => response,
-                () = tokio::time::sleep(warning_after) => {
-                    tracing::warn!(
-                        %session_id,
-                        %operation,
-                        warning_after_seconds = warning_after.as_secs_f64(),
-                        timeout_seconds = timeout.map(|duration| duration.as_secs_f64()),
-                        "relay operation is still waiting for its response"
-                    );
-                    let response = response.await;
-                    // The warning above says an operation is slow; this says
-                    // for how long, so a stall can be sized per target.
-                    tracing::warn!(
-                        %session_id,
-                        %operation,
-                        elapsed_seconds = started.elapsed().as_secs_f64(),
-                        answered = response.is_ok(),
-                        "slow relay operation finished"
-                    );
-                    response
+            loop {
+                let response = read_bounded_frame(&mut self.output, kind);
+                tokio::pin!(response);
+                let response = tokio::select! {
+                    response = &mut response => response,
+                    () = tokio::time::sleep(warning_after) => {
+                        tracing::warn!(
+                            %session_id,
+                            %operation,
+                            warning_after_seconds = warning_after.as_secs_f64(),
+                            timeout_seconds = timeout.map(|duration| duration.as_secs_f64()),
+                            "relay operation is still waiting for its response"
+                        );
+                        let response = response.await;
+                        // The warning above says an operation is slow; this says
+                        // for how long, so a stall can be sized per target.
+                        tracing::warn!(
+                            %session_id,
+                            %operation,
+                            elapsed_seconds = started.elapsed().as_secs_f64(),
+                            answered = response.is_ok(),
+                            "slow relay operation finished"
+                        );
+                        response
+                    }
+                };
+                let line = response
+                    .with_context(|| format!("read relay {operation} response"))?
+                    .ok_or_else(|| {
+                        anyhow::Error::new(RelayTransportDead::during_exchange(
+                            format!("relay proxy disconnected during {operation}"),
+                            kind,
+                        ))
+                    })?;
+                if matches!(envelope.request, RelayRequest::BeginLiveBaseline)
+                    && let RelayResponsePayload::LiveBaselineWaiting { blockers } =
+                        decode_relay_response(
+                            &line,
+                            &envelope.request_id,
+                            envelope.protocol_version,
+                        )?
+                {
+                    if let Some(progress) = &progress {
+                        progress.send_replace(Some(blockers));
+                    }
+                    continue;
                 }
-            };
-            response
-                .with_context(|| format!("read relay {operation} response"))?
-                .ok_or_else(|| {
-                    anyhow::Error::new(RelayTransportDead::during_exchange(
-                        format!("relay proxy disconnected during {operation}"),
-                        kind,
-                    ))
-                })
+                break Ok(line);
+            }
         };
         let exchange = async {
             match timeout {
@@ -190,28 +200,7 @@ impl RelayClient {
                 None => Ok(exchange.await),
             }
         };
-        let cancellation = self.cancellation.clone();
-        let exchanged = tokio::select! {
-            biased;
-            () = async {
-                match &cancellation {
-                    Some(flag) => crate::recovery_gate::wait_until_cancelled(flag).await,
-                    None => std::future::pending().await,
-                }
-            } => None,
-            exchanged = exchange => Some(exchanged),
-        };
-        // Dropping an exchange in flight leaves its reply to be read as the
-        // next call's, exactly as a timeout does, so the connection is
-        // abandoned the same way. The worker's state, not this call's answer,
-        // is what the next cycle reconciles from.
-        let Some(exchanged) = exchanged else {
-            tracing::debug!(%session_id, %operation, "relay operation cancelled; abandoning its sequential connection");
-            self.abandoned = Some(format!(
-                "relay connection abandoned after {operation} was cancelled by a lifecycle operation"
-            ));
-            return Err(anyhow::Error::new(RelayJobDeferred(CANCELLED)));
-        };
+        let exchanged = exchange.await;
         tracing::debug!(target: "mj_controller::latency", %session_id, %operation,
             request_id = %envelope.request_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             "relay exchange completed");
@@ -234,17 +223,6 @@ impl RelayClient {
                 Err(anyhow!(timed_out))
             }
         }
-    }
-
-    /// Run with a gate admission's cancellation flag, or without one.
-    pub fn set_cancellation(&mut self, cancellation: Option<Arc<std::sync::atomic::AtomicBool>>) {
-        self.cancellation = cancellation;
-    }
-
-    pub fn cancelled(&self) -> bool {
-        self.cancellation
-            .as_ref()
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
     }
 
     pub fn request_id_for(&self, sequence: u64) -> String {

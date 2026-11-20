@@ -6,6 +6,7 @@
 
 mod air_tasks;
 pub(crate) mod drive;
+mod guardian;
 mod instructions;
 mod launch;
 pub use instructions::InstructionRole;
@@ -34,6 +35,7 @@ use session::*;
 use session_config::*;
 pub use verdict_client::VerdictSource;
 
+use crate::relay::NativeSessionHistory;
 use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;
 mod claude_usage;
@@ -115,11 +117,18 @@ pub fn worker_exit_reason(error: &anyhow::Error) -> String {
         .chain()
         .map(ToString::to_string)
         .partition(|text| text.starts_with(BRIDGE_STDERR_CONTEXT));
-    let cause = causes
-        .iter()
-        .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
-        .collect::<Vec<_>>()
-        .join(": ");
+    let cause = error
+        .downcast_ref::<mj_core::relay::WorkerHarnessStartupFailure>()
+        .map_or_else(
+            || {
+                causes
+                    .iter()
+                    .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .collect::<Vec<_>>()
+                    .join(": ")
+            },
+            |failure| failure.message.clone(),
+        );
     tails
         .into_iter()
         .fold(cause, |reason, tail| format!("{reason}\n{tail}"))
@@ -366,7 +375,7 @@ pub async fn run_with_shutdown(
         emit_runtime_event(
             &events,
             RuntimeEvent::SessionFault {
-                message: format!("ACP runtime failed: {error:#}"),
+                message: format!("ACP runtime failed: {}", worker_exit_reason(error)),
             },
         )
         .await
@@ -380,10 +389,8 @@ pub async fn run_with_shutdown(
 struct OpenedSession {
     native_session_id: String,
     started_at: tokio::time::Instant,
-    resume_required: Arc<AtomicBool>,
-    /// Set once this thread holds something only it can replay. Unlike
-    /// `resume_required`, it starts false for every harness, so it is evidence
-    /// about the thread rather than a policy about reloading it.
+    resumed: bool,
+    /// Set when a prompt may have reached the thread or Claude ran a model cycle.
     native_session_used: Arc<AtomicBool>,
 }
 
@@ -405,9 +412,19 @@ struct BridgeRestart {
     /// Carried into the next bridge's spec: what the dead bridge saw is the
     /// evidence for whether its thread may be replaced.
     native_session_used: bool,
-    unexpected: bool,
     session_age: Duration,
-    message: &'static str,
+    notice: BridgeRestartNotice,
+}
+
+enum BridgeRestartNotice {
+    Planned(&'static str),
+    Unexpected,
+}
+
+struct BridgeSessionOpen<'a> {
+    replacing_previous_bridge: bool,
+    replace_unused_codex_thread: bool,
+    first_replaced_unused_native_session_id: &'a mut Option<String>,
 }
 
 async fn run_inner(
@@ -419,10 +436,31 @@ async fn run_inner(
     spec.environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
     let mut rapid_deaths = 0_u32;
     let mut replacing_previous_bridge = false;
+    let mut restart_notice = None;
+    // A new worker starts from the relay journal's latest native session ID.
+    // Within this worker, restore readiness can first see any replacement.
+    let mut first_replaced_unused_native_session_id = None;
     let mut rollback = None;
     loop {
         if shutdown.is_cancelled() {
             return Ok(());
+        }
+        let replace_unused_codex_thread = should_replace_unused_codex_thread(&spec);
+        if let Some(notice) = restart_notice.take() {
+            let message = match notice {
+                BridgeRestartNotice::Planned(message) => message,
+                BridgeRestartNotice::Unexpected if replace_unused_codex_thread => {
+                    "The agent stopped before its first prompt; restarting with a new empty thread."
+                }
+                BridgeRestartNotice::Unexpected => ACP_BRIDGE_LOST_WARNING,
+            };
+            emit_runtime_event(
+                &events,
+                RuntimeEvent::HarnessRestarting {
+                    message: message.to_owned(),
+                },
+            )
+            .await?;
         }
         let opened = Arc::new(Mutex::new(None));
         let result = run_bridge(
@@ -430,20 +468,32 @@ async fn run_inner(
             &mut requests,
             &events,
             opened.clone(),
-            replacing_previous_bridge,
+            BridgeSessionOpen {
+                replacing_previous_bridge,
+                replace_unused_codex_thread,
+                first_replaced_unused_native_session_id:
+                    &mut first_replaced_unused_native_session_id,
+            },
             &shutdown,
         )
         .await;
-        let did_open = opened
+        let opened_as_resume = opened
             .lock()
             .expect("opened session lock poisoned")
-            .is_some();
-        if did_open {
+            .as_ref()
+            .map(|opened| opened.resumed);
+        if let Some(resumed) = opened_as_resume {
             spec.context_restore = None;
-        }
-        if did_open && spec.clear_context_request.is_some() {
-            spec.clear_context_request = None;
-            rollback = None;
+            if !resumed {
+                // session/new establishes the proof for this new identity,
+                // including when it just replaced another unused thread.
+                spec.native_session_history = NativeSessionHistory::CreatedHereUnused;
+            } else if spec.native_session_history == NativeSessionHistory::CreatedHereUnused {
+                spec.native_session_history = NativeSessionHistory::LoadBeforeReplace;
+            }
+            if spec.clear_context_request.take().is_some() {
+                rollback = None;
+            }
         }
         let restart = match result {
             Err(error) if spec.clear_context_request.is_some() => {
@@ -453,9 +503,9 @@ async fn run_inner(
                 emit_runtime_event(&events, RuntimeEvent::CommandRejected {
                     request_id, message: format!("Could not clear context; restoring the previous conversation: {error:#}"),
                  reason: mj_core::event_outcome::OutcomeReason::CommandFailed }).await?;
-                let (previous, used, goal) = rollback.take().expect("clear rollback identity");
+                let (previous, history, goal) = rollback.take().expect("clear rollback identity");
                 spec.resume_session = Some(previous);
-                spec.native_session_may_have_history = used;
+                spec.native_session_history = history;
                 spec.goal_recovery = goal;
                 replacing_previous_bridge = true;
                 continue;
@@ -465,20 +515,32 @@ async fn run_inner(
                 Some(restart) => restart,
             },
         };
+        if restart.native_session_used {
+            spec.native_session_history = NativeSessionHistory::MayHaveHistory;
+        }
         if let Some((request_id, previous)) = restart.clear_context {
+            // run_bridge has reaped the old process. Retire its relay-owned
+            // work before either the replacement or rollback bridge opens.
+            emit_runtime_event(
+                &events,
+                RuntimeEvent::ContextClearing {
+                    request_id: request_id.request_id.clone(),
+                },
+            )
+            .await?;
             rollback = Some((
                 previous,
-                spec.native_session_may_have_history || restart.native_session_used,
+                spec.native_session_history,
                 spec.goal_recovery.clone(),
             ));
             spec.goal_recovery = Arc::new(Mutex::new(Default::default()));
             spec.clear_context_request = Some(request_id);
             spec.resume_session = None;
-            spec.native_session_may_have_history = false;
+            spec.native_session_history = NativeSessionHistory::LoadBeforeReplace;
             replacing_previous_bridge = true;
             continue;
         }
-        if restart.unexpected {
+        if matches!(restart.notice, BridgeRestartNotice::Unexpected) {
             if restart.session_age < RAPID_BRIDGE_WINDOW {
                 rapid_deaths += 1;
                 ensure!(
@@ -489,32 +551,25 @@ async fn run_inner(
                 rapid_deaths = 0;
             }
         }
-        emit_runtime_event(
-            &events,
-            RuntimeEvent::HarnessRestarting {
-                message: restart.message.to_owned(),
-            },
-        )
-        .await?;
+        restart_notice = Some(restart.notice);
         spec.goal_recovery
             .lock()
             .expect("goal lock poisoned")
             .state
             .restart();
         spec.resume_session = restart.resume_session;
-        spec.native_session_may_have_history |= restart.native_session_used;
         replacing_previous_bridge = true;
     }
 }
 
-/// Run one ACP bridge process. `Some` means reload the native session on a
+/// Run one ACP bridge process. `Some` means reopen the native session on a
 /// fresh bridge: a cancel that never acked, or a dead ACP child.
 async fn run_bridge(
     spec: &LaunchSpec,
     requests: &mut mpsc::Receiver<CommandRequest>,
     events: &mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
-    replacing_previous_bridge: bool,
+    session_open: BridgeSessionOpen<'_>,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> Result<Option<BridgeRestart>> {
     // Before the process starts, not after: a selector the harness reads only
@@ -591,14 +646,23 @@ async fn run_bridge(
     let stderr_task = mj_core::runtime::spawn(read_stderr_tail(stderr));
     let transport = ByteStreams::new(stdin.compat_write(), skip_stdout_preamble(stdout).compat());
 
+    let terminals = TerminalRegistry::new()?;
+    // Like the terminals, the guardian's reviewer outlives the protocol
+    // driver: it is stopped below, after this bridge's own teardown, on every
+    // exit path, so the next bridge never starts beside a live reviewer.
+    let guardian = guardian::Guardian::for_launch(spec);
     let (mut result, child_reaped) = {
-        let drive = drive(
+        let drive = drive_with_terminals(
             transport,
             spec.clone(),
             requests,
             events.clone(),
             opened.clone(),
-            replacing_previous_bridge,
+            session_open,
+            BridgeOwned {
+                terminals: terminals.clone(),
+                guardian: guardian.clone(),
+            },
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -678,6 +742,21 @@ async fn run_bridge(
             }
         }
     }
+    // The bridge lifetime owner also covers cancellation of drive before its
+    // ordinary shutdown path; no terminal from this connection may outlive it.
+    terminals.shutdown(events).await;
+    // Nor may its guardian reviewer: the next bridge prepares the same staged
+    // home (OpenCode's login database included) only after this one is gone.
+    if let Some(guardian) = &guardian {
+        guardian.shutdown().await;
+    }
+    emit_runtime_event(
+        events,
+        RuntimeEvent::BridgeRetired {
+            terminal_connection_id: terminals.connection_id().to_owned(),
+        },
+    )
+    .await?;
     let stderr_tail = match stderr_task.await {
         Ok(Ok(tail)) => tail,
         Ok(Err(error)) => {
@@ -704,9 +783,8 @@ async fn run_bridge(
             native_session_used: opened_now
                 .as_ref()
                 .is_some_and(|opened| opened.native_session_used.load(Ordering::Acquire)),
-            unexpected: false,
             session_age: Duration::ZERO,
-            message: "Clearing context",
+            notice: BridgeRestartNotice::Planned("Clearing context"),
         })),
         Ok(Some(restart @ (SessionRestart::Resume(_) | SessionRestart::ReloadLogins(_)))) => {
             let (native_session_id, message) = match restart {
@@ -720,29 +798,22 @@ async fn run_bridge(
                 native_session_used: opened_now
                     .as_ref()
                     .is_some_and(|opened| opened.native_session_used.load(Ordering::Acquire)),
-                unexpected: false,
                 session_age: opened_now
                     .map(|opened| opened.started_at.elapsed())
                     .unwrap_or(Duration::ZERO),
-                message,
+                notice: BridgeRestartNotice::Planned(message),
             }))
         }
         Err(error) => match opened_now {
             None => Err(error),
             Some(opened) => Ok(Some(BridgeRestart {
                 clear_context: None,
-                resume_session: opened
-                    .resume_required
-                    .load(Ordering::Acquire)
-                    .then_some(opened.native_session_id),
+                // Carry the identity even if we can replace it. The next
+                // session open decides whether to load or replace the thread.
+                resume_session: Some(opened.native_session_id),
                 native_session_used: opened.native_session_used.load(Ordering::Acquire),
-                unexpected: true,
                 session_age: opened.started_at.elapsed(),
-                message: if opened.resume_required.load(Ordering::Acquire) {
-                    ACP_BRIDGE_LOST_WARNING
-                } else {
-                    "The agent stopped before its first prompt; restarting with a new empty thread."
-                },
+                notice: BridgeRestartNotice::Unexpected,
             })),
         },
     }

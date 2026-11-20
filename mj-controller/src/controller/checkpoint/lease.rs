@@ -105,7 +105,6 @@ impl ControllerRelayLease {
         match lease.take() {
             Some(lease) => drop(lease),
             None => {
-                admission.abandon_copy().await?;
                 drop(handle.lease_connection(admission).await?);
             }
         }
@@ -185,8 +184,8 @@ pub(in crate::controller) enum CheckpointCompletion {
     /// advances the relay's recovery floor in one durable step; abandoning it
     /// cancels the barrier and leaves the floor alone.
     HeldBarrier,
-    /// The worker already resumed dispatch when target capture finished. All that
-    /// is left for a durably installed archive is the recovery floor move.
+    /// Dispatch resumed after target capture. Older workers still need their
+    /// recovery-floor update once the archive is durably installed.
     ReleasedAfterCapture,
 }
 
@@ -197,6 +196,7 @@ pub(in crate::controller) struct LatchedCheckpoint {
     pub(in crate::controller) barrier_command_id: String,
     pub(in crate::controller) cursor: RelayCursor,
     pub(in crate::controller) completion: CheckpointCompletion,
+    pub(in crate::controller) relay_protocol: u32,
     // Declared last: relay cleanup must finish before another operation enters.
     pub(in crate::controller) _worker_owner: crate::worker_lifecycle::WorkerPermit,
 }
@@ -208,8 +208,13 @@ pub(in crate::controller) struct LatchedCheckpoint {
 /// A close keeps its lease through the durable Close and CompleteCheckpoint
 /// decisions. Losing the connection preserves its sealed cut for recovery.
 impl LatchedCheckpoint {
-    /// Let the relay release the history that this installed archive covers.
+    /// Release a held barrier, or maintain archive coverage for older workers.
     pub(super) async fn complete(mut self) -> Result<()> {
+        if matches!(self.completion, CheckpointCompletion::ReleasedAfterCapture)
+            && self.relay_protocol >= mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL
+        {
+            return Ok(());
+        }
         let (prefix, command) = match self.completion {
             CheckpointCompletion::HeldBarrier => (
                 "checkpoint-complete",

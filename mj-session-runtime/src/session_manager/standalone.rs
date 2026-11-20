@@ -28,10 +28,21 @@ impl StandaloneSession {
     }
 
     pub async fn connect(target: &RelaySessionTarget) -> Result<Self> {
+        Self::connect_inner(target, None, None).await
+    }
+
+    async fn connect_inner(
+        target: &RelaySessionTarget,
+        prepared: Option<RelayClient>,
+        baseline: Option<mj_core::relay::LiveSessionBaseline>,
+    ) -> Result<Self> {
         // Reach the worker before reading the projection. A stored session can
         // be tens of megabytes, and the reconnect loop would otherwise pay that
         // whole synchronous read on every attempt against a worker that is down.
-        let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
+        let mut client = match prepared {
+            Some(client) => client,
+            None => RelayClient::connect(&target.spec, &target.session_id).await?,
+        };
         let session = target.session_id.clone();
         let protocol = client.protocol_version();
         mj_core::runtime::spawn_blocking(move || {
@@ -56,8 +67,210 @@ impl StandaloneSession {
             operator_presence_revision: None,
             history_active: Default::default(),
         };
+        if let Some(baseline) = baseline {
+            ensure!(
+                baseline.state.session_id == target.session_id,
+                "live recovery cut belongs to another session"
+            );
+            Self::cache_baseline_attachments(&mut connection.client, &baseline).await?;
+            let projection =
+                mj_transcript::projection::materialized_session_from_live_baseline(&baseline)?;
+            crate::database::install_live_session_baseline(&projection, baseline)?;
+            (connection.materialized, connection.window) =
+                load_projection(&target.session_id).await?;
+        }
         connection.sync_in_place().await?;
+        if let Some((legacy_pending, pinned_operations)) =
+            connection.client.command_retention_status().await?
+            && (legacy_pending || !pinned_operations.is_empty())
+        {
+            let session = target.session_id.clone();
+            // Inspect only the owners this worker reported. A concurrent new
+            // Move has a different identity and cannot be cleared by this read.
+            let (legacy, completed) = mj_core::runtime::spawn_blocking(move || -> Result<_> {
+                let operation = crate::database::load_move_operation(&session)?;
+                let pending = operation.as_ref().filter(|operation| {
+                    operation.queue_admission_started && !operation.queue_admission_finished
+                });
+                let completed = pinned_operations
+                    .into_iter()
+                    .filter(|id| pending.is_none_or(|operation| operation.operation_id != *id))
+                    .collect::<Vec<_>>();
+                if !legacy_pending {
+                    return Ok((None, completed));
+                }
+                let legacy = (|| -> Result<_> {
+                    let Some(operation) = pending.filter(|operation| {
+                        operation.queue == mj_core::state::ResumeQueueDisposition::Start
+                    }) else {
+                        return Ok((None, Default::default()));
+                    };
+                    let checkpoint = operation.restore_artifact()
+                        .context("pending Move queue archive is missing")?;
+                    let verified = verify_archive_streaming(&checkpoint.archive_path)?;
+                    anyhow::ensure!(
+                        verified.archive_sha256 == checkpoint.sha256
+                            && verified.manifest.session.id == session,
+                        "pending Move queue checkpoint verification failed"
+                    );
+                    Ok((Some(operation.operation_id.clone()),
+                        operation.queue_command_ids(&verified.canonical_session)))
+                })();
+                let legacy = match legacy {
+                    Ok(legacy) => Some(legacy),
+                    Err(error) => {
+                        // Keep the worker's legacy receipt hold intact. Queue
+                        // replay reports this error; ordinary attachment must
+                        // still expose the live destination and its status.
+                        tracing::warn!(session_id = %session,
+                            "could not reconcile pending Move receipts; retaining legacy protection: {error:#}");
+                        None
+                    }
+                };
+                Ok((legacy, completed))
+            })
+            .await
+            .context("reconcile command retention owners")??;
+            // Catch-up has validated this store against the worker before any
+            // receipt protection changes. Existing pins and the legacy hold
+            // protect receipts during that ACK; stale backups never release them.
+            if let Some((operation, ids)) = legacy {
+                connection
+                    .client
+                    .update_command_retention(operation, ids, true)
+                    .await?;
+            }
+            for operation in completed {
+                connection
+                    .client
+                    .update_command_retention(Some(operation), Default::default(), false)
+                    .await?;
+            }
+        }
         Ok(connection)
+    }
+
+    pub async fn cache_baseline_attachments(
+        client: &mut RelayClient,
+        baseline: &mj_core::relay::LiveSessionBaseline,
+    ) -> Result<()> {
+        for queued in baseline
+            .queue
+            .iter()
+            .chain(&baseline.delivered_initial_prompts)
+        {
+            if let Some(prompt) = queued.command.prompt_blocks() {
+                Self::cache_prompt_attachments_with(client, &baseline.state.session_id, &prompt)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn cache_prompt_attachments(
+        &mut self,
+        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
+    ) -> Result<()> {
+        Self::cache_prompt_attachments_with(&mut self.client, &self.materialized.session_id, prompt)
+            .await
+    }
+
+    async fn cache_prompt_attachments_with(
+        client: &mut RelayClient,
+        session_id: &str,
+        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
+    ) -> Result<()> {
+        for reference in mj_core::attachment::references(prompt)? {
+            if let Err(error) = client.cache_attachment(&reference).await {
+                tracing::warn!(session_id, attachment = %reference.sha256, %error, "could not cache image attachment during recovery");
+            }
+        }
+        Ok(())
+    }
+
+    async fn cache_event_attachments(
+        &mut self,
+        events: &[mj_core::relay::RelayEvent],
+    ) -> Result<()> {
+        for event in events {
+            if let mj_core::relay::RelayObservation::CommandQueued { command, .. } =
+                &event.observation
+                && let Some(prompt) = command.prompt_blocks()
+            {
+                self.cache_prompt_attachments(&prompt).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn prepare_adoption(spec: &CommandSpec, session_id: &str) -> Result<RelayClient> {
+        RelayClient::connect(spec, session_id).await
+    }
+
+    /// Probe only durable cursors; no history is acknowledged during preparation.
+    pub async fn adoption_needs_cut(client: &mut RelayClient, session_id: &str) -> Result<bool> {
+        let session = session_id.to_owned();
+        let cursor = mj_core::runtime::spawn_blocking(move || {
+            crate::database::materialized_event_frontier(&session)
+        })
+        .await
+        .context("read adoption cursor")??
+        .unwrap_or((0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into()));
+        match client.attach(cursor.0, &cursor.1).await {
+            Ok(_) => return Ok(false),
+            Err(error) if relay_desynchronized(&error) => {
+                // A competing adopter may have committed and ACKed since our read.
+                let session = session_id.to_owned();
+                let current = mj_core::runtime::spawn_blocking(move || {
+                    crate::database::materialized_event_frontier(&session)
+                })
+                .await
+                .context("reload adoption cursor")??;
+                if let Some(current) = current.filter(|current| current.0 > 0) {
+                    client.attach(current.0, &current.1).await?;
+                    return Ok(false);
+                }
+                if client.status().await?.retained_event_ordinal() == 0 {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        if client.protocol_version() < mj_core::relay::RELAY_LIVE_BASELINE_PROTOCOL {
+            return Err(crate::worker_client::LiveBaselineUnsupported.into());
+        }
+        Ok(true)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn connect_adopting(spec: &CommandSpec, session_id: &str) -> Result<Self> {
+        let mut client = Self::prepare_adoption(spec, session_id).await?;
+        let cut = if Self::adoption_needs_cut(&mut client, session_id).await? {
+            Some(client.live_session_baseline().await?)
+        } else {
+            None
+        };
+        Self::connect_prepared_adopting(spec, session_id, client, cut).await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    async fn connect_prepared_adopting(
+        spec: &CommandSpec,
+        session_id: &str,
+        client: RelayClient,
+        baseline: Option<mj_core::relay::LiveSessionBaseline>,
+    ) -> Result<Self> {
+        Self::connect_inner(
+            &RelaySessionTarget {
+                session_id: session_id.to_owned(),
+                spec: spec.clone(),
+                worker_recovery: None,
+                project_memory: None,
+            },
+            Some(client),
+            baseline,
+        )
+        .await
     }
 
     pub async fn connect_command(spec: &CommandSpec, session_id: &str) -> Result<Self> {
@@ -199,13 +412,25 @@ impl StandaloneSession {
                     continue;
                 }
                 Err(error) if relay_desynchronized(&error) => {
+                    // Another connection can commit and ACK beyond our cursor.
+                    // The shared durable projection, rather than a checkpoint,
+                    // owns that advancement and is the first repair source.
+                    let (durable, window) = load_projection(&self.materialized.session_id).await?;
+                    if durable.applied_event_ordinal > after_ordinal {
+                        self.materialized = durable;
+                        self.window = window;
+                        continue;
+                    }
+                    let behind_retention =
+                        after_ordinal < self.operational.retained_event_ordinal();
                     self.repair_projection()
                         .await
                         .with_context(|| {
-                            format!(
-                                "controller projection for {} cannot catch up from ordinal {after_ordinal}: {error:#}",
-                                self.materialized.session_id
-                            )
+                            if behind_retention {
+                                format!("controller store is behind the worker's retained journal for {} at ordinal {after_ordinal}: {error:#}", self.materialized.session_id)
+                            } else {
+                                format!("controller projection for {} cannot catch up from ordinal {after_ordinal}: {error:#}", self.materialized.session_id)
+                            }
                         })?;
                     repaired = true;
                     // Repair rebuilds from the same durable checkpoint every
@@ -364,9 +589,7 @@ impl StandaloneSession {
                 )
                 .await
                 .context("relay cannot rebuild the projection from its genesis")?;
-            save_materialized_session(&replacement)?;
-            self.window = mj_core::state::ProjectionWindow::of(&replacement);
-            self.materialized = replacement;
+            self.install_repaired_projection(replacement).await?;
             return Ok(());
         };
         let checkpoint_path = checkpoint.archive_path.clone();
@@ -407,9 +630,28 @@ impl StandaloneSession {
             .context("relay rejected the verified checkpoint repair cursor")?;
         let replacement =
             materialized_session_from_canonical(&self.materialized.session_id, &canonical)?;
-        save_materialized_session(&replacement)?;
-        self.window = mj_core::state::ProjectionWindow::of(&replacement);
-        self.materialized = replacement;
+        self.install_repaired_projection(replacement).await?;
+        Ok(())
+    }
+
+    async fn install_repaired_projection(
+        &mut self,
+        replacement: MaterializedSession,
+    ) -> Result<()> {
+        let ordinal = self.materialized.applied_event_ordinal;
+        let digest = self.materialized.applied_event_digest.clone();
+        let installed = mj_core::runtime::spawn_blocking(move || {
+            crate::database::repair_materialized_session_if_current(&replacement, ordinal, &digest)
+        })
+        .await
+        .context("projection repair writer failed")??;
+        // Reload either the repair or the concurrent winner; never replay from
+        // a replacement that lost its atomic writer decision.
+        (self.materialized, self.window) = load_projection(&self.materialized.session_id).await?;
+        if !installed {
+            tracing::debug!(session_id = %self.materialized.session_id,
+                "projection advanced during repair; using the durable winner");
+        }
         self.window.trim(
             &mut self.materialized,
             crate::database::PROJECTION_TAIL_ITEMS,
@@ -462,6 +704,17 @@ impl StandaloneSession {
         self.client.submit(command_id, command).await
     }
 
+    pub async fn update_command_retention(
+        &mut self,
+        operation_id: Option<String>,
+        command_ids: std::collections::BTreeSet<String>,
+        reconcile_legacy: bool,
+    ) -> Result<()> {
+        self.client
+            .update_command_retention(operation_id, command_ids, reconcile_legacy)
+            .await
+    }
+
     pub async fn submit(&mut self, command_id: String, command: RelayCommand) -> Result<u64> {
         let ordinal = self.submit_accepted(command_id, command).await?;
         self.sync_in_place().await?;
@@ -507,27 +760,7 @@ impl StandaloneSession {
         // Reconnect pages can replay events not yet projected before restart.
         // Only failures completed in the last backoff window create marks.
         let history_floor_ms = now_ms.saturating_sub(15 * 60 * 1000);
-        for event in &page.events {
-            if let mj_core::relay::RelayObservation::CommandQueued {
-                command: RelayCommand::Prompt { prompt },
-                ..
-            } = &event.observation
-            {
-                for reference in mj_core::attachment::references(prompt)? {
-                    if let Err(error) = self.client.cache_attachment(&reference).await {
-                        // History remains readable even if a blob was lost. A
-                        // later submission still verifies every image before
-                        // admission, and must report missing data to the user.
-                        tracing::warn!(
-                            session_id = %self.materialized.session_id,
-                            attachment = %reference.sha256,
-                            %error,
-                            "could not cache image attachment during replay"
-                        );
-                    }
-                }
-            }
-        }
+        self.cache_event_attachments(&page.events).await?;
 
         let RelayEventPage {
             events,

@@ -2189,6 +2189,10 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
         return;
     }
     let mode = std::env::var(CHILD).unwrap();
+    // The relay this test starts reports to its stderr, which the client
+    // logs at debug and nothing else shows; a failure below prints it.
+    let log = mj_controller::test_log::CapturedLog::default();
+    tracing::subscriber::set_global_default(log.clone()).expect("isolated test log subscriber");
     let _writer = mj_controller::database::install_isolated_test_writer();
     register_leased_relay_session();
     let root = tempfile::tempdir().unwrap();
@@ -2303,8 +2307,9 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
                     )
                     .await
                     .unwrap();
-                let lease = handle.lease_connection(&admission).await.unwrap();
+                let lease = handle.lease_connection(&admission).await?;
                 lease.release();
+                anyhow::Ok(())
             }
         })
     });
@@ -2323,14 +2328,25 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
             result.is_err(),
             "a person's foreground Move preempts scheduling"
         );
-        tokio::time::timeout(Duration::from_secs(5), moving)
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(5), moving)
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+        {
+            panic!(
+                "the Move could not lease the connection: {error:#}\nlogged:\n{}",
+                log.at_or_above(tracing::Level::DEBUG).join("\n")
+            );
+        }
     } else {
+        let scheduled = result.unwrap_or_else(|error| {
+            panic!(
+                "quota scheduling failed: {error:#}\nlogged:\n{}",
+                log.at_or_above(tracing::Level::DEBUG).join("\n")
+            )
+        });
         assert!(
-            result
-                .unwrap()
+            scheduled
                 .snapshot
                 .unwrap()
                 .operational

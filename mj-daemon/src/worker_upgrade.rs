@@ -2,9 +2,8 @@
 //!
 //! A running session keeps the worker it started with, so a session that is
 //! never stopped never gains anything a newer daemon's worker learned. This
-//! coordinator watches the same session views the recovery coordinator does
-//! and, when a session is quiet and its worker has a different compatibility
-//! identity from the one this controller would install, replaces it in place.
+//! coordinator watches session views and replaces a quiet worker whose
+//! compatibility identity differs from the one this controller would install.
 //!
 //! Quiet is the whole safety argument: stopping a worker tears down the ACP
 //! bridge with it, so an upgrade may only run when nothing would be lost.
@@ -17,11 +16,10 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinSet;
 
-use crate::recovery::{backoff_delay, elapsed_at_least};
+use mj_controller::backoff::backoff_delay;
 use mj_controller::controller::{Controller, HarnessPreparationFailure, WorkerUpgradeOutcome};
 use mj_controller::recovery_gate::{
-    BackgroundWork, ObservationReceiver, ObservationSender, RecoveryGate, RecoveryObserver,
-    observation_channel,
+    BackgroundWork, ObservationReceiver, ObservationSender, RecoveryGate, observation_channel,
 };
 use mj_controller::session_manager::SessionManagerControl;
 use mj_controller::targets::CancellableProcessExecutor;
@@ -47,7 +45,7 @@ const WORKER_UPGRADE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 #[derive(Debug, Clone)]
 pub struct WorkerUpgradeObservation {
     pub session: SessionRecord,
-    pub config: Config,
+    pub config: mj_core::snapshot_map::SharedSnapshot<Config>,
     /// Worker-input compatibility identity reported in hello, or `None` when
     /// it is too old to report one. `None` counts as outdated.
     pub worker_build: Option<String>,
@@ -62,7 +60,7 @@ pub struct WorkerUpgradeObservation {
 
 /// Reports session activity to the upgrade coordinator.
 ///
-/// Like the recovery observer, this is a queued hand-off: the caller is an
+/// This is a queued hand-off: the caller is an
 /// event loop and must never wait on an upgrade decision.
 #[derive(Clone)]
 pub struct WorkerUpgradeObserver {
@@ -97,19 +95,18 @@ pub struct WorkerUpgradeCoordinator {
 impl Drop for WorkerUpgradeCoordinator {
     fn drop(&mut self) {
         // Closing the shared gate prevents new attempts and cancels existing
-        // ones atomically. Both supervisors retain ownership until settlement.
+        // ones atomically. The supervisor retains ownership until settlement.
         self.gate.close();
     }
 }
 
 impl WorkerUpgradeCoordinator {
-    /// Start the coordinator, sharing the recovery observer's gate so a
-    /// recovery copy and an upgrade never touch one session at the same time.
-    pub fn spawn(session_manager: SessionManagerControl, recovery: &RecoveryObserver) -> Self {
+    /// Share lifecycle admission with all other work on the worker.
+    pub fn spawn(session_manager: SessionManagerControl, recovery: &Arc<RecoveryGate>) -> Self {
         let (observations_tx, mut observations_rx) =
             observation_channel::<WorkerUpgradeObservation>();
         let (results_tx, results_rx) = observation_channel();
-        let gate = recovery.gate.clone();
+        let gate = recovery.clone();
         let coordinator_gate = gate.clone();
         let supervisor = mj_core::runtime::spawn(async move {
             let mut policies = BTreeMap::<String, PolicyState>::new();
@@ -145,7 +142,7 @@ impl WorkerUpgradeCoordinator {
                                 let mut state = State::default();
                                 state.sessions.insert(task_session_id.clone(), session);
                                 let controller = Controller {
-                                    config: observation.config,
+                                    config: (*observation.config).clone(),
                                     state,
                                 };
                                 let executor = CancellableProcessExecutor::new(cancelled.cancellation())
@@ -390,6 +387,19 @@ impl PolicyState {
     }
 }
 
+/// Whether `now` is at least `window` past `since`. A timestamp in the future -
+/// a clock that moved backwards, a target whose clock runs ahead - is not
+/// elapsed.
+pub(crate) fn elapsed_at_least(
+    since: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+    window: Duration,
+) -> bool {
+    now.signed_duration_since(since)
+        .to_std()
+        .is_ok_and(|elapsed| elapsed >= window)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,7 +455,7 @@ mod tests {
     fn observation(worker_build: Option<&str>, quiet: bool) -> WorkerUpgradeObservation {
         WorkerUpgradeObservation {
             session: session_record(SessionState::Running),
-            config: Config::default(),
+            config: Config::default().into(),
             worker_build: worker_build.map(str::to_owned),
             quiet,
         }
@@ -645,13 +655,12 @@ mod tests {
         assert!(policy.due(&observation(Some("build-a"), true), now));
     }
 
-    /// Recovery holds the same per-session slot, so an upgrade cannot start
-    /// while a recovery copy is running for that session.
+    /// Worker replacement holds the per-session slot until it settles.
     #[test]
-    fn the_shared_gate_keeps_an_upgrade_and_a_recovery_copy_apart() {
+    fn the_shared_gate_keeps_two_worker_replacements_apart() {
         let gate = Arc::new(RecoveryGate::default());
-        let recovery_copy = gate
-            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+        let replacement = gate
+            .try_start("session-1", BackgroundWork::WorkerReplacement)
             .expect("the slot starts free");
 
         assert!(
@@ -659,7 +668,7 @@ mod tests {
                 .is_err()
         );
 
-        drop(recovery_copy);
+        drop(replacement);
         assert!(
             gate.try_start("session-1", BackgroundWork::WorkerReplacement)
                 .is_ok()

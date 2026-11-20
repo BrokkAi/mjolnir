@@ -224,19 +224,96 @@ impl ExpectedOutput<'_> {
 /// Do what the fixture terminal does whenever it is polled: take the
 /// program's output and answer the queries it has asked.
 fn answer_terminal(master: &mut File, output: &mut PtyOutput) {
+    output.timeline.polled();
     drain(master, output);
     if output.background_query_needs_answer(BACKGROUND_QUERY) {
         master
             .write_all(BACKGROUND_RESPONSE)
             .expect("answer terminal background query");
         output.mark_background_query_answered();
+        output.timeline.note("answered the background query");
+        output.timeline.awaiting_next_query = Some(Instant::now());
     }
     if output.device_query_needs_answer(DEVICE_ATTRIBUTES_QUERY) {
         master
             .write_all(DEVICE_ATTRIBUTES_RESPONSE)
             .expect("answer terminal device attributes query");
         output.mark_device_query_answered();
+        output.timeline.note("answered the device attributes query");
+        output.timeline.awaiting_next_query = None;
     }
+    // The dashboard asks its next question as soon as it has read the answer
+    // to the first, within milliseconds. Record who holds the terminal while
+    // it is still waiting, since by the time a test fails that has passed.
+    if output
+        .timeline
+        .awaiting_next_query
+        .is_some_and(|answered| answered.elapsed() > Duration::from_millis(300))
+    {
+        output.timeline.awaiting_next_query = None;
+        output.timeline.note(format!(
+            "the background answer was still unread after 300ms: {}",
+            terminal_snapshot(master)
+        ));
+    }
+}
+
+/// Who holds the fixture terminal and what it has not read: the evidence
+/// when bytes the fixture wrote do not reach the dashboard.
+fn terminal_snapshot(master: &File) -> String {
+    use std::os::unix::fs::OpenOptionsExt;
+    // `ptsname` returns a pointer into static storage.
+    static PTSNAME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let name = {
+        let _serial = PTSNAME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let name = unsafe { libc::ptsname(master.as_raw_fd()) };
+        if name.is_null() {
+            return format!("no terminal name: {}", io::Error::last_os_error());
+        }
+        unsafe { std::ffi::CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let mut snapshot = format!("{name}: foreground group {}", unsafe {
+        libc::tcgetpgrp(master.as_raw_fd())
+    });
+    match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(&name)
+    {
+        Ok(slave) => {
+            let mut unread: libc::c_int = -1;
+            unsafe { libc::ioctl(slave.as_raw_fd(), libc::FIONREAD as _, &raw mut unread) };
+            let modes = termios(slave.as_raw_fd());
+            snapshot += &format!(
+                ", {unread} input bytes unread, canonical={} echo={}",
+                modes.c_lflag & libc::ICANON != 0,
+                modes.c_lflag & libc::ECHO != 0
+            );
+        }
+        Err(error) => snapshot += &format!(", open: {error}"),
+    }
+    let terminal = name.trim_start_matches("/dev/");
+    match Command::new("ps")
+        .args(["-axo", "pid,ppid,pgid,tpgid,stat,tty,command"])
+        .output()
+    {
+        Ok(processes) => {
+            for line in String::from_utf8_lossy(&processes.stdout)
+                .lines()
+                .filter(|line| line.split_whitespace().nth(5) == Some(terminal))
+            {
+                snapshot += "\n    ";
+                snapshot.extend(line.chars().take(200));
+            }
+        }
+        Err(error) => snapshot += &format!(", ps: {error}"),
+    }
+    snapshot
 }
 
 fn wait_for_output_until(
@@ -246,10 +323,21 @@ fn wait_for_output_until(
     deadline: Instant,
     mut child: Option<&mut Child>,
 ) {
+    let started = Instant::now();
+    let mut slow = false;
     loop {
         answer_terminal(master, output);
         if expected.matches(output) {
             return;
+        }
+        // An interaction is answered within a frame or two. Record who holds
+        // the terminal while this one is still unanswered.
+        if child.is_none() && !slow && started.elapsed() > Duration::from_secs(2) {
+            slow = true;
+            output.timeline.note(format!(
+                "{expected:?} not seen after 2s: {}",
+                terminal_snapshot(master)
+            ));
         }
         if let Some(child) = child.as_deref_mut()
             && let Some(status) = child.try_wait().expect("poll PTY startup")
@@ -263,12 +351,13 @@ fn wait_for_output_until(
         }
         assert!(
             Instant::now() < deadline,
-            "PTY child did not reach {expected:?}; phase: {}; screen: {}; output: {:?}",
+            "PTY child did not reach {expected:?}; phase: {}; the terminal {}; screen: {}; output: {:?}",
             if child.is_some() {
                 "dashboard startup"
             } else {
                 "interaction"
             },
+            output.timeline,
             output.screen.contents(),
             String::from_utf8_lossy(output)
         );
@@ -424,7 +513,26 @@ fn spawn_dashboard_pty_with_prefix(
     local_target: bool,
     prefix: Option<&str>,
 ) -> DashboardPty {
-    spawn_dashboard_pty_with_setup(exit_when_idle, pending_session, local_target, prefix, false)
+    spawn_dashboard_pty_with_setup(
+        exit_when_idle,
+        pending_session,
+        local_target,
+        prefix,
+        Setup::Done,
+    )
+}
+
+/// What the fixture installation says about first-run setup when the
+/// dashboard asks its daemon.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Setup {
+    /// An existing installation: a written configuration and no marker.
+    Done,
+    /// A new installation whose setup is pending.
+    FirstRun,
+    /// An existing installation whose setup marker is a named pipe, so the
+    /// daemon cannot answer whether setup is due until the test writes it.
+    AnswerHeld,
 }
 
 fn spawn_dashboard_pty_with_setup(
@@ -432,7 +540,7 @@ fn spawn_dashboard_pty_with_setup(
     pending_session: bool,
     local_target: bool,
     prefix: Option<&str>,
-    first_run: bool,
+    setup: Setup,
 ) -> DashboardPty {
     spawn_dashboard_pty_with_setup_and_args(
         exit_when_idle,
@@ -440,7 +548,7 @@ fn spawn_dashboard_pty_with_setup(
         local_target,
         prefix,
         None,
-        first_run,
+        setup,
         &[],
     )
 }
@@ -451,7 +559,7 @@ fn spawn_dashboard_pty_with_setup_and_args(
     local_target: bool,
     prefix: Option<&str>,
     theme: Option<mj_core::config::ThemeChoice>,
-    first_run: bool,
+    setup: Setup,
     args: &[&str],
 ) -> DashboardPty {
     let directory = tempfile::tempdir().expect("create Hel test storage");
@@ -545,7 +653,24 @@ image = "ubuntu:24.04"
         }
         config.save_to(&path).unwrap();
     }
-    if first_run {
+    if setup == Setup::AnswerHeld {
+        let marker = std::ffi::CString::new(
+            storage
+                .path()
+                .join("data/hel/setup-state")
+                .into_os_string()
+                .into_encoded_bytes(),
+        )
+        .unwrap();
+        fs::create_dir_all(storage.path().join("data/hel")).unwrap();
+        assert_eq!(
+            unsafe { libc::mkfifo(marker.as_ptr(), 0o600) },
+            0,
+            "create the setup marker pipe: {}",
+            io::Error::last_os_error()
+        );
+    }
+    if setup == Setup::FirstRun {
         fs::write(
             config_root.join("hel/config.toml"),
             "version = 14\n[phone]\nenabled = false\n\n[targets.docker]\nkind = \"docker\"\nmachine = \"local\"\nimage = \"ubuntu:24.04\"\n",
@@ -653,7 +778,7 @@ image = "ubuntu:24.04"
     command.env("MJ_WORKER_BINARY", worker);
     // Every launch detects agent profiles from HOME and PATH, so no fixture
     // may see the host's own agent homes or installed agent commands.
-    let tools = if first_run {
+    let tools = if setup == Setup::FirstRun {
         storage.path().join("first-run-tools")
     } else {
         let tools = storage.path().join("fixture-tools");
@@ -674,6 +799,9 @@ image = "ubuntu:24.04"
     // These tests assert the bytes the real dashboard paints, so a host-wide
     // NO_COLOR setting must not turn every frame monochrome.
     command.env_remove("NO_COLOR");
+    // A failing fixture prints its logs; this adds how long the dashboard
+    // waited for the terminal's background and what it received.
+    command.env("RUST_LOG", "info,mj::terminal_background=debug");
     command.env("PATH", tools);
     command.args(["--instance", "terminal-regression"]);
     command.args(args);
@@ -733,6 +861,7 @@ image = "ubuntu:24.04"
         }),
         "daemon never took the fixture store"
     );
+    output.timeline.note("the daemon took the store");
     DashboardPty {
         _storage: storage,
         master,
@@ -777,7 +906,7 @@ fn auto_theme_paints_light_on_a_terminal_that_reports_a_white_background() {
         false,
         None,
         Some(mj_core::config::ThemeChoice::Auto),
-        false,
+        Setup::Done,
         &[],
     );
     let mut output = fixture.take_output();
@@ -794,7 +923,8 @@ fn auto_theme_paints_light_on_a_terminal_that_reports_a_white_background() {
     };
     assert!(
         painted(b"48;2;251;250;247m"),
-        "Light's panel surface was never painted; output: {:?}",
+        "Light's panel surface was never painted; the terminal {}; output: {:?}",
+        output.timeline,
         String::from_utf8_lossy(&output)
     );
     assert!(
@@ -1100,7 +1230,7 @@ fn simple_mode_detaches_on_direct_ctrl_q_and_never_claims_ctrl_b() {
         true,
         None,
         None,
-        false,
+        Setup::Done,
         &["simple", env!("CARGO_MANIFEST_DIR")],
     );
     let mut output = fixture.take_output();
@@ -1204,6 +1334,66 @@ fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
         REATTACH_MESSAGE,
         "reattachment message was not the final output"
     );
+}
+
+// Hard-won: dbb46cc7c: every start opened the first-run welcome until the
+// daemon said it was not needed, and keys typed meanwhile went to that dialog.
+#[test]
+fn keys_reach_the_dashboard_while_the_daemon_checks_for_a_first_run() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut fixture = spawn_dashboard_pty_with_setup_and_args(
+        true,
+        false,
+        false,
+        None,
+        None,
+        Setup::AnswerHeld,
+        &[],
+    );
+    let marker = fixture._storage.path().join("data/hel/setup-state");
+    let mut output = fixture.take_output();
+    wait_for_ready(
+        fixture.child.child_mut(),
+        &mut fixture.master,
+        &mut output,
+        READY_MARKER,
+    );
+    // A pipe opens for writing only once it has a reader, which is the daemon
+    // answering the dashboard. Holding it open keeps the daemon waiting.
+    let deadline = Instant::now() + TIMEOUT;
+    let mut answer = loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&marker)
+        {
+            Ok(pipe) => break pipe,
+            Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {}
+            Err(error) => panic!("open the setup marker pipe: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the dashboard never asked its daemon whether setup is due"
+        );
+        answer_terminal(&mut fixture.master, &mut output);
+        thread::sleep(Duration::from_millis(10));
+    };
+    output.clear();
+    // As in the test below: Shift-Tab reaches the workspace pane's hamburger
+    // and Enter opens workspace management.
+    fixture
+        .master
+        .write_all(b"\x1b[Z\r")
+        .expect("open workspace management");
+    wait_for_screen(
+        &mut fixture.master,
+        &mut output,
+        b"New workspace",
+        Instant::now() + TIMEOUT,
+    );
+    answer
+        .write_all(b"complete\n")
+        .expect("let the daemon answer");
 }
 
 #[test]
@@ -1357,7 +1547,7 @@ fn startup_wait_reports_a_child_exit_without_waiting_for_the_deadline() {
 
 #[test]
 fn first_startup_discovers_both_agents_and_remains_usable_during_background_checks() {
-    let mut fixture = spawn_dashboard_pty_with_setup(false, false, false, None, true);
+    let mut fixture = spawn_dashboard_pty_with_setup(false, false, false, None, Setup::FirstRun);
     // Declared after the fixture so that it drops first: the held check
     // must finish before teardown, even when this fails.
     let held_check = ReleaseOnDrop(fixture._storage.path().join(FIRST_RUN_CHECK_RELEASE));

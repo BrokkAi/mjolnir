@@ -1472,6 +1472,10 @@ fn stream_command_with_stdin(
         .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
     let group =
         (!command.detaches).then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
+    let exit_watch = crate::subprocess::ExitWatch::new(&child);
+    // Each timed wait says whether the child may have exited, so nothing
+    // polls the pidfd twice; the first pass checks once.
+    let mut maybe_exited = true;
     let stdin = child
         .stdin
         .take()
@@ -1587,7 +1591,7 @@ fn stream_command_with_stdin(
             if stdout_reader.is_finished() {
                 end_reply();
             }
-            match if status.is_some() {
+            match if status.is_some() || !maybe_exited {
                 Ok(status)
             } else {
                 child.try_wait()
@@ -1624,7 +1628,13 @@ fn stream_command_with_stdin(
                     break status;
                 }
             }
-            std::thread::sleep(Duration::from_millis(25));
+            // A reaped child's pidfd stays readable; sleep while draining.
+            maybe_exited = if status.is_some() {
+                std::thread::sleep(Duration::from_millis(25));
+                true
+            } else {
+                exit_watch.wait(Duration::from_millis(25))
+            };
         };
         let input_result = input_writer
             .join()
@@ -2227,6 +2237,10 @@ impl CancellableProcessExecutor {
             .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
         let group = (!command.detaches && !command.preserve_children_on_cancel)
             .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
+        let exit_watch = crate::subprocess::ExitWatch::new(&child);
+        // Each timed wait says whether the child may have exited, so nothing
+        // polls the pidfd twice; the first pass checks once.
+        let mut maybe_exited = true;
         let stdout = child.stdout.take().context("command stdout missing")?;
         let stderr = child.stderr.take().context("command stderr missing")?;
         let mut stdout_reader = PipeCollector::spawn_output(stdout, gate.cloned(), output);
@@ -2250,7 +2264,7 @@ impl CancellableProcessExecutor {
                 }
                 bail!("{}", self.cancellation_message(&command.purpose));
             }
-            if status.is_none() {
+            if status.is_none() && maybe_exited {
                 status = child
                     .try_wait()
                     .with_context(|| format!("wait for {}", command.purpose))?;
@@ -2265,7 +2279,13 @@ impl CancellableProcessExecutor {
                     break status;
                 }
             }
-            std::thread::sleep(Duration::from_millis(25));
+            // A reaped child's pidfd stays readable; sleep while draining.
+            maybe_exited = if status.is_some() {
+                std::thread::sleep(Duration::from_millis(25));
+                true
+            } else {
+                exit_watch.wait(Duration::from_millis(25))
+            };
         };
         let deadline = Instant::now();
         let stdout = stdout_reader.finish("stdout", deadline)?;
@@ -3881,13 +3901,12 @@ mod executor_tests {
     fn container_exec_drain_preserves_streams_stdin_and_status() {
         let temp = tempfile::tempdir().unwrap();
         let fake = temp.path().join("podman");
-        fs::write(
-            &fake,
-            "#!/bin/sh\nshift 3\ncat\nprintf 'stderr bytes\\n' >&2\nexit \"$1\"\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        // Never exec a file this multi-threaded test just wrote (ETXTBSY).
+        crate::test_hooks::install_fake_command(
+            temp.path(),
+            "podman",
+            "shift 3\ncat\nprintf 'stderr bytes\\n' >&2\nexit \"$1\"\n",
+        );
         for status in [0, 37, 23, 255] {
             let plain = CommandSpec::new(
                 fake.to_str().unwrap(),
@@ -3933,9 +3952,11 @@ mod executor_tests {
     fn container_exec_drain_survives_closed_downstream_pipes() {
         let temp = tempfile::tempdir().unwrap();
         let fake = temp.path().join("podman");
-        fs::write(&fake, "#!/bin/sh\nset -e\nshift 3\nhead -c 204800 /dev/zero\nhead -c 204800 /dev/zero >&2\nprintf done > \"$1\"\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_hooks::install_fake_command(
+            temp.path(),
+            "podman",
+            "set -e\nshift 3\nhead -c 204800 /dev/zero\nhead -c 204800 /dev/zero >&2\nprintf done > \"$1\"\n",
+        );
         let marker = temp.path().join("normal-exit");
         let wrapped =
             drained_container_exec(fake.to_str().unwrap(), "ctr", [marker.to_str().unwrap()]);
@@ -4656,10 +4677,7 @@ if [ "$count" -eq 0 ]; then
 fi
 exit 0
 "#;
-        let fake = directory.path().join("scp");
-        std::fs::write(&fake, script).unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_hooks::install_fake_command(directory.path(), "scp", script);
         let ssh = SshTarget {
             destination: "fake-host".to_owned(),
             ssh_args: Vec::new(),
