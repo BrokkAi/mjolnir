@@ -182,7 +182,7 @@ def validate(output, read_blob):
         # R-loc discards fields, so include every exact citation in its site list.
         # Preserve the supplied primary and the order of all supplied sites.
         listed = set(locations)
-        sites.extend(span for location, span in cited_sites.items() if location not in listed)
+        sites.extend(cited_sites[location] for location in sorted(cited_sites.keys() - listed))
     if coverage["complete"] == bool(coverage["open"]):
         errors.append("coverage.complete must be true exactly when coverage.open is empty")
     for index, frontier in enumerate(coverage["open"]):

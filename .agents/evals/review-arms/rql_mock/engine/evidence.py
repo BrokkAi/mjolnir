@@ -1,5 +1,5 @@
 """Host-side evidence that must survive destruction of the engine workspace."""
-from collections import defaultdict
+from collections import Counter, defaultdict
 import hashlib
 import json
 import os
@@ -28,20 +28,16 @@ def save_json(path, value):
     save_bytes(path, (json.dumps(value, sort_keys=True, allow_nan=False) + "\n").encode("utf-8"))
 
 
-def cross_query_reuse_summary(provenances):
-    measured, reused = defaultdict(set), defaultdict(set)
+def reset_retirement_summary(provenances):
+    by_step = defaultdict(dict)
     for provenance in provenances:
-        for turn in provenance.get("turns", ()):
-            if "cross_query_reuse" not in turn:
-                continue
-            identity = (turn["session"], turn["turn"])
+        for failure in provenance.get("reset_retirements", ()):
             for step in provenance.get("steps") or ("documented",):
-                measured[step].add(identity)
-                if turn["cross_query_reuse"]:
-                    reused[step].add(identity)
-    return {"enforced": False, "by_step": {
-        step: {"measured_turns": len(measured[step]), "reuse_turns": len(reused[step])}
-        for step in sorted(measured)
+                by_step[step][failure["session"]] = set(failure["reasons"])
+    return {"by_step": {
+        step: {"count": len(sessions),
+               "reasons": dict(sorted(Counter(reason for reasons in sessions.values() for reason in reasons).items()))}
+        for step, sessions in sorted(by_step.items())
     }}
 
 

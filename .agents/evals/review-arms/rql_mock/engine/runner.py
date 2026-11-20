@@ -2,7 +2,6 @@
 import json
 from pathlib import PurePosixPath
 import re
-import shlex
 import subprocess
 import time
 from uuid import uuid4
@@ -16,7 +15,8 @@ MODEL = "fable"
 EFFORT = "high"
 CONTEXT_BOUNDARY = "context-cleared:"
 SESSION_ID = re.compile(r"[a-f0-9]{32}")
-TMP_ISOLATION_PROTOCOL = "recursive-tmp-inventory-v1"
+TMP_ISOLATION_PROTOCOL = "recursive-tmp-inventory-v2"
+TMP_RESET_FAILURE = "tmp-reset-failure.json"
 # Observed harness areas from rerun-b9ceb9627/residual-artifacts.json. The
 # Podman worker runtime lives under /var/lib/hel/workers, outside this scan.
 TMP_EXCLUSIONS = ("/tmp/.bun-*", "/tmp/cc-socks", "/tmp/claude-*", "/tmp/node-compile-cache")
@@ -150,71 +150,6 @@ else:
     inventory(root, entries)
     print(json.dumps(entries))
 """
-
-
-def referenced_tmp_paths(pages, after_seq, cwd, home):
-    from audit import PATH_KEYS, resolve_path, shell_commands
-
-    paths = set()
-
-    def add(path, directory):
-        if isinstance(path, str) and (resolved := resolve_path(path, directory)) and resolved.startswith("/tmp/"):
-            paths.add(resolved)
-
-    def command_paths(command, directory, home):
-        try:
-            for words, redirects, _, start in shell_commands(command, directory, home=home):
-                for _, operand in redirects:
-                    add(operand, start)
-                if not words or words[0] in {"echo", "printf"}:
-                    continue
-                if PurePosixPath(words[0]).name in {"sh", "bash"} and words[1:2] in (["-c"], ["-lc"]):
-                    if len(words) >= 3:
-                        command_paths(words[2], start, home)
-                    continue
-                for word in words:
-                    add(word, start)
-        except ValueError:
-            # The audit owns unsupported-shell findings. Cleanup uses inventories.
-            pass
-
-    for page in pages:
-        execution = page.get("execution")
-        execution = execution if isinstance(execution, dict) else {}
-        page_cwd = page.get("cwd") or execution.get("cwd") or cwd
-        page_home = page.get("home") or execution.get("home") or home
-        for item in page["items"]:
-            if item["seq"] <= after_seq or item["role"] not in {"tool", "terminal"}:
-                continue
-            call = (item.get("body") or {}).get("call") or {}
-            raw = call.get("rawInput")
-            directory = page_cwd
-            if isinstance(raw, dict):
-                workdir = raw.get("cwd") or raw.get("workdir")
-                if isinstance(workdir, str):
-                    directory = resolve_path(workdir, page_cwd)
-            for fields in (raw, *(call.get("locations") or [])):
-                if isinstance(fields, dict):
-                    for key in PATH_KEYS & fields.keys():
-                        values = fields[key] if isinstance(fields[key], list) else [fields[key]]
-                        for path in values:
-                            add(path, page_cwd if key in {"cwd", "workdir"} else directory)
-            if isinstance(raw, dict):
-                command = raw.get("command", raw.get("cmd", raw.get("argv")))
-            else:
-                command = raw
-            if command is None and call.get("kind") in {None, "execute"}:
-                command = call.get("title")
-                if isinstance(command, str) and command.startswith('"') and command.endswith('"'):
-                    try:
-                        command = json.loads(command)
-                    except ValueError:
-                        pass
-            if isinstance(command, list) and all(isinstance(word, str) for word in command):
-                command = shlex.join(command)
-            if isinstance(command, str) and call.get("kind") in {None, "execute", "other"}:
-                command_paths(command, directory, page_home)
-    return paths
 
 
 def has_tmp_baseline(directory, sid):
@@ -522,65 +457,62 @@ class SealedRunner:
             save_json(directory / "tmp-baseline.json", {"protocol": TMP_ISOLATION_PROTOCOL, "session_id": sid,
                                                        "entries": self.tmp_admin(sid)})
 
-    def tmp_query_start(self, sid):
-        before = self.tmp_admin(sid)
-        cursor = self.driver.mj("transcript", "--session", sid, "--limit", 1)["latest_seq"]
-        return {"before": before, "after_seq": cursor}
-
-    def reset_query_tmp(self, sid, directory, evidence, scope, transcript_path=None):
+    def reset_query_tmp(self, sid, directory, evidence, scope):
         reset = evidence / "tmp-reset.json"
         if reset.exists():
-            return json.loads(reset.read_bytes())["cross_query_reuse"]
+            return json.loads(reset.read_bytes())["reasons"]
         history_path = directory / "residual-artifacts.json"
         history = json.loads(history_path.read_bytes()) if history_path.exists() else []
         event = next((row for row in history if row["context_id"] == evidence.name), None)
         if event is None:
-            before, after = scope["before"], self.tmp_admin(sid)
-            prior = history[-1]["survivors"] if history else {}
-            references = set()
-            if prior.keys() & before.keys():
-                if transcript_path is None:
-                    transcript_path = evidence / "reset-transcript.json"
-                    if not transcript_path.exists():
-                        save_json(transcript_path, self.driver.transcript(sid))
-                placement_path = directory / "placement.json"
-                placement = json.loads(placement_path.read_bytes()) if placement_path.exists() else {}
-                cwd = placement.get("cwd", f"/workspace/{sid}/{self.config['destination']}")
-                references = referenced_tmp_paths(json.loads(transcript_path.read_bytes()), scope["after_seq"],
-                                                  cwd, placement.get("home"))
-            modified = {}
-            for path in before.keys() & after.keys():
-                old, new = before[path], after[path]
-                if old == new or (old["type"] == new["type"] == "d" and old["inode"] == new["inode"]):
-                    # Child creation changes a directory's size and mtime.
-                    continue
-                modified[path] = {"before": old, "after": new}
-            survivors = {path: origin for path, origin in prior.items() if path in before and path in after}
-            for path in modified:
-                survivors.setdefault(path, evidence.name)
-            event = {"context_id": evidence.name, "after": after,
-                     "remove": {path: after[path] for path in after.keys() - before.keys()},
-                     "modified_baseline": modified, "survivors": survivors, "cleanup_complete": False,
-                     "cross_query_reuse": [{"path": path, "prior_context_id": prior[path]}
-                                           for path in sorted(before.keys() & prior.keys() & references)]}
+            before = scope["before"]
+            event = {"context_id": evidence.name, "reasons": []}
+            try:
+                after = self.tmp_admin(sid)
+            except RUN_ERRORS as error:
+                event["reasons"].append(f"post-query inventory failed: {error}")
+            else:
+                added = after.keys() - before.keys()
+                missing = before.keys() - after.keys()
+                changed_parents = {str(PurePosixPath(path).parent) for path in added | missing}
+                modified = {}
+                for path in before.keys() & after.keys():
+                    old, new = before[path], after[path]
+                    # Creating or deleting a direct child changes its parent's mtime and size.
+                    if old == new or (path in changed_parents and old["type"] == new["type"] == "d"
+                                      and old["inode"] == new["inode"]):
+                        continue
+                    modified[path] = {"before": old, "after": new}
+                event.update({"after": after, "remove": {path: after[path] for path in added},
+                              "modified_baseline": modified, "missing_baseline": sorted(missing)})
+                event["reasons"].extend(f"modified pre-existing entry: {path}" for path in sorted(modified))
+                event["reasons"].extend(f"missing pre-existing entry: {path}" for path in sorted(missing))
             history.append(event)
             save_json(history_path, history)
-        if not event["cleanup_complete"]:
-            results = self.tmp_admin(sid, event["remove"]) if event["remove"] else {}
-            event["removed"] = sorted(path for path, result in results.items() if result == "removed")
-            event["already_absent"] = sorted(path for path, result in results.items() if result == "absent")
-            event["failed_removals"] = {path: result for path, result in results.items()
-                                        if result not in {"removed", "absent"}}
-            for path in event["failed_removals"]:
-                event["survivors"][path] = evidence.name
+        if not event.get("cleanup_complete"):
+            if candidates := event.get("remove"):
+                try:
+                    results = self.tmp_admin(sid, candidates)
+                    event["removed"] = sorted(path for path, result in results.items() if result == "removed")
+                    failures = {path: results.get(path, "missing removal result") for path in candidates
+                                if results.get(path) not in {"removed", "absent"}}
+                    event["failed_removals"] = failures
+                    event["reasons"].extend(f"removal failed for {path}: {failures[path]}" for path in sorted(failures))
+                except RUN_ERRORS as error:
+                    event["reasons"].append(f"temporary entry removal failed: {error}")
+                try:
+                    remaining = sorted(self.tmp_admin(sid).keys() - scope["before"].keys())
+                    event["remaining"] = remaining
+                    event["reasons"].extend(f"entry remains after cleanup: {path}" for path in remaining)
+                except RUN_ERRORS as error:
+                    event["reasons"].append(f"post-cleanup inventory failed: {error}")
             event["cleanup_complete"] = True
             save_json(history_path, history)
-        turn_path = evidence / "turn.json"
-        if turn_path.is_file():
-            turn = json.loads(turn_path.read_bytes())
-            save_json(turn_path, {**turn, "cross_query_reuse": event["cross_query_reuse"]})
+        if event["reasons"]:
+            failure = {"session": sid, "context_id": evidence.name, "reasons": event["reasons"]}
+            save_json(directory / TMP_RESET_FAILURE, failure)
         save_json(reset, event)
-        return event["cross_query_reuse"]
+        return event["reasons"]
 
     def capture_pending(self, sid, directory):
         pending = []
@@ -588,13 +520,15 @@ class SealedRunner:
             record = json.loads(path.read_bytes())
             captured = (path.parent / "answer.raw").is_file() or (path.parent / "absent.json").is_file()
             scope = record.get("tmp_scope", {})
-            reset_due = isinstance(scope.get("before"), dict) and not (path.parent / "tmp-reset.json").is_file()
+            reset_due = (scope.get("protocol") == TMP_ISOLATION_PROTOCOL
+                         and not (path.parent / "tmp-reset.json").is_file())
             if not captured or reset_due:
                 pending.append((path, record, captured, reset_due))
         if len(pending) > 1:
             raise RuntimeError("more than one engine answer is pending capture")
         if pending:
             path, record, captured, reset_due = pending[0]
+            self.driver.wait_idle(sid)
             expected = f".rql-engine-{sid}/answer.json"
             if record["path"] != expected:
                 raise RuntimeError("pending engine answer path does not match its session")
@@ -693,7 +627,8 @@ class SealedRunner:
         def record_pending():
             save_json(evidence / "pending.json", {"path": output_path, "query": query,
                                                  "prior_validation_errors": errors,
-                                                 "tmp_scope": self.tmp_query_start(sid)})
+                                                 "tmp_scope": {"protocol": TMP_ISOLATION_PROTOCOL,
+                                                               "before": self.tmp_admin(sid)}})
 
         _, record = self.prompt(sid, prompt, context_id, before_send=record_pending)
         try:
@@ -706,9 +641,8 @@ class SealedRunner:
                 raise IsolationFailure("engine session failed transcript isolation audit", record)
             output, errors = self.capture_answer(sid, output_path, evidence)
             scope = json.loads((evidence / "pending.json").read_bytes())["tmp_scope"]
-            record["cross_query_reuse"] = self.reset_query_tmp(
-                sid, directory_on_host, evidence, scope, directory_on_host / f"turn-{record['turn']}-transcript.json")
-            self.clean_checkout(sid)
+            if not self.reset_query_tmp(sid, directory_on_host, evidence, scope):
+                self.clean_checkout(sid)
         except IsolationFailure:
             raise
         except RUN_ERRORS as error:

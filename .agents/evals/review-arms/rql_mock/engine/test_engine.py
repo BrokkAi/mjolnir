@@ -22,7 +22,7 @@ from .grammar import parse
 from .prompt import CONTEXT_RECALL, assert_blind, semantics_only, turn_prompt
 from .runner import CHECKOUT_CLEAN, CONTEXT_BOUNDARY, IsolationFailure, LaunchHeld, SealedRunner, usage_delta
 from .snapshot import blob_reader, git_output, manifest_sources, parentless_snapshot
-from .validation import validate
+from .validation import canonical, validate
 
 
 CATALOGUE = (CENSUS / "rql-documented-steps.md").read_text(encoding="utf-8")
@@ -289,6 +289,18 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("not the exact source slice",
                       "\n".join(validate(payload(rows), SOURCE.get)[2]))
 
+    def test_synthesized_citations_are_independent_of_field_key_order(self):
+        rows = deepcopy(ROWS)
+        fields = rows[0]["fields"]
+        fields.update(z=span(line=3), a=span(line=1), middle={**span(line=1), "end_line": 2})
+        reordered = [{**rows[0], "fields": dict(reversed(list(fields.items())))}]
+        first, _, errors = validate(payload(rows), SOURCE.get)
+        self.assertFalse(errors)
+        second, _, errors = validate(payload(reordered), SOURCE.get)
+        self.assertFalse(errors)
+        self.assertEqual(first[0]["sites"], [span(), span(line=1), fields["middle"], span(line=3)])
+        self.assertEqual(canonical(first), canonical(second))
+
     def test_open_coverage_and_false_complete(self):
         rows = deepcopy(ROWS)
         rows[0]["fields"]["proof"] = "open"
@@ -353,6 +365,9 @@ class FakeRunner:
 
     def tmp_admin(self, sid):
         return {}
+
+    def capture_pending(self, sid, directory):
+        pass
 
     def context_probe(self, sid, directory):
         return {"status": "passed", "context_id": "probe-context"}
@@ -584,11 +599,8 @@ class FakeAcpRunner(SealedRunner):
             return self.tmp_entries.copy()
         results = {}
         for path in remove:
-            if path == "/tmp/leftover":
-                results[path] = "simulated removal failure"
-            else:
-                self.tmp_entries.pop(path)
-                results[path] = "removed"
+            self.tmp_entries.pop(path)
+            results[path] = "removed"
         return results
 
     def transcript(self, sid):
@@ -601,7 +613,7 @@ class FakeAcpRunner(SealedRunner):
     def command(self, operation, *args, data=None):
         if operation == "put-file":
             session_flag, sid, path_flag, path, source = args
-            assert (session_flag, sid, path_flag, source) == ("--session", "test-session", "--path", "-"), args
+            assert (session_flag, path_flag, source) == ("--session", "--path", "-"), args
             assert path.startswith(f".rql-engine-{sid}/"), args
             self.artifact = data
             return b""
@@ -651,56 +663,97 @@ class FakeAcpRunner(SealedRunner):
 
 class ContextTests(unittest.TestCase):
     # Hard-won: b9ceb96: engine scratch persisted across /clear
-    def test_query_resets_recursive_inventory_delta_and_records_reuse(self):
+    def test_query_resets_recursive_inventory_delta(self):
         runner = FakeAcpRunner()
-        baseline_dir = {"type": "d", "size": 4096, "mtime_ns": 0, "inode": 1}
-        original = {"type": "-", "size": 0, "mtime_ns": 0, "inode": 2}
-        runner.tmp_entries.update({"/tmp/baseline": baseline_dir, "/tmp/baseline/existing": original})
+        baseline = {"/tmp/baseline": {"type": "d", "size": 4096, "mtime_ns": 0, "inode": 1}}
+        runner.tmp_entries.update(baseline)
         removed = ["/tmp/baseline/new", "/tmp/scratch", "/tmp/tmp.generated"]
-        survivors = {"/tmp/baseline", "/tmp/baseline/existing", "/tmp/leftover"}
         original_message = runner.message
 
         def answer_turn(sid, text, command):
-            if text == "/clear":
-                return original_message(sid, text, command)
-            first = not runner.tool_calls
-            if first:
-                for inode, path in enumerate([*removed, "/tmp/leftover"], start=3):
-                    runner.tmp_entries[path] = {**original, "inode": inode}
-                runner.tmp_entries["/tmp/baseline"] = {**baseline_dir, "mtime_ns": 1}
-                runner.tmp_entries["/tmp/baseline/existing"] = {**original, "mtime_ns": 1}
-                call = "cd /tmp && echo x > scratch; mktemp; touch /tmp/baseline/new /tmp/leftover"
-            else:
-                self.assertEqual(runner.tmp_entries.keys(), survivors)
-                call = "cd /tmp && cat scratch ./leftover baseline/../baseline/existing"
-            turn = original_message(sid, text, command)
-            runner.tool_calls.append({"seq": turn, "role": "tool", "body": {"call": {"rawInput": call}}})
-            return turn
+            if "Query: " in text:
+                self.assertEqual(runner.tmp_entries, baseline)
+                for inode, path in enumerate(removed, start=2):
+                    runner.tmp_entries[path] = {"type": "-", "size": 1, "mtime_ns": 0, "inode": inode}
+            return original_message(sid, text, command)
 
         runner.message = answer_turn
         with TemporaryDirectory() as directory:
             path = Path(directory)
             runner.prepare("test-session", {}, path)
             self.assertFalse(runner.messages)
-            _, first, _ = runner.turn("test-session", '(function :name "first")', CATALOGUE, MENU, [], path)
-            baseline = json.loads((path / "tmp-baseline.json").read_text())["entries"]
-            self.assertEqual(baseline["/tmp/baseline/existing"], original)
-            self.assertEqual(runner.tmp_entries.keys(), survivors)
-            self.assertEqual(first["cross_query_reuse"], [])
-            _, second, _ = runner.turn("test-session", '(function :name "second")', CATALOGUE, MENU, [], path)
-            self.assertEqual(runner.tmp_entries.keys(), survivors)
-            expected = [{"path": name, "prior_context_id": first["context_id"]}
-                        for name in ("/tmp/baseline/existing", "/tmp/leftover")]
-            self.assertEqual(second["cross_query_reuse"], expected)
-            record = json.loads((path / "answers" / second["context_id"] / "turn.json").read_text())
-            self.assertEqual(record["cross_query_reuse"], expected)
+            for name in ("first", "second"):
+                runner.turn("test-session", f'(function :name "{name}")', CATALOGUE, MENU, [], path)
+            self.assertEqual(runner.tmp_entries, baseline)
             history = json.loads((path / "residual-artifacts.json").read_text())
-            self.assertEqual([row["removed"] for row in history], [removed, []])
-            self.assertEqual(history[0]["failed_removals"], {"/tmp/leftover": "simulated removal failure"})
-            self.assertEqual(history[0]["modified_baseline"], {"/tmp/baseline/existing": {
-                "before": original, "after": {**original, "mtime_ns": 1},
-            }})
+            self.assertEqual([row["removed"] for row in history], [removed, removed])
             self.assertTrue(all(row["cleanup_complete"] for row in history))
+
+    def assert_reset_retires(self, *, mode, reasons):
+        original = {"type": "-", "size": 0, "mtime_ns": 0, "inode": 1}
+        baseline = {"/tmp/baseline": original}
+
+        class ResetRunner(FakeAcpRunner):
+            def __init__(self):
+                super().__init__()
+                self.retired = []
+                self.launches = 0
+
+            def start(self, snapshot, commit):
+                self.launches += 1
+                self.tmp_entries = baseline.copy()
+                return SESSION if self.launches == 1 else REPLACEMENT
+
+            def message(self, sid, text, command):
+                if sid == SESSION and "Query: " in text:
+                    if mode == "modified":
+                        self.tmp_entries["/tmp/baseline"] = {**original, "mtime_ns": 1}
+                    else:
+                        self.tmp_entries["/tmp/leftover"] = {**original, "inode": 2}
+                return super().message(sid, text, command)
+
+            def tmp_admin(self, sid, remove=None):
+                if remove is not None and mode != "modified":
+                    status = "simulated removal failure" if mode == "failed" else "removed"
+                    return {path: status for path in remove}
+                return super().tmp_admin(sid, remove)
+
+            def retire(self, directory, record):
+                self.retired.append(record["session_id"])
+                (directory / "destroy-receipt.json").write_text("{}")
+
+        runner = ResetRunner()
+        with TemporaryDirectory() as directory:
+            path = Path(directory)
+            engine = Engine(path, (CATALOGUE, MENU), lambda _: (SOURCE.get, {"orphan": COMMIT}),
+                            lambda: runner, VERSION)
+            first = engine.answer(COMMIT, QUERY)
+            self.assertEqual(first["status"], "ok", first)
+            self.assertEqual(first["provenance"]["session"], SESSION)
+            self.assertEqual(first["provenance"]["reset_retirements"][0]["reasons"], reasons)
+            self.assertEqual(runner.retired, [SESSION])
+            retired = path / COMMIT / "retired" / SESSION
+            context = first["provenance"]["context_id"]
+            self.assertTrue((retired / "destroy-receipt.json").exists())
+            self.assertTrue((retired / "answers" / context / "answer.raw").exists())
+            self.assertEqual(json.loads((retired / "tmp-reset-failure.json").read_text())["reasons"], reasons)
+            self.assertEqual(engine.answer(COMMIT, QUERY), first)
+            second = engine.answer(COMMIT, QUERY, fresh=True)
+            self.assertEqual(second["status"], "ok", second)
+            self.assertEqual(second["provenance"]["session"], REPLACEMENT)
+            self.assertEqual(runner.launches, 2)
+            self.assertEqual(runner.tmp_entries, baseline)
+
+    # Hard-won: 3c1a690: modified scratch crossed queries
+    def test_modified_baseline_retires_engine_after_valid_answer(self):
+        self.assert_reset_retires(mode="modified", reasons=["modified pre-existing entry: /tmp/baseline"])
+
+    def test_failed_or_incomplete_removal_retires_engine_after_valid_answer(self):
+        remains = "entry remains after cleanup: /tmp/leftover"
+        self.assert_reset_retires(mode="failed", reasons=[
+            "removal failed for /tmp/leftover: simulated removal failure", remains,
+        ])
+        self.assert_reset_retires(mode="leftover", reasons=[remains])
 
     # Hard-won: dfb55808: the wait exit code hid the structured quota refusal.
     def test_nonzero_wait_with_provider_quota_outcome_is_a_quota_hold(self):

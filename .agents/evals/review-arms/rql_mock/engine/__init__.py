@@ -11,7 +11,8 @@ import subprocess
 from .evidence import save_json, sync_directory
 from .grammar import MENU, parse
 from .prompt import CONTEXT_PROTOCOL, CONTEXT_RECALL, CONTEXT_SEED, PROMPT, REPAIR, semantics_only
-from .runner import (EFFORT, MODEL, RUN_ERRORS, SESSION_ID, TMP_ISOLATION_PROTOCOL, IsolationFailure, LaunchHeld,
+from .runner import (EFFORT, MODEL, RUN_ERRORS, SESSION_ID, TMP_ISOLATION_PROTOCOL, TMP_RESET_FAILURE,
+                     IsolationFailure, LaunchHeld,
                      QuotaTurnFailure, SealedRunner, TurnFailure, has_tmp_baseline)
 from .snapshot import OID, blob_reader, eligible_diffs, manifest_sources, prepared_snapshot
 from .validation import canonical, ordered_rows, validate
@@ -100,6 +101,12 @@ def move_to_retired(directory):
     return retired, record
 
 
+def retire_active(directory, runner):
+    active = directory / "active"
+    runner.retire(active, load(active / "session.json"))
+    move_to_retired(directory)
+
+
 def teardown(cache, runner):
     """Retire recorded sessions, including previous attempts with failed capture."""
     accepted, failures = 0, []
@@ -148,9 +155,12 @@ class Engine:
                 raise RuntimeError(f"existing engine session belongs to a different snapshot: {record_path}")
             if not record.get("session_id"):
                 raise RuntimeError(f"uncertain launch for {commit}; reconcile {record_path} before retrying")
-            if not has_tmp_baseline(record_path.parent, record["session_id"]):
-                runner.retire(record_path.parent, record)
-                move_to_retired(record_path.parent.parent)
+            active = record_path.parent
+            baseline = has_tmp_baseline(active, record["session_id"])
+            if baseline and not (active / TMP_RESET_FAILURE).exists():
+                runner.capture_pending(record["session_id"], active)
+            if not baseline or (active / TMP_RESET_FAILURE).exists():
+                retire_active(active.parent, runner)
                 record = None
         if record is None:
             record_path.parent.mkdir(parents=True, exist_ok=True)
@@ -216,14 +226,15 @@ class Engine:
                         provenance["tokens"][counter] = previous + tokens
 
                 provenance["retired_sessions"] = []
-                for replacement in range(2):
+                provenance["reset_retirements"] = []
+                errors = []
+                while True:
                     runner, sid = self.session(commit, snapshot, active / "session.json")
                     provenance["session"] = sid
                     probe = runner.context_probe(sid, active)
                     provenance["context_probe"] = probe
                     if probe["status"] != "passed":
                         raise RuntimeError(probe["message"])
-                    errors = []
                     while True:
                         try:
                             output, record, errors = runner.turn(
@@ -234,8 +245,9 @@ class Engine:
                             retired, session_record = move_to_retired(directory)
                             provenance["retired_sessions"].append({"session": sid, "context_probe": probe})
                             runner.retire(retired, session_record)
-                            if replacement:
+                            if len(provenance["retired_sessions"]) > 1:
                                 raise
+                            errors = []
                             break
                         except TurnFailure as error:
                             add_turn(error.record)
@@ -245,9 +257,20 @@ class Engine:
                             rows, coverage, errors = validate(output, read_blob)
                         evidence = active / "answers" / record["context_id"]
                         save_json(evidence / "validation.json", {"errors": errors})
+                        reset_failed = (active / TMP_RESET_FAILURE).is_file()
+                        if reset_failed:
+                            provenance["reset_retirements"].append(load(active / TMP_RESET_FAILURE))
                         if not errors:
                             result = response("ok", ordered_rows(rows), coverage)
                             save_json(evidence / "result.json", result)
+                        if reset_failed:
+                            try:
+                                retire_active(directory, runner)
+                            except RUN_ERRORS as error:
+                                save_json(active / "tmp-retirement-error.json", {"reason": str(error)})
+                                if errors:
+                                    raise
+                        if not errors:
                             if fresh:
                                 context = provenance["context_id"]
                                 if not context:
@@ -259,6 +282,8 @@ class Engine:
                         if provenance["validation_retries"]:
                             return response("engine_error", message="; ".join(errors))
                         provenance["validation_retries"] += 1
+                        if reset_failed:
+                            break
         except (LaunchHeld, QuotaTurnFailure) as error:
             return response("quota_hold", message=str(error))
         except (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
