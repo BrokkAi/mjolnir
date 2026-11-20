@@ -178,7 +178,27 @@ pub fn serve_latch_relay() {
             .expect("open the test relay journal");
             relay.set_turn_verdict_harness(HarnessKind::Codex);
             if relay.operational_state().native_session_id.is_none() {
-                if let Ok(fresh) = std::env::var(LATCH_RELAY_FRESH_NATIVE) {
+                // A launch that names no native session has nothing to load,
+                // so the worker opens a new one and has nothing to report.
+                let launch_names_native = || {
+                    mj_core::worker_launch::WorkerLaunchConfig::read(
+                        &Path::new(&root).join("launch.json"),
+                    )
+                    .expect("read the stand-in worker's launch configuration")
+                    .native_session_id
+                    .is_some()
+                };
+                let fresh = std::env::var(LATCH_RELAY_FRESH_NATIVE).ok();
+                if let Some(fresh) = fresh.clone().filter(|_| !launch_names_native()) {
+                    relay
+                        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+                            native_session_id: fresh,
+                            native_continuity_lost: false,
+                            resumed: false,
+                            replaced_unused_native_session_id: None,
+                        })
+                        .unwrap();
+                } else if let Some(fresh) = fresh {
                     let replaced = std::env::var(LATCH_RELAY_REPLACED_UNUSED).ok();
                     // What a worker restored from a checkpoint journals when the
                     // harness cannot reload the archived native session and this
