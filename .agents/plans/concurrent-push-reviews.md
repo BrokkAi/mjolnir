@@ -17,7 +17,9 @@ To see it working: in a test instance, start a session in a workspace with two w
 - [x] (2026-11-20) Precursor, separate commit: sub-agents no longer get the review tools, and `set_review_baseline` is renamed `set_baseline`. (Not part of this plan's milestones, but it changes the same tool surface.)
 - [x] (2026-11-20) Review of the plan: added root reservation for override and set_baseline, and corrected the older-worker behavior.
 - [x] (2026-11-20) Second review of the plan: restart stale preparations, resolve roots without a capture, keep save-before-ref for overrides.
-- [ ] Milestone 1: tool API and default scope, still one review per session.
+- [x] (2026-11-20) Fourth review of the plan: the base generation counts every review close, because a failed review can have moved some bases.
+- [x] (2026-11-20) Third review of the plan: review-off joins root ownership, clean verdicts retire findings, pathless override selects by count, old override schemas stay at one outstanding verdict, legacy overrides bump the base generation; new action fields are deliberately not version-gated.
+- [ ] Milestone 1: tool API and default scope, still one review per session (completed: `paths` and `override_review(path)` through tool, durable action with legacy `path` decoding, daemon dispatch and host; `capture_scope` in `reviewer.rs` decides the scope once for preparation and the review-off path; worker refusal lists workspace repositories; instructions and docs. Remaining: test run, review, commit).
 - [ ] Milestone 2: store one row per open review (breaking migration).
 - [ ] Milestone 3: review host keyed by review, with the overlap decision at the open step.
 - [ ] Milestone 4: surfaces show several reviews per session.
@@ -75,6 +77,26 @@ To see it working: in a test instance, start a session in a workspace with two w
 
 - Decision: `override_review` and `set_baseline` reserve their roots in the actor before the worker changes any ref, and release them when the operation ends.
   Rationale: found by review of the plan. The worker's `SetReviewBase` and `RecordOverridden` actions move refs before they answer, so a check after the answer would come too late. An override selected through `a` also writes refs for every root of the selected verdict, for example `b` of a verdict for `a, b`, so it must reserve all of them, not just the root it was named by.
+  Date/Author: 2026-11-20.
+
+- Decision: the new `paths` and `override_review.path` fields of the durable actions are not gated on the daemon's relay version.
+  Rationale: raised by review, which noted that an older daemon's action decoder denies unknown fields. A worker that writes the new fields only runs under the daemon that started it or a newer one: daemon handoff replaces the daemon first and workers afterwards, and a daemon is never downgraded automatically. The project's relay versions describe what a worker can do for the daemon; the earlier worker-to-daemon action `SetReviewBaseline` was added the same way, without a gate. What must keep working is the other direction, a new daemon reading actions an older worker queued, and Milestone 1 keeps that by decoding the old `path` field.
+  Date/Author: 2026-11-20.
+
+- Decision: the review-off path takes part in root ownership. When review is off, `request_review` still records the captured trees as allowed to push (`run_review_off` in `begin.rs`). It never emits `HostEvent::Prepared`, so in Milestone 3 it must reserve its captured roots in the actor, under the same rule as override and `set_baseline`, and refuse when a review still owns one.
+  Rationale: found by review. Today `begin_push` refuses before `run_review_off` when a review is open; removing that refusal without a replacement would let it approve a push for a root another review owns.
+  Date/Author: 2026-11-20.
+
+- Decision: a clean verdict retires every findings record that shares a root with it, the way a new findings verdict replaces them.
+  Rationale: found by review. The current clean-verdict path clears pending findings. Without the same rule per root, an old findings record for `a` would stay outstanding after `a` passed, and a pathless override for the only real verdict on `b` would be refused as ambiguous.
+  Date/Author: 2026-11-20.
+
+- Decision: a pathless `override_review` selects by count before it resolves anything: exactly one outstanding findings record is selected and its roots are reserved; otherwise the call is refused with the list of records. Only an explicit `path` goes through `ResolveRepositories`.
+  Rationale: found by review. Resolving the omitted path to the working directory would refuse a call whose only verdict belongs to a linked worktree outside the working directory.
+  Date/Author: 2026-11-20.
+
+- Decision: a worker whose `override_review` schema has no `path` cannot start a second review while one findings record is outstanding. Such a worker is detected by its relay protocol being older than `RELAY_REVIEW_PATHS_PROTOCOL` (75, added in Milestone 1), and the overlap check treats its outstanding findings record as owning every root of the session.
+  Rationale: found by review. An older worker that survives the daemon upgrade still offers `request_review(path)`, so it could open reviews of two disjoint roots; if both returned findings, the refusal would ask for a `path` its own tool rejects. Keeping such a session at one outstanding verdict avoids that dead end until the worker restarts.
   Date/Author: 2026-11-20.
 
 - Decision: a preparation records the session's base generation, and the open step restarts it when a base moved in the meantime.
@@ -136,7 +158,7 @@ In `scoped_repositories`, when a path is not inside a Git repository and it is t
 
 In `override_push.rs`, accept the optional path. With one review per session there is only one findings record, so in this milestone the path only has to resolve to a root that the record covers; otherwise refuse with the record's roots.
 
-Update `REVIEW_SERVER_INSTRUCTIONS` and regenerate the goldens. Update `docs/src/content/docs/turn-review.md`.
+Add `RELAY_REVIEW_PATHS_PROTOCOL` (75) in `mj-core/src/relay.rs` and make it `RELAY_PROTOCOL_VERSION`, so the daemon can tell whether a worker's tools accept `paths` and `override_review(path)` (Milestone 3 needs this). Update `REVIEW_SERVER_INSTRUCTIONS` and regenerate the goldens. Update `docs/src/content/docs/turn-review.md`.
 
 ### Milestone 2: one durable row per open review
 
@@ -150,7 +172,7 @@ Change `HostState::reviews`, `pending_open` and `closing` to be keyed by review 
 
 Put the overlap decision in the handling of `HostEvent::Prepared` in `dispatch.rs`, before `persist.rs` inserts into `pending_open`. The prepared capture gives the roots. Compare them with the roots of every slot and every `pending_open` entry of the same session. On overlap, drop the preparation, reply with the refusal described in the Decision Log, and leave state unchanged. Do this in the same event handler that inserts into `pending_open`, so no other event can run between the check and the insert.
 
-The open step must also reject a capture that went stale while it was prepared. A preparation can capture commit A and wait on reviewer selection while another review of the same root opens, settles clean and moves the base; if the first then opened, its verdict would review A against an old base and could move the base back. Keep a base generation per session in `HostState`, a counter the actor increments whenever it applies a change that moves a review base (a clean verdict's settle and `set_baseline`). `begin_push` records the generation when it starts a preparation. At the open step, if the generation has changed, the actor discards the capture and starts the preparation again for the same request, keeping the caller's reply. Each restart is caused by a base move, which only happens when another review settles, so the restarts end.
+The open step must also reject a capture that went stale while it was prepared. A preparation can capture commit A and wait on reviewer selection while another review of the same root opens, settles clean and moves the base; if the first then opened, its verdict would review A against an old base and could move the base back. Keep a base generation per session in `HostState`, a counter the actor increments whenever a review of the session closes, whatever its outcome, and whenever `set_baseline` or an override finishes. Counting every close, not only clean ones, matters because `RecordReviewed` writes one worktree at a time: a review of `a, b` can move `a`'s base and then fail on `b`, and its failed verdict would otherwise leave the generation unchanged. It also covers an override on a worker older than `RELAY_REVIEW_BASE_PROTOCOL` (52), which overrides with `RecordReviewed` and so moves the base (`base_moved` in `run_override`). A spurious restart costs one capture; a missed one can move a base backwards. `begin_push` records the generation when it starts a preparation. At the open step, if the generation has changed, the actor discards the capture and starts the preparation again for the same request, keeping the caller's reply. Each restart is caused by a base move, which only happens when another review settles, so the restarts end.
 
 Make every per-session question ask across that session's reviews: `has_open_review` answers whether any is open; the publish step emits one view per review; `retain_sessions` and session removal close every review of the session; the legacy `Resolution` cancel cancels all of them. Reviewer children already find their review by searching all slots' registrations (see `begin.rs` near the top); keep that search, now over review-keyed slots.
 
@@ -233,3 +255,7 @@ In `mj-client/src/review.rs`, `RuntimeReviewView` gains `review_id: String` and 
 Revision note (2026-11-20): review of the first version found that override and set_baseline change refs before the actor could refuse them, and that older workers refuse a scoped capture rather than ignore it. Milestone 1, Milestone 3 and the Decision Log now cover both.
 
 Revision note (2026-11-20, second): review found that a preparation could open with a capture made before another review moved the base, that resolving roots with a capture refuses edits `set_baseline` accepts and has side effects, and that an override must keep saving its declined findings before the ref. Milestone 3 and the Decision Log now cover all three.
+
+Revision note (2026-11-20, third): review found five more Milestone 3 gaps (review-off approvals, clean verdicts and findings records, pathless override selection, older override schemas, legacy overrides that move the base) and asked for relay versioning of the new action fields. The Decision Log records the five fixes and why the new fields are not version-gated.
+
+Revision note (2026-11-20, fourth): review found that `RecordReviewed` can move some bases of a review that then fails, so the base generation now advances on every review close and on every override or `set_baseline`, not only on clean verdicts.
