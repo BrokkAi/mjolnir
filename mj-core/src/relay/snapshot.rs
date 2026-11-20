@@ -183,9 +183,8 @@ pub enum RelayCommand {
         barrier_command_id: String,
     },
     /// Resume ACP dispatch for a barrier whose archive is exported but not yet
-    /// installed on the controller. The recovery floor deliberately stays put:
-    /// only [`RelayCommand::AdvanceRecoveryFloor`] may release journal history,
-    /// and only once an archive covering that history is durably installed.
+    /// installed on the controller. The archive-coverage marker stays put;
+    /// current workers retain journal history through daemon acknowledgement.
     ReleaseCheckpoint {
         barrier_command_id: String,
     },
@@ -608,8 +607,11 @@ pub enum HarnessPreparation {
     /// The harness bridge was started. `acp_ready` then reports whether its
     /// session is open.
     Started,
-    /// Preparation stopped at `step`. The worker keeps serving its relay, so
-    /// the session can still be checkpointed and closed.
+    /// Preparation stopped at `step`, and that worker kept serving its relay.
+    /// Only older workers report this. A current worker whose harness cannot
+    /// start exits, and its exit record carries a
+    /// [`crate::relay::WorkerHarnessStartupFailure`] instead. Daemons still
+    /// read it from older workers.
     Failed {
         step: String,
         error: String,
@@ -798,6 +800,8 @@ pub struct RelayOperationalState {
     /// it. It stays so that an older daemon still decodes the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authentication_retry_waiting: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev_rate_limit: Option<crate::jev::RateLimitKind>,
     /// Worker-published: the access-token hash of the failed turn this
     /// worker still owes a retry for. Present while the durable intent holds
     /// (the turn failed authentication, nothing newer was accepted or
@@ -934,6 +938,17 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    /// Interpret the worker-owned journal boundary using its negotiated policy.
+    /// Older workers collected only through both ACK and recovery floor.
+    pub fn retained_event_ordinal(&self) -> u64 {
+        retained_event_ordinal(
+            self.relay_protocol_version
+                .unwrap_or(super::RELAY_PROTOCOL_VERSION),
+            self.acknowledged_through,
+            self.recovery_floor_ordinal,
+        )
+    }
+
     pub fn supports_notification_stack(&self) -> bool {
         self.relay_protocol_version
             .is_some_and(|version| version >= super::RELAY_NOTIFICATION_STACK_PROTOCOL)
@@ -1146,6 +1161,7 @@ impl RelayOperationalState {
     }
 
     /// Terminal startup failure; this worker cannot retry preparation in place.
+    /// Only an older worker, still serving after the failure, reports it.
     #[must_use]
     pub fn harness_preparation_failed(&self) -> bool {
         matches!(
@@ -1582,6 +1598,18 @@ pub struct RelayDispatchRecord {
     pub state: RelayDispatchState,
 }
 
+impl RelayDispatchRecord {
+    /// Whether this prompt may already have reached the harness, so the
+    /// native session may hold its history.
+    pub fn prompt_may_have_reached_agent(&self) -> bool {
+        self.command.prompt_blocks().is_some()
+            && !matches!(
+                self.state,
+                RelayDispatchState::Queued | RelayDispatchState::Pending
+            )
+    }
+}
+
 /// The durable half of an open harness-initiated turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1671,6 +1699,24 @@ pub struct HandbackChecks {
     pub context: Option<crate::assessment::ContextHistory>,
 }
 
+/// Durable native-history proof, independent of the journal's retained prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionUseEvidence {
+    pub version: u32,
+    pub native_session_id: String,
+    pub opened_ordinal: Option<u64>,
+    pub usage: NativeSessionUse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeSessionUse {
+    Unknown,
+    Unused,
+    Used,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
@@ -1695,6 +1741,10 @@ pub struct RelaySnapshot {
     pub latest_prompt_accepted_ordinal: Option<u64>,
     #[serde(default)]
     pub assessment_questions: std::collections::BTreeSet<String>,
+    /// Worker-owned form bodies survive acknowledgement-based journal GC.
+    /// A null body preserves an open legacy ID whose event was already pruned.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_elicitations: BTreeMap<String, Option<ElicitationRequest>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1766,6 +1816,18 @@ pub struct RelaySnapshot {
     /// reading the snapshots of sessions that never used their thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub native_session_used: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_use_evidence: Option<NativeSessionUseEvidence>,
+    /// Accepted command receipts retained until their durable operation finishes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub command_retention: BTreeMap<String, BTreeSet<String>>,
+    /// Accepted startup identities, including migrated pins without receipt bodies.
+    /// Seeding consults this lifetime set even after context clear.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub initial_command_ids: BTreeSet<String>,
+    /// Upgrade protection until the daemon reconciles the outstanding Move.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_command_retention: bool,
     /// Ordinal of the `SessionOpened` that recorded `native_session_id`. It
     /// places the current native session relative to `recovery_floor_ordinal`:
     /// a session opened above the floor has everything about it recorded in
@@ -1886,6 +1948,7 @@ impl RelaySnapshot {
         Self {
             handback_checks: Default::default(),
             assessment_questions: Default::default(),
+            pending_elicitations: Default::default(),
             completed_reply_message: None,
             managed_subagent: false,
             work_liveness: None,
@@ -1923,6 +1986,10 @@ impl RelaySnapshot {
             native_continuity_lost: false,
             replaced_unused_native_session_id: None,
             native_session_used: false,
+            native_use_evidence: None,
+            command_retention: BTreeMap::new(),
+            initial_command_ids: BTreeSet::new(),
+            legacy_command_retention: false,
             native_session_opened_ordinal: None,
             restored_native_session_unused: false,
             agent_capabilities: None,
@@ -2064,6 +2131,7 @@ impl RelaySnapshot {
                 )
             }) || self.retry_assessment.is_some(),
             authentication_retry_waiting: None,
+            jev_rate_limit: None,
             held_login_fingerprint: None,
             authentication_retry_intent: None,
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,
@@ -2140,15 +2208,34 @@ impl RelaySnapshot {
     }
 
     pub fn retained_through(&self) -> u64 {
-        self.acknowledged_through.min(self.recovery_floor_ordinal)
+        retained_event_ordinal(
+            super::RELAY_PROTOCOL_VERSION,
+            self.acknowledged_through,
+            self.recovery_floor_ordinal,
+        )
     }
 
     pub fn retained_digest(&self) -> &str {
-        if self.acknowledged_through <= self.recovery_floor_ordinal {
-            &self.acknowledged_digest
-        } else {
-            &self.recovery_floor_digest
+        &self.acknowledged_digest
+    }
+
+    pub fn record_native_use(&mut self, usage: NativeSessionUse) {
+        if let Some(id) = &self.native_session_id {
+            self.native_use_evidence = Some(NativeSessionUseEvidence {
+                version: 1,
+                native_session_id: id.clone(),
+                opened_ordinal: self.native_session_opened_ordinal,
+                usage,
+            });
         }
+    }
+}
+
+fn retained_event_ordinal(protocol: u32, acknowledged: u64, recovery_floor: u64) -> u64 {
+    if protocol < super::RELAY_COMMAND_RETENTION_PROTOCOL {
+        acknowledged.min(recovery_floor)
+    } else {
+        acknowledged
     }
 }
 

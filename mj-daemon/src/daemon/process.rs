@@ -183,13 +183,11 @@ pub(super) async fn run_daemon_runtime(
     let manager_updates = manager.updates;
     let manager_control = manager.control.clone();
     let manager_shutdown = manager.shutdown;
-    let mut recovery = crate::recovery::RecoveryCoordinator::spawn(manager_control.clone());
-    let recovery_observer = recovery.observer();
-    // Shares the recovery gate, so a recovery copy and a worker upgrade never
-    // act on one session at the same time.
+    let session_gate = manager_control.session_gate.clone();
+    // Worker upgrades share admission with foreground lifecycle operations.
     let mut worker_upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
         manager_control.clone(),
-        &recovery_observer,
+        &session_gate,
     );
     let state = Arc::new(RuntimeState::new(
         manager_control.clone(),
@@ -197,7 +195,7 @@ pub(super) async fn run_daemon_runtime(
             config: controller.config.clone(),
             state: controller.state.clone(),
         },
-        recovery_observer.clone(),
+        session_gate.clone(),
         worker_upgrades.observer(),
         workspaces,
     ));
@@ -321,11 +319,6 @@ pub(super) async fn run_daemon_runtime(
             );
             record_daemon_cleanup(
                 &mut outcome,
-                "shut down bootstrap recovery coordinator",
-                recovery.shutdown().await,
-            );
-            record_daemon_cleanup(
-                &mut outcome,
                 "shut down code review host after bootstrap failure",
                 state
                     .review_host()
@@ -427,10 +420,21 @@ pub(super) async fn run_daemon_runtime(
     // Before the web viewer starts: it shows this service's readings.
     let capacity_service =
         super::capacity::spawn_capacity_service(state.clone(), cancellation.clone());
+    let mut availability = mj_core::runtime::spawn(super::availability::run(
+        state.clone(),
+        cancellation.clone(),
+    ));
+    let mut availability_outcome = None;
     let notification_pruning = mj_core::runtime::spawn(super::attention::prune_read_notifications(
         state.clone(),
         cancellation.clone(),
     ));
+
+    let jev_notice_state = state.clone();
+    let jev_notice_cancel = cancellation.clone();
+    let jev_notices = mj_core::runtime::spawn(async move {
+        super::jev_limit::publish_notices(&jev_notice_state, jev_notice_cancel).await
+    });
 
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
@@ -447,7 +451,7 @@ pub(super) async fn run_daemon_runtime(
     let image_refresh = spawn_image_refresher(
         {
             let state = state.clone();
-            move || state.with_config(mj_controller::controller::image_refresh_plan)
+            move || state.with_config(Clone::clone)
         },
         {
             // A background download is the daemon's own work, not a session's,
@@ -723,6 +727,10 @@ pub(super) async fn run_daemon_runtime(
                     result?;
                     break;
                 }
+                result = supervise_service(&mut availability, &mut availability_outcome, &cancellation, "availability service") => {
+                    result?;
+                    break;
+                }
                 result = supervise_service(&mut cache_task, &mut cache_outcome, &cancellation, "machine build cache service") => {
                     result?;
                     break;
@@ -759,7 +767,6 @@ pub(super) async fn run_daemon_runtime(
                     progress.phase(ServingPhase::Recovery);
                     publish_background_results(
                         &state,
-                        std::iter::from_fn(|| recovery.try_result()),
                         std::iter::from_fn(|| worker_upgrades.try_result()),
                     );
                 }
@@ -945,18 +952,13 @@ pub(super) async fn run_daemon_runtime(
                 .and_then(|result| result),
         },
     );
-    // Recovery copies and worker upgrades do not hold up a handoff, so some
-    // may still be running. Stop them first: the next daemon starts them again.
-    // The coordinators share one gate, and dropping either cancels both.
+    // Worker upgrade preparation does not hold up a handoff and may still be
+    // running. Stop it first; the next daemon starts it again.
+    // Closing the shared gate also cancels other background holders.
     epilogue.record(
         &mut outcome,
         "shut down worker upgrade coordinator",
         worker_upgrades.shutdown().await,
-    );
-    epilogue.record(
-        &mut outcome,
-        "shut down recovery coordinator",
-        recovery.shutdown().await,
     );
     epilogue.record(
         &mut outcome,
@@ -1039,11 +1041,27 @@ pub(super) async fn run_daemon_runtime(
     );
     epilogue.record(
         &mut outcome,
+        "join availability service",
+        match availability_outcome {
+            Some(result) => result,
+            None => availability
+                .await
+                .context("availability service failed")
+                .and_then(std::convert::identity),
+        },
+    );
+    epilogue.record(
+        &mut outcome,
         "join notification pruning",
         notification_pruning
             .await
             .context("notification pruning task panicked")
             .and_then(std::convert::identity),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join Jev notice publisher",
+        jev_notices.await.map_err(anyhow::Error::new),
     );
     if let Some(phone_task) = phone_task {
         epilogue.record(

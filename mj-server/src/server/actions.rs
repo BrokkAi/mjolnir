@@ -156,10 +156,7 @@ pub enum ControllerAction {
         session_id: String,
         workspace_id: String,
     },
-    /// Record the session's container allocation and attached
-    /// directories. An absent allocation uses the target defaults, and the
-    /// mounts list replaces the whole list. Nothing changes inside a running
-    /// container: the values are read the next time it is created.
+    /// Save settings for the next creation or preview a preserving replacement.
     SetContainerSettings {
         session_id: String,
         #[serde(default)]
@@ -185,6 +182,7 @@ pub enum ControllerAction {
     RefreshQuota {
         profile_id: String,
     },
+    CheckAvailability,
     RefreshCapacity {
         target_id: String,
     },
@@ -399,15 +397,18 @@ pub struct BundleRequest {
     pub source: String,
     /// The requested full repository set, with its primary repository first.
     pub exact_sources: Option<Vec<String>>,
+    /// A discovered network source may select an existing project unchanged.
+    pub discovered: bool,
     pub reply: tokio::sync::oneshot::Sender<Result<String, BundleFailure>>,
 }
 
 /// Safe failure classes for bundle creation. Detailed controller errors stay
 /// in daemon logs; a browser only needs to know whether to fix its source or
 /// report a server-side failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BundleFailure {
     InvalidSource,
+    Refused(Refusal),
     Controller,
 }
 
@@ -515,7 +516,7 @@ pub enum PreflightResume {
 #[derive(Debug)]
 pub struct MovePreparationRequest {
     pub selection: MoveSelection,
-    pub reply: tokio::sync::oneshot::Sender<Result<MovePreparation, String>>,
+    pub reply: tokio::sync::oneshot::Sender<Result<MovePreparation, Option<Refusal>>>,
 }
 
 /// A preflight can fail because the requested bare directory is unusable, an
@@ -543,6 +544,14 @@ pub use mj_client::daemon::{PreflightNew, PreflightRepository};
 /// and reload the controller on every keystroke.
 #[derive(Debug)]
 pub enum ClientStateRequest {
+    ContainerSettings {
+        session_id: String,
+        resource_allocation: Option<SessionResourceAllocation>,
+        mounts: Vec<AdditionalMount>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<Option<mj_core::state::ContainerUpgradePreview>, ActionOutcome>,
+        >,
+    },
     ContainerUpgradePreview {
         session_id: String,
         reply:

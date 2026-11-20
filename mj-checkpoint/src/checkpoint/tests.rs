@@ -1682,6 +1682,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                     content: vec![json!({"type": "text", "text": "next"})],
                     queued_at_ms: 2,
                 }],
+                mailbox: None,
             },
             output_path: output.clone(),
         },
@@ -2234,6 +2235,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         }),
         execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
         claude_permission_mode: Default::default(),
+        mjolnir_guardian: true,
         observe_policy: None,
     }
     .write(&spec.relay_root.join("launch.json"))
@@ -3923,6 +3925,27 @@ fn a_native_restore_says_whether_the_continued_session_ever_received_a_prompt() 
             .unwrap();
             restored_seed(&relay_root).native_session_unused
         };
+    // Hard-won: 806b123: an adopted used conversation looked unused without its old transcript.
+    let adoption = CanonicalTranscriptItem {
+        stable_id: mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID.into(),
+        position: 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1,
+        last_changed_at_ms: 1,
+        body: CanonicalTranscriptBody::System {
+            text: "Earlier transcript unavailable".into(),
+        },
+    };
+    assert!(!unused_after_restore(
+        "adopted",
+        vec![adoption.clone()],
+        true
+    ));
+    assert!(unused_after_restore(
+        "adopted-cleared",
+        vec![adoption.clone(), boundary.clone()],
+        true
+    ));
     let prompt = base.canonical_session.transcript[0].clone();
 
     assert!(unused_after_restore("never-prompted", Vec::new(), true));
@@ -3938,6 +3961,19 @@ fn a_native_restore_says_whether_the_continued_session_ever_received_a_prompt() 
     assert!(
         !unused_after_restore("text-handoff", Vec::new(), false),
         "a restore that does not continue the native session says nothing about it"
+    );
+    let mut missing_native = base;
+    missing_native.canonical_session.transcript = vec![adoption];
+    fs::remove_file(
+        missing_native
+            .harness_home
+            .join(format!("sessions/2026/08/09/rollout-{NATIVE}.jsonl")),
+    )
+    .unwrap();
+    let error = export_checkpoint(&missing_native).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no session artifacts found"),
+        "{error:#}"
     );
 }
 
@@ -4304,7 +4340,7 @@ fn incompatible_schema_is_rejected_before_restore_mutates_target() {
     for schema_version in [
         1,
         crate::archive::ARCHIVE_SCHEMA_VERSION + 1,
-        crate::archive::ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK + 1,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_MAILBOX + 1,
     ] {
         let incompatible = temp
             .path()

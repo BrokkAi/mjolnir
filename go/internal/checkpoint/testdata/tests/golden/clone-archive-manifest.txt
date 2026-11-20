@@ -1,0 +1,164 @@
+{
+  "schema_version": 6,
+  "format": "hel-session",
+  "session": {
+    "id": "session-1",
+    "title": "Forge Hel",
+    "harness_kind": "codex",
+    "profile_id": "codex-1",
+    "native_session_id": "native-1",
+    "created_at": "2026-08-09T10:00:00Z",
+    "checkpointed_at": "2026-08-09T10:05:00Z",
+    "hel_version": "0.1.0",
+    "relay_version": "0.1.0",
+    "adapter_version": "0.1.0"
+  },
+  "target": {
+    "template_id": "podman-rust",
+    "target_kind": "local_podman",
+    "details": {
+      "image": "fedora:latest"
+    }
+  },
+  "bundle": {
+    "id": "hel",
+    "primary_repository": "hel"
+  },
+  "repositories": [
+    {
+      "id": "hel",
+      "relative_destination": "hel",
+      "origin": "https://github.com/example/hel.git",
+      "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "branch": "feature/hel",
+      "saved_refs": {
+        "refs/heads/feature/hel": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "refs/tags/v1": "cccccccccccccccccccccccccccccccccccccccc"
+      },
+      "stash_stack": [
+        {
+          "commit": "dddddddddddddddddddddddddddddddddddddddd",
+          "message": "On feature/hel: draft"
+        }
+      ],
+      "committed_bundle_path": "repositories/hel/committed.bundle",
+      "staged_patch_path": "repositories/hel/staged.patch",
+      "unstaged_patch_path": "repositories/hel/unstaged.patch",
+      "untracked_tar_path": "repositories/hel/untracked.tar"
+    },
+    {
+      "id": "worker",
+      "relative_destination": "worker",
+      "origin": "https://github.com/example/worker.git",
+      "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "branch": "feature/hel",
+      "committed_bundle_path": "repositories/worker/committed.bundle",
+      "staged_patch_path": "repositories/worker/staged.patch",
+      "unstaged_patch_path": "repositories/worker/unstaged.patch",
+      "untracked_tar_path": "repositories/worker/untracked.tar"
+    }
+  ],
+  "payloads": [
+    {
+      "path": "canonical/session.json",
+      "sha256": "90233d32db1b7a8cb35c9d7b3271a8821e9f3340a6efbfe44a5e36baa4fc5ea9",
+      "size": 762,
+      "mode": 384,
+      "role": {
+        "kind": "canonical_session"
+      }
+    },
+    {
+      "path": "native/sessions/native-1/rollout.jsonl",
+      "sha256": "71d18a105b04090f709ed099a6d7fc79a33eaf22539facdb679303bd62134cae",
+      "size": 17,
+      "mode": 384,
+      "role": {
+        "kind": "native_artifact",
+        "relative_path": "sessions/native-1/rollout.jsonl"
+      }
+    },
+    {
+      "path": "repositories/hel/committed.bundle",
+      "sha256": "cd5427ca35a2f76beb75449d29c2ac79bb97da1a8970e0a43b52d017c9d2e687",
+      "size": 10,
+      "mode": 384,
+      "role": {
+        "kind": "git_bundle",
+        "repository_id": "hel"
+      }
+    },
+    {
+      "path": "repositories/hel/staged.patch",
+      "sha256": "607ae6412c16cc2613540f8d498efd6f49a138b58946ad581c0203a22e943cf2",
+      "size": 10,
+      "mode": 384,
+      "role": {
+        "kind": "git_staged_patch",
+        "repository_id": "hel"
+      }
+    },
+    {
+      "path": "repositories/hel/unstaged.patch",
+      "sha256": "75c04ac9d7ce2ff632eed3ad5f34229b3fb5b53cb424165034037abef806521d",
+      "size": 12,
+      "mode": 384,
+      "role": {
+        "kind": "git_unstaged_patch",
+        "repository_id": "hel"
+      }
+    },
+    {
+      "path": "repositories/hel/untracked.tar",
+      "sha256": "2a5e8bed8d19f92aa99257685c6dc1a98de0ed67ace815a164dfae8a7fba5af4",
+      "size": 2048,
+      "mode": 384,
+      "role": {
+        "kind": "git_untracked_tar",
+        "repository_id": "hel"
+      }
+    },
+    {
+      "path": "repositories/worker/committed.bundle",
+      "sha256": "482f7a68957b8872862cf373919fd477c8631ecee59b96756ce3ae6fb825092a",
+      "size": 13,
+      "mode": 384,
+      "role": {
+        "kind": "git_bundle",
+        "repository_id": "worker"
+      }
+    },
+    {
+      "path": "repositories/worker/staged.patch",
+      "sha256": "931cc79f24010a6e2123a100c51ce87bfc2e05f08446ac92eb96ccaa3b141835",
+      "size": 13,
+      "mode": 384,
+      "role": {
+        "kind": "git_staged_patch",
+        "repository_id": "worker"
+      }
+    },
+    {
+      "path": "repositories/worker/unstaged.patch",
+      "sha256": "04031c5bce26749a2eea50cb9dd252a0712467f2be6e81114705fc9355e46ea9",
+      "size": 15,
+      "mode": 384,
+      "role": {
+        "kind": "git_unstaged_patch",
+        "repository_id": "worker"
+      }
+    },
+    {
+      "path": "repositories/worker/untracked.tar",
+      "sha256": "2a5e8bed8d19f92aa99257685c6dc1a98de0ed67ace815a164dfae8a7fba5af4",
+      "size": 2048,
+      "mode": 384,
+      "role": {
+        "kind": "git_untracked_tar",
+        "repository_id": "worker"
+      }
+    }
+  ]
+}

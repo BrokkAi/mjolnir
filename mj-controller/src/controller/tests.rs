@@ -35,6 +35,7 @@ fn registration_config() -> Config {
                 local: None,
                 destination: PathBuf::from("project"),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -539,6 +540,39 @@ fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases()
 }
 
 #[test]
+fn directory_discovery_keeps_the_saved_transport_for_an_existing_identity() {
+    let mut config = Config::default();
+    let saved =
+        create_quick_bundle_in_config(&mut config, "ssh://git@github.com/BrokkAi/hel.git").unwrap();
+    let before = config.clone();
+    let discovered = add_project_sources(
+        &mut config,
+        &["https://github.com/BrokkAi/hel.git".into()],
+        true,
+    )
+    .unwrap();
+    assert_eq!(discovered, saved);
+    assert_eq!(config, before);
+}
+
+// Hard-won: 85ee0a63d: matching a network identity silently reused a different SSH login.
+#[test]
+fn project_selection_refuses_a_different_ssh_login_on_the_same_identity() {
+    let mut config = Config::default();
+    let saved = create_quick_bundle_in_config(&mut config, "alice@git.example:hel.git").unwrap();
+    let before = config.clone();
+    for discovered in [false, true] {
+        let error =
+            add_project_sources(&mut config, &["bob@git.example:hel.git".into()], discovered)
+                .unwrap_err();
+        let refusal = mj_core::refusal::Refusal::of(&error).unwrap();
+        assert!(refusal.message().contains(&saved));
+        assert!(refusal.message().contains("alice"));
+        assert_eq!(config, before);
+    }
+}
+
+#[test]
 fn selecting_a_linked_checkout_reuses_identity_and_retains_its_push_settings() {
     let checkout = super::test_support::committed_repository();
     let worktree_parent = tempfile::tempdir().unwrap();
@@ -657,6 +691,7 @@ fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
                     local: None,
                     destination: "app".into(),
                     git_ref: None,
+                    mbx_namespace: None,
                 },
                 ProjectRepository {
                     id: "shared".into(),
@@ -664,6 +699,7 @@ fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
                     local: None,
                     destination: "shared".into(),
                     git_ref: None,
+                    mbx_namespace: None,
                 },
             ],
         },
@@ -720,6 +756,7 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
                 local: Some(stale_local.path().to_owned()),
                 destination: "stale".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -733,6 +770,7 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
                 local: None,
                 destination: "existing".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );
@@ -1787,7 +1825,7 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
             &id,
             None,
             vec![mount(&missing)],
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap_err();
@@ -1810,7 +1848,7 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
             &id,
             None,
             vec![mount(&present)],
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap();
@@ -1825,7 +1863,7 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
                 memory_bytes: 4 << 30,
             }),
             vec![mount(&present)],
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap();
@@ -1891,7 +1929,7 @@ fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() 
                 memory_bytes: 4 << 30,
             }),
             Vec::new(),
-            Vec::new(),
+            Some(Vec::new()),
             &ProcessExecutor,
         )
         .unwrap();
@@ -2317,6 +2355,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
             },
             transcript,
             queued_prompts: queued,
+            mailbox: None,
         }
     };
     let assignment_item = CanonicalTranscriptItem {
@@ -2358,6 +2397,222 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
     // Started: the conversation holds the assignment, so nothing is re-sent.
     let started = snapshot(vec![assignment_item], Vec::new());
     assert!(initial_command_ids(LaunchHistory::Restored(&started)).is_empty());
+    // Hard-won: 6f0f854: live-cut recovery must retain the startup delivery fact across
+    // the archive format and the fresh relay created by a later resume.
+    for (case, delivered) in [
+        ("queued", false),
+        ("removed", false),
+        ("interrupted", true),
+        ("completed", true),
+    ] {
+        use mj_core::relay::{
+            RelayCommand, RelayCommandOutcome, RelayRequest, RelayRequestEnvelope,
+            RelayResponseBody,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let original = controller
+            .session_launch_config(&child_id, &backend, LaunchHistory::Stored)
+            .unwrap()
+            .0;
+        let brief = original.initial_commands.last().unwrap().clone();
+        let mut initial = vec![brief.clone()];
+        if !delivered {
+            // Startup's selector occupies dispatch, keeping its brief queued.
+            initial.insert(
+                0,
+                mj_core::worker_launch::InitialWorkerCommand {
+                    command_id: "test-selector".into(),
+                    command: RelayCommand::SetConfig {
+                        key: "model".into(),
+                        value: "test-model".into(),
+                    },
+                    optional: false,
+                },
+            );
+        }
+        let mut relay = mj_worker::relay::DurableRelay::open_for_harness(
+            directory.path(),
+            &child_id,
+            "test",
+            HarnessKind::Codex,
+            &initial,
+        )
+        .unwrap();
+        if case == "removed" {
+            let response = relay.handle(RelayRequestEnvelope {
+                request_id: "remove-startup-brief".into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::Submit {
+                    command_id: "remove-startup-brief".into(),
+                    command: RelayCommand::RemoveQueuedPrompt {
+                        queued_command_id: prompt_id.clone(),
+                    },
+                },
+            });
+            assert!(
+                matches!(response.body, RelayResponseBody::Ok { .. }),
+                "{:?}",
+                response.body
+            );
+        } else if delivered {
+            let claimed = relay.claim_pending_commands(true).unwrap();
+            assert!(
+                claimed
+                    .iter()
+                    .any(|command| command.command_id == prompt_id)
+            );
+            if case == "interrupted" {
+                relay
+                    .record_command_interrupted(
+                        &prompt_id,
+                        mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+                        "interrupted after start",
+                    )
+                    .unwrap();
+            } else if case == "completed" {
+                relay
+                    .record_command_completed(
+                        &prompt_id,
+                        RelayCommandOutcome::Prompt {
+                            stop_reason: "end_turn".into(),
+                            diagnostic: None,
+                            usage: None,
+                            work_facts: None,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        let cut = if delivered {
+            relay.live_session_baseline().unwrap()
+        } else {
+            // A live cut waits for startup's selector to finish while it
+            // holds the queue, so the brief is still queued at the cut.
+            let mut cut = relay.reserve_live_baseline();
+            assert!(cut.try_recv().is_err(), "{case}");
+            let claimed = relay.claim_pending_commands(true).unwrap();
+            assert_eq!(claimed.len(), 1, "{case}");
+            assert_eq!(claimed[0].command_id, "test-selector");
+            relay
+                .record_command_completed("test-selector", RelayCommandOutcome::Configured)
+                .unwrap();
+            cut.try_recv().unwrap().unwrap()
+        };
+        let mut projection =
+            mj_transcript::projection::materialized_session_from_live_baseline(&cut).unwrap();
+        assert_eq!(
+            projection
+                .transcript
+                .iter()
+                .any(|item| item.stable_id == format!("user:{prompt_id}")),
+            delivered,
+            "{case}"
+        );
+        if delivered {
+            assert!(projection.transcript[0].position < projection.transcript[1].position);
+            assert_eq!(cut.delivered_initial_prompts[0].command, brief.command);
+            let expected_content = brief
+                .command
+                .prompt_blocks()
+                .unwrap()
+                .iter()
+                .map(|block| serde_json::to_value(block).unwrap())
+                .collect::<Vec<_>>();
+            assert!(matches!(&projection.transcript[0].body,
+                mj_core::state::TranscriptBody::User { content }
+                    if *content == expected_content));
+        }
+        // Suspend settles the live turn before it writes the canonical archive.
+        projection.execution = mj_core::state::MaterializedExecutionState::Idle;
+        projection.active_turn = None;
+        let canonical =
+            mj_transcript::projection::canonical_session_from_materialized(&projection).unwrap();
+        let mut input = super::test_support::checkpoint_archive_input(
+            &child_id,
+            canonical.event_frontier,
+            Vec::new(),
+            Vec::new(),
+        );
+        input.canonical_session = canonical;
+        let archive = super::test_support::write_checkpoint_archive_input(
+            directory.path(),
+            &child_id,
+            &input,
+        );
+        let restored = mj_checkpoint::archive::read_archive_verified(&archive.archive_path)
+            .unwrap()
+            .canonical_session()
+            .unwrap();
+        // A resume that discards the queue must still deliver an unstarted brief.
+        let launch = controller
+            .session_launch_config(&child_id, &backend, LaunchHistory::Restored(&restored))
+            .unwrap()
+            .0;
+        assert_eq!(
+            launch
+                .initial_commands
+                .iter()
+                .any(|command| command.command_id == prompt_id),
+            !delivered,
+            "{case}"
+        );
+        let fresh = directory.path().join("resumed-worker");
+        let mut resumed = mj_worker::relay::DurableRelay::open_for_harness(
+            &fresh,
+            &child_id,
+            "test",
+            HarnessKind::Codex,
+            &launch.initial_commands,
+        )
+        .unwrap();
+        let mut deliveries = 0;
+        // Complete the finite startup prefix, then prove a reopen submits none.
+        loop {
+            let claimed = resumed.claim_pending_commands(true).unwrap();
+            if claimed.is_empty() {
+                break;
+            }
+            for command in claimed {
+                if command.command_id == prompt_id {
+                    deliveries += 1;
+                    resumed
+                        .record_command_completed(
+                            &command.command_id,
+                            RelayCommandOutcome::Prompt {
+                                stop_reason: "end_turn".into(),
+                                diagnostic: None,
+                                usage: None,
+                                work_facts: None,
+                            },
+                        )
+                        .unwrap();
+                } else {
+                    resumed
+                        .record_command_completed(
+                            &command.command_id,
+                            RelayCommandOutcome::Configured,
+                        )
+                        .unwrap();
+                }
+            }
+        }
+        assert_eq!(deliveries, usize::from(!delivered), "{case}");
+        let frontier = resumed.latest_ordinal();
+        drop(resumed);
+        let mut reopened = mj_worker::relay::DurableRelay::open_for_harness(
+            &fresh,
+            &child_id,
+            "test",
+            HarnessKind::Codex,
+            &launch.initial_commands,
+        )
+        .unwrap();
+        assert_eq!(reopened.latest_ordinal(), frontier, "{case}");
+        assert!(
+            reopened.claim_pending_commands(true).unwrap().is_empty(),
+            "{case}"
+        );
+    }
     rusqlite::Connection::open(crate::database::database_path())
         .unwrap()
         .execute_batch(&format!(
@@ -3381,7 +3636,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         worker.child_session_id, child.child_session_id,
         "kind belongs to the idempotent key"
     );
-    // An ordinary sub-agent is offered the review tools but is not push-gated.
+    // An ordinary sub-agent is neither offered the review tools nor push-gated.
     let ordinary_launch = controller
         .current_worker_launch_config(
             &worker.child_session_id,
@@ -3394,7 +3649,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             },
         )
         .unwrap();
-    assert!(ordinary_launch.review_tools());
+    assert!(!ordinary_launch.review_tools());
     assert!(!ordinary_launch.review_gate());
     let child_record = controller
         .state
@@ -3462,13 +3717,13 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
 
 #[test]
 #[cfg_attr(windows, ignore = "local bare target fixture")]
-fn ordinary_children_inherit_the_parent_effective_review_setting() {
+fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
     const MARKER: &str = "MJ_TEST_CHILD_EFFECTIVE_REVIEW";
     if std::env::var_os(MARKER).is_none() {
         let directory = tempfile::tempdir().unwrap();
         run_registration_child(
             MARKER,
-            "ordinary_children_inherit_the_parent_effective_review_setting",
+            "ordinary_children_get_no_review_tools_when_the_parent_reviews",
             directory.path(),
         );
         return;
@@ -3479,8 +3734,7 @@ fn ordinary_children_inherit_the_parent_effective_review_setting() {
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
-    // Global review is off; the first parent enables it with a session
-    // selection, then the same parent explicitly disables it.
+    // Global review is off; the parent enables it with a session selection.
     config.review = mj_core::config::ReviewConfig::default();
     let mut controller = Controller {
         config,
@@ -3525,51 +3779,22 @@ fn ordinary_children_inherit_the_parent_effective_review_setting() {
             })
             .unwrap()
     };
-    let enabled = register_worker(&mut controller, "review-enabled");
-    let backend = |child_id: &str| targets::TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir()
-            .join("workers")
-            .join(child_id)
-            .to_string_lossy()
-            .into_owned(),
-    };
-    let enabled_launch = controller
+    let child = register_worker(&mut controller, "review-enabled");
+    let launch = controller
         .current_worker_launch_config(
-            &enabled.child_session_id,
-            &backend(&enabled.child_session_id),
+            &child.child_session_id,
+            &targets::TargetLocator::LocalBare {
+                worker_root: mj_core::config::data_dir()
+                    .join("workers")
+                    .join(&child.child_session_id)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
         )
         .unwrap();
     assert!(
-        enabled_launch.review_tools(),
-        "session-specific parent review enables child review tools"
-    );
-    // The review host asks the same function, so the child is reviewed by
-    // the parent's selected reviewers, not the global list.
-    let child_choice = controller
-        .state
-        .effective_review(&enabled.child_session_id)
-        .unwrap();
-    assert_eq!(
-        controller.config.review.for_session(child_choice).reviewers,
-        vec![mj_core::config::SubagentChoice {
-            model: "review-model".into(),
-            effort: None,
-        }]
-    );
-
-    controller.state.sessions.get_mut(parent_id).unwrap().review =
-        Some(Box::new(mj_core::config::SessionReview::Off));
-    crate::database::save_state(&controller.state).unwrap();
-    let disabled = register_worker(&mut controller, "review-disabled");
-    let disabled_launch = controller
-        .current_worker_launch_config(
-            &disabled.child_session_id,
-            &backend(&disabled.child_session_id),
-        )
-        .unwrap();
-    assert!(
-        !disabled_launch.review_tools(),
-        "explicitly disabled parent review disables child review tools"
+        !launch.review_tools(),
+        "a sub-agent never requests review, whatever its parent's choice"
     );
 }
 
@@ -3597,6 +3822,7 @@ mod profile_homes {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
         };
@@ -3679,6 +3905,7 @@ mod profile_homes {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
         };
@@ -3705,4 +3932,93 @@ mod profile_homes {
             }
         }
     }
+}
+
+// Hard-won: 7a9a7ec: rename released the config lock before migrating session rows.
+#[test]
+fn profile_rename_holds_configuration_through_reference_migration() {
+    const NAME: &str = "profile_rename_holds_configuration_through_reference_migration";
+    const CHILD: &str = "MJ_PROFILE_RENAME_LOCK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        for kind in ["profile", "target"] {
+            let root = tempfile::tempdir().unwrap();
+            let hooks = root.path().join("hooks");
+            std::fs::create_dir(&hooks).unwrap();
+            IsolatedTest::new(test_name(module_path!(), NAME))
+                .env(CHILD, "1")
+                .env("MJ_RENAME_LOCK_KIND", kind)
+                .isolated_store(root.path())
+                .env(
+                    "MJ_TEST_HOOK",
+                    "config_replacement_before_reference_migration",
+                )
+                .env("MJ_TEST_HOOK_DIR", &hooks)
+                .env("MJ_CHAOS_ISOLATED", "1")
+                .run();
+        }
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let config = registration_config();
+    config.save().unwrap();
+    let profile = std::env::var("MJ_RENAME_LOCK_KIND").as_deref() == Ok("profile");
+    let mut record = super::test_support::checkpoint_test_session("renaming-session");
+    record.target_template_id = "podman".into();
+    crate::database::save_session(&record).unwrap();
+    let mut controller = Controller {
+        config,
+        state: crate::database::load_state().unwrap(),
+    };
+    let hooks = std::path::PathBuf::from(std::env::var_os("MJ_TEST_HOOK_DIR").unwrap());
+    let reached = hooks.join("config_replacement_before_reference_migration.reached");
+    let continuation = hooks.join("config_replacement_before_reference_migration.continue");
+    let renaming = std::thread::spawn(move || {
+        if profile {
+            controller.rename_profile_id("codex", "renamed")
+        } else {
+            controller.rename_target_id("podman", "renamed")
+        }
+    });
+    let observed = (0..1000).any(|_| {
+        if reached.exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        false
+    });
+    let (ready, started) = std::sync::mpsc::channel();
+    let (result, received) = std::sync::mpsc::channel();
+    let reading = std::thread::spawn(move || {
+        ready.send(()).unwrap();
+        let (config, _owner) = Config::load_locked().unwrap();
+        let record = crate::database::read_durable_session_record("renaming-session")
+            .unwrap()
+            .unwrap();
+        let observation = if profile {
+            (
+                config.profiles.contains_key(&record.last_profile),
+                record.last_profile,
+            )
+        } else {
+            (
+                config.targets.contains_key(&record.target_template_id),
+                record.target_template_id,
+            )
+        };
+        result.send(observation).unwrap();
+    });
+    started.recv().unwrap();
+    let premature = received.recv_timeout(std::time::Duration::from_millis(100));
+    // Release and join both owners before assertions, even if the regression returns.
+    std::fs::write(continuation, b"continue").unwrap();
+    renaming.join().unwrap().unwrap();
+    reading.join().unwrap();
+    assert!(observed, "rename never reached its save/migrate boundary");
+    assert!(
+        premature.is_err(),
+        "a dependent reader entered before reference migration"
+    );
+    let (consistent, profile) = received.recv().unwrap();
+    assert!(consistent);
+    assert_eq!(profile, "renamed");
 }

@@ -68,6 +68,38 @@ pub(super) fn edit_in_place(existing: &str, loaded: &str, updated: &str) -> Opti
             }
         }
     }
+    // Loading removes HTTP userinfo. Compare those bundles against their raw
+    // values so saving also removes the credentials from the file.
+    if let Some(raw_bundles) = raw.get("bundles").and_then(toml::Value::as_table)
+        && let Some(bundles) = loaded
+            .get_mut("bundles")
+            .and_then(toml::Value::as_table_mut)
+    {
+        for (id, bundle) in raw_bundles {
+            let has_credentials = bundle
+                .get("repositories")
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|repository| {
+                    repository
+                        .get("github")
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(|source| {
+                            matches!(
+                                crate::remote_git::project_source(
+                                    source,
+                                    crate::remote_git::Shorthand::Allowed
+                                ),
+                                Ok(std::borrow::Cow::Owned(_))
+                            )
+                        })
+                });
+            if has_credentials {
+                bundles.insert(id.clone(), bundle.clone());
+            }
+        }
+    }
     // Compare review against the file so saving replaces the legacy boolean
     // and writes the trigger even when its effective value has not changed.
     if let Some(review) = raw.get("review") {

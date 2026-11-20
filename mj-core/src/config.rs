@@ -83,11 +83,11 @@ pub fn default_phone_bind_for(instance: Option<&str>) -> String {
     format!("127.0.0.1:{port}")
 }
 
-const fn default_true() -> bool {
+pub(crate) const fn default_true() -> bool {
     true
 }
 
-const fn is_true(value: &bool) -> bool {
+pub(crate) const fn is_true(value: &bool) -> bool {
     *value
 }
 
@@ -919,25 +919,63 @@ impl Default for LegacyBuildCacheConfig {
     }
 }
 
-/// The one switch for the hosted Jev service. When it is off, Mjolnir sends
-/// nothing to Jev: no turn or GitHub-item classification and no quota recovery.
-/// `[jev] enabled = false`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Settings for the hosted Jev service.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JevConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fastino_key: Option<EnvironmentValue>,
+}
+
+impl std::fmt::Debug for JevConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JevConfig")
+            .field("enabled", &self.enabled)
+            .field("fastino_key_set", &self.fastino_key.is_some())
+            .finish()
+    }
 }
 
 impl Default for JevConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            fastino_key: None,
+        }
     }
 }
 
 impl JevConfig {
     fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    pub fn validate_fastino_key(key: &str) -> Result<()> {
+        ensure!(
+            key.len() <= 4096,
+            "A Fastino key can be at most 4096 bytes."
+        );
+        ensure!(
+            !key.chars().any(char::is_whitespace),
+            "A Fastino key can contain no whitespace."
+        );
+        ensure!(
+            key.bytes().all(|byte| byte.is_ascii_graphic()),
+            "A Fastino key must use printable ASCII."
+        );
+        Ok(())
+    }
+
+    /// Resolve the optional key on the host, before creating the caller.
+    pub fn resolve_fastino_key(&self) -> Result<Option<String>> {
+        let Some(source) = self.fastino_key.as_ref().filter(|_| self.enabled) else {
+            return Ok(None);
+        };
+        let key = secrets::resolve_active("jev.fastino_key", source)?;
+        Self::validate_fastino_key(&key)?;
+        Ok((!key.is_empty()).then_some(key))
     }
 }
 
@@ -1615,11 +1653,12 @@ impl TryFrom<StoredConfig> for Config {
             keys,
             legacy_startup,
             mut profiles,
-            bundles,
+            mut bundles,
             images,
             mut machines,
             targets,
         } = stored;
+        strip_project_credentials(&mut bundles);
         github.watch.enabled &= mailbox.enabled;
         github.validate()?;
         for profile in profiles.values_mut() {
@@ -1723,8 +1762,18 @@ impl TryFrom<StoredConfig> for Config {
     }
 }
 
+fn strip_project_credentials(bundles: &mut BTreeMap<String, ProjectBundle>) {
+    for repository in bundles
+        .values_mut()
+        .flat_map(|bundle| &mut bundle.repositories)
+    {
+        repository.strip_http_userinfo();
+    }
+}
+
 impl From<Config> for StoredConfig {
-    fn from(config: Config) -> Self {
+    fn from(mut config: Config) -> Self {
+        strip_project_credentials(&mut config.bundles);
         let mut machines = config.machines;
         let mut targets = BTreeMap::new();
         for (id, target) in &config.targets {
@@ -2095,6 +2144,18 @@ impl Config {
         Self::load_from(&config_path()).map(Self::with_local_targets)
     }
 
+    /// Read current configuration while excluding cooperating config edits.
+    /// Hold the opaque guard through the commit that relies on this snapshot.
+    pub fn load_locked() -> Result<(Self, ConfigReadGuard)> {
+        let path = config_path();
+        let guard = ConfigReadGuard {
+            _lock: ConfigLock::acquire(&path)?,
+            path,
+        };
+        let config = Self::load_from(&guard.path)?.with_local_targets();
+        Ok((config, guard))
+    }
+
     /// Supply standard local choices without requiring setup or writing a file.
     /// These are candidates: callers must check availability before offering launch.
     /// Explicit entries with the same name override the standard defaults.
@@ -2271,7 +2332,20 @@ impl Config {
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
-        Self::update_to(path, |config| {
+        let guard = ConfigReadGuard {
+            _lock: ConfigLock::acquire(path)?,
+            path: path.to_owned(),
+        };
+        Self::update_locked(&guard, edit)
+    }
+
+    /// Edit and save while an existing opaque owner retains the config lock.
+    /// The owner can span a subsequent reference migration or rollback.
+    pub fn update_locked<T, F>(guard: &ConfigReadGuard, edit: F) -> Result<(Self, T)>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        Self::update_to_locked(&guard.path, |config| {
             // Edits see the same local candidates as reads, but unrelated
             // changes must not write implicit defaults into the user's file.
             let mut runtime = config.clone().with_local_targets();
@@ -2304,8 +2378,36 @@ impl Config {
         F: FnOnce(&mut Self) -> Result<T>,
     {
         let _lock = ConfigLock::acquire(path)?;
+        Self::update_to_locked(path, edit)
+    }
+
+    /// As [`Self::update_to`], with a cancellable lock wait and edit.
+    pub fn update_to_cancellable<T, F>(
+        path: &Path,
+        cancelled: &dyn Fn() -> bool,
+        edit: F,
+    ) -> Result<(Self, T)>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        let file = ConfigLock::open(path)?;
+        let _lock = crate::file_lock::FileLock::acquire_cancellable(file, cancelled)
+            .with_context(|| format!("lock config {}", path.display()))?;
+        Self::update_to_locked(path, |config| {
+            anyhow::ensure!(!cancelled(), "configuration edit cancelled");
+            let value = edit(config)?;
+            anyhow::ensure!(!cancelled(), "configuration edit cancelled");
+            Ok(value)
+        })
+    }
+
+    fn update_to_locked<T, F>(path: &Path, edit: F) -> Result<(Self, T)>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
         let mut config = Self::load_from(path)?;
         let value = edit(&mut config)?;
+        strip_project_credentials(&mut config.bundles);
         config.save_to_locked(path)?;
         Ok((config, value))
     }
@@ -2370,6 +2472,13 @@ impl Config {
     }
 }
 
+/// Opaque owner of the configuration snapshot's cross-process lock.
+/// It exposes no lock internals; dropping it releases ownership.
+pub struct ConfigReadGuard {
+    _lock: ConfigLock,
+    path: PathBuf,
+}
+
 /// Cross-process lock for one config path. The lock has a stable inode beside
 /// the config because the config itself is replaced atomically after the lock
 /// is acquired.
@@ -2379,6 +2488,15 @@ pub(crate) struct ConfigLock {
 
 impl ConfigLock {
     pub(crate) fn acquire(config_path: &Path) -> Result<Self> {
+        let file = Self::open(config_path)?;
+        file.lock()
+            .with_context(|| format!("lock config {}", config_path.display()))?;
+        Ok(Self {
+            _file: crate::file_lock::FileLock::new(file),
+        })
+    }
+
+    fn open(config_path: &Path) -> Result<fs::File> {
         let lock_path = config_lock_path(config_path);
         let parent = lock_path
             .parent()
@@ -2394,14 +2512,9 @@ impl ConfigLock {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options
+        options
             .open(&lock_path)
-            .with_context(|| format!("open config lock {}", lock_path.display()))?;
-        file.lock()
-            .with_context(|| format!("lock config {}", config_path.display()))?;
-        Ok(Self {
-            _file: crate::file_lock::FileLock::new(file),
-        })
+            .with_context(|| format!("open config lock {}", lock_path.display()))
     }
 }
 

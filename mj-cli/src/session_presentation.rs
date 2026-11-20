@@ -189,6 +189,7 @@ mod tests {
                     local: None,
                     destination: "project".into(),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
         );
@@ -274,6 +275,7 @@ mod tests {
             capacity_retry: None,
             retry_assessment_pending: false,
             authentication_retry_waiting: None,
+            jev_rate_limit: None,
             held_login_fingerprint: None,
             authentication_retry_intent: None,
             activity_turn_started_at_ms: None,

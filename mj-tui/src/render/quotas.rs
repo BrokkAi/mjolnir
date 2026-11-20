@@ -30,37 +30,37 @@ pub(crate) fn minimized_targets_line(
         .map(|detail| {
             // Same rule as the expanded table: a host whose listed targets
             // are all unavailable shows no reading.
-            if super::capacity::all_listed_targets_unavailable(&detail.target.target_ids, dashboard)
-            {
+            if super::capacity::all_listed_targets_unavailable(
+                &detail.reading.target_ids,
+                dashboard,
+            ) {
                 return SummaryReading {
-                    name: detail.target.host.clone(),
+                    name: detail.reading.host.clone(),
                     value: "unavailable".to_string(),
                     color: None,
                 };
             }
             if detail.refreshing {
                 return SummaryReading {
-                    name: detail.target.host.clone(),
+                    name: detail.reading.host.clone(),
                     value: format!("refreshing{}", theme::glyphs().ellipsis),
                     color: None,
                 };
             }
-            let (value, cpu_percent) = match (&detail.target.kind, &detail.state.usage) {
-                (DeploymentCapacityKind::Host, Some(usage)) => match usage.cpu_percent {
+            let reading = &detail.reading;
+            let (value, cpu_percent) = match (reading.kind, reading.has_reading) {
+                (DeploymentCapacityKind::Host, true) => match reading.cpu_percent {
                     Some(cpu) => (format!("{cpu}%"), Some(cpu)),
                     None => ("no CPU".to_string(), None),
                 },
-                // A fleet has no CPU percentage of its own, so what it reports
-                // is how many machines it is running.
-                (DeploymentCapacityKind::AwsFleet, Some(_)) => (fleet_vm_label(detail), None),
-                (DeploymentCapacityKind::AwsFleet, None) if detail.state.on_demand => {
-                    (fleet_vm_label(detail), None)
+                (DeploymentCapacityKind::AwsFleet, _) if reading.fleet_instances.is_some() => {
+                    (reading.fleet_machines_label(), None)
                 }
                 _ => ("unavailable".to_string(), None),
             };
-            let stale = capacity_staleness(detail, now_epoch_seconds).is_some();
+            let stale = reading.staleness(now_epoch_seconds).is_some();
             SummaryReading {
-                name: detail.target.host.clone(),
+                name: detail.reading.host.clone(),
                 value: if stale {
                     format!("{value} (stale)")
                 } else {

@@ -68,9 +68,9 @@ impl HostState {
             HostEvent::Retain { live } => self.retain_sessions(&live),
             HostEvent::StartPush {
                 session_id,
-                path,
+                scope,
                 reply,
-            } => self.begin_push(session_id, path, reply),
+            } => self.begin_push(session_id, scope, reply),
             HostEvent::OverridePush {
                 session_id,
                 overrides,

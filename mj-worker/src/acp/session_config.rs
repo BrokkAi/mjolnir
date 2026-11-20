@@ -111,7 +111,7 @@ pub(super) async fn resolve_session_config_recovery(
     events: &mpsc::Sender<RuntimeEvent>,
     config_options: &mut Vec<SessionConfigOption>,
     grok_models: &mut Option<grok::GrokModelState>,
-    pending: &mut Option<ElicitationRequest>,
+    pending: &mut Option<CommandLoopQuestion>,
     idle: bool,
     elicitation_id: &str,
     response: &ElicitationResponse,
@@ -532,12 +532,8 @@ pub(super) async fn enforce_execution_mode(
 
 /// The ACP enforcement for this launch, based on harness and target policy.
 pub(super) fn session_enforcement(spec: &LaunchSpec) -> Option<ExecutionEnforcement> {
-    spec.harness.resolve_execution_enforcement(
-        spec.execution_policy,
-        mj_core::config::ApprovalChoices {
-            claude_permission_mode: spec.claude_permission_mode,
-        },
-    )
+    spec.harness
+        .resolve_execution_enforcement(spec.execution_policy, spec.approval_choices)
 }
 
 /// Select a config option an execution policy requires besides its mode,

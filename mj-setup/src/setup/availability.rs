@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Result, ensure};
-use mj_core::config::{AuthScheme, Config, HarnessProfile, Machine};
+use mj_core::config::{AuthScheme, Config, HarnessProfile, Machine, TargetTemplate};
 
 use super::machines::{MachineProbe, add_machine_runtimes, probe_machines};
 use super::{RuntimeProbe, add_detected_profiles, discover_runtimes, harness_cli_installed};
@@ -23,7 +23,9 @@ use crate::targets::CommandExecutor;
 pub struct AvailabilityReport {
     /// Every configured profile, as it was checked, and why it is missing,
     /// or `None` when it is there.
-    pub profiles: BTreeMap<String, (HarnessProfile, Option<String>)>,
+    pub profiles: BTreeMap<String, (HarnessProfile, Option<ProfilePresenceFailure>)>,
+    /// Target templates that stood while probing, including exact additions.
+    pub targets: BTreeMap<String, TargetTemplate>,
     /// This computer's container engines, usable or not.
     pub local: Vec<RuntimeProbe>,
     /// What each SSH and EC2 machine can run.
@@ -32,6 +34,13 @@ pub struct AvailabilityReport {
     pub added_profiles: Vec<String>,
     /// The runtimes this check added, by machine.
     pub added_runtimes: BTreeMap<String, Vec<String>>,
+}
+
+/// Readiness detail for the local operator and an explanation safe to publish.
+#[derive(Debug, Clone)]
+pub struct ProfilePresenceFailure {
+    pub detail: String,
+    pub browser_reason: String,
 }
 
 /// Why `profile` cannot be used here, or `Ok` when it can. A profile is
@@ -44,10 +53,16 @@ pub fn profile_presence(
     id: &str,
     profile: &HarnessProfile,
     executor: &impl CommandExecutor,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(), ProfilePresenceFailure> {
     profile
         .ensure_ready(id)
-        .map_err(|error| format!("{error:#}"))?;
+        .map_err(|error| ProfilePresenceFailure {
+            detail: format!("{error:#}"),
+            browser_reason: format!(
+                "{} failed its readiness check. Verify this profile in Settings › Profiles.",
+                profile.kind.display_name()
+            ),
+        })?;
     let logs_in_at_home = matches!(
         profile.auth_scheme(),
         AuthScheme::NativeLogin | AuthScheme::NativeLoginStore
@@ -59,11 +74,16 @@ pub fn profile_presence(
         && harness_cli_installed(profile.kind, executor) == Some(false)
     {
         let name = profile.kind.display_name();
-        return Err(format!(
-            "{name} is not installed here: {} does not exist and `{}` is not on PATH. Install {name}, or turn the profile off in Settings › Profiles.",
-            profile.home.display(),
-            profile.kind.cli_binary_name()
-        ));
+        return Err(ProfilePresenceFailure {
+            detail: format!(
+                "{name} is not installed here: {} does not exist and `{}` is not on PATH. Install {name}, or turn the profile off in Settings › Profiles.",
+                profile.home.display(),
+                profile.kind.cli_binary_name()
+            ),
+            browser_reason: format!(
+                "{name} is not installed here. Install {name}, or turn the profile off in Settings › Profiles."
+            ),
+        });
     }
     Ok(())
 }
@@ -76,7 +96,9 @@ pub fn check_availability(
     executor: &(impl CommandExecutor + Sync),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<AvailabilityReport> {
-    let machines: Vec<(String, Machine)> = Config::load_from(config_path)?
+    let config = Config::load_from(config_path)?.with_local_targets();
+    let mut targets = config.targets;
+    let machines: Vec<(String, Machine)> = config
         .machines
         .into_iter()
         .filter(|(_, machine)| !matches!(machine, Machine::Local { .. }))
@@ -91,7 +113,14 @@ pub fn check_availability(
     });
     let added_profiles = added_profiles?;
     ensure!(!cancelled(), "availability check cancelled");
-    let added_runtimes = add_machine_runtimes(config_path, &machines, cancelled)?;
+    let added_runtimes = add_machine_runtimes(config_path, &machines, cancelled)?
+        .into_iter()
+        .map(|(machine, runtimes)| {
+            let ids = runtimes.keys().cloned().collect();
+            targets.extend(runtimes);
+            (machine, ids)
+        })
+        .collect();
     let profiles = Config::load_from(config_path)?
         .profiles
         .into_iter()
@@ -102,6 +131,7 @@ pub fn check_availability(
         .collect();
     Ok(AvailabilityReport {
         profiles,
+        targets,
         local,
         machines,
         added_profiles,

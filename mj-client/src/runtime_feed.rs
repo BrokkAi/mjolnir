@@ -324,6 +324,13 @@ pub struct RuntimeContainerCapacity {
     pub capacity: mj_core::state::HostContainerCapacity,
 }
 
+/// One host or fleet and whether the daemon owes it a manual refresh.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeHostCapacity {
+    pub reading: mj_core::targets::HostCapacityRow,
+    pub refreshing: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationCard {
     /// Time of the oldest visible item.
@@ -506,6 +513,8 @@ pub struct RuntimeMetadata {
     pub profile_capabilities:
         SharedSnapshot<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
     pub config: SharedSnapshot<Config>,
+    #[serde(default)]
+    pub availability: SharedSnapshot<crate::availability::RuntimeAvailability>,
     /// The ids in `config.targets` that the daemon supplied as default
     /// candidates rather than the user's file naming them. `Config` never
     /// serializes this set (it is not file content), so the feed carries it
@@ -537,6 +546,9 @@ pub struct RuntimeMetadata {
     /// sends none.
     #[serde(default)]
     pub storage: SharedSnapshot<Vec<mj_core::targets::storage::TargetStorageView>>,
+    /// CPU, memory and filesystem readings from the daemon capacity service.
+    #[serde(default)]
+    pub host_capacities: SharedSnapshot<Vec<RuntimeHostCapacity>>,
     /// Hard container headroom for each probed deployment host. The daemon
     /// includes in-memory resume and move reservations; terminal surfaces
     /// must not recompute this from records they happen to have loaded.

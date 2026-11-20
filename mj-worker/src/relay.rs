@@ -119,6 +119,20 @@ pub enum BackgroundWorkPolicy {
     KimiTasks,
 }
 
+pub(crate) struct PendingLiveBaseline {
+    reply: Option<
+        tokio::sync::oneshot::Sender<
+            std::result::Result<mj_core::relay::LiveSessionBaseline, String>,
+        >,
+    >,
+}
+
+struct PendingNativeResume {
+    #[cfg(any(unix, test))]
+    resume_id: u64,
+    goal: Option<mj_core::goal::GoalSnapshot>,
+}
+
 /// The relay behind its lock. Every change to the relay takes this lock
 /// through [`Self::lock`], so each such release is counted as a possible
 /// change: a connection waiting for one (see
@@ -190,11 +204,22 @@ impl Drop for RelayGuard<'_> {
     }
 }
 
+/// Relay evidence about the native thread named at launch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeSessionHistory {
+    /// The thread may contain history and must not be replaced.
+    MayHaveHistory,
+    /// The thread may be replaced only if the harness reports it missing.
+    LoadBeforeReplace,
+    /// Durable evidence proves this relay created the thread and never used it.
+    CreatedHereUnused,
+}
+
 /// Durable, session-side ACP store-and-forward relay.
 ///
 /// `RelaySnapshot` is the canonical operational state. Journal spans retain
-/// observations newer than the last frontier covered by both a durable
-/// controller acknowledgement and a verified checkpoint.
+/// observations newer than the durable controller acknowledgement. Operation-owned
+/// command receipts survive separately until their consumers finish.
 pub struct DurableRelay {
     /// Immutable input supplied when this worker was created; execution and
     /// completion live exclusively in the ordinary durable command queue.
@@ -264,6 +289,10 @@ pub struct DurableRelay {
     /// appends never bump it — they only extend the active segment, which a
     /// lock-free reader already tolerates.
     journal_generation: u64,
+    /// Retry physical prefix cleanup once after reopen, or after a failed GC.
+    journal_cleanup_pending: bool,
+    pending_live_baselines: Vec<PendingLiveBaseline>,
+    pending_native_resumes: Vec<PendingNativeResume>,
     acp_activity: AcpActivityClock,
     step_clock: crate::acp::StepClock,
     /// Whether harness announcements or output with no prompt open a turn.
@@ -286,6 +315,7 @@ pub struct DurableRelay {
     #[cfg_attr(not(unix), allow(dead_code))] // Read only by the Unix worker control runtime.
     pub(crate) login_identity: crate::acp::ClaudeLoginIdentity,
     replied_verdict: verdict::RepliedVerdictState,
+    pub(crate) recovers_child_quota: bool,
     /// Adapter-owned tasks, keyed by their owning session and task identity.
     air_tasks: BTreeMap<String, AirTaskEntry>,
     /// Work facts the coordinator observed for the runtime event it is about to
@@ -348,6 +378,254 @@ pub struct DurableRelay {
 }
 
 impl DurableRelay {
+    /// The connection owns this queue hold until its cut or disconnection.
+    pub fn reserve_live_baseline(
+        &mut self,
+    ) -> tokio::sync::oneshot::Receiver<
+        std::result::Result<mj_core::relay::LiveSessionBaseline, String>,
+    > {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.pending_live_baselines
+            .push(PendingLiveBaseline { reply: Some(reply) });
+        self.service_live_baselines();
+        receiver
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn resume_after_adoption_wait(&mut self) -> Result<()> {
+        self.promote_next_queued_command()?;
+        Ok(())
+    }
+
+    fn live_baseline_pending(&mut self) -> bool {
+        self.service_live_baselines();
+        self.pending_live_baselines
+            .iter()
+            .any(|request| request.reply.is_some())
+    }
+
+    fn service_live_baselines(&mut self) {
+        self.pending_live_baselines.retain(|request| {
+            request
+                .reply
+                .as_ref()
+                .is_some_and(|reply| !reply.is_closed())
+        });
+        if !self
+            .pending_live_baselines
+            .iter()
+            .any(|request| request.reply.is_some())
+            || !self.quiescent_for_adoption()
+        {
+            return;
+        }
+        let cut = self
+            .live_session_baseline()
+            .map_err(|error| format!("{error:#}"));
+        for request in &mut self.pending_live_baselines {
+            if let Some(reply) = request.reply.take() {
+                let _ = reply.send(cut.clone());
+            }
+        }
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn native_goal_resume_sent(
+        &mut self,
+        resume_id: u64,
+        goal: Option<mj_core::goal::GoalSnapshot>,
+    ) {
+        let goal = goal.or_else(|| self.snapshot.goal.snapshot.clone());
+        self.pending_native_resumes
+            .push(PendingNativeResume { resume_id, goal });
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn native_goal_resume_rejected(&mut self, resume_id: u64) {
+        self.pending_native_resumes
+            .retain(|pending| pending.resume_id != resume_id);
+        self.service_live_baselines();
+    }
+
+    pub(crate) fn quiescent_for_adoption(&self) -> bool {
+        self.adoption_blockers().is_empty()
+    }
+
+    pub(crate) fn adoption_blockers(&self) -> Vec<String> {
+        let mut blockers = Vec::new();
+        if self.turn_in_progress() || self.has_held_claude_turn() {
+            blockers.push(if self.snapshot.assessment_questions.is_empty() {
+                "the worker's current turn to finish".to_owned()
+            } else {
+                "the worker's current turn, blocked on a pending question or approval, to finish"
+                    .to_owned()
+            });
+        }
+        if self.turn_cancellation_pending() {
+            blockers.push("the pending turn cancellation to finish".into());
+        }
+        if self.snapshot.clear_context_in_progress() {
+            blockers.push("the worker's context reset (/clear) to finish".into());
+        }
+        if !self.pending_native_resumes.is_empty()
+            || self.snapshot.dispatches.values().any(|dispatch| {
+                matches!(
+                    dispatch.command,
+                    RelayCommand::GoalControl {
+                        action: mj_core::goal::GoalControlAction::Resume
+                    }
+                ) && matches!(
+                    dispatch.state,
+                    RelayDispatchState::Pending | RelayDispatchState::InFlight
+                )
+            })
+        {
+            blockers.push("the accepted native goal resume to finish".into());
+        }
+        if self.configuration_dispatch_in_progress() {
+            blockers.push("the in-flight configuration change to finish".into());
+        }
+        blockers.extend(self.foreground_tools.snapshot().iter().map(|tool| {
+            format!(
+                "foreground tool {} to finish",
+                tool.title.as_deref().unwrap_or(&tool.tool_call_id)
+            )
+        }));
+        blockers.extend(
+            self.snapshot
+                .active_user_shells
+                .values()
+                .filter(|shell| shell.started_at_ms.is_some())
+                .map(|shell| format!("running shell {:?} to finish", shell.command)),
+        );
+        blockers.extend(
+            self.active_agent_terminals
+                .values()
+                .map(|terminal| format!("live harness terminal {:?} to exit", terminal.command)),
+        );
+        blockers.sort();
+        blockers
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_baseline_wait_message(&self) -> Option<String> {
+        let blockers = self.adoption_blockers();
+        (!blockers.is_empty()).then(|| format!("waiting for {}", blockers.join("; ")))
+    }
+
+    pub fn live_session_baseline(&self) -> Result<mj_core::relay::LiveSessionBaseline> {
+        use mj_core::relay::{LiveQueuedCommand, LiveSessionBaseline};
+        let mut state = self.operational_state();
+        anyhow::ensure!(
+            self.quiescent_for_adoption(),
+            "live recovery cut requires a quiescent worker"
+        );
+        state.execution = RelayExecutionState::Idle;
+        state.activity_turn_started_at_ms = None;
+        let queue = self
+            .snapshot
+            .queued_prompts
+            .iter()
+            .map(|queued| {
+                let command = self
+                    .snapshot
+                    .dispatches
+                    .get(&queued.command_id)
+                    .with_context(|| {
+                        format!("queued command {} has no dispatch", queued.command_id)
+                    })?
+                    .command
+                    .clone();
+                Ok(LiveQueuedCommand {
+                    command_id: queued.command_id.clone(),
+                    command,
+                    created_at_ms: queued.created_at_ms,
+                    accepted_ordinal: self
+                        .snapshot
+                        .handled_commands
+                        .get(&queued.command_id)
+                        .map(|receipt| receipt.accepted_ordinal),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let delivered_initial_prompts = self
+            .initial_commands
+            .iter()
+            .filter_map(|initial| {
+                if !matches!(initial.command, RelayCommand::Prompt { .. })
+                    || !self
+                        .snapshot
+                        .initial_command_ids
+                        .contains(&initial.command_id)
+                    || self
+                        .snapshot
+                        .queued_prompts
+                        .iter()
+                        .any(|queued| queued.command_id == initial.command_id)
+                {
+                    return None;
+                }
+                let receipt = self.snapshot.handled_commands.get(&initial.command_id);
+                let delivered = match receipt {
+                    // A legacy pin prevents reseeding, but acceptance alone cannot
+                    // distinguish delivery from removal before dispatch.
+                    None => false,
+                    Some(receipt)
+                        if receipt.failure.as_deref() == Some("queued command was removed") =>
+                    {
+                        false
+                    }
+                    Some(receipt) => {
+                        matches!(receipt.outcome, Some(RelayCommandOutcome::Prompt { .. }))
+                    // Receipts do not distinguish failure before/after start. Preserve
+                    // the delivered interpretation for every failure except queue removal.
+                    || receipt.failure.is_some()
+                    }
+                };
+                delivered.then(|| LiveQueuedCommand {
+                    command_id: initial.command_id.clone(),
+                    // Startup owns the original brief even after terminal receipt
+                    // compaction. Receipts decide delivery, never display content.
+                    command: initial.command.clone(),
+                    created_at_ms: state
+                        .active_prompt
+                        .as_ref()
+                        .filter(|active| active.command_id == initial.command_id)
+                        .map_or(0, |active| active.created_at_ms),
+                    accepted_ordinal: receipt.map(|receipt| receipt.accepted_ordinal),
+                })
+            })
+            .collect();
+        let live_questions = self.operator_away.live_questions();
+        Ok(LiveSessionBaseline {
+            delivered_initial_prompts,
+            state,
+            queue,
+            questions: self
+                .snapshot
+                .pending_elicitations
+                .iter()
+                .filter_map(|(id, body)| {
+                    body.as_ref()
+                        .filter(|question| live_questions.get(id) == Some(*question))
+                        .cloned()
+                })
+                .collect(),
+            unavailable_questions: self
+                .snapshot
+                .pending_elicitations
+                .iter()
+                .filter(|(id, body)| live_questions.contains_key(*id) && body.is_none())
+                .count(),
+            native_agent_replay: self
+                .snapshot
+                .native_agent_replay
+                .as_ref()
+                .map(|agents| agents.values().cloned().collect()),
+            native_use_evidence: self.snapshot.native_use_evidence.clone(),
+        })
+    }
+
     /// The Unix worker is the only production caller; the helper stays
     /// compiled on Windows so the relay tests still build there.
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -384,12 +662,29 @@ impl DurableRelay {
         session_id: impl Into<String>,
         relay_version: impl Into<String>,
     ) -> Result<Self> {
+        Self::open_for_checkpoint_with_initial_commands(root, session_id, relay_version, &[])
+    }
+
+    /// Preserve launch receipt owners during checkpoint-only upgrades without seeding work.
+    pub fn open_for_checkpoint_with_initial_commands(
+        root: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        relay_version: impl Into<String>,
+        initial_commands: &[mj_core::worker_launch::InitialWorkerCommand],
+    ) -> Result<Self> {
         let root = root.into();
         anyhow::ensure!(
             root.join(RELAY_STATE_FILE).is_file(),
             "checkpoint recovery requires existing relay state"
         );
-        Self::open_with_harness(root, session_id, relay_version, true, None, &[])
+        Self::open_with_harness(
+            root,
+            session_id,
+            relay_version,
+            true,
+            None,
+            initial_commands,
+        )
     }
 
     pub(crate) fn discard_queued_prompts_before_start(
@@ -472,6 +767,11 @@ impl DurableRelay {
             if snapshot.format_version < 27 {
                 seed_legacy_notification_stack(&mut snapshot);
             }
+            if snapshot.format_version < 28 {
+                // Old Moves had no explicit pins. Keep their acceptance receipts
+                // until the daemon has reconciled its durable operation owner.
+                snapshot.legacy_command_retention = true;
+            }
             seed_missing_notification_time(&mut snapshot);
             snapshot.format_version = RELAY_STATE_VERSION;
             // Older snapshots can still identify a live turn, even though
@@ -528,6 +828,11 @@ impl DurableRelay {
                 // bridge start, exactly as it does after a restart.
                 snapshot.config.extend(restored.accepted_config);
                 snapshot.restored_native_session_unused = restored.native_session_unused;
+                snapshot.record_native_use(if restored.native_session_unused {
+                    NativeSessionUse::Unused
+                } else {
+                    NativeSessionUse::Unknown
+                });
                 for queued in restored.queued_prompts {
                     anyhow::ensure!(
                         mj_core::continuation::valid_command_id(&queued.command_id),
@@ -595,10 +900,38 @@ impl DurableRelay {
                         created_at_ms: queued.queued_at_ms,
                     });
                 }
+                // The archived worker's mail, as the restore policy selected
+                // it. A claimed context may name a prompt the controller
+                // admits later under the same command ID; dispatch finds it
+                // there before that prompt starts.
+                if let Some(mailbox) = restored.mailbox {
+                    snapshot.pending_mailbox_events = mailbox.pending_events;
+                    snapshot.delivered_mailbox_event_keys = mailbox.delivered_event_keys;
+                    snapshot.mailbox_prompt_contexts = mailbox.prompt_contexts;
+                }
             }
             snapshot
         };
 
+        // Startup pins live until destroy. Upgrade from the lifetime prompt
+        // watermark, which /clear never resets: startup's final brief is the
+        // first accepted prompt, so that watermark proves the whole prefix.
+        // Pre-watermark states use their legacy native-use proof instead.
+        // Without it, retain only accepted receipt IDs and complete a crashed
+        // selector prefix normally. Missing selectors are idempotent settings.
+        // This also finishes migration first opened without launch arguments.
+        let startup_owner_count = snapshot.initial_command_ids.len();
+        for initial in initial_commands {
+            if snapshot.latest_prompt_accepted_ordinal.is_some()
+                || snapshot.native_session_used
+                || snapshot.handled_commands.contains_key(&initial.command_id)
+            {
+                snapshot
+                    .initial_command_ids
+                    .insert(initial.command_id.clone());
+            }
+        }
+        let registered_startup_owners = snapshot.initial_command_ids.len() != startup_owner_count;
         let compacted_terminal_commands = snapshot.compact_terminal_commands()?;
         let assigned_store_id = snapshot.store_id.is_none();
         if assigned_store_id {
@@ -608,12 +941,30 @@ impl DurableRelay {
             snapshot.store_id = Some(format!("{:032x}", u128::from_le_bytes(random)));
         }
         validate_relay_snapshot_frontiers(&snapshot)?;
-        let retained_through = snapshot.retained_through();
-        let retained_digest = snapshot.retained_digest().to_owned();
+        // Upgrade native-use evidence before discarding the old retained prefix.
+        let upgrading_native =
+            snapshot.native_session_id.is_some() && snapshot.native_use_evidence.is_none();
+        let upgrading_questions = snapshot
+            .assessment_questions
+            .iter()
+            .any(|id| !snapshot.pending_elicitations.contains_key(id));
+        let upgrading_history = upgrading_native || upgrading_questions;
+        let retained_through = if upgrading_history {
+            snapshot
+                .acknowledged_through
+                .min(snapshot.recovery_floor_ordinal)
+        } else {
+            snapshot.retained_through()
+        };
+        let retained_digest = if upgrading_history
+            && snapshot.recovery_floor_ordinal < snapshot.acknowledged_through
+        {
+            snapshot.recovery_floor_digest.clone()
+        } else {
+            snapshot.retained_digest().to_owned()
+        };
         let snapshot_ordinal = snapshot.latest_ordinal;
-        let missing_native_history = snapshot.native_session_id.is_some()
-            && snapshot.native_session_opened_ordinal.is_none()
-            && !snapshot.native_session_used;
+        let missing_native_history = upgrading_native;
         let (journal_spans, hot_events) = open_relay_journal(
             &root.join(RELAY_JOURNAL_DIR),
             retained_through,
@@ -658,7 +1009,11 @@ impl DurableRelay {
             reviewer_admissions: BTreeMap::new(),
             next_reviewer_admission: 0,
             steering_supported: None,
-            initial_commands: initial_commands.to_vec(),
+            initial_commands: if checkpoint_only {
+                Vec::new()
+            } else {
+                initial_commands.to_vec()
+            },
             automatic_steering: false,
             steering_delivery_mode: harness
                 .map(|harness| SteeringDeliveryMode::for_harness(harness, false))
@@ -670,6 +1025,9 @@ impl DurableRelay {
             replay_cursors: VecDeque::new(),
             unpersisted_journal_bytes: 0,
             journal_generation: 0,
+            journal_cleanup_pending: true,
+            pending_live_baselines: Vec::new(),
+            pending_native_resumes: Vec::new(),
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             harness_turns: HarnessTurnPolicy::default(),
@@ -680,6 +1038,7 @@ impl DurableRelay {
             authentication_login_path: None,
             login_identity: Default::default(),
             replied_verdict: Default::default(),
+            recovers_child_quota: false,
             air_tasks: BTreeMap::new(),
             pending_settle_facts: None,
             claude_pending_stops: BTreeMap::new(),
@@ -700,44 +1059,106 @@ impl DurableRelay {
             #[cfg(test)]
             stage_snapshot_every_append: false,
         };
-        if !checkpoint_only {
-            relay.return_mailbox_hook_lease(
-                mj_core::relay::MailboxHookLeaseReturnReason::WorkerRestart,
-            )?;
-        }
         let recovered_native_history =
-            missing_native_history && !checkpoint_only && relay.recover_native_history_evidence();
+            missing_native_history && relay.recover_native_history_evidence();
+        let recovered_questions = upgrading_questions && relay.recover_pending_elicitations();
         // Startup already reads the active journal into the bounded hot window.
         // Reuse it: old sealed history must not make worker startup slow or fail.
         if !checkpoint_only {
-            let mut prompts = BTreeMap::<String, String>::new();
-            if relay
+            let prompt_text = |command: &RelayCommand| {
+                command.prompt_blocks().map(|prompt| {
+                    prompt
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text(text) => Some(text.text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+            };
+            // The queue observation may be collected before delivery. The
+            // durable dispatch still owns the active prompt and its boundary.
+            let mut prompts: BTreeMap<String, Option<String>> = relay
+                .snapshot
+                .dispatches
+                .iter()
+                .filter_map(|(id, dispatch)| {
+                    prompt_text(&dispatch.command).map(|text| (id.clone(), Some(text)))
+                })
+                .collect();
+            // The relay owner persists autonomous identity in the open turn
+            // and its settled record; native starts inside prompts are not
+            // assistant-message boundaries.
+            let mut autonomous_starts = BTreeSet::new();
+            if let Some(turn) = relay.snapshot.autonomous_harness_turn() {
+                autonomous_starts.insert(turn.first_ordinal);
+            }
+            // Terminal records retain command kinds after dispatch bodies are
+            // gone. Their starts still establish boundaries; an unavailable
+            // body stays distinct from an empty prompt.
+            for event in &relay.hot_events {
+                if let RelayObservation::HarnessTurnSettled {
+                    autonomous: Some(turn),
+                    ..
+                } = &event.observation
+                {
+                    autonomous_starts.insert(turn.start_ordinal);
+                }
+                let command_id = match &event.observation {
+                    RelayObservation::CommandCompleted {
+                        command_id,
+                        command: Some(RelayCommandKind::Prompt),
+                        ..
+                    }
+                    | RelayObservation::CommandCompleted {
+                        command_id,
+                        outcome: RelayCommandOutcome::Prompt { .. },
+                        ..
+                    }
+                    | RelayObservation::CommandRejected {
+                        command_id,
+                        command: RelayCommandKind::Prompt,
+                        ..
+                    }
+                    | RelayObservation::CommandInterrupted {
+                        command_id,
+                        command: RelayCommandKind::Prompt,
+                        ..
+                    } => Some(command_id),
+                    _ => None,
+                };
+                if let Some(command_id) = command_id {
+                    prompts.entry(command_id.clone()).or_default();
+                }
+                if let RelayObservation::CommandInterrupted {
+                    continuation_id: Some(continuation_id),
+                    ..
+                } = &event.observation
+                {
+                    prompts.entry(continuation_id.clone()).or_default();
+                }
+            }
+            let earlier_history_omitted = relay
                 .hot_events
                 .front()
                 .is_none_or(|event| event.ordinal > 1)
-                && relay.snapshot.latest_ordinal > 0
-            {
+                && relay.snapshot.latest_ordinal > 0;
+            if earlier_history_omitted {
                 relay.turn_context.mark_earlier_history_omitted();
             }
             for event in &relay.hot_events {
+                if autonomous_starts.contains(&event.ordinal) {
+                    relay.turn_context.observe_autonomous_turn_start();
+                }
                 if let RelayObservation::CommandQueued {
                     command_id,
                     command,
                     ..
                 } = &event.observation
-                    && let Some(prompt) = command.prompt_blocks()
+                    && let Some(text) = prompt_text(command)
                 {
-                    prompts.insert(
-                        command_id.clone(),
-                        prompt
-                            .iter()
-                            .filter_map(|b| match b {
-                                ContentBlock::Text(t) => Some(t.text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
+                    prompts.insert(command_id.clone(), Some(text));
                 }
                 let prompt = if let Some(command_id) =
                     mj_transcript::turn_context::delivered_prompt_command_id(&event.observation)
@@ -751,9 +1172,22 @@ impl DurableRelay {
                     }
                     None
                 };
-                relay
-                    .turn_context
-                    .observe_relay(&event.observation, prompt.as_deref());
+                if let Some(prompt) = prompt {
+                    relay.turn_context.observe_prompt_delivery(
+                        mj_transcript::turn_context::delivered_prompt_command_id(
+                            &event.observation,
+                        ),
+                        prompt.as_deref(),
+                    );
+                } else {
+                    relay.turn_context.observe_relay(&event.observation, None);
+                }
+            }
+            // The latest persisted human instructions govern every turn,
+            // including mailbox wakes and restart continuations. Use what
+            // remains in that history, without matching an executing request ID.
+            if let Some(history) = relay.snapshot.authorization_context() {
+                relay.turn_context.restore_user_prompt_tail(&history);
             }
         }
         relay
@@ -774,12 +1208,37 @@ impl DurableRelay {
             || replayed
             || assigned_store_id
             || recovered_native_history
+            || recovered_questions
             || migrated_assessment
             || compacted_terminal_commands
+            || registered_startup_owners
         {
-            relay.persist_snapshot()?;
+            relay.persist_snapshot().with_context(|| {
+                if recovered_questions {
+                    format!(
+                        "save upgraded worker pending questions {:?}",
+                        relay
+                            .snapshot
+                            .pending_elicitations
+                            .keys()
+                            .collect::<Vec<_>>()
+                    )
+                } else {
+                    "save recovered worker snapshot".to_owned()
+                }
+            })?;
+        }
+        // Complete an ACK's interrupted file collection before any startup
+        // append can try sealing an acknowledged active file with no live span.
+        // Evidence upgrades above are durable before their old files disappear.
+        relay.garbage_collect_relay_history()?;
+        if !checkpoint_only {
+            relay.return_mailbox_hook_lease(
+                mj_core::relay::MailboxHookLeaseReturnReason::WorkerRestart,
+            )?;
         }
         relay.adopt_unqueued_queue_commands()?;
+        relay.ensure_initial_commands_succeeded()?;
         relay.seed_initial_commands()?;
         relay.recover_nonterminal_commands()?;
         relay.ensure_initial_commands_succeeded()?;
@@ -806,16 +1265,10 @@ impl DurableRelay {
     /// The final prompt's receipt proves the entire prefix was journaled. Once
     /// a turn has run, receipt compaction must never cause initialization again.
     fn seed_initial_commands(&mut self) -> Result<()> {
-        self.ensure_initial_commands_succeeded()?;
         let Some(last) = self.initial_commands.last() else {
             return Ok(());
         };
-        if self.snapshot.native_session_used
-            || self
-                .snapshot
-                .handled_commands
-                .contains_key(&last.command_id)
-        {
+        if self.snapshot.initial_command_ids.contains(&last.command_id) {
             return Ok(());
         }
         anyhow::ensure!(
@@ -829,6 +1282,13 @@ impl DurableRelay {
                     || matches!(initial.command, RelayCommand::SetConfig { .. }),
                 "initial input before the brief must be configuration"
             );
+            if self
+                .snapshot
+                .initial_command_ids
+                .contains(&initial.command_id)
+            {
+                continue;
+            }
             self.submit_command(&initial.command_id, initial.command.clone())?
                 .map_err(|error| {
                     anyhow!(
@@ -837,7 +1297,13 @@ impl DurableRelay {
                         error.message
                     )
                 })?;
+            self.snapshot
+                .initial_command_ids
+                .insert(initial.command_id.clone());
         }
+        // No endpoint is published during seeding. A crash before this write
+        // recovers the accepted IDs from their ordinary journal receipts.
+        self.persist_snapshot()?;
         Ok(())
     }
 
@@ -948,6 +1414,7 @@ impl DurableRelay {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         let mut state = self.snapshot.operational_state();
+        state.jev_rate_limit = mj_core::jev::current_rate_limit();
         state.acp_ready = Some(self.is_acp_ready());
         state.checkpoint_only = self.checkpoint_only;
         state.steering_supported = self.steering_supported;
@@ -1187,6 +1654,7 @@ impl DurableRelay {
             self.persist_snapshot()
                 .context("persist session idle transition")?;
         }
+        self.service_live_baselines();
         Ok(())
     }
 
@@ -1343,45 +1811,49 @@ impl DurableRelay {
             .map(|page| page.events)
     }
 
-    /// Whether this session's native thread may hold conversation history
-    /// Mjolnir cannot see. Computed from snapshot state alone, with no journal
-    /// replay, and deliberately conservative: it answers `false` only for a
-    /// thread this journal created and that nothing has used yet.
-    ///
-    /// A `false` answer is what allows Mjolnir to replace a native session the
-    /// harness says it has no record of. Codex writes a thread's rollout, and
-    /// Claude Code a session's transcript, only at the first user message, so
-    /// a session that was opened and never prompted can be missing on disk.
     pub fn native_session_may_have_history(&self) -> bool {
-        // Set when a prompt was transmitted, when Claude Code reported the
-        // result of a model cycle, when the session was resumed rather than
-        // created here, or when its identity arrived from outside this
-        // journal. Agent output alone does not set it: an adapter can send
-        // text with no model turn behind it (R4-3).
-        if self.snapshot.native_session_used {
-            return true;
-        }
-        // History before the recovery floor was released to an archive, so the
-        // snapshot no longer describes everything this session did. That only
-        // hides history belonging to the *current* native session if that
-        // session could have existed then. A session this journal opened above
-        // the floor has every event about it above the floor too, so the
-        // archive cannot hold any of its content. An unknown opening ordinal —
-        // an older snapshot, or no session opened yet — cannot be placed
-        // against the floor, so it counts as history. The exception is a relay
-        // restored from a checkpoint that shows the session it continues was
-        // never prompted: everything below the floor is that archive.
-        match self.snapshot.native_session_opened_ordinal {
-            Some(opened) if opened > self.snapshot.recovery_floor_ordinal => {}
-            None if self.snapshot.restored_native_session_unused => {}
-            _ => return true,
-        }
-        // A prompt that only waits in the durable queue never reached the
-        // agent. Anything past admission may have.
-        self.snapshot
+        self.native_session_history() == NativeSessionHistory::MayHaveHistory
+    }
+
+    /// Classify native history using the durable evidence, including after ACK pruning.
+    pub fn native_session_history(&self) -> NativeSessionHistory {
+        let dispatched = self
+            .snapshot
             .dispatches
             .values()
-            .any(native_history::prompt_may_have_reached_agent)
+            .any(RelayDispatchRecord::prompt_may_have_reached_agent);
+        if let Some(evidence) = &self.snapshot.native_use_evidence {
+            if evidence.version != 1
+                || Some(&evidence.native_session_id) != self.snapshot.native_session_id.as_ref()
+                || evidence.usage != NativeSessionUse::Unused
+                || dispatched
+            {
+                return NativeSessionHistory::MayHaveHistory;
+            }
+            return match evidence.opened_ordinal {
+                Some(_) => NativeSessionHistory::CreatedHereUnused,
+                None if self.snapshot.restored_native_session_unused => {
+                    NativeSessionHistory::LoadBeforeReplace
+                }
+                None => NativeSessionHistory::MayHaveHistory,
+            };
+        }
+        if self.snapshot.native_session_used || dispatched {
+            return NativeSessionHistory::MayHaveHistory;
+        }
+        match self.snapshot.native_session_opened_ordinal {
+            // History below the recovery floor was archived. A thread opened
+            // above it could never have contributed to that history.
+            Some(opened) if opened > self.snapshot.recovery_floor_ordinal => {
+                NativeSessionHistory::CreatedHereUnused
+            }
+            // The checkpoint hint only reflects visible user prompts. The
+            // harness can still have history from a mailbox wake.
+            None if self.snapshot.restored_native_session_unused => {
+                NativeSessionHistory::LoadBeforeReplace
+            }
+            _ => NativeSessionHistory::MayHaveHistory,
+        }
     }
 
     /// Whether the checkpoint this relay was restored from shows that the
@@ -1396,10 +1868,20 @@ impl DurableRelay {
     /// Persisted immediately: the evidence is live ACP traffic, and a worker
     /// that dies right after it must not come back believing the thread empty.
     pub fn mark_native_session_used(&mut self) -> Result<()> {
-        if self.snapshot.native_session_used {
+        if self
+            .snapshot
+            .native_use_evidence
+            .as_ref()
+            .is_some_and(|evidence| {
+                evidence.version == 1
+                    && Some(&evidence.native_session_id) == self.snapshot.native_session_id.as_ref()
+                    && evidence.usage == NativeSessionUse::Used
+            })
+        {
             return Ok(());
         }
         self.snapshot.native_session_used = true;
+        self.snapshot.record_native_use(NativeSessionUse::Used);
         self.persist_snapshot()
     }
 
@@ -1484,8 +1966,28 @@ impl DurableRelay {
         let native_before = self.snapshot.goal.running();
         let mut native_after = self.snapshot.goal.clone();
         native_after.apply(&update)?;
+        let resume_running = if let SessionUpdate::SessionInfoUpdate(info) = &update
+            && let Some(execution) = info.meta.as_ref().and_then(|meta| meta.get("execution"))
+        {
+            let execution: mj_core::goal::GoalExecution =
+                serde_json::from_value(execution.clone())?;
+            execution.status == "running" && native_after.execution.as_ref() == Some(&execution)
+        } else {
+            false
+        };
+        let resumes_goal = |pending: &PendingNativeResume| {
+            pending.goal.as_ref().is_none_or(|expected| {
+                native_after
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|goal| goal.same_goal(expected))
+            })
+        };
+        let resumed_native = resume_running && self.pending_native_resumes.iter().any(resumes_goal);
         let codex = self.harness_turns == HarnessTurnPolicy::CodexAdapter;
-        if codex && !native_before && native_after.running() {
+        if (codex && !native_before && native_after.running())
+            || (resumed_native && self.snapshot.harness_turn.is_none())
+        {
             self.append_relay_event(
                 None,
                 RelayObservation::HarnessTurnStarted {
@@ -1493,6 +1995,29 @@ impl DurableRelay {
                 },
             )?;
         }
+        // Arrival after the marker does not associate an idle update with
+        // this resume. Only running proof or an explicit goal change settles it.
+        let goal_report = if let SessionUpdate::SessionInfoUpdate(info) = &update {
+            info.meta.as_ref().and_then(mj_core::goal::goal_meta)
+        } else {
+            None
+        };
+        let explicitly_cleared = goal_report.is_some_and(serde_json::Value::is_null);
+        let goal_reported = goal_report.is_some();
+        self.pending_native_resumes.retain(|pending| {
+            let settled = explicitly_cleared
+                || (goal_reported
+                    && pending.goal.as_ref().is_some_and(|expected| {
+                        native_after.snapshot.as_ref().is_none_or(|goal| {
+                            !goal.same_goal(expected)
+                                || (expected.status != goal.status && !goal.active())
+                        })
+                    }));
+            !(settled
+                || (resumed_native
+                    && self.snapshot.harness_turn.is_some()
+                    && resumes_goal(pending)))
+        });
         let claude = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter;
         // A stop we requested is acknowledged with a plain chunk and nothing
         // else: no model cycle runs, so no result would ever settle a turn
@@ -1757,6 +2282,10 @@ impl DurableRelay {
             // claude-agent-acp 0.94.0 `dist/tool-calls/renderer.js`
             // (`unfinished`) on 2026-10-23; the file is unchanged in 0.97.0.
             && !matches!(update, SessionUpdate::ToolCallUpdate(_))
+            // Our terminal inventory/card is not evidence of a parent model
+            // cycle: a child may request it while the parent remains idle.
+            && !matches!(update, SessionUpdate::ToolCall(call)
+                if crate::acp::is_fallback_terminal_tool_call(call))
             && self.can_open_harness_turn()
     }
 

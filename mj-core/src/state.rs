@@ -333,9 +333,12 @@ pub struct MaterializedTurnOutcome {
 impl MaterializedTurnOutcome {
     /// Whether this command carries out the request again, including provider
     /// retries and any generation of worker restart continuation.
-    pub fn is_resubmitted_by(&self, command_id: &str) -> bool {
+    pub fn is_resubmitted_by(&self, command_id: &str, subagent: bool) -> bool {
         let carried = crate::continuation::carried_command(command_id);
         crate::relay::retried_turn(carried) == Some(self.completed_ordinal)
+            || (subagent
+                && crate::continuation::GeneratedPrompt::QuotaRetry.retry_ordinal(carried)
+                    == Some(self.completed_ordinal))
             || (carried != command_id
                 && carried == crate::continuation::carried_command(&self.command_id))
     }
@@ -789,18 +792,6 @@ impl ManagedSessionSnapshot {
         }
         self.window.latest_turn_start_position
     }
-}
-
-/// One session's activity, reported to the recovery coordinator.
-#[derive(Debug, Clone)]
-pub struct RecoveryObservation {
-    pub session: SessionRecord,
-    pub config: crate::snapshot_map::SharedSnapshot<Config>,
-    pub latest_completed_turn_ordinal: Option<u64>,
-    /// Why a routine checkpoint has to wait, or `None` when one may start now:
-    /// [`crate::activity::routine_checkpoint_wait`] on the worker's
-    /// operational state, the same answer checkpoint admission gives.
-    pub checkpoint_wait: Option<crate::activity::CheckpointWait>,
 }
 
 /// The position where the session's most recent finished turn began, or
@@ -1488,19 +1479,17 @@ impl CheckpointMetadata {
     }
 }
 
-/// The mbx build cache a container session was provisioned with. The
-/// directory is a host path mounted read-write at the same absolute path
-/// inside the container. Older containers retain their private binaries until
-/// recreated; the worker's `bin/mbx` contents identify that legacy scheme.
+/// The mbx build cache a container session was provisioned with. A shared
+/// cache mounts the host directory read-write at the same path inside the
+/// container. Nitro keeps its cache directory on the guest root disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBuildCache {
-    /// The container host this cache was resolved on. A session moved to a
-    /// different host cannot reuse it, so the decision is made again there.
+    /// The cache owner, a container host or a Nitro session.
     pub host: String,
     pub directory: PathBuf,
-    /// Read compatibility for old records only. Launch never uses this value;
-    /// budgets belong to the shared machine configuration.
+    /// Read compatibility for old records only. Shared caches use machine
+    /// policy and Nitro guests use mbx's automatic budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_size: Option<String>,
     /// A `[target] root` the host's mbx configuration relocates outside the
@@ -2271,7 +2260,7 @@ impl SessionRecord {
             ));
         }
         (!issues.is_empty()).then(|| format!(
-            "Session {:?} needs configuration repair: {}. Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+            "Session {:?} needs configuration repair: {}. Restore these entries in config.toml, then retry. Use Detect profiles and Detect runtimes in Settings to rediscover installed agents and runtimes.",
             self.id, issues.join("; ")
         ))
     }

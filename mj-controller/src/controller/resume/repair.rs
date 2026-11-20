@@ -335,12 +335,14 @@ impl Controller {
         let _outcome: mj_checkpoint::checkpoint::ParentRecoveryOutcome =
             serde_json::from_slice(&output.stdout)
                 .context("read missing parent recovery result")?;
-        if self.state.sessions[session_id].native_session_id.is_none() {
+        if self.state.sessions[session_id].native_session_id.is_none()
+            && let Some(native_session_id) = archive.native_session_to_load(true)
+        {
             self.state
                 .sessions
                 .get_mut(session_id)
                 .unwrap()
-                .native_session_id = Some(archive.manifest.session.native_session_id.clone());
+                .native_session_id = Some(native_session_id.to_owned());
             self.persist_session_state(session_id)?;
         }
         executor.end_resumable_work("resume recovered parent")?;

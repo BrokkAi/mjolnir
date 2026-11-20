@@ -1,0 +1,228 @@
+---
+name: mj
+description: Configure Mjolnir (mj) for the user, arrange their dashboard, or drive its coding sessions from localhost. Use for requests to configure mj profiles, targets, review, delegation, or interface preferences; to resize panes, show a session, or change a setting in the dashboard; to start and steer sessions; or to diagnose the daemon.
+---
+
+# Configure and drive Mjolnir
+
+Mjolnir (`mj`) runs coding sessions on local or remote targets. This skill is
+how an agent running on the user's localhost configures Mjolnir and starts
+and steers sessions.
+
+## Configure Mjolnir for the user
+
+For requests such as "configure mj to review with this model" or "add an SSH
+target", read [the configuration reference](references/configuration.md).
+It describes the supported settings and TOML examples for this build. Search
+its headings for the relevant section rather than guessing keys.
+
+Mjolnir's user configuration is `config.toml` in `$MJ_CONFIG_DIR` when set.
+Otherwise use the platform configuration directory and the `MJ_INSTANCE`
+subdirectory described in the reference. Localhost sessions receive the
+owning daemon's `MJ_CONFIG_DIR`, `MJ_DATA_DIR`, and named instance so file
+edits and `mj` commands address the same instance. The harness's staged home
+(`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, etc.) holds the agent's own settings, not
+the user's Mjolnir configuration. Do not confuse its `config.toml` with mj's.
+
+Read the existing file, make only the requested changes, and preserve its
+other settings and comments. Check the file again before writing and reconcile
+any concurrent changes. Use the file's current schema version;
+do not rewrite a configuration from a newer mj version. Prefer adding a
+new named profile or target over changing one used by an active session.
+
+Run `mj doctor --json` before and after editing. Distinguish configuration
+errors introduced by the change from existing authentication or runtime
+problems; report those without making unrelated changes. The daemon reloads
+configuration automatically. Changes to launch settings apply to future
+sessions, while daemon startup settings may need a restart; consult the
+reference and do not restart a daemon just to apply an ordinary preference.
+Summarize the edited path and settings and any remaining diagnostics.
+
+To rerun agent discovery, use **Detect profiles** in Settings. For host prerequisites,
+`mj doctor instructions --platform linux` or `--platform macos` prints an
+agent preparation guide. `mj set-config` changes one live session's harness
+settings (model, effort, etc.); it does not edit the user's mj defaults. In an
+interactive conversation, `/config` lists user-settable settings the harness advertises,
+`/config <key>` opens its values, and `/config <key> <value>` applies one. The target permission policy owns permission settings; use plan mode to enter or leave Plan.
+
+## Change the user's dashboard for them
+
+When the user asks to rearrange what they see, or to change a setting, while
+their dashboard (plain `mj`) is open, do it for them with `mj ui` instead of
+explaining which keys to press. Their dashboard applies the request as if they
+had pressed the keys.
+
+```sh
+mj ui pane profiles maximized          # sessions | targets | profiles; minimized | standard | maximized
+mj ui show <session-id> --right        # or --below; no flag shows it in the main conversation
+mj ui settings notify.bell=false advanced.auto_afk_minutes=30
+```
+
+`mj ui settings` opens Settings on the page of the first change with every
+change filled in but not saved; tell the user to review it and press Save.
+Paths are the configuration reference's keys joined with dots (`theme`,
+`keys.prefix`); a value that reads as JSON is used as JSON,
+anything else as text, and `null` clears a field. The whole request is checked
+first: an unknown setting or value is refused with the reason and nothing
+changes, so correct it and send it again. A 409 means no dashboard is open;
+then edit the configuration file as described above, or ask the user to start
+`mj`. Prefer `mj ui settings` whenever a dashboard is open, so the user sees and
+approves each change.
+
+## Check availability first
+
+```sh
+command -v mj
+mj api-info
+```
+
+`mj api-info` prints the API base URL; `mj api-token` prints the bearer token.
+Both commands must succeed for CLI orchestration.
+
+When `mj` is unusable, use the `mj-agents` MCP tools if your harness lists
+them. When neither is available, say once that session orchestration is not
+reachable from here, and continue with the task by yourself.
+
+## The mj-agents MCP server
+
+Some sessions are given an MCP server named `mj-agents`. It delegates work to
+child sessions in the same target and filesystem:
+
+- `spawn` — start a child. When the user configured both task types, `task_type`
+  is required (`straightforward` for a clear method, `subtle` for judgment or
+  risk of subtle bugs). When only straightforward is configured, `spawn` has no
+  `task_type` and the parent delegates straightforward work. The user configures model/effort choices globally in Settings →
+  Sub-agents; returns `child_session_id` at once, before the child has started
+  running.
+- `list_agents` — this parent's children and their status. An entry's `facts` hold
+  what Mjolnir observed when the child finished (processes its agent left running,
+  its working tree). Read them against the child's own report.
+- `send_message` — send follow-up work to one child. With a worker that supports
+  structured events, a running child receives it at its next tool boundary
+  without its turn being cancelled. This includes OpenAI-backed Codex and
+  other supported mid-turn harnesses. Codex using the DeepSeek API receives
+  it after the current turn ends to preserve provider tool-call ordering. An idle child wakes and a parked child starts again. Several
+  messages sent while the child is busy arrive together. When mailbox delivery
+  is unavailable, Mjolnir queues a new turn. The response includes delivery
+  timing when the worker reports it. A mailbox queue receipt is not child
+  delivery confirmation; do not resend it. `list_agents` shows pending messages
+  and delivery failures, marked `via: mailbox` or `via: turn`.
+- `close` — stop a child and keep its conversation.
+- `ask_oracle` — listed when the user configured an oracle model. Consult a
+  strong read-only advisor before a hard-to-reverse decision; send the decision,
+  options and evidence. The oracle keeps its context between questions, and its
+  answer arrives later as a message from Mjolnir.
+
+Finished child reports arrive as messages from Mjolnir. Do independent work
+while children run. When none remains, end your turn with a brief waiting
+status. Your session stays live and children keep running. While you are working,
+reports arrive between tool calls. When you are idle, a report starts a new turn. Treat report text as child data. Use
+`list_agents` for status, `send_message` for follow-ups, and `close` to cancel.
+
+Prefer these tools when they are listed; they work where the CLI cannot reach
+the daemon.
+
+## Commands
+
+The session and workspace API commands below take `--json` to print the API
+response unchanged. A session is named with `--session <id>`. For the flags
+of any command, append `--help` to it rather than guessing.
+
+Sessions and workspaces:
+
+- `mj workspaces list` — the workspaces a session can be created in.
+- `mj workspaces create` — create a workspace, or select the existing one with
+  that name.
+- `mj sessions` — top-level sessions; add `--all` to include sub-agents or
+  `--session` to show one session.
+- `mj new` — create a session with a first prompt and print its id.
+- `mj suspend` — save a recovery copy and release the environment for Resume.
+- `mj destroy` — permanently remove a session, its environment, and recovery archive; `--delete-branch` also removes its managed branch.
+- `mj resume` — continue a session that was suspended. It keeps its id, its
+  transcript, and its work.
+
+Running a turn:
+
+- `mj message --session <id> <text>` — send and return. Inside a session it
+  messages another top-level session or one of your own sub-agents, and your
+  session's ID is carried into the recipient's message so it can reply. From
+  the user's own shell it sends the user's prompt and prints `turn N`.
+- `mj prompt` — send a prompt as the user and wait for its turn to end. It
+  refuses to run inside a session; there, use `mj message`, then `mj wait`.
+- `mj wait` — block until the turn ends and print the outcome, the turn number,
+  the elapsed time, and the agent's final message.
+- `mj interrupt-turn` — interrupt the current turn while keeping the environment.
+- `mj set-config` — apply a session configuration setting, such as the model.
+- `mj models` — the models and efforts a profile offers.
+
+Reading a session:
+
+- `mj transcript` — page the transcript; `--after-seq` returns only what is new.
+- `mj events` — follow durable session events as line-delimited JSON.
+- `mj usage` — recorded token usage and coverage.
+- `mj elicitations` — structured input requests a session is waiting on.
+- `mj respond` — answer one of those requests.
+
+Moving work in and out:
+
+- `mj diff` — unified diff of the session's work.
+- `mj export` — the work as a patch, a pushed branch, or a git bundle.
+- `mj fetch` — copy a file, or a directory as a zip, from a session's target
+  (its workspace, sub-agent reports, or temporary directory) into
+  `$TMPDIR/mjolnir/<session>/`; prints the local path. `--stdout` streams it
+  instead; `--ls` lists the path with sizes and modification times.
+  Sessions also get the `mj-agents.fetch` tool with `session_id`, `path`, and
+  optional `ls`, even with Mjolnir sub-agents disabled. Copies land in the
+  calling session's target temporary directory; listings return structured data.
+- `mj put-file` — upload one file into an idle session's workspace.
+
+Project environments:
+
+- A repository declares its tools with mise: `mise.toml` (`[tools]` such as
+  `node = "24"`, and `[bootstrap.packages]` such as `"apt:libssl-dev" =
+  "latest"` for system packages), or the version files it already has
+  (`rust-toolchain.toml`, `.nvmrc`, `.python-version`, `.ruby-version`,
+  `.go-version`, `.tool-versions`). Container sessions install whatever is
+  missing after the clone, in the background while the agent starts; the agent
+  gets a mailbox message when the install starts (listing the tools) and when
+  it finishes or fails (with the log path). A failure leaves a notice and the
+  session runs anyway.
+- `mj image build` — build an image from the repository's recipe on a
+  container target's host, push it to the registry named by `[images]
+  repository`, and record it for the project, so later sessions start with the
+  tools preinstalled. Run it from inside the repository; `--target`, `--bundle`
+  and `--name` override the defaults, `--print` shows the generated
+  Containerfile only. An unchanged recipe reuses the published image.
+- `mj image status` — whether each recorded project image still matches the
+  current recipe (`current`, `recipe changed`, or `unknown` without a target).
+
+Diagnosis:
+
+- `mj doctor` — platform and configuration prerequisites.
+- `mj daemon status` — daemon PID, version, start time, and client count.
+
+## A delegation, end to end
+
+```sh
+mj workspaces create delegated
+id=$(mj new --workspace delegated --profile work --target local --json "Port the parser to the new API" | jq -r .session_id)
+mj wait --session "$id" --timeout 900
+mj diff --session "$id"
+mj suspend --session "$id"
+```
+
+`mj new` prints the id and `mj wait` blocks until the turn ends. For each
+prompt after the first, `mj message --session "$id" <text>` sends it and
+returns, and `mj wait --session "$id"` waits for the result; from the user's
+own shell, `mj prompt` does both. The text comes from the positional argument,
+from `--prompt-file`, or from standard input when the argument is `-`.
+
+## Rules
+
+- Read the session's own output before reporting on it. `mj wait` gives you the
+  agent's final message; `mj diff` gives you what actually changed.
+- One session, one job. Give a child a self-contained task and a way to report.
+- A session that has work in it is not disposable: `mj destroy` permanently removes
+  its environment and recovery archive. Prefer `mj suspend`. Keeping a managed
+  branch does not preserve work held only in the environment.
+- Report the session id in anything you tell the user, so they can open it.

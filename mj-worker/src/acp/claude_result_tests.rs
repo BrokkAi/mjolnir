@@ -53,15 +53,16 @@ impl ClaudeProbe {
             extra_mcp_servers: vec![],
             project_memory: None,
             resume_session: replay.then(|| SESSION.to_owned()),
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Claude,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -525,6 +526,8 @@ async fn a_native_child_can_send_output_and_request_permission_after_the_prompt_
         }
     };
     assert!(request.message.contains("child"));
+    // Hard-won: 509af374e: a child's call ID can match an unrelated parent row.
+    assert_eq!(request.tool_permission.unwrap().tool_call_id, None);
     let (resolved, response) = oneshot::channel();
     peer.probe
         .commands

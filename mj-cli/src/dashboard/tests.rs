@@ -87,6 +87,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 legacy_muse_auto_review: None,
                 load_balancing_may_consume_credits: false,
                 claude_permission_mode: None,
+                mjolnir_guardian: true,
                 aws: None,
                 codex_profile: None,
                 environment: Default::default(),
@@ -122,6 +123,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 local: None,
                 destination: "project".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );

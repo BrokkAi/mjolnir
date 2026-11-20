@@ -431,7 +431,7 @@ pub(super) fn render_project_picker(
                     "Your GitHub repositories. Search by name or owner/repository."
                 }
                 ProjectTab::Url => {
-                    "Paste a GitHub URL, owner/repository, or local repository path."
+                    "Git URL, GitHub owner/repo, or local path. HTTP credentials are removed."
                 }
             },
             theme::muted(),

@@ -54,6 +54,110 @@ pub fn shell_literal(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
+/// A fixture owns every pipeline launched by its reconnect command. Register
+/// atomically before spawning the pipeline; shutdown closes registration first.
+#[cfg(unix)]
+#[must_use]
+pub struct TestProxyGroupGuard {
+    directory: PathBuf,
+}
+
+#[cfg(unix)]
+impl TestProxyGroupGuard {
+    pub fn new(root: &Path) -> Self {
+        let directory = root.join("proxy-groups");
+        fs::create_dir_all(&directory).unwrap();
+        Self { directory }
+    }
+
+    pub fn registration_script(&self) -> String {
+        format!(
+            "set -e\nproxy_groups={}\nprintf '%s\\n' \"$$\" > \"$proxy_groups/$$.pending\"\nmv \"$proxy_groups/$$.pending\" \"$proxy_groups/$$\"\n",
+            shell_literal(&self.directory)
+        )
+    }
+
+    pub fn registered_group(&self) -> i32 {
+        fs::read_dir(&self.directory)
+            .unwrap()
+            .filter_map(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse().ok())
+            })
+            .next()
+            .expect("proxy registered its group before answering hello")
+    }
+
+    pub fn group_exists(group: i32) -> io::Result<bool> {
+        // SAFETY: signal zero only queries the positive, fixture-owned group.
+        if unsafe { libc::kill(-group, 0) } == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TestProxyGroupGuard {
+    fn drop(&mut self) {
+        let closed = self.directory.with_extension("reaping");
+        match fs::rename(&self.directory, &closed) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(error) => {
+                tracing::error!(%error, "close test proxy registration");
+                return;
+            }
+        }
+        let groups = match fs::read_dir(&closed).and_then(|entries| {
+            entries
+                .map(|entry| {
+                    let entry = entry?;
+                    Ok(entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| name.parse::<i32>().ok())
+                        .filter(|pid| *pid > 1))
+                })
+                .collect::<io::Result<Vec<_>>>()
+        }) {
+            Ok(groups) => groups.into_iter().flatten().collect::<Vec<_>>(),
+            Err(error) => {
+                tracing::error!(%error, "read test proxy groups");
+                return;
+            }
+        };
+        // Kill every owned group before waiting or removing fixture files.
+        for &group in &groups {
+            mj_core::subprocess::terminate_process_group(group, libc::SIGKILL);
+        }
+        for group in groups {
+            loop {
+                match Self::group_exists(group) {
+                    Ok(false) => break,
+                    Ok(true) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                    Err(error) => {
+                        tracing::error!(group, %error, "wait for test proxy reaping");
+                        break;
+                    }
+                }
+            }
+        }
+        // RelayClient's existing reaper remains the sole Child/waitpid owner.
+        if let Err(error) = fs::remove_dir_all(closed) {
+            tracing::error!(%error, "remove stopped test proxy registrations");
+        }
+    }
+}
+
 pub fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
     MoveOperation {
         quota_stop_reason: None,
@@ -412,6 +516,8 @@ pub fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind)
         2,
         source_kind,
         IN_PLACE_SOURCE_PROFILE,
+        // The source has a conversation, which a same-harness move continues.
+        true,
     );
     install_in_place_worker_script(&worker_root, checkpoint.event_frontier, &"a".repeat(64));
 
@@ -439,6 +545,7 @@ pub fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind)
                     legacy_muse_auto_review: None,
                     load_balancing_may_consume_credits: false,
                     claude_permission_mode: None,
+                    mjolnir_guardian: true,
                     aws: None,
                     ..mj_core::config::HarnessProfile::new(kind, home.clone())
                 },

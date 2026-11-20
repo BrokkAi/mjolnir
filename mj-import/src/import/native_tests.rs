@@ -38,6 +38,7 @@ fn test_config() -> Config {
                     local: None,
                     destination: PathBuf::from("app"),
                     git_ref: None,
+                    mbx_namespace: None,
                 }],
             },
         )]),

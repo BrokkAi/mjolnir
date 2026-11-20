@@ -115,6 +115,20 @@ pub fn apply_value(
     } else {
         value
     };
+    let value = if let Some(text) = value.as_str().filter(|_| path == ["jev", "fastino_key"]) {
+        match mj_core::config::EnvironmentValue::typed_reference(text) {
+            Some(reference) => {
+                serde_json::to_value(reference?).map_err(|error| error.to_string())?
+            }
+            None => {
+                mj_core::config::JevConfig::validate_fastino_key(text)
+                    .map_err(|error| error.to_string())?;
+                value
+            }
+        }
+    } else {
+        value
+    };
     if path == ["interface", "prefix"] {
         let mut keys = serde_json::from_value::<mj_core::config::KeysConfig>(draft["keys"].clone())
             .map_err(|error| error.to_string())?;

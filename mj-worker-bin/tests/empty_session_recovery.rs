@@ -17,7 +17,7 @@ use timeouts::IO_TIMEOUT;
 
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
-fn recovered_prompt_finished(root: &std::path::Path) -> bool {
+fn recovered_prompt_finished(root: &std::path::Path, session_id: &str) -> bool {
     let Ok(mut stream) = std::os::unix::net::UnixStream::connect(root.join("control.sock")) else {
         return false;
     };
@@ -43,7 +43,7 @@ fn recovered_prompt_finished(root: &std::path::Path) -> bool {
     };
     matches!(response.body, RelayResponseBody::Ok {
         payload: RelayResponsePayload::Status(state)
-    } if state.native_session_id.as_deref() == Some("replacement")
+    } if state.native_session_id.as_deref() == Some(session_id)
         && state.active_prompt.is_none() && state.queued_prompts.is_empty())
 }
 
@@ -73,16 +73,26 @@ fn claude_missing_session() -> serde_json::Value {
 }
 
 fn recover_missing_native_session(harness: &str, missing_error: serde_json::Value, used: bool) {
-    recover_missing_native_session_from(RelayOrigin::Journal, harness, missing_error, used);
+    recover_native_session_from(RelayOrigin::Journal, harness, Some(missing_error), used);
 }
 
-/// `missing_error` is the JSON-RPC error the bridge answers every reload with.
-fn recover_missing_native_session_from(
+/// The bridge loads the original thread unless given a JSON-RPC error.
+fn recover_native_session_from(
     origin: RelayOrigin,
     harness: &str,
-    missing_error: serde_json::Value,
+    missing_error: Option<serde_json::Value>,
     used: bool,
 ) {
+    let original = if missing_error.is_some() {
+        "missing-thread"
+    } else {
+        "saved-thread"
+    };
+    let ready = if missing_error.is_some() {
+        "replacement"
+    } else {
+        original
+    };
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
     let log = temp.path().join("bridge.log");
@@ -93,6 +103,9 @@ fn recover_missing_native_session_from(
             r#"import json, sys
 log = {log}
 error = json.loads({error})
+modes = {{"currentModeId": "agent",
+          "availableModes": [{{"id": "agent", "name": "Guardian"}},
+                             {{"id": "auto", "name": "Auto"}}]}}
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
@@ -102,14 +115,16 @@ for line in sys.stdin:
     if method == "initialize":
         result = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}}}
     elif method in ("session/load", "session/resume"):
-        print(json.dumps({{"jsonrpc": "2.0", "id": ident,
-                          "error": error}}), flush=True)
-        continue
+        assert request["params"]["sessionId"] == {original:?}, request
+        if error is not None:
+            print(json.dumps({{"jsonrpc": "2.0", "id": ident,
+                              "error": error}}), flush=True)
+            continue
+        result = {{"modes": modes}}
     elif method == "session/new":
-        result = {{"sessionId": "replacement", "modes": {{"currentModeId": "agent",
-                  "availableModes": [{{"id": "agent", "name": "Guardian"}},
-                                     {{"id": "auto", "name": "Auto"}}]}}}}
+        result = {{"sessionId": "replacement", "modes": modes}}
     elif method == "session/prompt":
+        assert request["params"]["sessionId"] == {ready:?}, request
         # Answer the way a real agent does: the reply streams as an update on
         # the session the prompt named, then the prompt returns (R8-1).
         print(json.dumps({{"jsonrpc": "2.0", "method": "session/update", "params": {{
@@ -124,7 +139,7 @@ for line in sys.stdin:
         print(json.dumps({{"jsonrpc": "2.0", "id": ident, "result": result}}), flush=True)
 "#,
             log = serde_json::to_string(&log).unwrap(),
-            error = serde_json::to_string(&missing_error.to_string()).unwrap(),
+            error = serde_json::to_string(&serde_json::to_string(&missing_error).unwrap()).unwrap(),
         ),
     )
     .unwrap();
@@ -134,7 +149,7 @@ for line in sys.stdin:
             let mut relay = DurableRelay::open(&root, SESSION_ID, "prior-worker").unwrap();
             relay
                 .record_observation(RelayObservation::SessionOpened {
-                    native_session_id: "missing-thread".into(),
+                    native_session_id: original.into(),
                     resumed: false,
                     native_continuity_lost: false,
                     replaced_unused_native_session_id: None,
@@ -183,6 +198,7 @@ for line in sys.stdin:
                     }],
                     accepted_config: Default::default(),
                     native_session_unused: !used,
+                    mailbox: None,
                 })
                 .unwrap(),
             )
@@ -220,7 +236,7 @@ for line in sys.stdin:
         "harness_home": harness_home
     });
     if origin == RelayOrigin::RestoredSeed {
-        launch["native_session_id"] = serde_json::json!("missing-thread");
+        launch["native_session_id"] = serde_json::json!(original);
     }
     std::fs::write(&config, serde_json::to_vec(&launch).unwrap()).unwrap();
     // Stage both the running worker and this build's lifecycle control worker.
@@ -257,7 +273,10 @@ for line in sys.stdin:
             if used && methods.contains("session/load") && worker.is_finished() {
                 return Ok(methods);
             }
-            if !used && methods.contains("session/prompt") && recovered_prompt_finished(&root) {
+            if !used
+                && methods.contains("session/prompt")
+                && recovered_prompt_finished(&root, ready)
+            {
                 return Ok(methods);
             }
             anyhow::ensure!(
@@ -288,8 +307,13 @@ for line in sys.stdin:
     });
     assert_eq!(stopped.unwrap().status, 0);
     let output = owner.expect("worker did not stop within its deadline");
-    assert!(
-        methods.contains("session/load") || methods.contains("session/resume"),
+    let reloads = methods
+        .lines()
+        .filter(|method| matches!(*method, "session/load" | "session/resume"))
+        .count();
+    assert_eq!(
+        reloads,
+        usize::from(used || harness != "codex" || origin == RelayOrigin::RestoredSeed),
         "{methods}"
     );
     if used {
@@ -305,7 +329,12 @@ for line in sys.stdin:
         }
         return;
     }
-    assert_eq!(methods.matches("session/new").count(), 1, "{methods}");
+    assert_eq!(output.status, 0, "{worker_log}");
+    assert_eq!(
+        methods.matches("session/new").count(),
+        usize::from(missing_error.is_some()),
+        "{methods}"
+    );
     assert_eq!(methods.matches("session/prompt").count(), 1, "{methods}");
 
     let relay = DurableRelay::open(&root, SESSION_ID, "recovered-worker").unwrap();
@@ -315,17 +344,20 @@ for line in sys.stdin:
         RelayOrigin::RestoredSeed => (4, restored_frontier.as_str()),
     };
     let events = relay.events_after(after, digest).unwrap();
-    // The opening names the session it replaced and why it could: the
-    // controller accepts a new identity on resume only on this evidence (R7-5).
+    let replaced = missing_error.as_ref().map(|_| original);
+    // The controller accepts a new identity on resume only when the journal
+    // names the unused thread that was replaced (R7-5).
     assert!(
         events.iter().any(|event| matches!(
             &event.observation,
             RelayObservation::SessionOpened {
                 native_session_id,
-                resumed: false,
-                replaced_unused_native_session_id: Some(replaced),
+                resumed,
+                replaced_unused_native_session_id,
                 ..
-            } if native_session_id == "replacement" && replaced == "missing-thread"
+            } if native_session_id == ready
+                && *resumed == replaced.is_none()
+                && replaced_unused_native_session_id.as_deref() == replaced
         )),
         "{events:#?}"
     );
@@ -334,13 +366,16 @@ for line in sys.stdin:
             .operational_state()
             .replaced_unused_native_session_id
             .as_deref(),
-        Some("missing-thread")
+        replaced
     );
-    assert!(events.iter().any(|event| matches!(
-        &event.observation,
-        RelayObservation::Warning { message } if message.contains("new empty session")
-    )));
-    // The replacement session is live, not a replay: the reply reaches the
+    assert_eq!(
+        events.iter().any(|event| matches!(
+            &event.observation,
+            RelayObservation::Warning { message } if message.contains("new empty session")
+        )),
+        replaced.is_some()
+    );
+    // The opened session is live: the reply reaches the
     // journal and the turn ends answered rather than `prompt_unanswered` (R8-1).
     assert!(
         events.iter().any(|event| matches!(
@@ -372,7 +407,7 @@ for line in sys.stdin:
 fn codex_missing_unused_thread_recovers_after_worker_restart() {
     recover_missing_native_session(
         "codex",
-        codex_missing_thread("no rollout found for thread id missing-thread"),
+        codex_missing_thread("thread not loaded: missing-thread"),
         false,
     );
 }
@@ -399,23 +434,29 @@ fn used_native_history_is_not_replaced_after_worker_restart() {
 // Hard-won: 0bb9439: a restored session with no prompts could not resume its unused native thread.
 #[test]
 fn a_never_prompted_session_resumes_fresh_from_its_checkpoint() {
-    recover_missing_native_session_from(
+    recover_native_session_from(
         RelayOrigin::RestoredSeed,
         "codex",
-        codex_missing_thread("thread not found: missing-thread"),
+        Some(codex_missing_thread("thread not found: missing-thread")),
         false,
     );
-    recover_missing_native_session_from(
+    recover_native_session_from(
         RelayOrigin::RestoredSeed,
         "claude",
-        claude_missing_session(),
+        Some(claude_missing_session()),
         false,
     );
     // A checkpoint that cannot vouch for the session keeps it protected.
-    recover_missing_native_session_from(
+    recover_native_session_from(
         RelayOrigin::RestoredSeed,
         "codex",
-        codex_missing_thread("thread not found: missing-thread"),
+        Some(codex_missing_thread("thread not found: missing-thread")),
         true,
     );
+}
+
+// Hard-won: dc5d9891a: a restored session whose only turns were mailbox wakes was replaced although loadable
+#[test]
+fn codex_loads_a_restored_thread_marked_unused_by_the_seed() {
+    recover_native_session_from(RelayOrigin::RestoredSeed, "codex", None, false);
 }

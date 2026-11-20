@@ -20,8 +20,7 @@ Checks do not start stopped services, and launch performs a final preflight.
 
 Settings refuses to remove or rewrite configuration used by an active session;
 add an alternative entry or stop the session first. Global defaults and profile
-enablement remain editable. `mj setup` reruns automatic agent and repository
-discovery; direct `config.toml` editing also remains available.
+enablement remain editable. **Detect profiles** and **Detect runtimes** in Settings rerun discovery. You can also edit `config.toml` directly.
 
 If an active session references a missing profile, bundle, or target, Mjolnir
 still opens and marks that session as needing configuration repair. Select it
@@ -673,6 +672,7 @@ home = "/home/me/.codex-work"
 | `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile takes `DEEPSEEK_API_KEY` from the key saved in DSH (`.credentials.yaml` in its home) first, then the environment Mjolnir started with, then `.env` in its home, and only then from this table. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 | `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
+| `mjolnir_guardian` | boolean | no | `true` | Whether the Mjolnir guardian answers the profile's tool approvals on runtimes that keep configured approvals. `false` sends every approval to the person's permission form. Applies to new sessions. Only valid on a `kimi`, `open-code`, or `dsh` profile. See [Profiles](/profiles/#turn-off-the-mjolnir-guardian). |
 | `models` | array of strings | no | empty (offer everything) | Exact model values, as `mj models --profile <id> --unrestricted` lists them, that Mjolnir offers from this profile in session model pickers, sub-agent choices, review slots and Autoconfigure. The profile's current model is always offered. Edits apply without rediscovery. `mj doctor` warns when a profile advertises more than 50 models without this list, and about entries the profile does not advertise. See [Profiles](/profiles/#limit-the-models-a-profile-offers). |
 
 The profile's harness-home variable cannot appear in `environment`; set `home`
@@ -861,16 +861,15 @@ Repository fields:
 | Field | TOML type | Required | Validation and behavior |
 | --- | --- | --- | --- |
 | `id` | string | yes | Valid, unique ID within the bundle. |
-| `github` | string | exactly one source | GitHub source in a supported form; cannot be combined with `local`. |
+| `github` | string | exactly one source | Network Git URL or GitHub shorthand; cannot be combined with `local`. |
 | `local` | path string | exactly one source | Absolute controller-side Git path used to resolve its network remotes; cannot be combined with `github`. |
 | `destination` | path string | yes | Non-empty relative path below the target workspace; no `.` or `..` components. |
 
-Supported GitHub forms are `owner/repository`,
-`https://github.com/owner/repository`, `git@github.com:owner/repository`, and
-`ssh://git@github.com/owner/repository`, with an optional `.git` suffix. Sources
-cannot contain whitespace or begin with `-`. At session creation, Mjolnir uses
-the source's default network fetch remote and preserves its configured push
-destination(s). A `local` path is inspected for that configuration; its local
+The `github` key accepts HTTP(S), SSH, scp-style SSH, and `git://` URLs on any
+host, plus GitHub `owner/repository` shorthand. Sources cannot contain whitespace
+or begin with `-`. Mjolnir removes HTTP userinfo before saving, retains SSH
+usernames, and uses the saved URL for fetch and push. Private repositories
+outside GitHub have no credential path in containers yet. A `local` path is inspected for that configuration; its local
 commits, staged changes, unstaged changes, and untracked files are excluded
 from an isolated clone. Repository destinations may not be equal, ancestors,
 or descendants of one another.
@@ -1028,6 +1027,43 @@ existing local and SSH machine, including implicit `local`. This preserves the
 old global override even when a machine explicitly requested caching. The next
 save writes those machine settings and removes the global section. Machines
 added afterward use the normal enabled default.
+
+#### Shared build cache on Nitro
+
+Nitro sandboxes keep a guest-local mbx cache. Set `remote = "s3://bucket/prefix"`
+in `[machines.<id>.build_cache]` to read trusted CI's cache. Optional
+`remote_region` defaults to the Nitro host's region. New hosts can use
+`mj ec2 create --runtime nitro --mbx-remote s3://bucket/prefix` with optional
+`--mbx-remote-region` to create or reuse and attach the instance profile.
+For an existing host, use `aws ec2 associate-iam-instance-profile` and set
+the configuration keys. A manually attached role needs both
+`s3:GetObject` scoped to the cache prefix and unconditional `s3:ListBucket`
+on the cache bucket so missing objects can be distinguished from access
+failures. The proxy serves no bucket listing requests. Use `mj doctor`
+to check the remote.
+
+The namespace defaults to GitHub `owner/repository`, preserving the case
+from `github`. Set `mbx_namespace` on a bundle repository to override it or
+enable a repository without a GitHub source. The primary repository's
+namespace is the guest default, or the first available namespace if the
+primary has none. The guest can read every namespace in its bundle. The
+proxy uses the host instance role and serves only reads on the private
+guest-to-host link. mbx warns that this plain-HTTP hop does not protect
+traffic from reading or modification in transit.
+
+Grant S3 writes only to trusted CI. For GitHub Actions, run the seed build only
+on pushes to the protected default branch and scope the AWS OIDC trust
+policy to the repository, branch ref and `event_name:push` using a customized
+subject. The CI environment uses:
+
+```yaml
+env:
+  MBX_REMOTE_URL: s3://bucket/prefix
+  MBX_REMOTE_NAMESPACE: ${{ github.repository }}
+```
+
+See [Shared build cache on Nitro](/project-environments/#shared-build-cache-on-nitro)
+for the job and IAM trust configuration.
 
 ## Runtimes `[targets.<id>]`
 
@@ -1225,6 +1261,15 @@ directories or share the host's mbx build cache: a session that asks for them
 starts without and says so. RAM is a hard limit, taken from the memory pool the
 host reserved at boot.
 
+Build Nitro images for the host's architecture. The session runs as root in
+the guest. The host pulls with crane as root. For a private registry, sign in
+with `ssh host sudo crane auth login <registry> -u <user> --password-stdin`, replacing
+the host, registry, and credentials.
+
+`mj ec2 create` warms the base image plus bundle images assigned for the
+host's platform. After a successful refresh, the Nitro host reclaims obsolete
+images and keeps disks used by retained sandboxes and staged root replacements.
+
 ### Files written before version 12
 
 Before version 12 one `[targets.<id>]` table fused the machine and the runtime,
@@ -1314,8 +1359,8 @@ and finally the verified URL fallback.
 The normal release installer already supplies both supported portable Linux
 worker architectures.
 
-Harness-home variables influence automatic first-run discovery and explicit
-`mj setup` reruns. Existing profiles retain their configured homes:
+Harness-home variables influence automatic first-run discovery and Settings'
+**Detect profiles**. Existing profiles retain their configured homes:
 
 | Harness | Discovery variable | Conventional home |
 | --- | --- | --- |

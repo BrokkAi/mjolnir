@@ -263,7 +263,7 @@ enum WorkerCommand {
 }
 
 fn write_worker_exit_record(root: &Path, reason: &str) {
-    write_worker_exit_record_with_refusal(root, reason, None);
+    write_worker_exit_record_details(root, reason, None, None);
 }
 
 /// The exit record, plus the sentence a refusal wants the person who asked to
@@ -273,7 +273,12 @@ fn write_worker_exit_record(root: &Path, reason: &str) {
 /// way to say anything. The controller lifts `refusal` back onto the error
 /// chain, which turns the failure into a 409 carrying this text instead of a
 /// generic 500.
-fn write_worker_exit_record_with_refusal(root: &Path, reason: &str, refusal: Option<&str>) {
+fn write_worker_exit_record_details(
+    root: &Path,
+    reason: &str,
+    refusal: Option<&str>,
+    startup_failure: Option<&mj_core::relay::WorkerHarnessStartupFailure>,
+) {
     if !root.is_dir() {
         return;
     }
@@ -281,6 +286,7 @@ fn write_worker_exit_record_with_refusal(root: &Path, reason: &str, refusal: Opt
         root,
         reason,
         refusal,
+        startup_failure,
         &mj_core::logging::stderr_writer().recent_log(),
     ) {
         mj_core::diagnostic_stderr!("Mjolnir: could not write worker exit record: {error:#}");
@@ -382,7 +388,24 @@ fn bootstrap_login_environment(
                     mj_worker::worker_runtime::seed_container_github_token(root, std::env::vars())?;
                 }
             }
-            environment.extend(launch.target_environment);
+            let mut target_environment = launch.target_environment;
+            if target_environment
+                .remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV)
+                .is_some()
+            {
+                environment.remove("MJ_MBX_CONFIG_DIR");
+                // Drop settings inherited from login scripts and the image
+                // overlay, then restore only the engine's remote settings.
+                environment.retain(|name, _| {
+                    !name.starts_with(mj_core::worker_launch::MBX_REMOTE_ENV_PREFIX)
+                });
+                for name in mj_core::worker_launch::MBX_REMOTE_ENVIRONMENT {
+                    if let Ok(value) = std::env::var(name) {
+                        environment.insert(name.to_owned(), value);
+                    }
+                }
+            }
+            environment.extend(target_environment);
             if launch.no_github_credentials {
                 mj_core::credentials::remove_github_authentication_environment(&mut environment);
             }
@@ -400,6 +423,9 @@ fn bootstrap_login_environment(
                 launch.no_github_credentials,
             )?;
         }
+        // The worker consumes this setting from its launch map. It never
+        // enters the process environment where subprocesses could inherit it.
+        environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
         environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
         // The reliability lab's crash hooks run inside the worker after this
         // environment-isolating re-exec. Carry only those feature-gated test
@@ -533,10 +559,13 @@ fn main() -> Result<()> {
         );
         if let Some(root) = &exit_root {
             let refusal = mj_core::refusal::Refusal::of(error);
-            write_worker_exit_record_with_refusal(
+            let startup_failure =
+                error.downcast_ref::<mj_core::relay::WorkerHarnessStartupFailure>();
+            write_worker_exit_record_details(
                 root,
                 &mj_worker::acp::worker_exit_reason(error),
                 refusal.as_ref().map(mj_core::refusal::Refusal::message),
+                startup_failure,
             );
         }
     }

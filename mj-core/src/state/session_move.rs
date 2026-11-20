@@ -214,6 +214,8 @@ impl PreparedMoveDestination {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MovePreparation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_upgrade: Option<Box<super::ContainerUpgradePreview>>,
     #[serde(default)]
     pub destination_checks: DestinationChecks,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -355,6 +357,24 @@ pub struct MoveOperation {
 }
 
 impl MoveOperation {
+    /// Every command a retained Move queue can resubmit, including quota continuation.
+    pub fn queue_command_ids(
+        &self,
+        canonical: &crate::archive::CanonicalSessionSnapshot,
+    ) -> std::collections::BTreeSet<String> {
+        let mut ids = canonical
+            .queued_prompts
+            .iter()
+            .map(|queued| queued.command_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if self.quota_stop_reason.is_some() {
+            ids.insert(
+                crate::continuation::GeneratedPrompt::QuotaRetry.command_id(&self.operation_id),
+            );
+        }
+        ids
+    }
+
     /// Capture the two independently owned facts at acceptance of each attempt.
     pub fn capture_container_settings(&mut self, source: &SessionRecord) {
         let applied = super::applied_container_settings(source);

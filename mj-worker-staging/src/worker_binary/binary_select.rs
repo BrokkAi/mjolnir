@@ -208,7 +208,7 @@ pub fn worker_binary_for(
     locator: &targets::TargetLocator,
     executor: &impl CommandExecutor,
 ) -> Result<PathBuf> {
-    let platform = probe_platform(executor, targets::platform_probe(locator))?;
+    let platform = target_platform(locator, executor)?;
     let requirement = if matches!(locator, targets::TargetLocator::LocalBare { .. }) {
         WorkerBinaryRequirement::LocalHost
     } else {
@@ -228,6 +228,13 @@ fn materialize_worker_source(source: WorkerBinaryAvailability) -> Result<PathBuf
     }?;
     verify_worker_build(&path)?;
     Ok(path)
+}
+
+pub fn target_platform(
+    locator: &targets::TargetLocator,
+    executor: &impl CommandExecutor,
+) -> Result<targets::TargetPlatform> {
+    probe_platform(executor, targets::platform_probe(locator))
 }
 
 fn probe_platform(

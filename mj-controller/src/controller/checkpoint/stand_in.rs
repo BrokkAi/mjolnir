@@ -214,6 +214,7 @@ pub async fn close_cut_controller_with(
                 local: None,
                 destination: "project".into(),
                 git_ref: None,
+                mbx_namespace: None,
             }],
         },
     );

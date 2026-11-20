@@ -42,15 +42,16 @@ pub(crate) async fn native_muse_turn(
         project_memory: None,
         extra_mcp_servers: Vec::new(),
         resume_session: resume,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -231,15 +232,16 @@ for line in sys.stdin:
         }),
         extra_mcp_servers: Vec::new(),
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -329,8 +331,14 @@ async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
     // A host that never started also withholds the grant; its diagnostic, not
     // the missing grant, is what the person has to act on.
     let opened = open_muse("failed").await;
-    let error = format!("{:#}", opened.outcome.unwrap_err());
-    assert!(error.contains("Muse Code is not logged in"), "{error}");
+    let error = worker_exit_reason(&opened.outcome.unwrap_err());
+    assert!(
+        error.contains(&format!(
+            "create ACP session ({}): Muse Code is not logged in",
+            mj_core::acp::PROMPT_AUTH_REQUIRED_MARKER
+        )),
+        "{error}"
+    );
     assert!(!error.contains("MCP"), "{error}");
     assert!(!opened.configured);
 }
@@ -390,15 +398,16 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             project_memory: None,
             extra_mcp_servers: Vec::new(),
             resume_session: resume.then(|| "01991be0-0000-7000-8000-000000000001".into()),
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Muse,
             execution_policy: policy,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,

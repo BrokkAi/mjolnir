@@ -2,22 +2,32 @@ use super::*;
 use std::collections::BTreeMap;
 use tracing::instrument::WithSubscriber;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionConfiguration {
+    Opening,
+    Ready,
+    Reopening,
+}
+
+impl SessionConfiguration {
+    fn is_ready(self) -> bool {
+        self == Self::Ready
+    }
+}
+
 /// Only the coordinator accepts readiness or expiry. A ready bridge removes
-/// its timer; a restart arms a new one, and expiry exits event processing.
+/// its timer; a restart arms a new one, and expiry ends the worker with a
+/// typed startup failure.
 pub(super) struct HarnessStartup {
     deadline: Option<tokio::time::Instant>,
-    pub(super) status: watch::Sender<PreparationSnapshot>,
-    pub(super) idle_dispatch_wakes: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
 }
 
 impl HarnessStartup {
-    pub(super) fn new(status: watch::Sender<PreparationSnapshot>) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             deadline: Some(
                 tokio::time::Instant::now() + mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT,
             ),
-            status,
-            idle_dispatch_wakes: Default::default(),
         }
     }
 
@@ -29,17 +39,6 @@ impl HarnessStartup {
         if ready {
             self.deadline = None;
         }
-    }
-
-    fn fail(&mut self, error: String) {
-        self.status.send_replace(PreparationSnapshot {
-            state: Some(mj_core::relay::HarnessPreparation::Failed {
-                step: "session-open".to_owned(),
-                error,
-                at_ms: chrono::Utc::now().timestamp_millis(),
-            }),
-            services: None,
-        });
     }
 }
 
@@ -141,7 +140,7 @@ fn run_relay_coordinator(
         let mut verdict_poll = tokio::time::interval(std::time::Duration::from_secs(1));
         verdict_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut in_flight = BTreeMap::new();
-        let mut session_configured = false;
+        let mut session_configuration = SessionConfiguration::Opening;
         let mut kimi_poll = tokio::time::interval(KIMI_TASK_POLL_INTERVAL);
         kimi_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut login_reads = tokio::task::JoinSet::new();
@@ -168,7 +167,7 @@ fn run_relay_coordinator(
             &relay,
             &commands,
             &mut in_flight,
-            session_configured,
+            session_configuration.is_ready(),
             &mut user_shells,
         )?;
         let mut wakes_open = true;
@@ -186,9 +185,13 @@ fn run_relay_coordinator(
             // answer, its assessment bookkeeping and the retry and stop timers all
             // wait. A barrier ends through a relay request or a disconnect, and
             // both wake this loop, so the branches below open again then.
-            let held = {
+            // The open deadline waits only for a held cut: a pending Close is
+            // claimed only once the session is configured, so waiting for it
+            // would wait forever on a harness that never opens.
+            let (held, cut_held) = {
                 let relay = relay.lock().expect("relay state lock poisoned");
-                relay.worker_writes_held() || relay.close_pending()
+                let cut_held = relay.worker_writes_held();
+                (cut_held || relay.close_pending(), cut_held)
             };
             if !held
                 && relay
@@ -298,7 +301,7 @@ fn run_relay_coordinator(
             let stop_at = stop_timer.map_or_else(tokio::time::Instant::now, |(_, wake)| wake);
             tokio::select! {
                 biased;
-                _ = tokio::time::sleep_until(startup_deadline.unwrap_or_else(tokio::time::Instant::now)), if startup_deadline.is_some() && !held => {
+                _ = tokio::time::sleep_until(startup_deadline.unwrap_or_else(tokio::time::Instant::now)), if startup_deadline.is_some() && !cut_held => {
                     {
                         // Already received readiness precedes an uncommitted
                         // expiry. Bound the prefix by the actual queue so fresh
@@ -308,7 +311,7 @@ fn run_relay_coordinator(
                             observer, wakes: &mut dispatch_wakes,
                         });
                         if record_queued_runtime_events(
-                            &relay, &mut in_flight, &mut events, &mut session_configured,
+                            &relay, &mut in_flight, &mut events, &mut session_configuration,
                             &mut user_shells, &mut kimi_tasks, queued, capturing.as_mut(), startup.as_mut(),
                         ).await? {
                             verdict_tasks.shutdown().await;
@@ -318,31 +321,38 @@ fn run_relay_coordinator(
                     if startup.as_ref().and_then(|startup| startup.deadline)
                         .is_none_or(|deadline| tokio::time::Instant::now() < deadline) {
                         recover_authentication(&relay)?;
-                        dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
+                        dispatch_pending(&relay, &commands, &mut in_flight, session_configuration.is_ready(), &mut user_shells)?;
                         continue;
                     }
                     let cause = format!("the harness did not open its session within {}s; use Restart agent to retry in the existing environment", mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT.as_secs());
-                    let startup = startup.as_mut().expect("guarded startup deadline");
                     {
                         let mut state = relay.lock().expect("relay state lock poisoned");
-                        // A control request may have acquired a cut since `held`
-                        // was observed. Decide and journal under its owner's lock.
-                        if state.worker_writes_held() || state.close_pending() {
+                        // A control request may have acquired a cut since
+                        // `cut_held` was observed. Decide and journal under
+                        // its owner's lock.
+                        if state.worker_writes_held() {
                             continue;
                         }
                         state.set_acp_ready(false);
-                        interrupt_in_flight_locked(&mut state, &mut in_flight, &cause)?;
-                        // Requests that observed Started already handed accepted
-                        // lifecycle work to us. Drain it before advertising the
-                        // request handler as the new owner, under the same lock.
-                        state.dispatch_preparation_lifecycle()?;
-                        startup.fail(cause);
+                        // A Close sealed the relay at its cut: nothing is
+                        // journaled behind the seal, and the next worker
+                        // settles what is left, as after any worker death.
+                        if !state.close_pending() {
+                            interrupt_in_flight_locked(&mut state, &mut in_flight, &cause)?;
+                            // As when the bridge faults before opening, clear any
+                            // question it asked while opening, so no invisible
+                            // question outlives this harness. Accepted lifecycle
+                            // work stays queued for the next worker.
+                            state.record_observation(RelayObservation::ElicitationsCleared)?;
+                        }
                     }
-                    *startup.idle_dispatch_wakes.lock().expect("idle dispatch wake lock poisoned") = Some(dispatch_wakes);
-                    // No more runtime events can be accepted after failure. The
-                    // runtime owner stops ACP and retains the failed relay.
+                    // The worker ends here: the runtime owner stops ACP and the
+                    // exit record carries the typed failure, so the daemon stops
+                    // restarting this harness and reports why.
                     verdict_tasks.shutdown().await;
-                    return Ok(());
+                    return Err(anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+                        message: cause,
+                    }));
                 }
                 wake = dispatch_wakes.recv(), if wakes_open => {
                     if wake.is_none() {
@@ -360,7 +370,7 @@ fn run_relay_coordinator(
                             &relay,
                             &mut in_flight,
                             &mut events,
-                            &mut session_configured,
+                            &mut session_configuration,
                             &mut user_shells,
                             &mut kimi_tasks,
                             queued,
@@ -375,7 +385,7 @@ fn run_relay_coordinator(
                             &relay,
                             &commands,
                             &mut in_flight,
-                            session_configured,
+                            session_configuration.is_ready(),
                             &mut user_shells,
                         )?;
                     }
@@ -399,7 +409,7 @@ fn run_relay_coordinator(
                         &mut in_flight,
                         event,
                         &mut events,
-                        &mut session_configured,
+                        &mut session_configuration,
                         &mut user_shells,
                         &mut kimi_tasks,
                         capturing.as_mut(),
@@ -413,7 +423,7 @@ fn run_relay_coordinator(
                         &relay,
                         &commands,
                         &mut in_flight,
-                        session_configured,
+                        session_configuration.is_ready(),
                         &mut user_shells,
                     )?;
                 }
@@ -424,7 +434,7 @@ fn run_relay_coordinator(
                         .expect("relay state lock poisoned")
                         .expire_mailbox_hook_lease_and_promote(mj_core::clock::epoch_millis())?;
                     if expired {
-                        dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
+                        dispatch_pending(&relay, &commands, &mut in_flight, session_configuration.is_ready(), &mut user_shells)?;
                     } else {
                         // A wall-clock adjustment can make a monotonic timer fire before
                         // the persisted deadline. Retry with a bounded delay, not a spin.
@@ -442,7 +452,7 @@ fn run_relay_coordinator(
                         capacity_timer = capacity_deadline.map(|deadline| (deadline,
                             tokio::time::Instant::now() + std::time::Duration::from_secs(1)));
                     }
-                    dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
+                    dispatch_pending(&relay, &commands, &mut in_flight, session_configuration.is_ready(), &mut user_shells)?;
                 }
                 _ = tokio::time::sleep_until(stop_at), if stop_timer.is_some() && !held => {
                     let (turn, _) = stop_timer.take().expect("guarded stop timer");
@@ -469,14 +479,14 @@ fn run_relay_coordinator(
                         observer, wakes: &mut dispatch_wakes,
                     });
                     if record_events_in_order(
-                        &relay, &mut in_flight, deferred, &mut events, &mut session_configured,
+                        &relay, &mut in_flight, deferred, &mut events, &mut session_configuration,
                         &mut user_shells, &mut kimi_tasks, capturing.as_mut(), startup.as_mut(),
                     ).await? {
                         verdict_tasks.shutdown().await;
                         return Ok(());
                     }
                     // A checkpoint barrier may have been waiting for this turn.
-                    dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
+                    dispatch_pending(&relay, &commands, &mut in_flight, session_configuration.is_ready(), &mut user_shells)?;
                 }
                 _ = kimi_poll.tick(), if kimi_tasks.is_some() && !held => {
                     kimi_tasks
@@ -491,7 +501,7 @@ fn run_relay_coordinator(
                         Some(Ok((revision, Ok(login)))) => {
                             relay.lock().expect("relay state lock poisoned").login_identity.observe(revision, login);
                             recover_authentication(&relay)?;
-                            dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
+                            dispatch_pending(&relay, &commands, &mut in_flight, session_configuration.is_ready(), &mut user_shells)?;
                         }
                         Some(Ok((_, Err(error)))) => tracing::warn!(%error, "could not initialize the Claude login identity"),
                         Some(Err(error)) => return Err(error).context("Claude login reader failed"),
@@ -687,7 +697,7 @@ async fn record_one_runtime_event(
     in_flight: &mut BTreeMap<String, RelayCommand>,
     event: RuntimeEvent,
     events: &mut mpsc::Receiver<RuntimeEvent>,
-    session_configured: &mut bool,
+    session_configuration: &mut SessionConfiguration,
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
     capture: Option<&mut Capture<'_>>,
@@ -698,7 +708,7 @@ async fn record_one_runtime_event(
         in_flight,
         std::collections::VecDeque::from([event]),
         events,
-        session_configured,
+        session_configuration,
         user_shells,
         kimi_tasks,
         capture,
@@ -717,7 +727,7 @@ async fn record_events_in_order(
     in_flight: &mut BTreeMap<String, RelayCommand>,
     mut queue: std::collections::VecDeque<RuntimeEvent>,
     events: &mut mpsc::Receiver<RuntimeEvent>,
-    session_configured: &mut bool,
+    session_configuration: &mut SessionConfiguration,
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
     mut capture: Option<&mut Capture<'_>>,
@@ -732,7 +742,7 @@ async fn record_events_in_order(
             event,
             events,
             &mut deferred,
-            session_configured,
+            session_configuration,
             user_shells,
             kimi_tasks,
             capture.as_deref_mut(),
@@ -754,7 +764,7 @@ async fn observe_and_record(
     mut event: RuntimeEvent,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     deferred: &mut std::collections::VecDeque<RuntimeEvent>,
-    session_configured: &mut bool,
+    session_configuration: &mut SessionConfiguration,
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
     capture: Option<&mut Capture<'_>>,
@@ -786,7 +796,7 @@ async fn observe_and_record(
         relay,
         in_flight,
         event,
-        session_configured,
+        session_configuration,
         work_facts,
         startup,
     )
@@ -796,7 +806,7 @@ fn record_runtime_event_with_startup(
     relay: &Arc<RelayCell>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     event: RuntimeEvent,
-    session_configured: &mut bool,
+    session_configuration: &mut SessionConfiguration,
     work_facts: Option<mj_core::work_facts::WorkFacts>,
     startup: Option<&mut HarnessStartup>,
 ) -> Result<bool> {
@@ -804,17 +814,46 @@ fn record_runtime_event_with_startup(
         event,
         RuntimeEvent::HarnessRestarting { .. } | RuntimeEvent::ContextClearing { .. }
     );
-    let stopped = record_runtime_event_and_track_configuration(
-        relay,
-        in_flight,
-        event,
-        session_configured,
-        work_facts,
-    )?;
+    let configured = matches!(event, RuntimeEvent::SessionConfigured { .. });
+    let failure = match &event {
+        RuntimeEvent::SessionFault { message }
+            if startup.is_some() && *session_configuration == SessionConfiguration::Opening =>
+        {
+            let (cause, diagnostics) = message.split_once('\n').unwrap_or((message, ""));
+            let failure = anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+                message: cause.to_owned(),
+            });
+            Some(if diagnostics.is_empty() {
+                failure
+            } else {
+                failure.context(diagnostics.to_owned())
+            })
+        }
+        _ => None,
+    };
+    let stopped = record_runtime_event_with_facts(relay, in_flight, event, work_facts)?;
+    if let Some(failure) = failure {
+        // The worker exits before the runtime's Stopped is recorded. Clear
+        // any question the bridge asked while opening, as Stopped would, so
+        // no invisible question outlives this harness. In-flight commands
+        // are left for the next boot's recovery.
+        relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .record_observation(RelayObservation::ElicitationsCleared)?;
+        return Err(failure);
+    }
+    if configured {
+        *session_configuration = SessionConfiguration::Ready;
+    } else if restarting && session_configuration.is_ready() {
+        // Allow dispatch again only after the fresh bridge configures itself.
+        // Its failure is no longer a failure to open this worker's session.
+        *session_configuration = SessionConfiguration::Reopening;
+    }
     if let Some(startup) = startup {
         startup.observe_event(
             restarting,
-            *session_configured
+            session_configuration.is_ready()
                 && relay
                     .lock()
                     .expect("relay state lock poisoned")
@@ -835,7 +874,7 @@ async fn record_runtime_event_batch(
     in_flight: &mut BTreeMap<String, RelayCommand>,
     first: RuntimeEvent,
     events: &mut mpsc::Receiver<RuntimeEvent>,
-    session_configured: &mut bool,
+    session_configuration: &mut SessionConfiguration,
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
     mut capture: Option<&mut Capture<'_>>,
@@ -846,7 +885,7 @@ async fn record_runtime_event_batch(
         in_flight,
         first,
         events,
-        session_configured,
+        session_configuration,
         user_shells,
         kimi_tasks,
         capture.as_deref_mut(),
@@ -861,7 +900,7 @@ async fn record_runtime_event_batch(
         relay,
         in_flight,
         events,
-        session_configured,
+        session_configuration,
         user_shells,
         kimi_tasks,
         queued,
@@ -876,7 +915,7 @@ async fn record_queued_runtime_events(
     relay: &Arc<RelayCell>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     events: &mut mpsc::Receiver<RuntimeEvent>,
-    session_configured: &mut bool,
+    session_configuration: &mut SessionConfiguration,
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
     maximum: usize,
@@ -891,7 +930,7 @@ async fn record_queued_runtime_events(
                     in_flight,
                     event,
                     events,
-                    session_configured,
+                    session_configuration,
                     user_shells,
                     kimi_tasks,
                     capture.as_deref_mut(),
@@ -926,26 +965,6 @@ pub(crate) fn track_user_shell_completion(
     if let RuntimeEvent::UserShellFinished { request_id, .. } = event {
         user_shells.completed(request_id);
     }
-}
-
-pub(crate) fn record_runtime_event_and_track_configuration(
-    relay: &Arc<RelayCell>,
-    in_flight: &mut BTreeMap<String, RelayCommand>,
-    event: RuntimeEvent,
-    session_configured: &mut bool,
-    work_facts: Option<mj_core::work_facts::WorkFacts>,
-) -> Result<bool> {
-    // A fresh bridge must configure its session again before any command is
-    // dispatched to it. That gap is what lets the bridge drop the requests the
-    // previous one left queued without racing a new dispatch.
-    if matches!(
-        event,
-        RuntimeEvent::HarnessRestarting { .. } | RuntimeEvent::ContextClearing { .. }
-    ) {
-        *session_configured = false;
-    }
-    *session_configured |= matches!(event, RuntimeEvent::SessionConfigured { .. });
-    record_runtime_event_with_facts(relay, in_flight, event, work_facts)
 }
 
 #[cfg(test)]
@@ -1008,7 +1027,16 @@ pub(crate) fn record_runtime_event_with_facts(
                 message: "ACP initialized without capability metadata".into(),
             })?;
         }
-        RuntimeEvent::ContextClearing { .. } => {}
+        RuntimeEvent::BridgeRetired {
+            terminal_connection_id,
+        } => {
+            relay.retire_agent_terminal_connection(&terminal_connection_id)?;
+        }
+        RuntimeEvent::ContextClearing { .. } => {
+            // The previous bridge has exited, including when opening the new
+            // conversation fails and /clear rolls back to its native session.
+            relay.retire_harness_process_state()?;
+        }
         RuntimeEvent::ContextCleared {
             request_id,
             native_session_id,
@@ -1049,6 +1077,12 @@ pub(crate) fn record_runtime_event_with_facts(
         }
         RuntimeEvent::NativeAgent { event } => {
             relay.record_observation(RelayObservation::NativeAgent { event })?;
+        }
+        RuntimeEvent::NativeGoalResumeSent { resume_id, goal } => {
+            relay.native_goal_resume_sent(resume_id, goal);
+        }
+        RuntimeEvent::NativeGoalResumeRejected { resume_id } => {
+            relay.native_goal_resume_rejected(resume_id);
         }
         RuntimeEvent::SessionUpdate { update } => {
             let typed = serde_json::from_value::<SessionUpdate>(update).map_err(|error| {
@@ -1218,7 +1252,7 @@ pub(crate) fn record_runtime_event_with_facts(
             relay.record_observation(RelayObservation::NativeAgent {
                 event: mj_core::native_agent::NativeAgentEvent::Disconnected,
             })?;
-            relay.clear_agent_terminals()?;
+            relay.retire_harness_process_state()?;
             relay.record_observation(RelayObservation::Warning {
                 message: message.clone(),
             })?;
@@ -1244,7 +1278,6 @@ pub(crate) fn record_runtime_event_with_facts(
             exit_code,
             signal,
         } => {
-            relay.agent_terminal_closed(&terminal_id)?;
             // Cap here rather than letting `clamp_observation` fire: that
             // keeps the head of a string, and a terminal's tail is what
             // says how the command ended.
@@ -1253,26 +1286,27 @@ pub(crate) fn record_runtime_event_with_facts(
                 mj_core::relay::TERMINAL_JOURNAL_OUTPUT_BYTES,
             );
             relay.record_observation(RelayObservation::TerminalOutput {
-                terminal_id,
+                terminal_id: terminal_id.clone(),
                 output,
                 truncated,
                 exit_code,
                 signal,
             })?;
+            relay.agent_terminal_closed(&terminal_id)?;
+        }
+        RuntimeEvent::TerminalStartFailed { terminal_id } => {
+            relay.agent_terminal_start_failed(&terminal_id)?;
         }
         RuntimeEvent::TerminalStarted {
             terminal_id,
             command,
             started_at_ms,
         } => {
-            relay.agent_terminal_started(mj_core::relay::ActiveAgentTerminal {
-                terminal_id: terminal_id.clone(),
-                command: command.clone(),
+            relay.admit_agent_terminal(mj_core::relay::ActiveAgentTerminal {
+                terminal_id,
+                command,
                 started_at_ms,
             })?;
-            relay.record_session_update(SessionUpdate::ToolCall(
-                crate::acp::fallback_terminal_tool_call(&terminal_id, command),
-            ))?;
         }
         RuntimeEvent::UserShellOutput {
             request_id,
@@ -1300,7 +1334,7 @@ pub(crate) fn record_runtime_event_with_facts(
                 event: mj_core::native_agent::NativeAgentEvent::Disconnected,
             })?;
             relay.clear_acp_readiness();
-            relay.clear_agent_terminals()?;
+            relay.retire_harness_process_state()?;
             relay.record_observation(RelayObservation::ElicitationsCleared)?;
             if relay.operational_state().execution != mj_core::relay::RelayExecutionState::Closed {
                 relay.record_observation(RelayObservation::Warning {
@@ -1614,10 +1648,8 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
 
 /// Which native thread this worker should try to resume. Always the identity
 /// the journal recorded last, if there is one: the launch configuration can
-/// still name a thread this session already replaced. Resuming is always
-/// attempted; whether a failure may be answered with a fresh thread is decided
-/// in `mj-worker/src/acp.rs` from the resume error and
-/// `DurableRelay::native_session_may_have_history`.
+/// still name a thread this session already replaced. ACP decides how to open
+/// that identity using `DurableRelay::native_session_history` as evidence.
 pub(crate) fn select_resume_session(
     config: &WorkerLaunchConfig,
     relay: &DurableRelay,
@@ -1632,9 +1664,9 @@ pub(crate) fn select_resume_session(
 /// somewhere other than this journal, which therefore cannot show what the
 /// thread contains. Record that durably before the thread is used again, so a
 /// later resume failure can never be answered by replacing it. The one
-/// exception is a relay restored from a checkpoint whose conversation shows
-/// the session never received a prompt (I2-7): the harness wrote nothing for
-/// it, so there is nothing a replacement could lose.
+/// exception is a relay restored from a checkpoint with no visible prompt
+/// on the thread (I2-7). That hint allows the typed missing-session fallback
+/// after a reload attempt.
 pub(crate) fn record_imported_native_identity(
     config: &WorkerLaunchConfig,
     relay: &mut DurableRelay,
@@ -1814,6 +1846,7 @@ mod startup_tests {
             BatchedRestart,
             CheckpointExpiry,
             CheckpointReady,
+            CloseAtReleasedCut,
         }
         let allowance = mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
         for arrival in [
@@ -1824,6 +1857,7 @@ mod startup_tests {
             Arrival::BatchedRestart,
             Arrival::CheckpointExpiry,
             Arrival::CheckpointReady,
+            Arrival::CloseAtReleasedCut,
         ] {
             let temp = tempfile::tempdir().unwrap();
             let relay = Arc::new(RelayCell::new(
@@ -1835,7 +1869,7 @@ mod startup_tests {
                 .set_turn_verdict_harness(HarnessKind::Codex);
             let checkpoint = if matches!(
                 arrival,
-                Arrival::CheckpointExpiry | Arrival::CheckpointReady
+                Arrival::CheckpointExpiry | Arrival::CheckpointReady | Arrival::CloseAtReleasedCut
             ) {
                 submit(
                     &relay,
@@ -1858,12 +1892,31 @@ mod startup_tests {
             } else {
                 None
             };
-            let (status, preparation) = watch::channel(PreparationSnapshot {
-                state: Some(mj_core::relay::HarnessPreparation::Started),
-                services: None,
-            });
-            let startup = HarnessStartup::new(status);
-            let idle_wakes = startup.idle_dispatch_wakes.clone();
+            if arrival == Arrival::CloseAtReleasedCut {
+                // A Close sealed at the cut, whose barrier the controller then
+                // released. The coordinator claims the Close only once the
+                // session is configured, so it stays pending.
+                // Hard-won: #1617: a pending Close kept the open deadline from ever firing.
+                submit(
+                    &relay,
+                    "close-at-cut",
+                    RelayCommand::Close {
+                        barrier_command_id: "startup-cut".into(),
+                        expected: checkpoint.clone().unwrap(),
+                    },
+                );
+                submit(
+                    &relay,
+                    "release-close-cut",
+                    RelayCommand::CompleteCheckpoint {
+                        barrier_command_id: "startup-cut".into(),
+                    },
+                );
+                let state = relay.lock().unwrap();
+                assert!(state.close_pending() && !state.worker_writes_held());
+            }
+            let sealed_frontier = relay.lock().unwrap().latest_ordinal();
+            let startup = HarnessStartup::new();
             let (events, received) = mpsc::channel(16);
             let (wake, wakes) = mpsc::channel(1);
             let (commands, mut requests) = mpsc::channel(1);
@@ -1953,10 +2006,6 @@ mod startup_tests {
                         // Hard-won: 8d32fbf09 review: expiry wrote faults through a held checkpoint cut.
                         assert!(state.worker_writes_held());
                         assert_eq!(state.latest_ordinal(), checkpoint.unwrap().ordinal);
-                        assert!(matches!(
-                            preparation.borrow().state,
-                            Some(mj_core::relay::HarnessPreparation::Started)
-                        ));
                         assert!(!coordinator.is_finished());
                     }
                     submit(
@@ -1971,10 +2020,6 @@ mod startup_tests {
                         "handoff-checkpoint",
                         RelayCommand::BeginCheckpoint { reason: None },
                     );
-                    assert!(matches!(
-                        preparation.borrow().state,
-                        Some(mj_core::relay::HarnessPreparation::Started)
-                    ));
                     wake.send(()).await.unwrap();
                 }
                 Arrival::BatchedRestart => {
@@ -1987,7 +2032,9 @@ mod startup_tests {
                     );
                     tokio::time::advance(std::time::Duration::from_secs(1)).await;
                 }
-                Arrival::ExpiryFirst => {}
+                // A pending Close does not hold the deadline: it would wait
+                // forever for a session that never opens.
+                Arrival::ExpiryFirst | Arrival::CloseAtReleasedCut => {}
                 _ => {
                     while !relay
                         .lock()
@@ -2008,14 +2055,7 @@ mod startup_tests {
                     tokio::time::advance(allowance * 2).await;
                     tokio::task::yield_now().await;
                     // Hard-won: a09de965f review: an overdue timer discarded readiness queued behind a cut.
-                    assert!(
-                        matches!(
-                            preparation.borrow().state,
-                            Some(mj_core::relay::HarnessPreparation::Started)
-                        ),
-                        "{arrival:?}"
-                    );
-                    assert!(!coordinator.is_finished());
+                    assert!(!coordinator.is_finished(), "{arrival:?}");
                     if matches!(
                         arrival,
                         Arrival::ReadyQueuedAtExpiry | Arrival::CheckpointReady
@@ -2046,12 +2086,15 @@ mod startup_tests {
                     tokio::time::advance(allowance).await;
                 }
             }
-            coordinator.await.unwrap().unwrap();
+            // Expiry ends the worker with the typed failure its exit record
+            // carries; no relay stays served without a harness.
+            let error = coordinator.await.unwrap().unwrap_err();
+            let failure = error
+                .downcast_ref::<mj_core::relay::WorkerHarnessStartupFailure>()
+                .unwrap_or_else(|| panic!("untyped startup expiry for {arrival:?}: {error:#}"));
             assert!(
-                matches!(&preparation.borrow().state,
-                Some(mj_core::relay::HarnessPreparation::Failed { error, .. })
-                if error.contains("300s") && error.contains("Restart agent")),
-                "{arrival:?}"
+                failure.message.contains("300s") && failure.message.contains("Restart agent"),
+                "{arrival:?}: {failure:?}"
             );
             assert!(
                 !relay
@@ -2068,15 +2111,12 @@ mod startup_tests {
                     .await
                     .is_err()
             );
-            assert!(idle_wakes.lock().unwrap().is_some());
-            if arrival == Arrival::CheckpointExpiry {
-                let state = relay.lock().unwrap().operational_state();
-                // Hard-won: a09de965f review: expiry stranded a checkpoint accepted under Started.
-                assert_eq!(
-                    state.checkpoint_barrier.as_deref(),
-                    Some("handoff-checkpoint")
-                );
-                assert!(state.checkpoint_ready.is_some());
+            if arrival == Arrival::CloseAtReleasedCut {
+                let state = relay.lock().unwrap();
+                // Nothing is journaled behind the seal; the next worker
+                // finishes the Close.
+                assert_eq!(state.latest_ordinal(), sealed_frontier);
+                assert!(state.close_pending());
             }
             if arrival == Arrival::ReadyThenClear {
                 drop(relay);

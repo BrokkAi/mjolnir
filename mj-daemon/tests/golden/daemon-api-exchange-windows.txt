@@ -98,44 +98,7 @@
     },
     "reply": {
       "Ok": {
-        "reply": "availability",
-        "value": {
-          "profiles": {
-            "agent": [
-              {
-                "kind": "codex",
-                "home": "<server>/profile",
-                "environment": {
-                  "DAEMON_TEST_KEY": {
-                    "from_secret": "missing-test-key"
-                  }
-                }
-              },
-              "profile \"agent\": DAEMON_TEST_KEY = { from_secret = \"missing-test-key\" } needs `missing-test-key = \"...\"` in <daemon-config>/secrets.toml"
-            ],
-            "ready": [
-              {
-                "kind": "codex",
-                "home": "<server>/ready-profile",
-                "environment": {
-                  "DAEMON_TEST_KEY": {
-                    "from_secret": "daemon-only-key"
-                  }
-                }
-              },
-              null
-            ]
-          },
-          "local": {
-            "podman": {
-              "missing": "Mjolnir's local Podman target requires Linux, WSL2, or macOS with a rootless Podman machine.",
-              "installed": false
-            }
-          },
-          "machines": [],
-          "added_profiles": [],
-          "added_runtimes": {}
-        }
+        "reply": "done"
       }
     }
   },
@@ -430,6 +393,28 @@
       "Ok": {
         "reply": "done"
       }
+    }
+  },
+  {
+    "request": {
+      "action": "checkpoint_session",
+      "arguments": {
+        "session_id": "removed"
+      }
+    },
+    "reply": {
+      "Err": "The checkpoint action was removed; suspend saves the session."
+    }
+  },
+  {
+    "request": {
+      "action": "checkpoint_session",
+      "arguments": {
+        "session_id": "removed"
+      }
+    },
+    "reply": {
+      "Err": "The checkpoint action was removed; suspend saves the session."
     }
   }
 ]

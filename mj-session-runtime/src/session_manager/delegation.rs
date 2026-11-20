@@ -52,7 +52,7 @@ impl DelegationObservation {
                         snapshot.materialized.execution,
                         mj_core::state::MaterializedExecutionState::Idle
                     )
-                    && !crate::wait_policy::WaitObservation::worker_turn_pending(snapshot)
+                    && !crate::wait_policy::WaitObservation::child_turn_pending(snapshot)
             }),
             in_flight: snapshot
                 .materialized

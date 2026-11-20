@@ -1329,14 +1329,13 @@ impl DashboardState {
             .collect()
     }
 
-    /// One row of the profile picker tables: the warning marker, the profile
-    /// id, the harness, and the two quota percentages remaining. The picker
-    /// pads the cells into aligned columns and draws the marker's footnote
-    /// below the table.
+    /// One row of the profile picker tables: a blank indent, the profile id,
+    /// the harness, and the two quota percentages remaining. The picker pads
+    /// the cells into aligned columns.
     pub(crate) fn profile_choice(&self, id: &str, harness: HarnessKind) -> PickerChoice {
         let (weekly, five_hour) = self.profile_quota_cells(id);
         PickerChoice::table(vec![
-            guardian_warning_marker(harness),
+            PickerCell::blank(),
             PickerCell::text(id),
             PickerCell::text(harness.display_name()),
             weekly,

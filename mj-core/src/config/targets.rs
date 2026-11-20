@@ -8,17 +8,36 @@ use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Environment, ExecutionPolicy, PermissionMode, is_github_source, validate_id,
-    validate_relative_destination,
+    Environment, ExecutionPolicy, PermissionMode, validate_id, validate_relative_destination,
 };
+
+pub fn container_memory_limit(text: &str) -> anyhow::Result<i64> {
+    let text = text.trim();
+    let value = text.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let unit = match text[value.len()..].to_ascii_lowercase().as_str() {
+        "" | "b" => "B",
+        "k" | "kb" | "kib" => "KiB",
+        "m" | "mb" | "mib" => "MiB",
+        "g" | "gb" | "gib" => "GiB",
+        "t" | "tb" | "tib" => "TiB",
+        _ => anyhow::bail!("invalid container memory limit {text:?}"),
+    };
+    let bytes = format!("{value}{unit}")
+        .parse::<bytesize::ByteSize>()
+        .map_err(anyhow::Error::msg)?;
+    Ok(i64::try_from(bytes.as_u64())?)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRepository {
     /// Stable name within the bundle, used by `primary_repo`.
     pub id: String,
-    /// GitHub HTTPS or SSH URL (or `owner/repository` shorthand).
+    /// Network Git URL (or GitHub `owner/repository` shorthand).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github: Option<String>,
+    /// S3 build cache namespace. Defaults to the GitHub owner/repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mbx_namespace: Option<String>,
     /// Controller-side repository whose default network remotes seed isolated sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<PathBuf>,
@@ -59,15 +78,15 @@ impl ProjectBundle {
                     repository.id,
                 );
             }
-            if repository
-                .github
-                .as_deref()
-                .is_some_and(|source| !is_github_source(source))
-            {
-                bail!(
-                    "bundle {bundle_id:?} repository {:?} is not a supported GitHub source",
-                    repository.id,
-                );
+            if let Some(source) = repository.github.as_deref() {
+                crate::remote_git::validate_configured_project_source(source).with_context(
+                    || {
+                        format!(
+                            "invalid Git source for bundle {bundle_id:?} repository {:?}",
+                            repository.id
+                        )
+                    },
+                )?;
             }
             if repository
                 .local
@@ -109,6 +128,8 @@ impl ProjectBundle {
                 self.primary_repo
             );
         }
+        self.mbx_namespaces()
+            .with_context(|| format!("bundle {bundle_id:?}"))?;
         Ok(())
     }
 
@@ -117,9 +138,54 @@ impl ProjectBundle {
             .iter()
             .find(|repository| repository.id == self.primary_repo)
     }
+
+    /// The session's default namespace followed by its other allowed namespaces.
+    pub fn mbx_namespaces(&self) -> Result<Vec<String>> {
+        let primary = self.primary();
+        let mut seen = BTreeSet::new();
+        let mut namespaces = Vec::new();
+        for repository in primary.into_iter().chain(
+            self.repositories
+                .iter()
+                .filter(|repo| repo.id != self.primary_repo),
+        ) {
+            let namespace = repository.mbx_namespace.clone().or_else(|| {
+                let (owner, name) =
+                    crate::remote_git::github_owner_repo(repository.github.as_deref()?)?;
+                Some(format!("{owner}/{name}"))
+            });
+            if let Some(namespace) = namespace {
+                if !namespace.split('/').all(|segment| {
+                    !matches!(segment, "" | "." | "..")
+                        && segment.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                        })
+                }) {
+                    bail!(
+                        "repository {:?} has invalid mbx_namespace {namespace:?}",
+                        repository.id
+                    );
+                }
+                if seen.insert(namespace.clone()) {
+                    namespaces.push(namespace);
+                }
+            }
+        }
+        Ok(namespaces)
+    }
 }
 
 impl ProjectRepository {
+    pub(super) fn strip_http_userinfo(&mut self) {
+        if let Some(source) = self.github.as_deref()
+            && let Ok(std::borrow::Cow::Owned(clean)) =
+                crate::remote_git::project_source(source, crate::remote_git::Shorthand::Allowed)
+        {
+            self.github = Some(clean);
+            tracing::warn!("{}", crate::remote_git::HTTP_USERINFO_REMOVED);
+        }
+    }
+
     pub fn source_label(&self) -> String {
         self.github
             .clone()
@@ -149,6 +215,12 @@ pub struct TargetBuildCache {
     /// Shared storage budget, an mbx size string such as `100GiB`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_total_size: Option<String>,
+    /// S3 cache read by the Nitro host on behalf of its guests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// S3 bucket region. Defaults to the Nitro host's region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_region: Option<String>,
     /// Machine-wide compiler admission settings shared by all builds on this host.
     #[serde(default, skip_serializing_if = "BuildCacheScheduler::is_default")]
     pub scheduler: BuildCacheScheduler,
@@ -187,6 +259,8 @@ struct BuildCacheSettings {
     directory: Option<PathBuf>,
     tools_directory: Option<PathBuf>,
     max_total_size: Option<String>,
+    remote: Option<String>,
+    remote_region: Option<String>,
     scheduler: BuildCacheScheduler,
     #[serde(rename = "max_size")]
     _legacy_max_size: Option<serde_json::Value>,
@@ -201,6 +275,8 @@ impl From<BuildCacheSettings> for TargetBuildCache {
             directory: settings.directory,
             tools_directory: settings.tools_directory,
             max_total_size: settings.max_total_size,
+            remote: settings.remote,
+            remote_region: settings.remote_region,
             scheduler: settings.scheduler,
         }
     }
@@ -213,6 +289,10 @@ impl TargetBuildCache {
     }
 
     pub(super) fn validate(&self, template_id: &str) -> Result<()> {
+        if let Some(remote) = &self.remote {
+            mbx_s3_location(remote)
+                .with_context(|| format!("target template {template_id:?} build cache"))?;
+        }
         if let Some(directory) = &self.tools_directory
             && !crate::target_path::is_absolute(directory)
         {
@@ -246,6 +326,38 @@ impl TargetBuildCache {
         }
         Ok(())
     }
+}
+
+/// Check the bucket name's length, alphabet and endpoints for an mbx S3 remote.
+pub fn valid_mbx_s3_bucket(bucket: &str) -> bool {
+    (3..=63).contains(&bucket.len())
+        && bucket.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+        && bucket.as_bytes()[0].is_ascii_alphanumeric()
+        && bucket.as_bytes()[bucket.len() - 1].is_ascii_alphanumeric()
+}
+
+/// Split an mbx S3 cache location, allowing the bucket root as its prefix.
+pub fn mbx_s3_location(remote: &str) -> Result<(&str, &str)> {
+    let location = remote.strip_prefix("s3://").unwrap_or_default();
+    let (bucket, prefix) = location.split_once('/').unwrap_or((location, ""));
+    if !valid_mbx_s3_bucket(bucket) {
+        bail!("build cache remote {remote:?} must be s3://<bucket>/<prefix>");
+    }
+    let prefix = prefix.trim_matches('/');
+    if prefix
+        .split('/')
+        .any(|segment| matches!(segment, "." | ".."))
+    {
+        bail!("build cache remote {remote:?} contains an S3 prefix with a dot segment");
+    }
+    // The IAM policy and the host proxy must read the prefix the same way;
+    // a percent escape would mean one literal key to IAM and another to S3.
+    if prefix.contains('%') {
+        bail!("build cache remote {remote:?} must spell its S3 prefix without percent escapes");
+    }
+    Ok((bucket, prefix))
 }
 
 fn is_build_cache_scheduler_memory(value: &str) -> bool {
@@ -322,7 +434,7 @@ pub fn build_cache_configuration_directory(directory: &Path) -> PathBuf {
 }
 
 /// The image a container target runs when its table names none: the
-/// reference image CI publishes, which `mj setup` also writes.
+/// reference image CI publishes, which first-run setup also writes.
 fn default_container_image() -> String {
     super::DEFAULT_SESSION_IMAGE.to_owned()
 }

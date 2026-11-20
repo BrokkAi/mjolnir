@@ -3,30 +3,6 @@ use super::*;
 use mj_chat::components::ControlKind;
 use ratatui::layout::{Flex, Layout};
 
-/// How many machines an EC2 fleet is running, as the fleet's answer to the
-/// "In Use" question.
-///
-/// A fleet gets one probe per live instance, so the probe list is the fleet's
-/// size. A fleet has no CPU percentage of its own, and how many machines are
-/// up is what it costs.
-pub(crate) fn fleet_vm_label(detail: &CapacityDetail) -> String {
-    let count = detail.target.probes.len();
-    crate::widgets::counted(count, "VM", "VMs")
-}
-
-/// Why the row's reading cannot be trusted, if it cannot.
-pub(crate) fn capacity_staleness(
-    detail: &CapacityDetail,
-    now_epoch_seconds: u64,
-) -> Option<String> {
-    mj_core::targets::capacity_staleness(
-        detail.state.usage.is_some(),
-        detail.state.probe_error.as_deref(),
-        detail.state.sampled_at_epoch_seconds,
-        now_epoch_seconds,
-    )
-}
-
 pub(crate) struct CapacityTableRow {
     host: String,
     targets: Line<'static>,
@@ -65,9 +41,9 @@ pub(crate) fn capacity_table_rows(
         .map(|detail| {
             // Every listed target is unavailable: say so once for the host
             // and draw nothing else (no capacity, no Disks button).
-            if all_listed_targets_unavailable(&detail.target.target_ids, dashboard) {
+            if all_listed_targets_unavailable(&detail.reading.target_ids, dashboard) {
                 return CapacityTableRow {
-                    host: detail.target.host.clone(),
+                    host: detail.reading.host.clone(),
                     targets: Line::styled("unavailable", theme::muted()),
                     cpu: Line::default(),
                     memory: Line::default(),
@@ -75,11 +51,11 @@ pub(crate) fn capacity_table_rows(
                     staleness: None,
                 };
             }
-            let staleness = capacity_staleness(detail, now_epoch_seconds);
+            let staleness = detail.reading.staleness(now_epoch_seconds);
             let (cpu, memory) = capacity_cpu_and_memory(detail, staleness.is_some());
             CapacityTableRow {
-                host: detail.target.host.clone(),
-                targets: capacity_target_labels(&detail.target.target_ids, dashboard),
+                host: detail.reading.host.clone(),
+                targets: capacity_target_labels(&detail.reading.target_ids, dashboard),
                 cpu,
                 memory,
                 disks: capacity_disks_cell(dashboard, detail),
@@ -95,12 +71,15 @@ pub(crate) fn all_listed_targets_unavailable(
     dashboard: &DashboardState,
 ) -> bool {
     let mut listed = super::sessions::listed_capacity_targets(target_ids, dashboard).peekable();
-    listed.peek().is_some() && listed.all(|id| dashboard.target_missing(id).is_some())
+    listed.peek().is_some() && listed.all(|id| dashboard.target_missing_line(id).is_some())
 }
 
 /// The CPU and RAM cells of one row. A host reports how much of each is in
 /// use; a fleet has no percentage of its own and reports what it is running.
-fn capacity_cpu_and_memory(detail: &CapacityDetail, stale: bool) -> (Line<'static>, Line<'static>) {
+fn capacity_cpu_and_memory(
+    detail: &RuntimeHostCapacity,
+    stale: bool,
+) -> (Line<'static>, Line<'static>) {
     if detail.refreshing {
         return (
             Line::styled(
@@ -111,9 +90,10 @@ fn capacity_cpu_and_memory(detail: &CapacityDetail, stale: bool) -> (Line<'stati
         );
     }
     let unavailable = || Line::styled("unavailable", theme::muted());
-    match (&detail.target.kind, &detail.state.usage) {
-        (DeploymentCapacityKind::Host, Some(usage)) => {
-            let reading = |used_percent: u8| {
+    let reading = &detail.reading;
+    match (reading.kind, reading.has_reading) {
+        (DeploymentCapacityKind::Host, true) => {
+            let percent_cell = |used_percent: u8| {
                 Line::styled(
                     format!("{used_percent}%"),
                     Style::default().fg(if stale {
@@ -123,29 +103,16 @@ fn capacity_cpu_and_memory(detail: &CapacityDetail, stale: bool) -> (Line<'stati
                     }),
                 )
             };
-            let cpu = usage.cpu_percent.map_or_else(unavailable, reading);
-            let memory = if usage.memory_total_bytes == 0 {
-                unavailable()
-            } else {
-                let percent = (u128::from(usage.memory_used_bytes) * 100
-                    / u128::from(usage.memory_total_bytes))
-                .min(100);
-                reading(u8::try_from(percent).unwrap_or(100))
-            };
-            (cpu, memory)
+            (
+                reading.cpu_percent.map_or_else(unavailable, percent_cell),
+                reading
+                    .memory_percent()
+                    .map_or_else(unavailable, percent_cell),
+            )
         }
-        (DeploymentCapacityKind::AwsFleet, Some(usage)) => (
-            Line::raw(format!(
-                "{} cores on {}",
-                usage.logical_cores,
-                fleet_vm_label(detail)
-            )),
-            Line::raw(format_resource_bytes(usage.memory_total_bytes)),
-        ),
-        // A fleet with nothing running has no capacity figures, and the
-        // count is the whole answer.
-        (DeploymentCapacityKind::AwsFleet, None) if detail.state.on_demand => {
-            (Line::raw(fleet_vm_label(detail)), Line::default())
+        (DeploymentCapacityKind::AwsFleet, _) if reading.fleet_instances.is_some() => {
+            let (cpu, memory) = reading.cpu_and_memory();
+            (Line::raw(cpu), Line::raw(memory))
         }
         _ => (unavailable(), Line::default()),
     }
@@ -157,44 +124,32 @@ fn capacity_cpu_and_memory(detail: &CapacityDetail, stale: bool) -> (Line<'stati
 /// The cell is one line: `Disks ▾` while every filesystem is fine, or the
 /// filesystem in the worst condition, as `/srv low ▾`. Details are in the
 /// anchored dropdown.
-fn capacity_disks_cell(dashboard: &DashboardState, detail: &CapacityDetail) -> Line<'static> {
+fn capacity_disks_cell(dashboard: &DashboardState, detail: &RuntimeHostCapacity) -> Line<'static> {
     use mj_core::targets::storage::StorageCondition;
-    let fleet = detail.target.kind == DeploymentCapacityKind::AwsFleet;
-    let filesystems = dashboard
-        .capacity_storage(detail)
-        .into_iter()
-        .flat_map(|view| {
-            view.filesystems.iter().map(move |filesystem| {
-                let place = if fleet {
-                    format!("{} {}", view.host, filesystem.space.mount)
-                } else {
-                    filesystem.space.mount.clone()
-                };
-                (place, filesystem)
-            })
-        })
-        .collect::<Vec<_>>();
-    if filesystems.is_empty() {
+    let reading = &detail.reading;
+    if reading.filesystems.is_empty() {
         return Line::default();
     }
-    let mark = if dashboard.capacity_disks_menu_open(&detail.target.id) {
+    let mark = if dashboard.capacity_disks_menu_open(&detail.reading.id) {
         theme::glyphs().dropup
     } else {
         theme::glyphs().dropdown
     };
-    let worst = filesystems
+    let worst = reading
+        .filesystems
         .iter()
-        .filter(|(_, filesystem)| filesystem.condition != StorageCondition::Ok)
-        .max_by_key(|(_, filesystem)| {
+        .filter(|filesystem| filesystem.condition != StorageCondition::Ok)
+        .max_by_key(|filesystem| {
             (
                 filesystem.condition,
-                std::cmp::Reverse(filesystem.space.available_bytes),
+                std::cmp::Reverse(filesystem.available_bytes),
             )
         });
     match worst {
-        Some((place, filesystem)) => Line::styled(
+        Some(filesystem) => Line::styled(
             format!(
-                "{place}{} {mark}",
+                "{}{} {mark}",
+                reading.filesystem_place(filesystem),
                 storage_condition_flag(filesystem.condition)
             ),
             storage_condition_style(filesystem.condition),
@@ -215,31 +170,22 @@ fn storage_condition_style(condition: mj_core::targets::storage::StorageConditio
 use mj_core::targets::storage_condition_flag;
 
 /// Filesystem details for the dropdown, styled like the former expanded rows.
-pub(crate) fn capacity_disks_menu_lines(
-    dashboard: &DashboardState,
-    detail: &CapacityDetail,
-) -> Vec<Line<'static>> {
-    let fleet = detail.target.kind == DeploymentCapacityKind::AwsFleet;
-    dashboard
-        .capacity_storage(detail)
-        .into_iter()
-        .flat_map(|view| {
-            view.filesystems.iter().map(move |filesystem| {
-                let place = if fleet {
-                    format!("{} {}", view.host, filesystem.space.mount)
-                } else {
-                    filesystem.space.mount.clone()
-                };
-                Line::styled(
-                    format!(
-                        "{place} {} free of {}{}",
-                        format_resource_bytes(filesystem.space.available_bytes),
-                        format_resource_bytes(filesystem.space.total_bytes),
-                        storage_condition_flag(filesystem.condition)
-                    ),
-                    storage_condition_style(filesystem.condition),
-                )
-            })
+pub(crate) fn capacity_disks_menu_lines(detail: &RuntimeHostCapacity) -> Vec<Line<'static>> {
+    let reading = &detail.reading;
+    reading
+        .filesystems
+        .iter()
+        .map(|filesystem| {
+            Line::styled(
+                format!(
+                    "{} {} free of {}{}",
+                    reading.filesystem_place(filesystem),
+                    format_resource_bytes(filesystem.available_bytes),
+                    format_resource_bytes(filesystem.total_bytes),
+                    storage_condition_flag(filesystem.condition)
+                ),
+                storage_condition_style(filesystem.condition),
+            )
         })
         .collect()
 }

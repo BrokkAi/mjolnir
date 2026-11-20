@@ -50,8 +50,9 @@ OpenCode has no steering, so a child's report reaches an OpenCode parent when
 its current turn ends, not between its tool calls. An OpenCode older than 2.2.6
 (for example in a container built from an older image) loads its MCP tools
 shortly after it connects, so the worker holds its first prompt for 250 ms.
-Under configured approvals OpenCode asks the person before each `mj-agents`
-call; choose "always allow" to stop it asking for the rest of the session.
+Under configured approvals OpenCode asks before each `mj-agents` call, and the
+[Mjolnir guardian](/security/#the-mjolnir-guardian) reviews it, as it reviews
+every OpenCode tool call that can reach outside the workspace.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 
@@ -155,11 +156,11 @@ the model mix and quota charging stay comparable.
 | --- | --- | --- | --- | --- | --- |
 | Codex | `codex` | `CODEX_HOME` | `~/.codex` | `auth.json`, or `config.toml` for an API-key provider | yes |
 | Claude Code | `claude` | `CLAUDE_CONFIG_DIR` | `~/.claude` | `.credentials.json` | yes |
-| Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | no |
+| Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | yes (Mjolnir guardian) |
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
-| Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
-| OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | no |
-| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` saved in DSH, or in the environment | no |
+| Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | yes |
+| OpenCode | `open-code` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | a login in `opencode.db`, or a provider key in the environment | yes (Mjolnir guardian) |
+| DSH | `dsh` | `DSH_ACP_DATA_DIR` | `~/.dsh` | `DEEPSEEK_API_KEY` saved in DSH, or in the environment | yes (Mjolnir guardian) |
 
 There are seven harness kinds. A profile whose `kind` is `mimo`, for the
 removed MiMo Code harness, is ignored with a warning when the configuration
@@ -173,19 +174,23 @@ target including a bare runtime on this machine, runs from a staged copy of the
 home that belongs to the session, and the harness's home variable points at
 that copy. See [What a session's staged home holds](#what-a-sessions-staged-home-holds).
 
-`mj setup` checks the home variable first and otherwise looks in the
-conventional location. It also treats an API key in the environment Mjolnir
+First-run setup and **Detect profiles** check the home variable first and then
+look in the conventional location. Discovery also treats an API key in the environment Mjolnir
 started with as an installation signal for a harness that authenticates with
 no login, such as `DEEPSEEK_API_KEY` for DSH. A detected home becomes the
 explicit `home` path in `config.toml`; subsequent sessions use that configured
 path.
 
-Kimi Code does not expose a guardian approval mode. OpenCode asks before tools
-according to its permission rules, and DSH asks before every write, command,
-and MCP tool call other than Mjolnir's own, but both run commands on the host
-without a sandbox, so they have no guardian either. The dashboard's
-new-session and resume wizards warn before using any of them on a raw target. Muse's guardian is muse-acp's auto-review; see
-[Harness limitations](#harness-limitations).
+Kimi Code, OpenCode, and DSH have no guardian of their own. Kimi Code asks
+before tools according to its permission rules, OpenCode asks before every
+tool call that can reach outside the workspace (a hook Mjolnir adds under
+configured approvals, since OpenCode's own default asks for nothing), and DSH
+asks before every write, command, and MCP tool call other than Mjolnir's own,
+but all three run commands on the host without a sandbox. On a raw target the
+[Mjolnir guardian](/security/#the-mjolnir-guardian) answers those requests with
+a review on the same harness and the session's model, unless the profile
+[turns it off](#turn-off-the-mjolnir-guardian). Muse's guardian is
+muse-acp's auto-review; see [Harness limitations](#harness-limitations).
 Container runtimes and EC2
 machines instead run every harness unconstrained inside the isolation
 boundary. See
@@ -482,7 +487,7 @@ on the profile to the exact model values you want offered:
 
 ```toml
 [profiles.ds8bit]
-kind = "opencode"
+kind = "open-code"
 home = "/home/me/.opencode-ds8bit"
 models = ["openrouter/deepseek/deepseek-v4.1-flash-1017"]
 ```
@@ -532,6 +537,30 @@ next launch on. Runtimes that allow all actions (containers, EC2 machines, and
 SSH machines with `permissions = "yolo"`) always run Claude with
 `bypassPermissions`, whatever this setting says. The setting applies only to a
 Claude profile; setting it on any other profile is a configuration error.
+
+## Turn off the Mjolnir guardian
+
+On a runtime that keeps configured approvals, the
+[Mjolnir guardian](/security/#the-mjolnir-guardian) answers the permission
+requests of Kimi Code, OpenCode, and DSH sessions, and asks you only when it
+cannot decide. To answer every request yourself instead, set
+`mjolnir_guardian = false` on the profile:
+
+```toml
+[profiles.opencode]
+kind = "open-code"
+home = "/home/me/.config/opencode"
+mjolnir_guardian = false
+```
+
+The harness still asks before the same actions, and each request opens
+Mjolnir's permission form. You can also turn off **Mjolnir guardian** in
+Settings, on the profile's page. Every session the profile launches reads the
+setting when it starts, including when an existing session resumes, so a
+change applies from the next launch on. Runtimes that allow all actions never
+ask, so the setting changes nothing there. It applies only to Kimi Code,
+OpenCode, and DSH profiles, the harnesses without a guardian of their own;
+setting it on any other profile is a configuration error.
 
 ## Codex profile files
 
@@ -703,7 +732,11 @@ before running `mj`, and run `mj daemon restart` after exporting a new one;
 `mj doctor` names the keys a profile is using.
 
 Mjolnir copies the profile's `opencode.json` to each session unchanged and adds
-its own permission rules on top, so any OpenCode setting in it applies. For example, to set a
+its own permission rules on top, so any OpenCode setting in it applies; under
+configured approvals the
+[Mjolnir guardian's hook](/security/#execution-policy-is-selected-by-the-runtime)
+also makes an action your rules allow ask, where it can reach outside the
+workspace. For example, to set a
 default model and send every OpenRouter request for it to one provider, with
 no fallback to others:
 
@@ -941,10 +974,15 @@ Mjolnir then adds its own files to the staged home:
   ordinary tools named `mj-agents_spawn` and so on instead of reachable only
   through scripts, and, unless the session uses OpenCode's own delegation
   (Native), its own `subagent` tool, and that carry the GitHub CLI approval
-  under configured approvals. OpenCode names a tool
-  `<server>_<tool>`, so another server can carry the same name as a Mjolnir
-  tool; the worker therefore never answers OpenCode's permission requests,
-  and under configured approvals the person approves Mjolnir's tools too;
+  and, under configured approvals, turn off OpenCode's tools that never
+  consult its permissions. OpenCode names a tool `<server>_<tool>`, so another
+  server can carry the same name as a Mjolnir tool; the worker therefore never
+  approves OpenCode's requests for Mjolnir's tools itself, and under
+  configured approvals the
+  [Mjolnir guardian](/security/#the-mjolnir-guardian) reviews them;
+- for OpenCode under configured approvals, the Mjolnir guardian's plugin in
+  `OPENCODE_CONFIG_CONTENT`, whose permission hook runs after OpenCode's rules
+  and makes an allowed action that can reach outside the workspace ask;
 - the GitHub CLI approval in the harness's own configuration, under configured
   approvals: `rules/mj-gh.rules` for Codex, `config.toml` for Kimi Code and
   Grok Build, muse-acp's command prefixes for Muse Code, and agy's project
@@ -1248,12 +1286,14 @@ without them. Muse Spark can also supply utility inference for cross-harness
 handoffs; see
 [Durability and recovery](/durability/).
 
-- Kimi Code, OpenCode, and DSH have no guardian approval mode.
-  Prefer an isolated [container target](/containers/) or EC2 rather than raw
-  execution.
+- Kimi Code, OpenCode, and DSH have no guardian approval mode of their own;
+  on raw targets the [Mjolnir guardian](/security/#the-mjolnir-guardian)
+  reviews their tool requests. It is not a sandbox, so prefer an isolated
+  [container target](/containers/) or EC2 for untrusted work.
 - OpenCode talks to third-party providers through its own gateway, so it
   publishes no quota endpoint and its profile shows quota as unavailable. It
-  reads permission rules from `opencode.json`. Its sessions live in a SQLite
+  reads permission rules from `opencode.json`; under configured approvals the
+  Mjolnir guardian's hook also applies. Its sessions live in a SQLite
   database, so native import and SessionWiki search do not list them, and it
   never serves Mjolnir's delegation or utility inference.
 - DSH has no sandbox: commands run directly on the host, and only its file

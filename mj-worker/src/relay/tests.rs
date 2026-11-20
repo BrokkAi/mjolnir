@@ -27,6 +27,287 @@ fn initial_fifo_commands() -> Vec<mj_core::worker_launch::InitialWorkerCommand> 
     .collect()
 }
 
+// Hard-won: 6f0f854: a legacy receipt evicted before /clear allowed startup replay at upgrade.
+#[test]
+fn startup_upgrade_uses_lifetime_prompt_watermark_after_pruning_and_clear() {
+    legacy_startup_with_pruned_receipt(true, false, false);
+}
+
+// Hard-won: 6f0f854: pre-watermark native use must still prove startup was seeded.
+#[test]
+fn startup_upgrade_preserves_pre_watermark_native_use_without_a_receipt() {
+    legacy_startup_with_pruned_receipt(false, true, false);
+}
+
+// Hard-won: 9a72411: a pruned removal receipt was displayed as delivery of a legacy brief.
+#[test]
+fn startup_upgrade_does_not_display_a_removed_brief_after_its_receipt_is_pruned() {
+    legacy_startup_with_pruned_receipt(false, false, true);
+}
+
+fn legacy_startup_with_pruned_receipt(clear: bool, omit_watermark: bool, removed: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let commands = vec![mj_core::worker_launch::InitialWorkerCommand {
+        command_id: "original-brief".into(),
+        command: prompt("original task"),
+        optional: false,
+    }];
+    let mut relay = DurableRelay::open_for_harness(
+        temp.path(),
+        SESSION,
+        "old",
+        HarnessKind::Codex,
+        if removed { &[] } else { &commands },
+    )
+    .unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Codex);
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "old-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    if removed {
+        submit_relay(&mut relay, "blocking-prompt", prompt("already running"));
+        relay.claim_pending_commands(true).unwrap();
+        relay.initial_commands = commands.clone();
+        relay.seed_initial_commands().unwrap();
+        submit_relay(
+            &mut relay,
+            "remove-original",
+            RelayCommand::RemoveQueuedPrompt {
+                queued_command_id: "original-brief".into(),
+            },
+        );
+        assert_eq!(
+            relay.snapshot.handled_commands["original-brief"]
+                .failure
+                .as_deref(),
+            Some("queued command was removed")
+        );
+        finish_prompt(&mut relay, "blocking-prompt");
+    } else {
+        relay.claim_pending_commands(true).unwrap();
+        finish_prompt(&mut relay, "original-brief");
+    }
+    submit_relay(&mut relay, "later-prompt", prompt("later"));
+    relay.claim_pending_commands(true).unwrap();
+    finish_prompt(&mut relay, "later-prompt");
+    // Emulate legacy retention, before startup owners were registered.
+    relay.snapshot.initial_command_ids.clear();
+    for index in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+        submit_relay(
+            &mut relay,
+            &format!("later-command-{index}"),
+            RelayCommand::RecordNotice {
+                text: "later".into(),
+            },
+        );
+    }
+    let acknowledged = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "prune-old-startup", acknowledged);
+    assert!(
+        !relay
+            .snapshot
+            .handled_commands
+            .contains_key("original-brief")
+    );
+    if clear {
+        submit_relay(&mut relay, "clear-context", RelayCommand::ClearContext);
+        relay.claim_pending_commands(true).unwrap();
+        relay
+            .record_command_completed(
+                "clear-context",
+                RelayCommandOutcome::ContextCleared {
+                    native_session_id: "cleared-thread".into(),
+                    memory: None,
+                },
+            )
+            .unwrap();
+        assert!(!relay.snapshot.native_session_used);
+    } else {
+        assert!(relay.snapshot.native_session_used);
+    }
+    let frontier = relay.latest_ordinal();
+    relay.persist_snapshot().unwrap();
+    drop(relay);
+    let path = temp.path().join(RELAY_STATE_FILE);
+    let mut saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved["format_version"] = serde_json::json!(27);
+    // Legacy collection pruned only after a checkpoint covered this ACK.
+    saved["recovery_floor_ordinal"] = saved["acknowledged_through"].clone();
+    saved["recovery_floor_digest"] = saved["acknowledged_digest"].clone();
+    saved.as_object_mut().unwrap().remove("initial_command_ids");
+    saved.as_object_mut().unwrap().remove("native_use_evidence");
+    if omit_watermark {
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("latest_prompt_accepted_ordinal");
+    }
+    fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    for _ in 0..2 {
+        let mut relay = DurableRelay::open_for_harness(
+            temp.path(),
+            SESSION,
+            "new",
+            HarnessKind::Codex,
+            &commands,
+        )
+        .unwrap();
+        assert_eq!(relay.latest_ordinal(), frontier);
+        assert!(
+            relay
+                .snapshot
+                .initial_command_ids
+                .contains("original-brief")
+        );
+        assert!(
+            !relay
+                .snapshot
+                .handled_commands
+                .contains_key("original-brief")
+        );
+        let cut = relay.live_session_baseline().unwrap();
+        // Missing legacy receipts prove neither completion nor removal. The
+        // startup pin prevents replay without inventing a delivered user row.
+        assert!(cut.delivered_initial_prompts.is_empty());
+        assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    }
+}
+
+// Hard-won: 6f0f854: a partially accepted selector prefix must not consume the unsubmitted brief.
+#[test]
+fn startup_upgrade_completes_one_of_two_accepted_commands_exactly_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let commands = vec![
+        mj_core::worker_launch::InitialWorkerCommand {
+            command_id: "initial-model".into(),
+            command: set_config("model", "chosen"),
+            optional: false,
+        },
+        mj_core::worker_launch::InitialWorkerCommand {
+            command_id: "initial-brief".into(),
+            command: prompt("owed task"),
+            optional: false,
+        },
+    ];
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    let accepted = submit_relay(&mut relay, "initial-model", commands[0].command.clone());
+    assert!(relay.snapshot.latest_prompt_accepted_ordinal.is_none());
+    relay.persist_snapshot().unwrap();
+    drop(relay);
+    let path = temp.path().join(RELAY_STATE_FILE);
+    let mut saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved["format_version"] = serde_json::json!(27);
+    saved.as_object_mut().unwrap().remove("initial_command_ids");
+    fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "new", HarnessKind::Codex, &commands)
+            .unwrap();
+    assert_eq!(
+        relay.snapshot.handled_commands["initial-model"].accepted_ordinal,
+        accepted
+    );
+    assert!(
+        relay
+            .snapshot
+            .handled_commands
+            .contains_key("initial-brief")
+    );
+    let frontier = relay.latest_ordinal();
+    drop(relay);
+    let relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "new", HarnessKind::Codex, &commands)
+            .unwrap();
+    assert_eq!(relay.latest_ordinal(), frontier);
+    assert_eq!(
+        relay
+            .snapshot
+            .queued_prompts
+            .iter()
+            .filter(|queued| queued.command_id == "initial-brief")
+            .count(),
+        1
+    );
+}
+
+// Hard-won: 92ab7be: clearing context and pruning receipts replayed the original child assignment.
+#[test]
+fn initial_brief_is_not_reseeded_after_clear_and_ack_pruning() {
+    let temp = tempfile::tempdir().unwrap();
+    let commands = vec![mj_core::worker_launch::InitialWorkerCommand {
+        command_id: "original-brief".into(),
+        command: prompt("original assignment"),
+        optional: false,
+    }];
+    let mut relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &commands)
+            .unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Codex);
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "original-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    relay.claim_pending_commands(true).unwrap();
+    finish_prompt(&mut relay, "original-brief");
+    // The latest-turn owner must not accidentally protect the startup receipt.
+    submit_relay(&mut relay, "followup-prompt", prompt("later user request"));
+    relay.claim_pending_commands(true).unwrap();
+    finish_prompt(&mut relay, "followup-prompt");
+    submit_relay(&mut relay, "clear-context", RelayCommand::ClearContext);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "clear-context",
+            RelayCommandOutcome::ContextCleared {
+                native_session_id: "empty-after-clear".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+    assert!(!relay.snapshot.native_session_used);
+    for index in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+        submit_relay(
+            &mut relay,
+            &format!("later-command-{index}"),
+            RelayCommand::RecordNotice {
+                text: "later".into(),
+            },
+        );
+    }
+    let latest = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "ack-after-clear", latest);
+    assert!(
+        !relay
+            .snapshot
+            .handled_commands
+            .contains_key("later-command-0")
+    );
+    drop(relay);
+    let mut checkpoint_only =
+        DurableRelay::open_for_checkpoint(temp.path(), SESSION, "test").unwrap();
+    acknowledge_relay(&mut checkpoint_only, "checkpoint-only-ack", latest);
+    assert!(
+        checkpoint_only
+            .snapshot
+            .handled_commands
+            .contains_key("original-brief")
+    );
+    drop(checkpoint_only);
+    let mut relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &commands)
+            .unwrap();
+    assert_eq!(relay.latest_ordinal(), latest);
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+}
+
 // Hard-won: #1394: a mailbox wake ran between startup selectors without the child's original brief.
 #[test]
 fn initial_fifo_completes_a_crashed_prefix_and_keeps_mail_after_the_brief() {
@@ -171,7 +452,13 @@ fn initial_fifo_does_not_release_the_brief_after_required_configuration_fails() 
             .contains("provider refused the selected model")
     );
     // Checkpoint recovery still owns and can preserve this failed worker's data.
-    DurableRelay::open_for_checkpoint(temp.path(), SESSION, "test").unwrap();
+    DurableRelay::open_for_checkpoint_with_initial_commands(
+        temp.path(),
+        SESSION,
+        "test",
+        &commands,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -1387,7 +1674,7 @@ fn a_dispatched_prompt_gives_the_native_session_history() {
 }
 
 #[test]
-fn a_released_recovery_floor_gives_the_native_session_history() {
+fn a_released_recovery_floor_does_not_override_known_unused_native_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     relay
@@ -1401,7 +1688,7 @@ fn a_released_recovery_floor_gives_the_native_session_history() {
     assert!(!relay.native_session_may_have_history());
     let cursor = ready_checkpoint(&mut relay, "checkpoint");
     submit_floor(&mut relay, "archive-installed", cursor);
-    assert!(relay.native_session_may_have_history());
+    assert!(!relay.native_session_may_have_history());
 }
 
 // Hard-won: c82d9df3: an empty Claude session opened above an archive floor was mistaken for used history.
@@ -2279,6 +2566,74 @@ fn a_proven_replay_cursor_does_not_reread_its_old_segment() {
     );
 }
 
+// Hard-won: 0c505b8: ACK GC copied the entire live suffix under the relay owner lock.
+#[test]
+fn acknowledgement_collects_only_covered_files_and_preserves_live_segments() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    record_paged_history(&mut relay, 80);
+    let spans = relay.journal_spans.clone();
+    assert!(spans.len() >= 4);
+    let through = spans[0].file_last_ordinal;
+    let digest = relay.digest_at(through).unwrap().unwrap();
+    let frontier = relay.latest_ordinal();
+    let partial = spans[0].file_first_ordinal + 1;
+    assert!(partial < through);
+    let partial_digest = relay.digest_at(partial).unwrap().unwrap();
+    let deferred = relay
+        .take_deferred_attach(&attach_envelope(&relay, "before-partial-ack", 0))
+        .unwrap();
+    let generation = deferred.journal_generation();
+
+    let live = &spans[2].path;
+    let saved = fs::read(live).unwrap();
+    // A later unreadable segment cannot prevent collection of the covered prefix.
+    fs::write(live, b"unreadable live segment").unwrap();
+    let response = relay.handle(relay_request(
+        "collect-boundary-prefix",
+        RelayRequest::Acknowledge {
+            through_ordinal: partial,
+            through_digest: partial_digest,
+        },
+    ));
+    assert!(
+        matches!(response.body, RelayResponseBody::Ok { .. }),
+        "{response:?}"
+    );
+    assert!(
+        spans[0].path.exists(),
+        "a straddling file is retained until completely covered"
+    );
+    assert_eq!(relay.journal_spans[0].after_ordinal, partial);
+    assert_ne!(
+        relay.journal_generation(),
+        generation,
+        "logical collection invalidates prepared reads"
+    );
+    let response = relay.handle(relay_request(
+        "collect-prefix",
+        RelayRequest::Acknowledge {
+            through_ordinal: through,
+            through_digest: digest.clone(),
+        },
+    ));
+    assert!(
+        matches!(response.body, RelayResponseBody::Ok { .. }),
+        "{response:?}"
+    );
+    assert!(!spans[0].path.exists());
+    for span in &spans[1..] {
+        assert!(span.path.exists(), "a fully live segment was replaced");
+    }
+    assert_eq!(fs::read(live).unwrap(), b"unreadable live segment");
+    fs::write(live, saved).unwrap();
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "reopened").unwrap();
+    let events = relay.events_after(through, &digest).unwrap();
+    assert_eq!(events.first().unwrap().ordinal, through + 1);
+    assert_eq!(events.last().unwrap().ordinal, frontier);
+}
+
 #[test]
 fn a_deferred_attach_refuses_a_page_from_a_collected_journal() {
     let temp = tempfile::tempdir().unwrap();
@@ -2792,10 +3147,9 @@ fn releasing_a_checkpoint_requires_that_exact_ready_barrier() {
     );
 }
 
-/// Installing the archive is what earns the journal release, and the
-/// recovery floor is how the relay records it.
+/// Legacy archive coverage remains validated, independently of journal retention.
 #[test]
-fn advancing_the_recovery_floor_releases_history_only_forward_and_on_chain() {
+fn legacy_recovery_floor_advances_only_forward_without_controlling_retention() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     let ready = ready_checkpoint(&mut relay, "installed-barrier");
@@ -2806,13 +3160,6 @@ fn advancing_the_recovery_floor_releases_history_only_forward_and_on_chain() {
             barrier_command_id: "installed-barrier".into(),
         },
     );
-    // Acknowledge past the ready cursor so the recovery floor alone decides
-    // what the relay retains.
-    attach_relay(&mut relay, "attach-floor", 0);
-    let acknowledged = relay.latest_ordinal();
-    acknowledge_relay(&mut relay, "ack-floor", acknowledged);
-    assert_eq!(relay.snapshot.retained_through(), 0);
-
     let mismatched = submit_floor(
         &mut relay,
         "floor-wrong-digest",
@@ -2855,7 +3202,7 @@ fn advancing_the_recovery_floor_releases_history_only_forward_and_on_chain() {
     );
     assert_eq!(relay.snapshot.recovery_floor_ordinal, ready.ordinal);
     assert_eq!(relay.snapshot.recovery_floor_digest, ready.digest);
-    assert_eq!(relay.snapshot.retained_through(), ready.ordinal);
+    assert_eq!(relay.snapshot.retained_through(), 0);
 
     let backwards = submit_floor(
         &mut relay,
@@ -2875,6 +3222,9 @@ fn advancing_the_recovery_floor_releases_history_only_forward_and_on_chain() {
         }
     ));
     assert_eq!(relay.snapshot.recovery_floor_ordinal, ready.ordinal);
+    let acknowledged = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "ack-floor", acknowledged);
+    assert_eq!(relay.snapshot.retained_through(), acknowledged);
 }
 
 /// The legacy one-step completion is unchanged: it both resumes dispatch
@@ -5216,7 +5566,7 @@ fn air_tasks_are_process_local_and_clear_on_teardown() {
     relay
         .set_air_tasks(vec![air_task("design", "Design review")])
         .unwrap();
-    relay.clear_agent_terminals().unwrap();
+    relay.retire_harness_process_state().unwrap();
     assert!(relay.operational_state().background_commands.is_empty());
     relay
         .set_air_tasks(vec![air_task("design", "Design review")])
@@ -6492,6 +6842,8 @@ fn clear_changes_only_native_context_and_is_idempotent_across_reopen() {
         relay.operational_state().native_session_id.as_deref(),
         Some("original")
     );
+    let mut cut = relay.reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
     relay
         .record_command_completed(
             "clear-request",
@@ -6501,6 +6853,8 @@ fn clear_changes_only_native_context_and_is_idempotent_across_reopen() {
             },
         )
         .unwrap();
+    assert!(relay.pending_native_resumes.is_empty());
+    assert!(cut.try_recv().unwrap().is_ok());
     let ordinal = relay.operational_state().latest_ordinal;
     assert!(!relay.native_session_may_have_history());
     assert!(relay.snapshot.pending_prompt_context.is_none());
@@ -6752,6 +7106,319 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     relay.claim_pending_commands(true).unwrap();
     submit_relay(&mut relay, "queued-prompt", prompt("DELIVERED CORRECTION"));
     assert_eq!(evidence(&relay).user_prompt_tail, "ORIGINAL REQUEST");
+    // Hard-won: 655be2b: a later removed queue receipt hid delivered text after ACK.
+    submit_relay(
+        &mut relay,
+        "removed-undelivered",
+        prompt("NEVER DELIVER THIS"),
+    );
+    submit_relay(
+        &mut relay,
+        "remove-undelivered",
+        RelayCommand::RemoveQueuedPrompt {
+            queued_command_id: "removed-undelivered".into(),
+        },
+    );
+
+    assert!(
+        !evidence(&relay)
+            .transcript_summary
+            .contains("DELIVERED CORRECTION")
+    );
+    submit_relay(&mut relay, "cancel-command", RelayCommand::Cancel);
+    relay.claim_pending_commands(true).unwrap();
+    assert_eq!(evidence(&relay).user_prompt_tail, "ORIGINAL REQUEST");
+    relay
+        .record_command_completed(
+            "cancel-command",
+            RelayCommandOutcome::Steered {
+                queued_command_id: "queued-prompt".into(),
+            },
+        )
+        .unwrap();
+    let before = evidence(&relay);
+    assert_eq!(before.user_prompt_tail, "DELIVERED CORRECTION");
+    assert!(before.transcript_summary.contains("DELIVERED CORRECTION"));
+    assert!(!before.transcript_summary.contains("ORIGINAL REQUEST"));
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let after = evidence(&relay);
+    assert_eq!(after.user_prompt_tail, before.user_prompt_tail);
+    assert_eq!(after.transcript_summary, before.transcript_summary);
+    // Hard-won: cc8c246: ACK pruning removed the only restart source for judge text tails.
+    let mut relay = relay;
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"REPLY AFTER THE CORRECTION"}
+    })).unwrap()).unwrap();
+    let expected = evidence(&relay);
+    let through = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "collect-judgment-history", through);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "after-ack").unwrap();
+    let recovered = evidence(&relay);
+    assert_eq!(recovered.user_prompt_tail, expected.user_prompt_tail);
+    assert!(recovered.assistant_text_tail.is_empty());
+    assert!(!recovered.user_prompt_tail.is_empty());
+    assert!(
+        relay
+            .snapshot
+            .authorization_context()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| message.role == "assistant"
+                && message.text == expected.assistant_text_tail)
+    );
+    assert!(
+        !relay
+            .turn_context()
+            .authorization_context()
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    // A newer delivered request must not inherit the prior request's reply.
+    let mut relay = relay;
+    // Restart recovery now precedes new input. Settle the interrupted turn
+    // before checking the evidence for the next delivered request.
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    for pending in relay.claim_pending_commands(true).unwrap() {
+        relay
+            .record_command_completed(
+                &pending.command_id,
+                RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                    diagnostic: None,
+                    usage: None,
+                    work_facts: None,
+                },
+            )
+            .unwrap();
+    }
+    submit_relay(
+        &mut relay,
+        "next-person-request",
+        prompt("NEXT REQUEST WITHOUT A REPLY"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "next-person-request",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                diagnostic: None,
+                usage: None,
+                work_facts: None,
+            },
+        )
+        .unwrap();
+    let through = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "collect-next-request", through);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "next-request-after-ack").unwrap();
+    let recovered = evidence(&relay);
+    assert_eq!(recovered.user_prompt_tail, "NEXT REQUEST WITHOUT A REPLY");
+    assert!(recovered.assistant_text_tail.is_empty());
+    // Generated work continues under the latest human instructions, whether
+    // or not its own delivery remains in the journal.
+    let mut relay = relay;
+    let through = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "collect-before-generated", through);
+    submit_relay(
+        &mut relay,
+        "auto-continue-no-human",
+        prompt("Continue the authorized work"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    drop(relay);
+    let mut relay =
+        DurableRelay::open(temp.path(), SESSION, "generated-with-retained-delivery").unwrap();
+    assert_eq!(
+        evidence(&relay).user_prompt_tail,
+        "NEXT REQUEST WITHOUT A REPLY"
+    );
+    assert!(evidence(&relay).assistant_text_tail.is_empty());
+    let through = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "collect-generated-delivery", through);
+    drop(relay);
+    let mut relay =
+        DurableRelay::open(temp.path(), SESSION, "generated-with-pruned-delivery").unwrap();
+    assert_eq!(
+        evidence(&relay).user_prompt_tail,
+        "NEXT REQUEST WITHOUT A REPLY"
+    );
+    assert!(evidence(&relay).assistant_text_tail.is_empty());
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let recovery = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(recovery.len(), 1);
+    assert_eq!(
+        evidence(&relay).user_prompt_tail,
+        "NEXT REQUEST WITHOUT A REPLY"
+    );
+    assert!(evidence(&relay).assistant_text_tail.is_empty());
+}
+
+// Hard-won: ce467bc6f: a restarted mailbox wake inherited the prior turn's closed answer.
+#[test]
+fn mailbox_reopen_keeps_latest_instructions_without_the_previous_reply() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "human-turn").unwrap();
+    let evidence = |relay: &DurableRelay| {
+        relay.turn_context().evidence(
+            mj_core::config::HarnessKind::Codex,
+            mj_core::activity::verdict::TurnPhase::Running,
+            &mj_core::activity::ActivityFacts::default(),
+            0,
+        )
+    };
+    submit_relay(
+        &mut relay,
+        "human-instructions",
+        prompt("Keep working under these instructions"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"human-answer",
+                "content":{"type":"text","text":"human turn complete"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    relay
+        .record_command_completed(
+            "human-instructions",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                diagnostic: None,
+                usage: None,
+                work_facts: None,
+            },
+        )
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "idle-after-human").unwrap();
+    assert_eq!(evidence(&relay).assistant_text_tail, "human turn complete");
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    submit_relay(
+        &mut relay,
+        "mailbox-event-assessment",
+        RelayCommand::DeliverMailboxEvent {
+            event: mj_core::mailbox::MailboxEvent {
+                key: "new-mailbox-work".into(),
+                source: "operator".into(),
+                wake: true,
+                created_at_ms: 1,
+                body: mj_core::mailbox::MailboxEventBody::OperatorBack {
+                    requests: vec!["continue the work".into()],
+                },
+            },
+        },
+    );
+    let wake = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(wake.len(), 1);
+    assert!(matches!(wake[0].command, RelayCommand::MailboxWake { .. }));
+    assert!(evidence(&relay).assistant_text_tail.is_empty());
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "mailbox-before-output").unwrap();
+    assert_eq!(
+        evidence(&relay).user_prompt_tail,
+        "Keep working under these instructions"
+    );
+    assert!(evidence(&relay).assistant_text_tail.is_empty());
+    // Hard-won: 32f7cb9: reopening with recovery still queued revived the old answer.
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "mailbox-recovery-queued").unwrap();
+    assert!(evidence(&relay).assistant_text_tail.is_empty());
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"mailbox-answer",
+                "content":{"type":"text","text":"mailbox prefix"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "mailbox-with-output").unwrap();
+    assert_eq!(evidence(&relay).assistant_text_tail, "mailbox prefix");
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"mailbox-answer",
+                "content":{"type":"text","text":" plus suffix"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        evidence(&relay).assistant_text_tail,
+        "mailbox prefix plus suffix"
+    );
+    assert_eq!(
+        evidence(&relay).user_prompt_tail,
+        "Keep working under these instructions"
+    );
+    // Hard-won: 32f7cb9: authorization history reopened narration closed by a thought.
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_thought_chunk", "content":{"type":"text","text":"thinking"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "mailbox-after-thought").unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"new reply"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(evidence(&relay).assistant_text_tail, "new reply");
+}
+
+// Hard-won: 31d6d4489: ACK and a second running restart lost the confirmed correction.
+#[test]
+fn restart_continuation_preserves_confirmed_steering_context() {
+    use mj_core::activity::{ActivityFacts, verdict::TurnPhase};
+    use mj_core::config::HarnessKind;
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let evidence = |relay: &DurableRelay| {
+        relay.turn_context().evidence(
+            HarnessKind::Codex,
+            TurnPhase::Running,
+            &ActivityFacts::default(),
+            0,
+        )
+    };
+    submit_relay(&mut relay, "active-prompt", prompt("ORIGINAL REQUEST"));
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(&mut relay, "queued-prompt", prompt("DELIVERED CORRECTION"));
+    assert_eq!(evidence(&relay).user_prompt_tail, "ORIGINAL REQUEST");
     assert!(
         !evidence(&relay)
             .transcript_summary
@@ -6797,6 +7464,76 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     assert!(
         matches!(&blocks[0], ContentBlock::Text(note) if note.text.contains("take precedence"))
     );
+
+    assert_eq!(evidence(&relay).user_prompt_tail, "DELIVERED CORRECTION");
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"Work under the correction"}
+    })).unwrap()).unwrap();
+    // Every new recovery is already running before its delivery is collected.
+    // The latest user entry governs it, regardless of its executing command ID.
+    for generation in 0..3 {
+        if generation == 0 {
+            for index in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+                submit_relay(
+                    &mut relay,
+                    &format!("post-correction-control-{index}"),
+                    RelayCommand::RecordNotice {
+                        text: "later control".into(),
+                    },
+                );
+            }
+        }
+        let through = relay.latest_ordinal();
+        acknowledge_relay(
+            &mut relay,
+            &format!("collect-recovery-{generation}"),
+            through,
+        );
+        assert_eq!(relay.snapshot.retained_through(), through);
+        assert!(
+            !relay
+                .snapshot
+                .handled_commands
+                .contains_key("queued-prompt"),
+            "the delivered correction must outlive its retry receipt"
+        );
+        drop(relay);
+        relay = DurableRelay::open(temp.path(), SESSION, "repeated-after-ack").unwrap();
+        assert_eq!(evidence(&relay).user_prompt_tail, "DELIVERED CORRECTION");
+        assert!(evidence(&relay).assistant_text_tail.is_empty());
+        assert!(
+            relay
+                .snapshot
+                .authorization_context()
+                .unwrap()
+                .messages
+                .iter()
+                .any(|message| message.role == "assistant"
+                    && message.text == "Work under the correction")
+        );
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        let recovery = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(recovery.len(), 1);
+        assert!(mj_core::continuation::is_restart_continuation(
+            &recovery[0].command_id
+        ));
+        assert_eq!(evidence(&relay).user_prompt_tail, "DELIVERED CORRECTION");
+        assert!(evidence(&relay).assistant_text_tail.is_empty());
+        assert!(
+            relay
+                .snapshot
+                .authorization_context()
+                .unwrap()
+                .messages
+                .iter()
+                .any(|message| message.role == "assistant"
+                    && message.text == "Work under the correction")
+        );
+    }
 }
 
 /// I1-11: a finished turn leaves its compact receipt in the ledger until the
@@ -8761,6 +9498,7 @@ fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_o
             .into_iter()
             .collect(),
         native_session_unused: true,
+        mailbox: None,
     };
     fs::write(
         mj_core::relay::restored_relay_seed_path(seed_root.path()),
@@ -8839,4 +9577,1503 @@ fn an_autonomous_harness_turn_settling_records_work_facts_and_liveness() {
     let (watched, identities) = relay.watched_work().unwrap();
     assert_eq!(watched, liveness);
     assert_eq!(identities, vec![identity]);
+}
+
+// Pinning is a durable operation boundary, independent of the journal and bounded retry tail.
+// Hard-won: f30ad64: completed pin release also dropped an unrelated legacy Move hold.
+#[test]
+fn interrupted_move_receipts_survive_ack_pruning_and_worker_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    let command = set_config("model", "retained-model");
+    let accepted = submit_relay(&mut relay, "move-queued-config", command.clone());
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed("move-queued-config", RelayCommandOutcome::Configured)
+        .unwrap();
+    for i in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+        submit_relay(
+            &mut relay,
+            &format!("later-command-{i}"),
+            RelayCommand::RecordNotice {
+                text: format!("completed {i}"),
+            },
+        );
+    }
+    // Model an old worker's acknowledged snapshot: its floor still retains
+    // the journal, and its Move has not registered pins with this new protocol.
+    relay.snapshot.acknowledged_through = relay.latest_ordinal();
+    relay.snapshot.acknowledged_digest = relay.latest_digest().to_owned();
+    relay.persist_snapshot().unwrap();
+    drop(relay);
+    let path = temp.path().join(RELAY_STATE_FILE);
+    let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    old["format_version"] = serde_json::json!(27);
+    fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    assert!(relay.snapshot.legacy_command_retention);
+    // Failed archive reconciliation cannot prevent releasing an unrelated
+    // finished operation, but that release must keep the upgrade hold.
+    for (request_id, ids) in [
+        ("pin-finished-move", ["later-command-0".into()].into()),
+        ("release-finished-move", std::collections::BTreeSet::new()),
+    ] {
+        assert!(matches!(
+            relay
+                .handle(relay_request(
+                    request_id,
+                    RelayRequest::UpdateCommandRetention {
+                        operation_id: Some("finished-move-operation".into()),
+                        command_ids: ids,
+                        reconcile_legacy: false,
+                    }
+                ))
+                .body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::CommandRetentionUpdated
+            }
+        ));
+        assert!(relay.snapshot.legacy_command_retention);
+    }
+    relay.garbage_collect_relay_history().unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "still-unreconciled").unwrap();
+    assert!(relay.snapshot.legacy_command_retention);
+    assert_eq!(
+        submit_relay(&mut relay, "move-queued-config", command.clone()),
+        accepted
+    );
+    let update = |ids: std::collections::BTreeSet<String>, reconcile_legacy| {
+        RelayRequest::UpdateCommandRetention {
+            operation_id: Some("move-operation-1".into()),
+            command_ids: ids,
+            reconcile_legacy,
+        }
+    };
+    assert!(matches!(
+        relay
+            .handle(relay_request(
+                "reconcile",
+                update(["move-queued-config".into()].into(), true)
+            ))
+            .body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::CommandRetentionUpdated
+        }
+    ));
+    let ordinal = relay.latest_ordinal();
+    let digest = relay.latest_digest().to_owned();
+    assert!(matches!(
+        relay
+            .handle(relay_request(
+                "acknowledge",
+                RelayRequest::Acknowledge {
+                    through_ordinal: ordinal,
+                    through_digest: digest
+                }
+            ))
+            .body,
+        RelayResponseBody::Ok { .. }
+    ));
+    assert_eq!(relay.snapshot.retained_through(), ordinal);
+    assert_eq!(relay.snapshot.recovery_floor_ordinal, 0);
+    assert_eq!(
+        relay.snapshot.handled_commands["move-queued-config"].outcome,
+        Some(RelayCommandOutcome::Configured)
+    );
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new-again").unwrap();
+    // A retry after journal pruning returns the original acceptance, not a new dispatch.
+    assert_eq!(
+        submit_relay(&mut relay, "move-queued-config", command),
+        accepted
+    );
+    assert!(
+        !relay.snapshot.dispatches.contains_key("move-queued-config")
+            || relay.snapshot.dispatches["move-queued-config"].state
+                == RelayDispatchState::Completed
+    );
+    // A stale connector cannot undo operation pins after upgrade reconciliation.
+    relay.handle(relay_request(
+        "stale-reconcile",
+        RelayRequest::UpdateCommandRetention {
+            operation_id: None,
+            command_ids: Default::default(),
+            reconcile_legacy: true,
+        },
+    ));
+    assert!(
+        relay
+            .snapshot
+            .command_retention
+            .contains_key("move-operation-1")
+    );
+    // The daemon sends this only after queue_admission_finished is durable.
+    relay.handle(relay_request(
+        "release-operation",
+        update(Default::default(), false),
+    ));
+    relay.garbage_collect_relay_history().unwrap();
+    assert!(
+        !relay
+            .snapshot
+            .handled_commands
+            .contains_key("move-queued-config")
+    );
+}
+
+#[test]
+fn unused_native_evidence_survives_ack_pruning_and_worker_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "empty-native".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let ordinal = relay.latest_ordinal();
+    let digest = relay.latest_digest().to_owned();
+    relay.handle(relay_request(
+        "ack-empty",
+        RelayRequest::Acknowledge {
+            through_ordinal: ordinal,
+            through_digest: digest.clone(),
+        },
+    ));
+    assert_eq!(relay.snapshot.acknowledged_through, ordinal);
+    assert!(relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).is_err());
+    assert!(
+        fs::read(
+            temp.path()
+                .join(RELAY_JOURNAL_DIR)
+                .join(RELAY_ACTIVE_SEGMENT)
+        )
+        .unwrap()
+        .is_empty()
+    );
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    assert!(!relay.native_session_may_have_history());
+    assert_eq!(
+        relay.native_session_history(),
+        NativeSessionHistory::CreatedHereUnused
+    );
+
+    let evidence = relay.snapshot.native_use_evidence.as_ref().unwrap();
+    assert_eq!(evidence.native_session_id, "empty-native");
+    assert_eq!(evidence.opened_ordinal, Some(ordinal));
+    assert_eq!(evidence.usage, NativeSessionUse::Unused);
+    assert_eq!(evidence.version, 1);
+}
+
+#[test]
+fn uncertain_native_use_survives_terminal_receipt_pruning() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "uncertain-native".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    submit_relay(
+        &mut relay,
+        "uncertain-prompt",
+        prompt("possibly transmitted"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_rejected(
+            "uncertain-prompt",
+            mj_core::event_outcome::OutcomeReason::CommandFailed,
+            "lost ACP reply",
+        )
+        .unwrap();
+    for i in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+        submit_relay(
+            &mut relay,
+            &format!("after-uncertain-{i}"),
+            RelayCommand::RecordNotice {
+                text: format!("later {i}"),
+            },
+        );
+    }
+    let through_ordinal = relay.latest_ordinal();
+    let through_digest = relay.latest_digest().to_owned();
+    relay.handle(relay_request(
+        "ack-uncertain",
+        RelayRequest::Acknowledge {
+            through_ordinal,
+            through_digest,
+        },
+    ));
+    assert!(!relay.snapshot.dispatches.contains_key("uncertain-prompt"));
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    assert!(relay.native_session_may_have_history());
+    assert_eq!(
+        relay.snapshot.native_use_evidence.as_ref().unwrap().usage,
+        NativeSessionUse::Unknown
+    );
+    relay.mark_native_session_used().unwrap();
+    assert_eq!(
+        relay.snapshot.native_use_evidence.as_ref().unwrap().usage,
+        NativeSessionUse::Used
+    );
+}
+
+#[test]
+fn adoption_cut_precedes_queued_work_and_does_not_hold_announced_native_work() {
+    use super::background::{AirTaskEntry, AirTaskState};
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(&mut relay, "draining-prompt", prompt("first"));
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(&mut relay, "queued-followup", prompt("next"));
+    // A native turn has already been announced. It must run to completion,
+    // whereas the relay's own queued prompt must wait behind the cut.
+    relay.air_tasks.insert(
+        "held-native".into(),
+        AirTaskEntry {
+            session_id: "native".into(),
+            task_id: "held-native".into(),
+            state: AirTaskState::HeldTurn,
+        },
+    );
+    let mut cut = relay.reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
+    finish_prompt(&mut relay, "draining-prompt");
+    assert!(cut.try_recv().is_err());
+    assert!(relay.operational_state().harness_turn.is_some());
+    relay.air_tasks.clear();
+    relay
+        .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
+            origin: Some("agent".into()),
+            prompt_in_flight: false,
+        })
+        .unwrap();
+    let cut = cut.try_recv().unwrap().unwrap();
+    assert_eq!(
+        cut.state.execution,
+        mj_core::relay::RelayExecutionState::Idle
+    );
+    assert_eq!(cut.queue[0].command_id, "queued-followup");
+    let frontier = cut.state.latest_ordinal;
+    relay.claim_pending_commands(true).unwrap();
+    assert_eq!(
+        relay.operational_state().active_prompt.unwrap().command_id,
+        "queued-followup"
+    );
+    assert!(relay.latest_ordinal() > frontier);
+}
+
+#[test]
+fn adoption_cut_holds_queued_shells_but_allows_cancellation_and_releases_on_drop() {
+    for disconnect in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        submit_relay(
+            &mut relay,
+            "running-shell",
+            RelayCommand::RunUserShell {
+                command: "tail -f log".into(),
+            },
+        );
+        relay.claim_pending_user_shell_commands_up_to(1).unwrap();
+        submit_relay(
+            &mut relay,
+            "queued-shell",
+            RelayCommand::RunUserShell {
+                command: "printf next".into(),
+            },
+        );
+        let mut cut = relay.reserve_live_baseline();
+        assert!(
+            relay
+                .live_baseline_wait_message()
+                .unwrap()
+                .contains("tail -f log")
+        );
+        assert!(
+            relay
+                .claim_pending_user_shell_commands_up_to(1)
+                .unwrap()
+                .is_empty()
+        );
+        if disconnect {
+            drop(cut);
+            relay.resume_after_adoption_wait().unwrap();
+            assert!(!relay.live_baseline_pending());
+            assert_eq!(
+                relay.claim_pending_user_shell_commands_up_to(1).unwrap()[0].command_id,
+                "queued-shell"
+            );
+        } else {
+            submit_relay(
+                &mut relay,
+                "cancel-running",
+                RelayCommand::CancelUserShell {
+                    shell_command_id: "running-shell".into(),
+                },
+            );
+            assert_eq!(
+                relay.claim_pending_user_shell_commands_up_to(1).unwrap()[0].command_id,
+                "cancel-running"
+            );
+            relay
+                .record_command_completed(
+                    "running-shell",
+                    RelayCommandOutcome::UserShell {
+                        result: successful_shell("tail -f log", ""),
+                    },
+                )
+                .unwrap();
+            let cut = cut.try_recv().unwrap().unwrap();
+            assert_eq!(cut.state.active_user_shells.len(), 1);
+            assert_eq!(cut.state.active_user_shells[0].command_id, "queued-shell");
+            assert!(cut.state.active_user_shells[0].started_at_ms.is_none());
+            assert_eq!(
+                relay.claim_pending_user_shell_commands_up_to(1).unwrap()[0].command_id,
+                "queued-shell"
+            );
+        }
+    }
+}
+
+#[test]
+fn adoption_cut_waits_for_clear_and_ignores_dead_form_responders() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    submit_relay(&mut relay, "clear-before-cut", RelayCommand::ClearContext);
+    let mut cut = relay.reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
+    assert!(
+        relay
+            .live_baseline_wait_message()
+            .unwrap()
+            .contains("/clear")
+    );
+    relay
+        .record_command_interrupted(
+            "clear-before-cut",
+            mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+            "runtime restarted",
+        )
+        .unwrap();
+    assert!(cut.try_recv().unwrap().is_ok());
+    let question = mj_core::elicitation::ElicitationRequest::from_acp_params("dead-question", serde_json::json!({
+        "mode":"form", "sessionId":SESSION, "message":"Approve?", "requestedSchema":{"type":"object","properties":{}}
+    })).unwrap();
+    relay
+        .record_observation(RelayObservation::ElicitationRequested { request: question })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    assert!(relay.live_session_baseline().unwrap().questions.is_empty());
+}
+
+#[test]
+fn adoption_cut_waits_for_an_unowned_foreground_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"tool_call", "toolCallId":"unowned-build", "title":"cargo test", "status":"in_progress", "kind":"execute"
+    })).unwrap()).unwrap();
+    assert!(relay.snapshot.active_prompt.is_none());
+    assert!(relay.snapshot.harness_turn.is_none());
+    let mut cut = relay.reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
+    assert!(
+        relay
+            .live_baseline_wait_message()
+            .unwrap()
+            .contains("cargo test")
+    );
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"tool_call_update", "toolCallId":"unowned-build", "status":"completed"
+    })).unwrap()).unwrap();
+    assert!(cut.try_recv().unwrap().is_ok());
+}
+
+#[test]
+fn adoption_wait_keeps_automatic_steering_queued_until_after_the_cut() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay.set_steering_supported(Some(true));
+    relay.set_automatic_steering(true);
+    submit_relay(&mut relay, "running-prompt", prompt("first"));
+    relay.claim_pending_commands(true).unwrap();
+    let mut cut = relay.reserve_live_baseline();
+    submit_relay(&mut relay, "followup-prompt", prompt("next"));
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    assert!(relay.operational_state().steering.is_none());
+    finish_prompt(&mut relay, "running-prompt");
+    let cut = cut.try_recv().unwrap().unwrap();
+    assert_eq!(cut.queue[0].command_id, "followup-prompt");
+    relay.claim_pending_commands(true).unwrap();
+    assert_eq!(
+        relay.operational_state().active_prompt.unwrap().command_id,
+        "followup-prompt"
+    );
+    assert!(relay.latest_ordinal() > cut.state.latest_ordinal);
+}
+
+#[test]
+fn adoption_cut_waits_for_promoted_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(
+        &mut relay,
+        "config-before-cut",
+        set_config("model", "chosen"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    let mut cut = relay.reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
+    assert!(
+        relay
+            .live_baseline_wait_message()
+            .unwrap()
+            .contains("configuration")
+    );
+    relay
+        .record_command_completed("config-before-cut", RelayCommandOutcome::Configured)
+        .unwrap();
+    assert_eq!(
+        cut.try_recv().unwrap().unwrap().state.config["model"],
+        "chosen"
+    );
+}
+
+#[test]
+fn adoption_cut_waits_for_a_mode_dispatch_to_finish() {
+    for (id, command, outcome) in [
+        (
+            "mode-before-cut",
+            RelayCommand::SetSessionMode {
+                mode_id: "agent".into(),
+            },
+            RelayCommandOutcome::SessionModeSet,
+        ),
+        (
+            "policy-before-cut",
+            RelayCommand::RestoreExecutionMode,
+            RelayCommandOutcome::Configured,
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        submit_relay(&mut relay, id, command);
+        relay.claim_pending_commands(true).unwrap();
+        let mut cut = relay.reserve_live_baseline();
+        assert!(cut.try_recv().is_err());
+        assert!(
+            relay
+                .live_baseline_wait_message()
+                .unwrap()
+                .contains("configuration")
+        );
+        relay.record_command_completed(id, outcome).unwrap();
+        assert!(cut.try_recv().unwrap().is_ok());
+    }
+}
+
+#[test]
+fn adoption_cut_waits_for_live_terminals_and_keeps_the_followup_queued() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .agent_terminal_started(ActiveAgentTerminal {
+            terminal_id: "live-terminal".into(),
+            command: "tail -f work.log".into(),
+            started_at_ms: 1,
+        })
+        .unwrap();
+    let mut cut = relay.reserve_live_baseline();
+    submit_relay(&mut relay, "after-terminal", prompt("continue"));
+    assert!(cut.try_recv().is_err());
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    assert!(
+        relay
+            .live_baseline_wait_message()
+            .unwrap()
+            .contains("tail -f work.log")
+    );
+    relay.agent_terminal_closed("live-terminal").unwrap();
+    let cut = cut.try_recv().unwrap().unwrap();
+    assert!(cut.state.active_agent_terminals.is_empty());
+    assert_eq!(cut.queue[0].command_id, "after-terminal");
+    relay.claim_pending_commands(true).unwrap();
+    assert!(relay.latest_ordinal() > cut.state.latest_ordinal);
+}
+
+#[test]
+fn adoption_cut_waits_for_a_goal_resume_before_its_turn_opens() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(
+        &mut relay,
+        "resume-without-turn",
+        RelayCommand::GoalControl {
+            action: mj_core::goal::GoalControlAction::Resume,
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    assert!(relay.snapshot.harness_turn.is_none());
+    assert!(relay.snapshot.active_prompt.is_none());
+    let mut cut = relay.reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
+    assert!(
+        relay
+            .adoption_blockers()
+            .iter()
+            .any(|blocker| blocker.contains("goal resume"))
+    );
+    relay
+        .record_command_completed("resume-without-turn", RelayCommandOutcome::GoalControlled)
+        .unwrap();
+    assert!(cut.try_recv().unwrap().is_ok());
+}
+
+// Automatic reopen and answered native resumes have no command dispatch to block a cut.
+// Hard-won: d5c0c25: an unrelated shell cancellation released the native resume reservation.
+#[test]
+fn adoption_cut_waits_for_unledgered_native_resume_until_its_turn_ends() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = std::sync::Arc::new(RelayCell::new(
+        DurableRelay::open(temp.path(), SESSION, "test").unwrap(),
+    ));
+    {
+        let mut relay = relay.lock().unwrap();
+        submit_relay(
+            &mut relay,
+            "unrelated-shell",
+            RelayCommand::RunUserShell {
+                command: "tail -f previous.log".into(),
+            },
+        );
+        relay.claim_pending_user_shell_commands_up_to(1).unwrap();
+    }
+    relay.lock().unwrap().native_goal_resume_sent(1, Some(
+        serde_json::from_value(
+            serde_json::json!({"objective":"resume this goal", "createdAt":1, "status":"paused"}),
+        )
+        .unwrap(),
+    ));
+    let mut cut = relay.lock().unwrap().reserve_live_baseline();
+    assert!(cut.try_recv().is_err());
+    assert!(
+        relay
+            .observe()
+            .unwrap()
+            .adoption_blockers()
+            .iter()
+            .any(|blocker| blocker.contains("goal resume"))
+    );
+    {
+        let mut relay = relay.lock().unwrap();
+        submit_relay(
+            &mut relay,
+            "unrelated-shell-cancel",
+            RelayCommand::CancelUserShell {
+                shell_command_id: "unrelated-shell".into(),
+            },
+        );
+        relay.claim_pending_user_shell_commands_up_to(1).unwrap();
+        relay
+            .record_command_completed(
+                "unrelated-shell-cancel",
+                RelayCommandOutcome::UserShellCancelled,
+            )
+            .unwrap();
+        relay
+            .record_command_completed(
+                "unrelated-shell",
+                RelayCommandOutcome::UserShell {
+                    result: successful_shell("tail -f previous.log", ""),
+                },
+            )
+            .unwrap();
+        assert!(!relay.pending_native_resumes.is_empty());
+    }
+    assert!(
+        cut.try_recv().is_err(),
+        "native acknowledgement does not settle the resumed turn"
+    );
+    {
+        let mut relay = relay.lock().unwrap();
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::HarnessTurnSettled {
+                autonomous: None,
+                origin: None,
+                prompt_in_flight: false,
+            })
+            .unwrap();
+
+        assert!(!relay.pending_native_resumes.is_empty());
+        assert!(cut.try_recv().is_err());
+    }
+    // Hard-won: 0c505b8: repeated paused metadata was mistaken for resume settlement.
+    for tokens_used in [0, 10] {
+        relay.lock().unwrap().record_session_update(serde_json::from_value(serde_json::json!({
+            "sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"resume this goal", "createdAt":1, "status":"paused", "tokensUsed":tokens_used}}
+        })).unwrap()).unwrap();
+        assert!(!relay.observe().unwrap().pending_native_resumes.is_empty());
+        assert!(cut.try_recv().is_err());
+    }
+    relay
+        .lock()
+        .unwrap()
+        .record_session_update(serde_json::from_value(serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"resume this goal", "createdAt":1, "status":"active"}, "execution":{"version":1,"status":"running","turnId":"resumed-goal"}}})).unwrap())
+        .unwrap();
+    assert!(cut.try_recv().is_err());
+    assert!(relay.observe().unwrap().pending_native_resumes.is_empty());
+    relay
+        .lock()
+        .unwrap()
+        .record_observation(RelayObservation::HarnessTurnSettled {
+            prompt_in_flight: false,
+            origin: None,
+            autonomous: None,
+        })
+        .unwrap();
+    assert!(cut.try_recv().unwrap().is_ok());
+    // A local request error/timeout is not proof of rejection. A later goal
+    // clear is authoritative and supersedes the already-sent resume.
+    relay.lock().unwrap().native_goal_resume_sent(2, None);
+    let mut rejected_cut = relay.lock().unwrap().reserve_live_baseline();
+    assert!(rejected_cut.try_recv().is_err());
+    // Hard-won: 1f0ee89: arrival after a marker did not tie idle to that resume.
+    relay.lock().unwrap().record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta":{"execution":{"version":1,"status":"idle","turnId":"resumed-goal"}}
+    })).unwrap()).unwrap();
+    assert_eq!(
+        relay
+            .observe()
+            .unwrap()
+            .snapshot
+            .goal
+            .execution
+            .as_ref()
+            .unwrap()
+            .status,
+        "idle"
+    );
+    assert!(rejected_cut.try_recv().is_err());
+    assert!(!relay.observe().unwrap().pending_native_resumes.is_empty());
+
+    relay
+        .lock()
+        .unwrap()
+        .record_session_update(
+            serde_json::from_value(
+                serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"goal":null}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(rejected_cut.try_recv().unwrap().is_ok());
+    // Hard-won: 282a657: an explicit clear could not retire a resume with no known goal.
+    relay.lock().unwrap().native_goal_resume_sent(20, None);
+    assert!(
+        relay.observe().unwrap().pending_native_resumes[0]
+            .goal
+            .is_none()
+    );
+    let mut unknown_cut = relay.lock().unwrap().reserve_live_baseline();
+    relay.lock().unwrap().record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta":{"execution":{"version":1,"status":"idle"}}
+    })).unwrap()).unwrap();
+    assert!(unknown_cut.try_recv().is_err());
+    relay
+        .lock()
+        .unwrap()
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"session_info_update", "_meta":{"goal":null}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(unknown_cut.try_recv().unwrap().is_ok());
+    // Hard-won: 655be2b: a definitive refusal must not retire another request.
+    relay.lock().unwrap().native_goal_resume_sent(3, None);
+    relay.lock().unwrap().native_goal_resume_sent(4, None);
+    let mut refused_cut = relay.lock().unwrap().reserve_live_baseline();
+    relay.lock().unwrap().native_goal_resume_rejected(3);
+    assert!(refused_cut.try_recv().is_err());
+    relay.lock().unwrap().native_goal_resume_rejected(4);
+    assert!(refused_cut.try_recv().unwrap().is_ok());
+    relay.lock().unwrap().native_goal_resume_sent(
+        6,
+        Some(
+            serde_json::from_value(serde_json::json!({
+                "objective":"new goal", "createdAt":2, "status":"paused"
+            }))
+            .unwrap(),
+        ),
+    );
+    relay.lock().unwrap().record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"new goal", "createdAt":2, "status":"paused"}}
+    })).unwrap()).unwrap();
+    let mut deactivated_cut = relay.lock().unwrap().reserve_live_baseline();
+    assert!(deactivated_cut.try_recv().is_err());
+    relay.lock().unwrap().record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"new goal", "createdAt":2, "status":"complete"}}
+    })).unwrap()).unwrap();
+    assert!(deactivated_cut.try_recv().unwrap().is_ok());
+    relay.lock().unwrap().native_goal_resume_sent(5, None);
+    let mut exited_cut = relay.lock().unwrap().reserve_live_baseline();
+    assert!(exited_cut.try_recv().is_err());
+    relay
+        .lock()
+        .unwrap()
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    assert!(exited_cut.try_recv().unwrap().is_ok());
+}
+
+// Hard-won: 64493cb: a durable ACK with an uncleared full active file prevented the first restart append.
+#[test]
+fn startup_collects_an_acknowledged_full_active_segment_before_appending() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    let active = temp
+        .path()
+        .join(RELAY_JOURNAL_DIR)
+        .join(RELAY_ACTIVE_SEGMENT);
+    let payload = "x".repeat(64 * 1024);
+    while fs::metadata(&active).map_or(0, |metadata| metadata.len())
+        < mj_core::relay::RELAY_SEGMENT_BYTE_LIMIT
+    {
+        relay
+            .record_observation(RelayObservation::Warning {
+                message: payload.clone(),
+            })
+            .unwrap();
+    }
+    let frontier = relay.latest_ordinal();
+    let digest = relay.latest_digest().to_owned();
+    // Crash between the durable ACK and physical active-file replacement.
+    relay.snapshot.acknowledged_through = frontier;
+    relay.snapshot.acknowledged_digest = digest.clone();
+    relay.persist_snapshot().unwrap();
+    drop(relay);
+
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    assert_eq!(relay.latest_ordinal(), frontier + 1);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "newer").unwrap();
+    let events = relay.events_after(frontier, &digest).unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0].observation,
+        RelayObservation::SessionRestarted
+    ));
+}
+
+// Hard-won: 7a9a7ec: legacy duplicate sealed files lost cleanup eligibility before a later ACK covered them.
+#[test]
+fn later_acknowledgements_collect_legacy_rewrite_duplicates_without_restarting() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "legacy").unwrap();
+    record_paged_history(&mut relay, 80);
+    let spans = relay.journal_spans.clone();
+    let sealed: Vec<_> = spans
+        .iter()
+        .filter(|span| span.path.extension().is_some_and(|ext| ext == "gz"))
+        .map(|span| span.path.clone())
+        .collect();
+    assert!(sealed.len() >= 2);
+    let events = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
+    let partial = spans[0].file_last_ordinal - 1;
+    let partial_digest = relay.digest_at(partial).unwrap().unwrap();
+    let frontier = relay.latest_ordinal();
+    let digest = relay.latest_digest().to_owned();
+    relay.snapshot.acknowledged_through = partial;
+    relay.snapshot.acknowledged_digest = partial_digest;
+    relay.persist_snapshot().unwrap();
+    drop(relay);
+    // A legacy rewrite installed its complete replacement active file and
+    // crashed before deleting the sealed originals it had copied.
+    let mut replacement = Vec::new();
+    for event in events {
+        serde_json::to_writer(&mut replacement, &event).unwrap();
+        replacement.push(b'\n');
+    }
+    fs::write(
+        temp.path()
+            .join(RELAY_JOURNAL_DIR)
+            .join(RELAY_ACTIVE_SEGMENT),
+        replacement,
+    )
+    .unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "current").unwrap();
+    assert_eq!(relay.journal_spans.len(), 1);
+    assert!(relay.journal_cleanup_pending);
+    assert!(sealed.iter().all(|path| path.exists()));
+    let first_end = spans[0].file_last_ordinal;
+    acknowledge_relay(&mut relay, "first-duplicate-covered", first_end);
+    assert!(!sealed[0].exists());
+    assert!(relay.journal_cleanup_pending);
+    acknowledge_relay(&mut relay, "all-duplicates-covered", frontier);
+    assert!(sealed.iter().all(|path| !path.exists()));
+    assert!(!relay.journal_cleanup_pending);
+    assert!(relay.events_after(frontier, &digest).unwrap().is_empty());
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "reopened").unwrap();
+    assert_eq!(relay.events_after(frontier, &digest).unwrap().len(), 1);
+}
+
+// Hard-won: b4985a8: SessionOpened discarded a new bridge's still-live startup form.
+#[test]
+fn forms_opened_during_bridge_startup_survive_session_open_and_ack_pruning() {
+    for resumed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        let question = |id: &str| {
+            mj_core::elicitation::ElicitationRequest::from_acp_params(id,
+            serde_json::json!({"mode":"form", "sessionId":SESSION, "message":"Approve?", "requestedSchema":{"type":"object","properties":{}}})).unwrap()
+        };
+        relay
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: question("old-runtime"),
+            })
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::SessionRestarted)
+            .unwrap();
+        let live = question("new-opening-runtime");
+        relay
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: live.clone(),
+            })
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "new-native".into(),
+                resumed,
+                native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
+            })
+            .unwrap();
+        let mut projection = mj_core::state::MaterializedSession::empty(SESSION);
+        for event in relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap() {
+            let mutation = mj_transcript::projection::project_relay_event(&projection, &event)
+                .unwrap()
+                .mutation;
+            mj_transcript::projection::apply_committed_projection_event(
+                &mut projection,
+                &event,
+                mutation,
+            )
+            .unwrap();
+        }
+        assert_eq!(projection.pending_elicitations, vec![live.clone()]);
+        assert_eq!(
+            relay.snapshot.pending_elicitations.get(&live.id),
+            Some(&Some(live.clone()))
+        );
+        let frontier = relay.latest_ordinal();
+        acknowledge_relay(&mut relay, "collect-startup", frontier);
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "reopened").unwrap();
+        assert_eq!(
+            relay.snapshot.pending_elicitations.get(&live.id),
+            Some(&Some(live))
+        );
+        // Reopening does not resurrect the old bridge's responder.
+        assert!(relay.live_session_baseline().unwrap().questions.is_empty());
+        relay
+            .record_observation(RelayObservation::SessionRestarted)
+            .unwrap();
+        assert!(relay.live_session_baseline().unwrap().questions.is_empty());
+    }
+}
+
+// Hard-won: 2a0aae9: failed /clear rollback retained a goal resume owned by the exited bridge.
+#[cfg(unix)]
+#[test]
+fn clear_bridge_retirement_releases_resumes_before_success_or_rollback() {
+    use mj_core::acp::RuntimeEvent;
+    for replacement_succeeds in [false, true] {
+        for replacement_has_resume in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let relay = Arc::new(RelayCell::new(clearable_relay(temp.path())));
+            {
+                let mut state = relay.lock().unwrap();
+                submit_relay(&mut state, "clear-request", RelayCommand::ClearContext);
+                assert_eq!(state.claim_pending_commands(true).unwrap().len(), 1);
+                state.native_goal_resume_sent(1, None);
+            }
+            let mut cut = relay.lock().unwrap().reserve_live_baseline();
+            assert!(cut.try_recv().is_err());
+            let mut in_flight =
+                BTreeMap::from([("clear-request".into(), RelayCommand::ClearContext)]);
+            crate::worker_runtime::record_runtime_event(
+                &relay,
+                &mut in_flight,
+                RuntimeEvent::ContextClearing {
+                    request_id: "clear-request".into(),
+                },
+            )
+            .unwrap();
+            assert!(relay.lock().unwrap().pending_native_resumes.is_empty());
+            // Retiring the old bridge must not retire a later bridge's work
+            // when either outcome of the clear is subsequently applied.
+            if replacement_has_resume {
+                relay.lock().unwrap().native_goal_resume_sent(2, None);
+            }
+            assert!(cut.try_recv().is_err());
+            crate::worker_runtime::record_runtime_event(
+                &relay,
+                &mut in_flight,
+                if replacement_succeeds {
+                    RuntimeEvent::ContextCleared {
+                        request_id: "clear-request".into(),
+                        native_session_id: "replacement".into(),
+                        memory: None,
+                    }
+                } else {
+                    RuntimeEvent::CommandRejected {
+                        request_id: "clear-request".into(),
+                        reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
+                        message: "Could not clear context; restoring the previous conversation"
+                            .into(),
+                    }
+                },
+            )
+            .unwrap();
+            if replacement_has_resume {
+                assert!(cut.try_recv().is_err());
+                relay.lock().unwrap().native_goal_resume_rejected(2);
+            }
+            assert!(cut.try_recv().unwrap().is_ok());
+            assert_eq!(
+                relay
+                    .lock()
+                    .unwrap()
+                    .operational_state()
+                    .native_session_id
+                    .as_deref(),
+                Some(if replacement_succeeds {
+                    "replacement"
+                } else {
+                    "original"
+                })
+            );
+        }
+    }
+}
+
+// Hard-won: ad4c24b: delayed old restart erased a new bridge's synchronous terminal reservation.
+#[cfg(unix)]
+#[test]
+fn old_bridge_retirement_preserves_replacement_terminal_admission() {
+    use mj_core::acp::RuntimeEvent;
+    for lifecycle in [
+        RuntimeEvent::HarnessRestarting {
+            message: "old bridge exited".into(),
+        },
+        RuntimeEvent::ContextClearing {
+            request_id: "clear-request".into(),
+        },
+        RuntimeEvent::Stopped,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(temp.path(), SESSION, "test").unwrap(),
+        ));
+        let old = crate::terminal::TerminalRegistry::new().unwrap();
+        let replacement = crate::terminal::TerminalRegistry::new().unwrap();
+        let old_id = old.allocate_id();
+        let replacement_id = replacement.allocate_id();
+        let terminal = |id: &str| mj_core::relay::ActiveAgentTerminal {
+            terminal_id: id.into(),
+            command: "sleep 30".into(),
+            started_at_ms: 1,
+        };
+        let mut in_flight = BTreeMap::new();
+        relay
+            .lock()
+            .unwrap()
+            .agent_terminal_started(terminal(&old_id))
+            .unwrap();
+        crate::worker_runtime::record_runtime_event(
+            &relay,
+            &mut in_flight,
+            RuntimeEvent::TerminalStarted {
+                terminal_id: old_id.clone(),
+                command: "sleep 30".into(),
+                started_at_ms: 1,
+            },
+        )
+        .unwrap();
+        // Replacement registration overtakes queued retirement/lifecycle events,
+        // just as terminal/create reserves before spawn and FIFO application.
+        relay
+            .lock()
+            .unwrap()
+            .agent_terminal_started(terminal(&replacement_id))
+            .unwrap();
+        let mut cut = relay.lock().unwrap().reserve_live_baseline();
+        let retirement = RuntimeEvent::BridgeRetired {
+            terminal_connection_id: old.connection_id().into(),
+        };
+        // Historical RuntimeEvent readers cannot be sent this worker-local event.
+        assert!(serde_json::to_value(&retirement).is_err());
+        crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, retirement).unwrap();
+        crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, lifecycle).unwrap();
+        assert!(cut.try_recv().is_err());
+        assert_eq!(
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_agent_terminals,
+            vec![terminal(&replacement_id)]
+        );
+        crate::worker_runtime::record_runtime_event(
+            &relay,
+            &mut in_flight,
+            RuntimeEvent::TerminalStarted {
+                terminal_id: replacement_id.clone(),
+                command: "sleep 30".into(),
+                started_at_ms: 1,
+            },
+        )
+        .unwrap();
+        assert!(cut.try_recv().is_err());
+        crate::worker_runtime::record_runtime_event(
+            &relay,
+            &mut in_flight,
+            RuntimeEvent::BridgeRetired {
+                terminal_connection_id: replacement.connection_id().into(),
+            },
+        )
+        .unwrap();
+        assert!(cut.try_recv().unwrap().is_ok());
+    }
+}
+
+// Hard-won: bd33e3913: pruning a queued prompt lost its later delivery boundary on replay.
+#[test]
+fn replayed_delivery_without_queue_event_resets_the_previous_reply() {
+    for (steered, finished, replied) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, true, true),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "first-turn").unwrap();
+        submit_relay(&mut relay, "first-prompt", prompt("first request"));
+        relay.claim_pending_commands(true).unwrap();
+        submit_relay(&mut relay, "second-prompt", prompt("second request"));
+        let through = relay.latest_ordinal();
+        acknowledge_relay(&mut relay, "collect-queue", through);
+        relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"first answer"}
+    })).unwrap()).unwrap();
+        if steered {
+            submit_relay(&mut relay, "confirm-correction", RelayCommand::Cancel);
+            relay.claim_pending_commands(true).unwrap();
+            relay
+                .record_command_completed(
+                    "confirm-correction",
+                    RelayCommandOutcome::Steered {
+                        queued_command_id: "second-prompt".into(),
+                    },
+                )
+                .unwrap();
+            assert!(!relay.snapshot.dispatches.contains_key("second-prompt"));
+        } else {
+            finish_prompt(&mut relay, "first-prompt");
+            relay.claim_pending_commands(true).unwrap();
+            assert_eq!(
+                relay.snapshot.active_prompt.as_ref().unwrap().command_id,
+                "second-prompt"
+            );
+        }
+        // Hard-won: c624e4aba: a completed prompt lost its boundary with its dispatch.
+        if finished {
+            if replied {
+                relay.record_session_update(serde_json::from_value(serde_json::json!({
+                    "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"second answer"}
+                })).unwrap()).unwrap();
+            }
+            finish_prompt(&mut relay, "second-prompt");
+            assert!(!relay.snapshot.dispatches.contains_key("second-prompt"));
+        }
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "second-turn").unwrap();
+        let context = relay.turn_context();
+        let evidence = || {
+            context.evidence(
+                mj_core::config::HarnessKind::Codex,
+                mj_core::activity::verdict::TurnPhase::Running,
+                &Default::default(),
+                0,
+            )
+        };
+        assert_eq!(evidence().user_prompt_tail, "second request");
+        assert_eq!(
+            evidence().assistant_text_tail,
+            if replied { "second answer" } else { "" }
+        );
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        relay.claim_pending_commands(true).unwrap();
+        assert_eq!(
+            evidence().assistant_text_tail,
+            if replied { "second answer" } else { "" }
+        );
+    }
+}
+
+// Hard-won: bd33e3913: a recovery question inherited the interrupted reply's explicit ID.
+#[test]
+fn restart_continuation_starts_a_new_authorization_message_for_an_unlabelled_question() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "interrupted").unwrap();
+    submit_relay(&mut relay, "original", prompt("do the work"));
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"interrupted-reply",
+                "content":{"type":"text","text":"working"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "recovery").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let recovery = relay.claim_pending_commands(true).unwrap();
+    assert!(mj_core::continuation::is_restart_continuation(
+        &recovery[0].command_id
+    ));
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"Which option?"}
+    })).unwrap()).unwrap();
+    // Hard-won: 798a9157c: the auxiliary tail still inherited the old explicit message ID.
+    let evidence = relay.turn_context().evidence(
+        mj_core::config::HarnessKind::Codex,
+        mj_core::activity::verdict::TurnPhase::Running,
+        &Default::default(),
+        0,
+    );
+    assert_eq!(evidence.assistant_text_tail, "Which option?");
+    let history = relay.snapshot.authorization_context().unwrap();
+    let question = history.messages.last().unwrap();
+    assert_eq!(question.text, "Which option?");
+    assert_ne!(question.id, "interrupted-reply");
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .find(|message| message.id == "interrupted-reply")
+            .unwrap()
+            .text,
+        "working"
+    );
+    // Hard-won: c624e4aba: a completed continuation has no queue event or dispatch to replay.
+    finish_prompt(&mut relay, &recovery[0].command_id);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "completed-recovery").unwrap();
+    let evidence = relay.turn_context().evidence(
+        mj_core::config::HarnessKind::Codex,
+        mj_core::activity::verdict::TurnPhase::Replied,
+        &Default::default(),
+        0,
+    );
+    assert_eq!(evidence.assistant_text_tail, "Which option?");
+}
+
+// Hard-won: 7211dfd7b: an autonomous unlabelled reply inherited a completed prompt's explicit ID.
+#[test]
+fn autonomous_reply_after_completed_prompt_has_its_own_judgment_tail() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "human-reply").unwrap();
+    relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+    submit_relay(&mut relay, "human-prompt", prompt("do the work"));
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"human-reply",
+                "content":{"type":"text","text":"finished human work"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    finish_prompt(&mut relay, "human-prompt");
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"autonomous reply"}
+    })).unwrap()).unwrap();
+    assert!(relay.snapshot.harness_turn.is_some());
+    let check = |relay: &DurableRelay| {
+        assert_eq!(
+            relay
+                .turn_context()
+                .evidence(
+                    mj_core::config::HarnessKind::Claude,
+                    mj_core::activity::verdict::TurnPhase::Running,
+                    &Default::default(),
+                    0,
+                )
+                .assistant_text_tail,
+            "autonomous reply"
+        );
+    };
+    check(&relay);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "autonomous-reopen").unwrap();
+    check(&relay);
+}
+
+// Hard-won: c82699f02: Codex native markers split the reply of a still-running ACP prompt.
+#[test]
+fn prompted_reply_survives_native_start_and_settle_markers() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "prompted-native").unwrap();
+    relay.set_harness_turn_policy(HarnessTurnPolicy::CodexAdapter);
+    submit_relay(&mut relay, "prompt-native-turn", prompt("answer this"));
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"prompt-reply",
+                "content":{"type":"text","text":"before start; "}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 100 })
+        .unwrap();
+    assert!(!relay.snapshot.harness_turn.unwrap().autonomous);
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"after start; "}
+    })).unwrap()).unwrap();
+    relay
+        .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
+            origin: None,
+            prompt_in_flight: true,
+        })
+        .unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"after settle"}
+    })).unwrap()).unwrap();
+    let check = |relay: &DurableRelay| {
+        assert_eq!(
+            relay
+                .turn_context()
+                .evidence(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::activity::verdict::TurnPhase::Running,
+                    &Default::default(),
+                    0,
+                )
+                .assistant_text_tail,
+            "before start; after start; after settle"
+        )
+    };
+    check(&relay);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "prompted-native-reopen").unwrap();
+    check(&relay);
+}
+
+// Hard-won: e06c07a69: restarted autonomous turns lost their start proofs and merged on replay.
+#[test]
+fn bridge_restarts_keep_interrupted_autonomous_replies_separate_on_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "autonomous-restarts").unwrap();
+    relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"first-autonomous-reply",
+                "content":{"type":"text","text":"first reply"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"second reply"}
+    })).unwrap()).unwrap();
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    assert!(relay.snapshot.harness_turn.is_none());
+    assert!(
+        !observations(&relay)
+            .iter()
+            .any(|observation| matches!(observation, RelayObservation::HarnessTurnSettled { .. }))
+    );
+    let check = |relay: &DurableRelay| {
+        assert_eq!(
+            relay
+                .turn_context()
+                .evidence(
+                    mj_core::config::HarnessKind::Claude,
+                    mj_core::activity::verdict::TurnPhase::Replied,
+                    &Default::default(),
+                    0,
+                )
+                .assistant_text_tail,
+            "second reply"
+        )
+    };
+    check(&relay);
+    let history = relay.snapshot.authorization_context().unwrap();
+    assert_eq!(history.messages.last().unwrap().text, "second reply");
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .find(|message| message.id == "first-autonomous-reply")
+            .unwrap()
+            .text,
+        "first reply"
+    );
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "autonomous-restarts-reopen").unwrap();
+    check(&relay);
+}
+
+// Hard-won: a72c7b7fd: ACP completion split a reply whose native goal was still running.
+#[test]
+fn native_goal_reply_spans_acp_completion_and_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "native-acp-completion").unwrap();
+    relay.set_harness_turn_policy(HarnessTurnPolicy::CodexAdapter);
+    submit_relay(&mut relay, "native-goal-prompt", prompt("keep working"));
+    relay.claim_pending_commands(true).unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta":{"execution":{"version":1,"status":"running","turnId":"native-goal"}}
+    })).unwrap()).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"native-goal-reply",
+                "content":{"type":"text","text":"before completion; "}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    finish_prompt(&mut relay, "native-goal-prompt");
+    assert!(relay.snapshot.goal.running());
+    assert_eq!(relay.snapshot.execution, RelayExecutionState::Running);
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"after completion"}
+    })).unwrap()).unwrap();
+    let check = |relay: &DurableRelay| {
+        assert_eq!(
+            relay
+                .turn_context()
+                .evidence(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::activity::verdict::TurnPhase::Running,
+                    &Default::default(),
+                    0,
+                )
+                .assistant_text_tail,
+            "before completion; after completion"
+        );
+        let history = relay.snapshot.authorization_context().unwrap();
+        let reply = history.messages.last().unwrap();
+        assert_eq!(reply.id, "native-goal-reply");
+        assert_eq!(reply.text, "before completion; after completion");
+    };
+    check(&relay);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "native-acp-completion-reopen").unwrap();
+    check(&relay);
+}
+
+// Hard-won: ddbed432e: an unlabelled response appended to the elicitation's answered question.
+#[test]
+fn answered_elicitation_starts_a_new_auxiliary_reply_before_unlabelled_chunks() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "elicitation-answer").unwrap();
+    submit_relay(
+        &mut relay,
+        "elicitation-prompt",
+        prompt("continue the task"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"question-message",
+                "content":{"type":"text","text":"Which option?"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let question = mj_core::elicitation::ElicitationRequest::from_acp_params("option-question", serde_json::json!({
+        "mode":"form", "sessionId":SESSION, "message":"Which option?", "requestedSchema":{"type":"object","properties":{}}
+    })).unwrap();
+    relay
+        .record_observation(RelayObservation::ElicitationRequested { request: question })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::ElicitationResolved {
+            elicitation_id: "option-question".into(),
+            action: "accept".into(),
+            reply: Some("implement".into()),
+        })
+        .unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"Implementing the selected option."}
+    })).unwrap()).unwrap();
+    let check = |relay: &DurableRelay| {
+        assert_eq!(
+            relay
+                .turn_context()
+                .evidence(
+                    mj_core::config::HarnessKind::Codex,
+                    mj_core::activity::verdict::TurnPhase::Running,
+                    &Default::default(),
+                    0,
+                )
+                .assistant_text_tail,
+            "Implementing the selected option."
+        )
+    };
+    check(&relay);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "elicitation-answer-reopen").unwrap();
+    check(&relay);
 }

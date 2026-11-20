@@ -213,16 +213,21 @@ pub fn directory_presence_command(
         .purpose("probe retained environment directory")
 }
 
-fn directory_probe_command(
-    locator: &targets::TargetLocator,
-    directory: &str,
-    relay_contents: bool,
-) -> CommandSpec {
+const FIND_LISTED_ENTRY: &str = r#"hel_lists() {
+  while IFS= read -r hel_entry; do
+    case "$hel_entry" in "$2"|"$3") return 0 ;; esac
+  done <<MJ_ENTRIES
+$1
+MJ_ENTRIES
+  return 1
+};"#;
+
+fn prove_path_absent(path: &str, answer: &str) -> String {
     // A failed file test is not absence. Climb to a readable ancestor: if
     // its listing contains the next component, the failed lookup is Unknown.
     // Only a readable listing without that component proves absence.
     let mut missing = String::new();
-    for path in std::path::Path::new(directory).ancestors() {
+    for path in std::path::Path::new(path).ancestors() {
         let Some(name) = path.file_name() else {
             continue;
         };
@@ -233,11 +238,21 @@ fn directory_probe_command(
         missing.push_str(&format!(
             "if entries=$(ls -1A {parent}); then \
              if hel_lists \"$entries\" {name} {name}; then exit 1; fi; \
-             printf 'absent\\n'; exit 0; fi; ",
+             printf '%s\\n' {answer}; exit 0; fi; ",
             parent = targets::posix_quote(&parent.to_string_lossy()),
             name = targets::posix_quote(&name.to_string_lossy()),
+            answer = targets::posix_quote(answer),
         ));
     }
+    missing
+}
+
+fn directory_probe_command(
+    locator: &targets::TargetLocator,
+    directory: &str,
+    relay_contents: bool,
+) -> CommandSpec {
+    let missing = prove_path_absent(directory, "absent");
     let present = if relay_contents {
         format!(
             "if hel_lists \"$entries\" resume-checkout-recovery.json resume-checkout-recovery.json; then printf 'checkout-partial\\n'; \
@@ -252,13 +267,7 @@ fn directory_probe_command(
     };
     let script = format!(
         "root={root}; \
-         hel_lists() {{ \
-           while IFS= read -r hel_entry; do \
-             case \"$hel_entry\" in \"$2\"|\"$3\") return 0 ;; esac; \
-           done <<MJ_ENTRIES
-$1
-MJ_ENTRIES
-           return 1; }}; \
+         {FIND_LISTED_ENTRY} \
          if [ -d \"$root\" ]; then \
            entries=$(ls -1A \"$root\") || exit 1; {present} \
          else {missing} exit 1; fi",
@@ -322,24 +331,24 @@ pub fn worker_recovery(
     }
 }
 
-/// Print the worker's exit record, or nothing when it left none. Reads only,
+/// Print the worker's exit record, or JSON null when it left none. Reads only,
 /// so it works on a target whose disk is full.
 pub fn worker_exit_record_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> CommandSpec {
-    let path = targets::join_remote_command(&[format!(
-        "{worker_root}/{}",
-        mj_core::relay::WORKER_EXIT_FILE
-    )]);
+    let path = format!("{worker_root}/{}", mj_core::relay::WORKER_EXIT_FILE);
+    let missing = prove_path_absent(&path, "null");
+    let script = format!(
+        "path={}; {FIND_LISTED_ENTRY} \
+         if [ -e \"$path\" ]; then exec cat -- \"$path\"; fi; \
+         {missing} exit 1",
+        targets::posix_quote(&path),
+    );
     targets::locator_command(
         SshTrafficClass::Control,
         locator,
-        vec![
-            "sh".into(),
-            "-c".into(),
-            format!("cat -- {path} 2>/dev/null; exit 0"),
-        ],
+        vec!["sh".into(), "-c".into(), script],
     )
     .purpose("read the Mjolnir worker's exit record")
 }
@@ -348,17 +357,17 @@ pub fn worker_exit_record_command(
 /// the output of [`worker_exit_record_command`]. A reserved record that says
 /// `null` means the worker left no reason.
 pub fn recorded_exit_reason(output: &[u8]) -> Option<(String, Option<u64>)> {
-    serde_json::from_slice::<Option<WorkerExitRecord>>(output)
+    read_worker_exit_record(output)
         .ok()
         .flatten()
         .map(|record| {
-            let at = record
-                .at
-                .as_deref()
-                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-                .and_then(|at| u64::try_from(at.timestamp()).ok());
+            let at = record.timestamp();
             (record.reason, at)
         })
+}
+
+pub fn read_worker_exit_record(output: &[u8]) -> Result<Option<WorkerExitRecord>> {
+    serde_json::from_slice(output).context("decode the worker's exit record")
 }
 
 pub fn start_worker(
@@ -582,7 +591,21 @@ pub fn worker_probe_diagnosis(
         None => error,
     };
     match diagnose_worker_read_only(executor, locator, worker_root) {
-        Ok(probe) => error.context(probe.to_string()),
+        Ok(probe) => {
+            let diagnostic = probe.to_string();
+            if probe
+                .exit
+                .is_some_and(|exit| exit.harness_startup_failure.is_some())
+            {
+                // The worker may have died after accepting the initial relay
+                // connection. Preserve its startup scope with the probe text.
+                error.context(mj_core::relay::WorkerHarnessStartupFailure {
+                    message: diagnostic,
+                })
+            } else {
+                error.context(diagnostic)
+            }
+        }
         Err(probe_error) => {
             error.context(format!("the worker could not be probed: {probe_error:#}"))
         }
@@ -671,6 +694,31 @@ pub struct WorkerExitRecord {
     /// When the worker stopped, as RFC 3339.
     #[serde(default)]
     pub at: Option<String>,
+    #[serde(default)]
+    pub harness_startup_failure: Option<mj_core::relay::WorkerHarnessStartupFailure>,
+}
+
+impl WorkerExitRecord {
+    pub fn timestamp(&self) -> Option<u64> {
+        self.at
+            .as_deref()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .and_then(|at| u64::try_from(at.timestamp()).ok())
+    }
+
+    /// The marked failure of a harness that could not open its session, which
+    /// starting the same harness again would only repeat.
+    ///
+    /// A harness that failed to open for lack of space is a disk-full exit
+    /// instead: the storage owner restarts it once space returns, and the same
+    /// record still holds the marker then. That is judged by the failure's own
+    /// cause, because `reason` also carries the bridge's stderr, which can
+    /// mention an earlier, unrelated full disk.
+    pub fn harness_failed_to_open(&self) -> Option<&mj_core::relay::WorkerHarnessStartupFailure> {
+        self.harness_startup_failure
+            .as_ref()
+            .filter(|failure| !mj_core::targets::storage::reports_no_space(&failure.message))
+    }
 }
 
 impl WorkerProbe {
@@ -870,6 +918,7 @@ mod probe_tests {
                     .into(),
                 refusal: None,
                 at: None,
+                harness_startup_failure: None,
             }),
             pids: vec![],
         };

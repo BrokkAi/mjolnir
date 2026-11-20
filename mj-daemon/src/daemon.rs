@@ -1,9 +1,11 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
 mod auto_afk;
+mod availability;
 pub(crate) mod capacity;
 mod container_upgrade;
 mod feed;
+mod jev_limit;
 mod owner;
 mod record_index;
 mod restart;
@@ -27,7 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use mj_controller::database::StoreSchemaMismatch;
-use mj_controller::recovery_gate::RecoveryObserver;
+use mj_controller::recovery_gate::RecoveryGate;
 use mj_controller::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor,
     ProvisionStage, ProvisionStageGuard,
@@ -35,7 +37,7 @@ use mj_controller::targets::{
 use mj_core::config::Config;
 use mj_core::refusal::Refusal;
 use mj_core::relay::RelayCommand;
-use mj_core::state::{RecoveryObservation, SessionRecord, SessionState};
+use mj_core::state::{SessionRecord, SessionState};
 
 use crate::review_host::TurnReviewHost;
 use crate::worker_upgrade::{WorkerUpgradeObservation, WorkerUpgradeObserver};
@@ -249,7 +251,7 @@ pub(crate) enum QuotaRefreshIntent {
 
 struct SurfaceNotice {
     notice: RuntimeNotice,
-    public: bool,
+    public_text: Option<String>,
 }
 
 pub struct RuntimeState {
@@ -271,6 +273,8 @@ pub struct RuntimeState {
     pub(crate) credential_targets:
         Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
     feed: Mutex<feed::RuntimeHistory>,
+    availability: Mutex<availability::Availability>,
+    availability_requested: tokio::sync::Notify,
     recent_launch: tokio::sync::watch::Sender<Option<mj_core::go::RecentLaunch>>,
     recent_launch_update: Mutex<()>,
     committed: Option<
@@ -294,7 +298,7 @@ pub struct RuntimeState {
     mbx_install_wake: crate::daemon::mbx_service::InstallWake,
     projects: Arc<mj_controller::project_catalog::Catalog>,
     profile_catalog: crate::review_host::SharedProfileCatalog,
-    recovery_observer: RecoveryObserver,
+    session_gate: Arc<RecoveryGate>,
     worker_upgrade_observer: WorkerUpgradeObserver,
     /// Recent background notices, newest last, with the id of the next one.
     /// Bounded: a surface that never attaches must not make this grow.
@@ -874,6 +878,7 @@ mod resume;
 mod snapshot;
 pub(crate) mod startup_followup;
 mod state;
+pub(crate) use state::ChildReview;
 mod subagent_park;
 mod support;
 pub(crate) mod ui_requests;

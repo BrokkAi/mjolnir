@@ -19,7 +19,8 @@ impl RelayClient {
             RelayRequest::ProjectMemoryTransfer { .. }
             | RelayRequest::ProjectMemorySnapshot
             | RelayRequest::InstallProjectMemorySnapshot { .. }
-            | RelayRequest::ReplaceProjectMemoryTree { .. } => None,
+            | RelayRequest::ReplaceProjectMemoryTree { .. }
+            | RelayRequest::BeginLiveBaseline => None,
             _ => Some(self.request_timeout),
         };
         self.call_with_deadline(request, timeout).await
@@ -127,6 +128,7 @@ impl RelayClient {
         let session_id = self.session_id.clone();
         let warning_after = slow_operation_warning_after(&envelope.request);
         let started = Instant::now();
+        let progress = self.adoption_wait_progress.clone();
         let exchange = async {
             self.input
                 .as_mut()
@@ -142,39 +144,55 @@ impl RelayClient {
                 .await
                 .map_err(|error| RelayTransportDead::from_io(error, kind))
                 .with_context(|| format!("flush relay {operation} request"))?;
-            let response = read_bounded_frame(&mut self.output, kind);
-            tokio::pin!(response);
-            let response = tokio::select! {
-                response = &mut response => response,
-                () = tokio::time::sleep(warning_after) => {
-                    tracing::warn!(
-                        %session_id,
-                        %operation,
-                        warning_after_seconds = warning_after.as_secs_f64(),
-                        timeout_seconds = timeout.map(|duration| duration.as_secs_f64()),
-                        "relay operation is still waiting for its response"
-                    );
-                    let response = response.await;
-                    // The warning above says an operation is slow; this says
-                    // for how long, so a stall can be sized per target.
-                    tracing::warn!(
-                        %session_id,
-                        %operation,
-                        elapsed_seconds = started.elapsed().as_secs_f64(),
-                        answered = response.is_ok(),
-                        "slow relay operation finished"
-                    );
-                    response
+            loop {
+                let response = read_bounded_frame(&mut self.output, kind);
+                tokio::pin!(response);
+                let response = tokio::select! {
+                    response = &mut response => response,
+                    () = tokio::time::sleep(warning_after) => {
+                        tracing::warn!(
+                            %session_id,
+                            %operation,
+                            warning_after_seconds = warning_after.as_secs_f64(),
+                            timeout_seconds = timeout.map(|duration| duration.as_secs_f64()),
+                            "relay operation is still waiting for its response"
+                        );
+                        let response = response.await;
+                        // The warning above says an operation is slow; this says
+                        // for how long, so a stall can be sized per target.
+                        tracing::warn!(
+                            %session_id,
+                            %operation,
+                            elapsed_seconds = started.elapsed().as_secs_f64(),
+                            answered = response.is_ok(),
+                            "slow relay operation finished"
+                        );
+                        response
+                    }
+                };
+                let line = response
+                    .with_context(|| format!("read relay {operation} response"))?
+                    .ok_or_else(|| {
+                        anyhow::Error::new(RelayTransportDead::during_exchange(
+                            format!("relay proxy disconnected during {operation}"),
+                            kind,
+                        ))
+                    })?;
+                if matches!(envelope.request, RelayRequest::BeginLiveBaseline)
+                    && let RelayResponsePayload::LiveBaselineWaiting { blockers } =
+                        decode_relay_response(
+                            &line,
+                            &envelope.request_id,
+                            envelope.protocol_version,
+                        )?
+                {
+                    if let Some(progress) = &progress {
+                        progress.send_replace(Some(blockers));
+                    }
+                    continue;
                 }
-            };
-            response
-                .with_context(|| format!("read relay {operation} response"))?
-                .ok_or_else(|| {
-                    anyhow::Error::new(RelayTransportDead::during_exchange(
-                        format!("relay proxy disconnected during {operation}"),
-                        kind,
-                    ))
-                })
+                break Ok(line);
+            }
         };
         let exchange = async {
             match timeout {

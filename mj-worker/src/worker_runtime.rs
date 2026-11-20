@@ -145,6 +145,7 @@ pub struct AcpSupervisorSpec {
 impl From<&WorkerLaunchConfig> for AcpSupervisorSpec {
     fn from(config: &WorkerLaunchConfig) -> Self {
         let mut excluded_environment = config.excluded_environment.clone();
+        excluded_environment.push(mj_core::jev::FASTINO_KEY_ENVIRONMENT.into());
         if config.no_github_credentials {
             for name in mj_core::credentials::GITHUB_AUTHENTICATION_ENVIRONMENT {
                 if !excluded_environment.iter().any(|excluded| excluded == name) {
@@ -327,6 +328,8 @@ mod harness_launch;
 #[cfg(unix)]
 mod json_gh_rules;
 #[cfg(unix)]
+pub(crate) use json_gh_rules::opencode_reviewer_environment;
+#[cfg(unix)]
 mod project_tools;
 #[cfg(unix)]
 mod shell_environment;
@@ -494,7 +497,7 @@ pub use unix::{
 };
 
 #[cfg(all(test, unix))]
-pub(crate) use unix::record_runtime_event;
+pub(crate) use unix::{record_runtime_event, run_relay_coordinator_with_verdict};
 
 #[cfg(not(unix))]
 pub async fn run_daemon(

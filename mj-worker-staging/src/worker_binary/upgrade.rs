@@ -576,43 +576,53 @@ pub fn worker_binary_upload_plan(
     installed: &str,
     remote_source: Option<&str>,
 ) -> Result<CommandPlan> {
+    let source = worker.host_binary();
+    if let Some(source) = source {
+        verify_worker_build(source)?;
+    }
+    binary_upload_plan(locator, session_id, source, installed, remote_source)
+}
+
+pub(super) fn binary_upload_plan(
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    source: Option<&Path>,
+    installed: &str,
+    remote_source: Option<&str>,
+) -> Result<CommandPlan> {
     let worker_root = targets::worker_root(locator, session_id)?;
     let installed = installed.to_owned();
     let staged = format!("{installed}.next");
-    let worker_binary = match worker {
-        WorkerInstall::Host(worker_binary) => worker_binary,
-        WorkerInstall::Image => {
-            ensure!(
-                locator.container_engine().is_some(),
-                "only a container target can run its image's worker"
-            );
-            // A link renamed into place, like a copied binary: the image owns
-            // the file, so there is nothing to re-own or make private.
-            return Ok(CommandPlan {
-                description: format!("link the image's Mjolnir worker for session {session_id}"),
-                commands: vec![
-                    targets::locator_command(
-                        SshTrafficClass::Control,
-                        locator,
-                        vec![
-                            "ln".into(),
-                            "-sfn".into(),
-                            IMAGE_WORKER.into(),
-                            staged.clone(),
-                        ],
-                    )
-                    .purpose("stage a link to the image's Mjolnir worker"),
-                    targets::locator_command(
-                        SshTrafficClass::Control,
-                        locator,
-                        vec!["mv".into(), "-f".into(), "--".into(), staged, installed],
-                    )
-                    .purpose("replace installed Mjolnir worker"),
-                ],
-            });
-        }
+    let Some(worker_binary) = source else {
+        ensure!(
+            locator.container_engine().is_some(),
+            "only a container target can run its image's worker"
+        );
+        // A link renamed into place, like a copied binary: the image owns
+        // the file, so there is nothing to re-own or make private.
+        return Ok(CommandPlan {
+            description: format!("link the image's Mjolnir worker for session {session_id}"),
+            commands: vec![
+                targets::locator_command(
+                    SshTrafficClass::Control,
+                    locator,
+                    vec![
+                        "ln".into(),
+                        "-sfn".into(),
+                        IMAGE_WORKER.into(),
+                        staged.clone(),
+                    ],
+                )
+                .purpose("stage a link to the image's Mjolnir worker"),
+                targets::locator_command(
+                    SshTrafficClass::Control,
+                    locator,
+                    vec!["mv".into(), "-f".into(), "--".into(), staged, installed],
+                )
+                .purpose("replace installed Mjolnir worker"),
+            ],
+        });
     };
-    verify_worker_build(worker_binary)?;
     let commands = match locator {
         targets::TargetLocator::LocalBare { .. } => vec![
             CommandSpec::new(

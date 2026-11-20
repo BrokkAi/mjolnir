@@ -71,15 +71,16 @@ for line in sys.stdin:
                 extra_mcp_servers: Vec::new(),
                 project_memory: None,
                 resume_session: Some("native".into()),
-                native_session_may_have_history: true,
+                native_session_history: NativeSessionHistory::MayHaveHistory,
                 accepted_config: Default::default(),
                 initial_model: None,
                 harness: HarnessKind::Claude,
                 execution_policy: ExecutionPolicy::ConfiguredApprovals,
-                claude_permission_mode: Default::default(),
+                approval_choices: Default::default(),
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
+                terminal_owner: None,
                 turn_context: Default::default(),
                 verdict: Some(crate::acp::VerdictSource::Disabled),
                 stall_policy: None,
@@ -198,15 +199,16 @@ for line in sys.stdin:
                 extra_mcp_servers: Vec::new(),
                 project_memory: None,
                 resume_session: Some("native".into()),
-                native_session_may_have_history: true,
+                native_session_history: NativeSessionHistory::MayHaveHistory,
                 accepted_config: Default::default(),
                 initial_model: None,
                 harness,
                 execution_policy: ExecutionPolicy::ConfiguredApprovals,
-                claude_permission_mode: Default::default(),
+                approval_choices: Default::default(),
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
+                terminal_owner: None,
                 turn_context: Default::default(),
                 verdict: Some(crate::acp::VerdictSource::Disabled),
                 stall_policy: None,
@@ -350,15 +352,16 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -806,7 +809,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                             );
                             if offers_review {
                                 expected.extend(
-                                    ["request_review", "override_review", "set_review_baseline"]
+                                    ["request_review", "override_review", "set_baseline"]
                                         .map(|tool| format!("mcp__mj-review__{tool}")),
                                 );
                             }
@@ -827,7 +830,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         ("mcp  mj-agents  list agents", offers("list_agents")),
                         ("mcp  mj-review  request review", offers_review),
                         ("mcp  mj-review  override review", offers_review),
-                        ("mcp  mj-review  set review baseline", offers_review),
+                        ("mcp  mj-review  set baseline", offers_review),
                         ("mcp  mj-review_  request review", false),
                         ("mcp  mj-agents  handback", offers("handback")),
                         ("mcp  mj-memory  trace file src/lib.rs", true),
@@ -1302,15 +1305,16 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -1405,15 +1409,16 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }),
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -1506,15 +1511,16 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: None,
         stall_policy: None,
@@ -1637,6 +1643,7 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
             login_identity: Default::default(),
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -1655,12 +1662,12 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: None,
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock,
         };
@@ -2157,15 +2164,16 @@ async fn answer_to_ext_request(
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Grok,
         execution_policy,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -2363,15 +2371,16 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -2884,15 +2893,23 @@ async fn policy_is_enforced_before_session_is_reported(
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: resume_session.map(str::to_owned),
-        native_session_may_have_history: false,
+        native_session_history: if resume_session.is_some() {
+            NativeSessionHistory::MayHaveHistory
+        } else {
+            NativeSessionHistory::LoadBeforeReplace
+        },
         accepted_config: Default::default(),
         initial_model: None,
         harness,
         execution_policy,
-        claude_permission_mode,
+        approval_choices: mj_core::config::ApprovalChoices {
+            claude_permission_mode,
+            ..Default::default()
+        },
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -3168,15 +3185,16 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -3237,15 +3255,16 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::Unconstrained,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -3523,15 +3542,16 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -3942,16 +3962,17 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         // Muse marks no turn end of its own, so the watchdog covers it.
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: Some(stall_policy),
@@ -4532,15 +4553,16 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -4867,15 +4889,16 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -5010,15 +5033,16 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -5107,15 +5131,16 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session,
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -5401,6 +5426,19 @@ mod terminals {
     }
 
     fn start_scripted_runtime() -> ScriptedRuntime {
+        start_scripted_runtime_with_owner(None)
+    }
+
+    fn start_scripted_runtime_with_owner(
+        terminal_owner: Option<std::sync::Weak<crate::relay::RelayCell>>,
+    ) -> ScriptedRuntime {
+        start_scripted_runtime_with_pause(terminal_owner, None)
+    }
+
+    fn start_scripted_runtime_with_pause(
+        terminal_owner: Option<std::sync::Weak<crate::relay::RelayCell>>,
+        mut pause: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    ) -> ScriptedRuntime {
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
         let (scripted_tx, scripted_rx) = mpsc::unbounded_channel();
         let (answers_tx, answers_rx) = mpsc::unbounded_channel();
@@ -5413,19 +5451,40 @@ mod terminals {
         let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
 
         let (request_tx, mut request_rx) = mpsc::channel(4);
-        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let (event_tx, mut event_rx) = mpsc::channel::<RuntimeEvent>(64);
         // Drain events so a full channel can never be mistaken for silence,
         // and keep them so a test can read what the runtime reported.
         let observed = Arc::new(Mutex::new(Vec::new()));
         let recorder = observed.clone();
+        let event_owner = terminal_owner.clone();
         let events = mj_core::runtime::spawn(async move {
+            let mut in_flight = BTreeMap::new();
             while let Some(event) = event_rx.recv().await {
+                if matches!(&event, RuntimeEvent::SessionUpdate { update } if update.get("sessionUpdate").and_then(serde_json::Value::as_str) == Some("agent_message_chunk"))
+                    && let Some((reached, release)) = pause.take()
+                {
+                    reached.send(()).unwrap();
+                    release.await.unwrap();
+                }
+                if let Some(owner) = event_owner.as_ref().and_then(std::sync::Weak::upgrade) {
+                    crate::worker_runtime::record_runtime_event(
+                        &owner,
+                        &mut in_flight,
+                        event.clone(),
+                    )
+                    .unwrap();
+                }
                 recorder
                     .lock()
                     .expect("observed events lock poisoned")
                     .push(event);
             }
         });
+        let tools_in_flight = terminal_owner
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .map(|owner| owner.lock().unwrap().tools_in_flight())
+            .unwrap_or_default();
         let spec = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
@@ -5446,15 +5505,16 @@ mod terminals {
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: None,
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
-            tools_in_flight: Default::default(),
+            tools_in_flight,
+            terminal_owner,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -5528,6 +5588,147 @@ mod terminals {
             .as_str()
             .unwrap_or_else(|| panic!("terminal/create must return a terminal id: {created}"))
             .to_owned()
+    }
+
+    // Hard-won: 1f0ee89: synchronous terminal card admission overtook an earlier ACP chunk.
+    #[tokio::test]
+    async fn terminal_admission_preserves_queued_assistant_output_order() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = Arc::new(crate::relay::RelayCell::new(
+            crate::relay::DurableRelay::open(root.path(), "terminal-order", "test").unwrap(),
+        ));
+        let (reached, paused) = oneshot::channel();
+        let (release, resumed) = oneshot::channel();
+        let mut runtime = start_scripted_runtime_with_pause(
+            Some(Arc::downgrade(&owner)),
+            Some((reached, resumed)),
+        );
+        runtime.agent.scripted.send(serde_json::json!({
+            "jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"scripted", "update":{
+                "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"Introducing the terminal"}
+            }}
+        })).unwrap();
+        tokio::time::timeout(ANSWER_TIMEOUT, paused)
+            .await
+            .unwrap()
+            .unwrap();
+        let terminal = create_terminal(
+            &mut runtime.agent,
+            serde_json::json!({
+                "sessionId":"scripted", "command":"/bin/sh", "args":["-c", "sleep 600"]
+            }),
+        )
+        .await;
+        let mut cut = owner.lock().unwrap().reserve_live_baseline();
+        assert!(
+            cut.try_recv().is_err(),
+            "inventory blocks the cut before the FIFO is drained"
+        );
+        release.send(()).unwrap();
+        runtime
+            .agent
+            .call("terminal/kill", terminal_params(&terminal))
+            .await;
+        tokio::time::timeout(ANSWER_TIMEOUT, cut)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let events = owner
+            .lock()
+            .unwrap()
+            .events_after(0, crate::relay::RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap();
+        let chunk = events.iter().position(|event| matches!(&event.observation, mj_core::relay::RelayObservation::SessionUpdate { update } if matches!(update.as_ref(), SessionUpdate::AgentMessageChunk(_)))).unwrap();
+        let card = events.iter().position(|event| matches!(&event.observation, mj_core::relay::RelayObservation::SessionUpdate { update } if matches!(update.as_ref(), SessionUpdate::ToolCall(_)))).unwrap();
+        assert!(
+            chunk < card,
+            "a later terminal card cannot precede the queued introduction"
+        );
+        runtime.stop().await;
+    }
+
+    // Hard-won: 9a72411: a failed synthetic terminal opened an idle Claude turn with no result.
+    #[tokio::test]
+    async fn terminal_spawn_failure_releases_its_cut_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = Arc::new(crate::relay::RelayCell::new(
+            crate::relay::DurableRelay::open(root.path(), "terminal-adoption", "test").unwrap(),
+        ));
+        owner
+            .lock()
+            .unwrap()
+            .set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+        let mut runtime = start_scripted_runtime_with_owner(Some(Arc::downgrade(&owner)));
+        let terminal = create_terminal(
+            &mut runtime.agent,
+            serde_json::json!({
+                "sessionId":"scripted", "command":"/bin/sh", "args":["-c", "sleep 600"]
+            }),
+        )
+        .await;
+        let mut cut = owner.lock().unwrap().reserve_live_baseline();
+        assert!(cut.try_recv().is_err());
+        let failed = runtime.agent.call("terminal/create", serde_json::json!({
+            "sessionId":"scripted", "command":"/bin/sh", "args":["-c", "exit 0"], "cwd":root.path().join("missing-directory")
+        })).await;
+        assert!(failed.get("error").is_some(), "{failed}");
+        tokio::time::timeout(ANSWER_TIMEOUT, async {
+            while owner
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_agent_terminals
+                .len()
+                != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            owner
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_agent_terminals
+                .len(),
+            1
+        );
+        assert!(cut.try_recv().is_err());
+        let stopped = runtime
+            .agent
+            .call("terminal/kill", terminal_params(&terminal))
+            .await;
+        assert!(stopped.get("result").is_some(), "{stopped}");
+        let cut = tokio::time::timeout(ANSWER_TIMEOUT, cut)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(cut.state.active_agent_terminals.is_empty());
+        assert!(owner.lock().unwrap().tools_in_flight().is_empty());
+        runtime.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_disappeared_terminal_owner_refuses_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = Arc::new(crate::relay::RelayCell::new(
+            crate::relay::DurableRelay::open(root.path(), "terminal-adoption", "test").unwrap(),
+        ));
+        let weak = Arc::downgrade(&owner);
+        drop(owner);
+        let mut runtime = start_scripted_runtime_with_owner(Some(weak));
+        let marker = root.path().join("must-not-spawn");
+        let failed = runtime.agent.call("terminal/create", serde_json::json!({
+            "sessionId":"scripted", "command":"/bin/sh", "args":["-c", format!("touch {}", mj_core::targets::posix_quote(&marker.to_string_lossy()))]
+        })).await;
+        assert!(failed.get("error").is_some(), "{failed}");
+        assert!(failed.to_string().contains("relay owner is gone"));
+        assert!(!marker.exists());
+        runtime.stop().await;
     }
 
     #[tokio::test]
@@ -5810,6 +6011,7 @@ mod terminals {
 }
 
 #[cfg(unix)]
+// Hard-won: 14b4b00de: a replacement bridge exiting before its first prompt reloaded the unwritten thread and aborted
 #[tokio::test]
 async fn unused_codex_bridge_restarts_with_a_new_thread() {
     codex_bridge_restart_preserves_only_used_threads(false).await;
@@ -5824,13 +6026,17 @@ async fn codex_bridge_restarts_with_the_used_thread_even_if_the_prompt_reply_was
 #[cfg(unix)]
 async fn codex_bridge_restart_preserves_only_used_threads(send_prompt: bool) {
     let temp = tempfile::tempdir().unwrap();
-    let marker = temp.path().join("restarted");
+    let launches = temp.path().join("launches");
+    let exit_requested = temp.path().join("exit-requested");
     let script = temp.path().join("codex_persistence.py");
     std::fs::write(&script, format!(r#"
 import json, os, sys, time
-marker = {marker:?}
+launches = {launches:?}
+exit_requested = {exit_requested:?}
 used = {send_prompt}
-second = os.path.exists(marker)
+launch = int(open(launches).read()) + 1 if os.path.exists(launches) else 1
+with open(launches, "w") as counter:
+    counter.write(str(launch))
 
 def write(payload):
     print(json.dumps(payload), flush=True)
@@ -5842,26 +6048,34 @@ for line in sys.stdin:
     if method == "initialize":
         result = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}, "_meta": {{"jetbrains": {{"air": {{"version": 1, "capabilities": ["nativeSubagentSessions"]}}}}}}}}
     elif method in ("session/new", "session/load", "session/resume"):
-        if second and not used and method != "session/new":
-            write({{"jsonrpc": "2.0", "id": ident, "error": {{"code": -32603, "message": "no rollout found for thread id unused"}}}})
+        if not used and method != "session/new":
+            thread = request["params"]["sessionId"]
+            write({{"jsonrpc": "2.0", "id": ident, "error": {{"code": -32603, "message": "Internal error", "data": {{"details": f"thread not loaded: {{thread}}"}}}}}})
             continue
-        assert method == ("session/load" if second and used else "session/new"), request
-        result = {{"sessionId": "original" if not second or used else "replacement",
+        assert method == ("session/load" if launch > 1 and used else "session/new"), request
+        result = {{"sessionId": "original" if used else f"thread-{{launch}}",
                    "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Guardian"}}]}}}}
         write({{"jsonrpc": "2.0", "id": ident, "result": result}})
         continue
     elif method == "session/prompt":
-        assert not second and used
-        open(marker, "w").close()
-        # Crash after consuming the prompt, before replying.
-        break
+        if used:
+            assert launch == 1
+            # Crash after consuming the prompt, before replying.
+            break
+        assert launch == 2 and request["params"]["sessionId"] == "thread-2", request
+        write({{"jsonrpc": "2.0", "method": "session/update", "params": {{
+            "sessionId": request["params"]["sessionId"],
+            "update": {{"sessionUpdate": "agent_message_chunk",
+                       "content": {{"type": "text", "text": "recovered reply"}}}}}}}})
+        result = {{"stopReason": "end_turn"}}
     else:
         result = {{}}
     if ident is not None:
         write({{"jsonrpc": "2.0", "id": ident, "result": result}})
-    if method == "session/set_mode" and not second and not used:
-        open(marker, "w").close()
-        time.sleep(0.2)
+    if method == "session/set_mode" and not used and launch == 1:
+        # Wait until the runtime has published this open before exiting.
+        while not os.path.exists(exit_requested):
+            time.sleep(0.01)
         break
 "#, send_prompt = if send_prompt { "True" } else { "False" })).unwrap();
     let (request_tx, request_rx) = mpsc::channel(4);
@@ -5886,16 +6100,21 @@ for line in sys.stdin:
             additional_directories: Vec::new(),
             extra_mcp_servers: Vec::new(),
             project_memory: None,
-            resume_session: None,
-            native_session_may_have_history: false,
+            resume_session: (!send_prompt).then(|| "unused".into()),
+            native_session_history: if send_prompt {
+                NativeSessionHistory::LoadBeforeReplace
+            } else {
+                NativeSessionHistory::CreatedHereUnused
+            },
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Codex,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -5906,6 +6125,7 @@ for line in sys.stdin:
     let mut opened = Vec::new();
     let mut prompt_sent = false;
     let mut replay = Vec::new();
+    let mut restart_messages = Vec::new();
     loop {
         let event = tokio::time::timeout(std::time::Duration::from_secs(10), event_rx.recv())
             .await
@@ -5913,18 +6133,26 @@ for line in sys.stdin:
             .expect("the runtime must survive the first bridge's death");
         match event {
             RuntimeEvent::NativeAgent { event } => replay.push(event),
+            RuntimeEvent::HarnessRestarting { message } => restart_messages.push(message),
             RuntimeEvent::SessionStarted {
                 native_session_id,
                 resumed,
+                replaced_unused_native_session_id,
                 ..
             } => {
-                opened.push((native_session_id, resumed));
+                opened.push((
+                    native_session_id,
+                    resumed,
+                    replaced_unused_native_session_id,
+                ));
             }
             RuntimeEvent::SessionConfigured { .. } => {
-                if opened.len() == 2 {
+                if send_prompt && opened.len() == 2 {
                     break;
                 }
-                if send_prompt && !prompt_sent {
+                if !send_prompt && opened.len() == 1 {
+                    std::fs::write(&exit_requested, "").unwrap();
+                } else if !prompt_sent {
                     request_tx
                         .send(CommandRequest::Prompt {
                             request_id: "prompt-1".into(),
@@ -5935,6 +6163,14 @@ for line in sys.stdin:
                     prompt_sent = true;
                 }
             }
+            RuntimeEvent::PromptFinished {
+                request_id,
+                stop_reason,
+                ..
+            } if request_id == "prompt-1" && !send_prompt => {
+                assert_eq!(stop_reason, "EndTurn");
+                break;
+            }
             RuntimeEvent::Stopped => {
                 panic!("runtime stopped instead of recovering: {:?}", runtime.await)
             }
@@ -5943,18 +6179,25 @@ for line in sys.stdin:
     }
     assert_eq!(
         opened,
-        vec![
-            ("original".into(), false),
-            (
-                if send_prompt {
-                    "original"
-                } else {
-                    "replacement"
-                }
-                .into(),
-                send_prompt
-            ),
-        ]
+        if send_prompt {
+            vec![
+                ("original".into(), false, None),
+                ("original".into(), true, None),
+            ]
+        } else {
+            vec![
+                ("thread-1".into(), false, Some("unused".into())),
+                ("thread-2".into(), false, Some("unused".into())),
+            ]
+        }
+    );
+    assert_eq!(
+        restart_messages,
+        [if send_prompt {
+            "ACP bridge exited; reloading the native session"
+        } else {
+            "The agent stopped before its first prompt; restarting with a new empty thread."
+        }]
     );
     assert_eq!(
         replay,
@@ -5964,7 +6207,12 @@ for line in sys.stdin:
                 mj_core::native_agent::NativeAgentEvent::ReplayCommit,
             ]
         } else {
-            Vec::new()
+            vec![
+                mj_core::native_agent::NativeAgentEvent::ReplayBegin,
+                mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+                mj_core::native_agent::NativeAgentEvent::ReplayBegin,
+                mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+            ]
         }
     );
     drop(request_tx);
@@ -6083,15 +6331,16 @@ for line in sys.stdin:
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }),
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -6247,15 +6496,16 @@ while True:
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }),
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -6391,15 +6641,16 @@ while True:
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -6505,15 +6756,16 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::Unconstrained,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -6586,15 +6838,16 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: None,
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::Unconstrained,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -6835,15 +7088,20 @@ pub(super) fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: Some("gone".into()),
-        native_session_may_have_history: false,
+        native_session_history: if harness == HarnessKind::Codex {
+            NativeSessionHistory::MayHaveHistory
+        } else {
+            NativeSessionHistory::LoadBeforeReplace
+        },
         accepted_config: Default::default(),
         initial_model: None,
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -6921,15 +7179,16 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: Some("native".into()),
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Default::default(),
             initial_model: None,
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -7057,7 +7316,7 @@ fn missing_native_session_spec(
     directory: &Path,
     script: &Path,
     harness: HarnessKind,
-    native_session_may_have_history: bool,
+    native_session_history: NativeSessionHistory,
 ) -> LaunchSpec {
     LaunchSpec {
         operator_away: Default::default(),
@@ -7079,15 +7338,16 @@ fn missing_native_session_spec(
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: Some("missing-thread".into()),
-        native_session_may_have_history,
+        native_session_history,
         accepted_config: Default::default(),
         initial_model: None,
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -7143,7 +7403,7 @@ async fn assert_unused_native_session_is_replaced(
             temp.path(),
             &script,
             harness,
-            relay.native_session_may_have_history(),
+            relay.native_session_history(),
         ),
         request_rx,
         event_tx,
@@ -7162,8 +7422,15 @@ async fn assert_unused_native_session_is_replaced(
             RuntimeEvent::SessionStarted {
                 native_session_id,
                 resumed,
+                replaced_unused_native_session_id,
                 ..
-            } => opened = Some((native_session_id, resumed)),
+            } => {
+                assert_eq!(
+                    replaced_unused_native_session_id.as_deref(),
+                    Some("missing-thread")
+                );
+                opened = Some((native_session_id, resumed));
+            }
             RuntimeEvent::PromptFinished { request_id, .. } => finished = Some(request_id),
             RuntimeEvent::Stopped => {
                 panic!("the runtime stopped instead of replacing the session: {warnings:?}")
@@ -7190,10 +7457,18 @@ async fn assert_unused_native_session_is_replaced(
 }
 
 #[cfg(unix)]
+// Hard-won: 710ffb643: Codex could still refuse to reload a never-prompted thread after an idle worker upgrade.
 #[tokio::test]
 async fn an_unused_codex_thread_is_replaced_in_the_same_session_after_upgrade() {
-    assert_unused_native_session_is_replaced(HarnessKind::Codex, missing_codex_thread_error())
-        .await;
+    assert_unused_native_session_is_replaced(
+        HarnessKind::Codex,
+        serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"details": "thread not loaded: missing-thread"}
+        }),
+    )
+    .await;
 }
 
 #[cfg(unix)]
@@ -7211,7 +7486,12 @@ async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() 
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = mj_core::runtime::spawn(run(
-        missing_native_session_spec(temp.path(), &script, HarnessKind::Codex, true),
+        missing_native_session_spec(
+            temp.path(),
+            &script,
+            HarnessKind::Codex,
+            NativeSessionHistory::MayHaveHistory,
+        ),
         request_rx,
         event_tx,
     ));
@@ -7394,15 +7674,15 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
                         serde_json::json!({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}},
                             "_meta":{"jetbrains":{"air":{"version":1,"capabilities":["nativeSubagentSessions"]}}}})
                     }
-                    "session/load" if missing => {
-                        let response = serde_json::json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32603,"message":"no rollout found for thread id root"}});
-                        write
-                            .write_all(format!("{response}\n").as_bytes())
-                            .await
-                            .unwrap();
-                        continue;
-                    }
                     "session/load" | "session/new" => {
+                        assert_eq!(
+                            method,
+                            if missing {
+                                "session/new"
+                            } else {
+                                "session/load"
+                            }
+                        );
                         // Exceed the pipe capacity so the driver must drain history
                         // concurrently with the load response.
                         for (address, update) in [
@@ -7450,6 +7730,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             login_identity: Default::default(),
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -7468,12 +7749,16 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: Some("root".into()),
-            native_session_may_have_history: false,
+            native_session_history: if missing {
+                NativeSessionHistory::CreatedHereUnused
+            } else {
+                NativeSessionHistory::MayHaveHistory
+            },
             accepted_config: Default::default(),
             initial_model: None,
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock,
         };
@@ -7517,12 +7802,15 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             missing_background_capability,
             harness == HarnessKind::Claude
         );
-        assert_eq!(children.len(), 5);
-        assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));
         let spawn_index = if missing {
+            // Hard-won: 14b4b00de: replacing an unused thread skipped the replay boundary, so staging from an abandoned load hid later native children.
+            assert_eq!(children.len(), 5);
+            assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));
             assert!(matches!(children[1], NativeAgentEvent::ReplayCommit));
             2
         } else {
+            assert_eq!(children.len(), 5);
+            assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));
             assert!(matches!(children[4], NativeAgentEvent::ReplayCommit));
             1
         };
@@ -7706,9 +7994,27 @@ for line in sys.stdin:
         })
         .await
         .unwrap();
+    // Hard-won: ad4c24b: bridge retirement must be published before replacement startup.
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::BridgeRetired { .. })
+    })
+    .await;
+    // Hard-won: 2a0aae9: rollback skipped the old bridge's retirement signal.
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event,
+        RuntimeEvent::ContextClearing { request_id } if request_id == "clear-request")
+    })
+    .await;
     if fail_replacement {
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, message , ..} if request_id == "clear-request" && message.contains("replacement refused"))).await;
-        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: true, .. } if native_session_id == "original")).await;
+        if harness == HarnessKind::Codex {
+            // Codex keeps a never-prompted thread only in the app-server that
+            // created it, and the rollback runs in a new bridge, so the
+            // unused original is replaced rather than reloaded.
+            wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: false, replaced_unused_native_session_id: Some(previous), .. } if native_session_id == "replacement" && previous == "original")).await;
+        } else {
+            wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: true, .. } if native_session_id == "original")).await;
+        }
     } else {
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::ContextCleared { request_id, native_session_id, .. } if request_id == "clear-request" && native_session_id == "replacement")).await;
     }
@@ -7762,14 +8068,18 @@ for line in sys.stdin:
             .iter()
             .filter(|method| method.as_str() == "session/new")
             .count(),
-        2
+        if fail_replacement && harness == HarnessKind::Codex {
+            3
+        } else {
+            2
+        }
     );
     assert_eq!(
         methods
             .iter()
             .filter(|method| method.as_str() == "session/load")
             .count(),
-        usize::from(fail_replacement)
+        usize::from(fail_replacement && harness != HarnessKind::Codex)
     );
 }
 
@@ -7890,7 +8200,10 @@ fn a_permission_form_shows_the_command_it_approves() {
 /// "Kimi Code requests permission: Bash" and nothing else. The recorded
 /// updates are replayed from the reviewer journal R4 saved
 /// (`reviewer-B-kimi-bash-permission.jsonl`), followed by a permission request
-/// that names the call and carries no input, as Kimi's did.
+/// that names the call and carries no input, as Kimi's did. Kimi has no
+/// guardian of its own, and the Mjolnir guardian's reviewer cannot start here
+/// (there is no `kimi-probe`), so the request reaches the person's form with
+/// the reason first.
 // Hard-won: 11ace4e: Kimi permission forms omitted commands streamed in tool content rather than rawInput.
 #[tokio::test]
 async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
@@ -7922,15 +8235,16 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         extra_mcp_servers: vec![],
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -8021,8 +8335,15 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
             break request.message;
         }
     };
+    let (preface, request) = message
+        .split_once("Answer it yourself.\n")
+        .expect("the form names why the guardian handed it over");
+    assert!(
+        preface.starts_with("Mjolnir guardian could not decide this request (its review failed: "),
+        "{preface}"
+    );
     assert_eq!(
-        message,
+        request,
         "Kimi Code requests permission:\nBash\n$ git status --short && git ls-files && ls -a"
     );
     driver.abort();
@@ -8060,6 +8381,38 @@ fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
     assert!(!pending.is_empty());
     assert!(pending.remove("elicitation-1").is_some());
     assert!(pending.is_empty());
+}
+
+// Hard-won: 747336f25: AFK answered a permission while a cancelled turn was being withdrawn.
+#[test]
+fn afk_cannot_answer_a_permission_between_withdrawal_and_form_removal() {
+    let owner = OperatorAway::default();
+    let pending = owner.pending_for_bridge();
+    let id = format!("{TOOL_PERMISSION_ID_PREFIX}1");
+    let mut permission_rx = pending.register(
+        pending_test_question(&id),
+        String::new(),
+        AwayRequest::Tool("permission".into()),
+    );
+
+    pending.begin_withdrawal();
+    owner.set(mj_core::state::OperatorPresence {
+        away: true,
+        revision: 1,
+    });
+    assert!(
+        matches!(
+            permission_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "the form remains for withdrawal to remove"
+    );
+
+    pending.withdraw_tool_permissions();
+    assert!(matches!(
+        permission_rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Closed)
+    ));
 }
 
 fn pending_test_question(id: &str) -> ElicitationRequest {
@@ -8331,15 +8684,16 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Default::default(),
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -8397,6 +8751,18 @@ fn a_worker_exit_reason_names_the_cause_before_the_bridge_stderr() {
     );
     assert_eq!(lines.next(), Some(BRIDGE_STDERR_CONTEXT));
     assert!(reason.ends_with("[session/create] phase=register durationMs=1"));
+
+    // The marker supplies the first line even when cleanup also reported
+    // an error. The bridge stderr remains available below that cause.
+    let error = anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+        message: "load ACP session failed".to_owned(),
+    })
+    .context(format!("{BRIDGE_STDERR_CONTEXT}\nbridge diagnostic"))
+    .context("ACP cleanup also failed");
+    assert_eq!(
+        worker_exit_reason(&error),
+        format!("load ACP session failed\n{BRIDGE_STDERR_CONTEXT}\nbridge diagnostic")
+    );
 
     // A failure with no stderr is the chain on one line.
     let error = anyhow::anyhow!("durable relay open failed").context("start worker");
@@ -8841,6 +9207,72 @@ async fn opencode_reloads_its_session_for_changed_logins_only_between_turns() {
     }
     assert!(finished, "the turn finished before the reload");
     bridge.abort();
+}
+
+// Hard-won: ad4c24b: worker-local retirement must traverse the real FIFO without serialization.
+#[cfg(unix)]
+#[tokio::test]
+async fn real_bridge_retirement_runs_through_worker_fifo_without_serialization() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(crate::relay::RelayCell::new(
+        crate::relay::DurableRelay::open(temp.path(), "retirement-fifo", "test").unwrap(),
+    ));
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.harness = HarnessKind::Codex;
+    spec.command = "python3".into();
+    spec.args = vec!["-u".into(), "-c".into(), r#"
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'method' not in request or 'id' not in request: continue
+    method = request['method']
+    result = {'protocolVersion':1} if method == 'initialize' else {'sessionId':'retirement-native', 'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Agent'},{'id':'plan','name':'Plan'}]}} if method == 'session/new' else {}
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
+"#.into()];
+    spec.cwd = temp.path().to_owned();
+    spec.terminal_owner = Some(Arc::downgrade(&relay));
+    let (commands, requests) = mpsc::channel(1);
+    drop(commands);
+    let (events, received) = mpsc::channel(64);
+    let (_wake, wakes) = mpsc::channel(1);
+    let (unused_commands, _unused_requests) = mpsc::channel(1);
+    let (shell_events, _shell_received) = mpsc::channel(1);
+    let shells = crate::user_shell::UserShellRegistry::new(
+        temp.path().to_owned(),
+        BTreeMap::new(),
+        shell_events,
+    );
+    let coordinator =
+        mj_core::runtime::spawn(crate::worker_runtime::run_relay_coordinator_with_verdict(
+            relay.clone(),
+            received,
+            wakes,
+            unused_commands,
+            shells,
+            None,
+            None,
+            None,
+        ));
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events));
+    // Join both even if either fails, so the fixture leaves no runtime behind.
+    let (runtime_result, coordinator_result) = tokio::join!(runtime, coordinator);
+    runtime_result.unwrap().unwrap();
+    coordinator_result.unwrap().unwrap();
+    let state = relay.lock().unwrap();
+    assert!(state.operational_state().active_agent_terminals.is_empty());
+    assert!(
+        state
+            .events_after(0, crate::relay::RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap()
+            .iter()
+            .any(|event| matches!(
+                event.observation,
+                mj_core::relay::RelayObservation::SessionOpened { .. }
+            ))
+    );
 }
 
 /// Replay pinned-adapter lifecycle replies (Claude source-derived) against real driver requests.

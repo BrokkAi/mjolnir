@@ -223,7 +223,6 @@ struct PreparedMbx {
     program: PathBuf,
     kind: MbxInstallKind,
     staged: Option<PathBuf>,
-    _download: Option<tempfile::TempDir>,
 }
 
 impl Drop for PreparedMbx {
@@ -242,14 +241,9 @@ impl Drop for PreparedMbx {
 
 /// Probe, fetch, verify and upload without publishing or holding handoff admission.
 fn prepare_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result<PreparedMbx> {
-    let root = mj_core::config::data_dir().join("mbx-download");
-    std::fs::create_dir_all(&root).context("create mbx download staging root")?;
-    let directory = tempfile::tempdir_in(root).context("create mbx download staging directory")?;
-    let mut prepared = prepare_mbx_with(machine, executor, None, |triple| {
-        download(triple, directory.path(), executor)
-    })?;
-    prepared._download = Some(directory);
-    Ok(prepared)
+    prepare_mbx_with(machine, executor, None, |triple| {
+        pinned_linux_binary(triple, executor)
+    })
 }
 
 /// Install from a standalone CLI operation without a daemon handoff owner.
@@ -314,7 +308,6 @@ fn prepare_mbx_with(
         program,
         kind,
         staged: Some(staged),
-        _download: None,
     })
 }
 
@@ -830,7 +823,9 @@ fn expected_digest(triple: &str) -> Result<&'static str> {
 }
 
 /// Async HTTP is cancelled by dropping its future; subprocesses retain their executor owner.
-fn download(triple: &str, directory: &Path, executor: &impl CommandExecutor) -> Result<PathBuf> {
+/// Materialize the verified Linux release for the target's architecture on
+/// the controller, regardless of the controller's own OS and architecture.
+pub fn pinned_linux_binary(triple: &str, executor: &impl CommandExecutor) -> Result<PathBuf> {
     let expected = expected_digest(triple)?;
     // Keep the original verified cache layout for offline retries and other hosts.
     let destination = mj_core::config::data_dir()
@@ -841,22 +836,29 @@ fn download(triple: &str, directory: &Path, executor: &impl CommandExecutor) -> 
     if destination.is_file() {
         return Ok(destination);
     }
-    let archive_path = directory.join("release.tar.gz");
+    let root = mj_core::config::data_dir().join("mbx-download");
+    std::fs::create_dir_all(&root).context("create mbx download staging root")?;
+    let directory = tempfile::tempdir_in(root).context("create mbx download staging directory")?;
     let url = release_url(triple);
-    let archive = mj_core::runtime::block_on(async {
-        let fetch = fetch_archive(&url);
-        tokio::pin!(fetch);
-        loop {
-            check_cancelled(executor)?;
-            tokio::select! {
-                result = &mut fetch => return result,
-                // Match the cancellable subprocess executor's flag polling interval.
-                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+    // Session staging can run inside a lifecycle future driven by Handle::block_on.
+    // Release that runtime entry before waiting synchronously for the HTTP request.
+    let archive = mj_core::runtime::off_async_worker(|| {
+        mj_core::runtime::block_on(async {
+            let fetch = fetch_archive(&url);
+            tokio::pin!(fetch);
+            loop {
+                check_cancelled(executor)?;
+                tokio::select! {
+                    result = &mut fetch => return result,
+                    // Match the cancellable subprocess executor's flag polling interval.
+                    _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+                }
             }
-        }
+        })
     })??;
     check_cancelled(executor)?;
-    std::fs::write(&archive_path, &archive).context("write staged mbx archive")?;
+    std::fs::write(directory.path().join("release.tar.gz"), &archive)
+        .context("write staged mbx archive")?;
     let actual = mj_core::hex::lower_hex(Sha256::digest(&archive));
     ensure!(
         actual.eq_ignore_ascii_case(expected),
@@ -1319,16 +1321,13 @@ mod tests {
             .join(MBX_VERSION)
             .join("x86_64")
             .join("mbx");
-        let stage = tempfile::tempdir().unwrap();
         let bytes = b"recorded verified mbx executable";
         retain_verified_download(&destination, bytes).unwrap();
-        drop(stage);
         // The real download entry point must reuse its durable cache with no runtime or network.
         MBX_TEST_RELEASE_URL
             .set("http://127.0.0.1:0/offline".into())
             .unwrap();
-        let next_stage = tempfile::tempdir().unwrap();
-        let cached = download("x86_64", next_stage.path(), &targets::ProcessExecutor).unwrap();
+        let cached = pinned_linux_binary("x86_64", &targets::ProcessExecutor).unwrap();
         assert_eq!(cached, destination);
         assert_eq!(std::fs::read(cached).unwrap(), bytes);
     }

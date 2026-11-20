@@ -29,7 +29,7 @@ use super::{
 
 use crate::acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
 use crate::relay::{
-    ClaimedRelayCommand, DeferredRelayAttach, DurableRelay, RELAY_STATE_FILE,
+    ClaimedRelayCommand, DeferredRelayAttach, DurableRelay, NativeSessionHistory, RELAY_STATE_FILE,
     RESTORED_RELAY_SEED_FILE, RelayCell, RelayCommand, RelayCommandOutcome, RelayErrorCode,
     RelayObservation, RelayProtocolError, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
     RelayResponseEnvelope, RelayResponsePayload, invalid_relay_request_response,
@@ -45,13 +45,13 @@ pub(crate) const ACP_EVENT_CHANNEL_CAPACITY: usize = 256;
 /// Subagent profile, project memory, ACP setup, and bridge start each get
 /// three minutes, with no local preparation stage exceeding five minutes.
 const LOCAL_PREPARATION_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3 * 60);
-const PREPARATION_CANCELLED_ERROR: &str =
-    "cancelled because the session is closing or the worker is shutting down";
 
 #[derive(Clone, Default)]
 pub(super) struct PreparationSnapshot {
     state: Option<mj_core::relay::HarnessPreparation>,
     services: Option<Arc<PreparedConnectionServices>>,
+    /// The current step's own bound, which also bounds the threads it starts.
+    step_deadline: Option<tokio::time::Instant>,
 }
 
 impl PreparationSnapshot {
@@ -71,9 +71,6 @@ struct PreparedConnectionServices {
 }
 
 struct RunningHarness {
-    // On startup failure the coordinator transfers its receiver here so relay
-    // lifecycle requests can still wake it, just as during preparation failure.
-    idle_dispatch_wakes: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
     acp_task: tokio::task::JoinHandle<Result<()>>,
     event_task: tokio::task::JoinHandle<Result<()>>,
     acp_shutdown: CancellationToken,
@@ -91,9 +88,24 @@ struct RunningHarness {
     project_tools: Option<super::project_tools::BackgroundInstall>,
 }
 
-struct HarnessPreparationCompletion {
-    result: Result<RunningHarness>,
-    idle_dispatch_wakes: Option<mpsc::Receiver<()>>,
+/// How a harness preparation ended. There is no failed state to serve: a
+/// harness that cannot start ends the worker.
+enum PreparationOutcome {
+    Started(Box<RunningHarness>),
+    /// A Close sealed the relay, or the worker is stopping, before the bridge
+    /// started. The receiver keeps request-side dispatch wakes deliverable
+    /// while the sealed relay is served without a harness.
+    Cancelled(Option<mpsc::Receiver<()>>),
+    /// The harness cannot start. The error carries a
+    /// [`mj_core::relay::WorkerHarnessStartupFailure`] for the exit record.
+    Failed(anyhow::Error),
+}
+
+/// Why [`supervise_preparation`] did not return a prepared value.
+#[derive(Debug)]
+enum PreparationStop {
+    Cancelled,
+    Failed(anyhow::Error),
 }
 
 struct HarnessPreparationSetup {
@@ -104,7 +116,7 @@ struct HarnessPreparationSetup {
     credentials: std::result::Result<CredentialEndpoint, String>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
     resume_session: Option<String>,
-    native_session_may_have_history: bool,
+    native_session_history: NativeSessionHistory,
     /// What a sub-agent's worker observes at the end of each turn.
     capture: Option<crate::work_facts::WorkObserver>,
 }
@@ -146,7 +158,7 @@ struct AcpPreparationSetup {
     supervisor_spec: AcpSupervisorSpec,
     relay: Arc<RelayCell>,
     resume_session: Option<String>,
-    native_session_may_have_history: bool,
+    native_session_history: NativeSessionHistory,
     profile_registration: bool,
     /// Read from the launch before preparation strips the marker from the
     /// harness environment, so the ACP runtime knows the session is a child.
@@ -172,7 +184,6 @@ struct PreparedAcpSetup {
 }
 
 struct StartedBridgeTasks {
-    idle_dispatch_wakes: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
     acp_shutdown: Option<CancellationToken>,
     acp_task: Option<tokio::task::JoinHandle<Result<()>>>,
     event_task: Option<tokio::task::JoinHandle<Result<()>>>,
@@ -187,7 +198,6 @@ struct StartedBridgeTasks {
 impl StartedBridgeTasks {
     fn into_running(mut self) -> RunningHarness {
         RunningHarness {
-            idle_dispatch_wakes: self.idle_dispatch_wakes.clone(),
             acp_shutdown: self.acp_shutdown.take().expect("ACP task was started"),
             acp_task: self.acp_task.take().expect("ACP task was started"),
             event_task: self
@@ -238,7 +248,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         supervisor_spec,
         relay,
         resume_session,
-        native_session_may_have_history,
+        native_session_history,
         profile_registration,
         managed_subagent,
         subagent_role,
@@ -336,6 +346,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &mut additional_directories,
     );
     let instruction_role = crate::acp::InstructionRole::from_launch(&config);
+    let approval_choices = config.approval_choices();
     let acp_spec = LaunchSpec {
         operator_away,
         imported_logins: None,
@@ -384,15 +395,16 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         }),
         project_memory: config.project_memory,
         resume_session,
-        native_session_may_have_history,
+        native_session_history,
         accepted_config,
         initial_model: config.initial_model,
         harness: config.harness,
         execution_policy: config.execution_policy,
-        claude_permission_mode: config.claude_permission_mode,
+        approval_choices,
         acp_activity,
         step_clock,
         tools_in_flight,
+        terminal_owner: Some(Arc::downgrade(&relay)),
         turn_context,
         verdict: None,
         stall_policy: None,
@@ -414,16 +426,62 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     })
 }
 
+/// Hand relay-local lifecycle work from the request handler to the
+/// coordinator about to start, or refuse because a Close sealed the relay
+/// first. Returns the dispatch wakes the coordinator will own.
+///
+/// The relay lock is the one decision point between this and a Close the
+/// request handler accepts during preparation (see `serve_client_with_memory`).
+/// Started is published inside it, and only while preparation is not
+/// cancelled and the relay is not sealed. A handler that saw Preparing
+/// therefore completed the Close and cancelled a preparation that never starts
+/// a bridge, and one that sees Started leaves the Close to the coordinator.
+///
+/// A seal found here cancels the preparation itself, under the same lock: the
+/// handler that accepted the Close may not have cancelled it yet, and a worker
+/// that booted with a closing relay has no handler to do it. The cancelled
+/// token is then the one fact that makes this refusal a cancellation rather
+/// than a startup failure. On refusal the wakes stay with the preparation for
+/// the sealed relay.
+fn publish_started(
+    relay: &RelayCell,
+    cancel: &CancellationToken,
+    status: &watch::Sender<PreparationSnapshot>,
+    dispatch_wakes: &mut Option<mpsc::Receiver<()>>,
+    services: PreparedConnectionServices,
+) -> Result<mpsc::Receiver<()>> {
+    let state = relay.lock().expect("relay state lock poisoned");
+    if state.sealed_by_close() {
+        cancel.cancel();
+    }
+    if cancel.is_cancelled() {
+        bail!("preparation cancelled before the bridge started");
+    }
+    let dispatch_wakes = dispatch_wakes
+        .take()
+        .context("preparation lost ownership of relay dispatch wake channel")?;
+    status.send_replace(PreparationSnapshot {
+        state: Some(mj_core::relay::HarnessPreparation::Started),
+        services: Some(Arc::new(services)),
+        step_deadline: None,
+    });
+    Ok(dispatch_wakes)
+}
+
+/// Start the bridge and its coordinator once [`publish_started`] accepts the
+/// handoff. Started is published before any bridge process exists, and
+/// nothing after the publication can fail, so a Started worker always has a
+/// coordinator.
 #[allow(clippy::too_many_arguments)]
 fn start_bridge(
     setup: PreparedAcpSetup,
     relay: Arc<RelayCell>,
-    dispatch_wakes: mpsc::Receiver<()>,
+    dispatch_wakes: &mut Option<mpsc::Receiver<()>>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
     capture: Option<crate::work_facts::WorkObserver>,
     runtime: tokio::runtime::Handle,
-    cancel: CancellationToken,
-    startup: HarnessStartup,
+    cancel: &CancellationToken,
+    status: &watch::Sender<PreparationSnapshot>,
 ) -> Result<StartedBridgeTasks> {
     let PreparedAcpSetup {
         commands_tx,
@@ -439,9 +497,19 @@ fn start_bridge(
         managed_cache_root,
         harness,
     } = setup;
+    let dispatch_wakes = publish_started(
+        &relay,
+        cancel,
+        status,
+        dispatch_wakes,
+        PreparedConnectionServices {
+            commands: commands_tx.clone(),
+            reviewer: reviewer.clone(),
+            subagents: subagents.clone(),
+        },
+    )?;
     let acp_shutdown = CancellationToken::new();
     let mut started = StartedBridgeTasks {
-        idle_dispatch_wakes: startup.idle_dispatch_wakes.clone(),
         acp_shutdown: Some(acp_shutdown.clone()),
         acp_task: None,
         event_task: None,
@@ -459,21 +527,6 @@ fn start_bridge(
         events_tx,
         acp_shutdown,
     )));
-    if cancel.is_cancelled() {
-        bail!("preparation cancelled while starting the ACP bridge");
-    }
-    startup.status.send_replace(PreparationSnapshot {
-        state: Some(mj_core::relay::HarnessPreparation::Started),
-        services: Some(Arc::new(PreparedConnectionServices {
-            commands: commands_tx.clone(),
-            reviewer: started
-                .reviewer
-                .as_ref()
-                .expect("prepared reviewer")
-                .clone(),
-            subagents: started.subagents.clone(),
-        })),
-    });
     started.event_task = Some(runtime.spawn(run_relay_coordinator_with_shells(
         relay,
         events_rx,
@@ -482,11 +535,8 @@ fn start_bridge(
         user_shells,
         kimi_task_home.map(KimiTaskMonitor::new),
         capture,
-        startup,
+        HarnessStartup::new(),
     )));
-    if cancel.is_cancelled() {
-        bail!("preparation cancelled while starting the relay coordinator");
-    }
     Ok(started)
 }
 
@@ -519,6 +569,7 @@ async fn preparation_step(
             step: step.to_owned(),
             since_ms: chrono::Utc::now().timestamp_millis(),
         });
+        snapshot.step_deadline = Some(budget.deadline);
     });
     let root = root.to_owned();
     let step = step.to_owned();
@@ -534,20 +585,19 @@ async fn preparation_step(
 }
 
 fn preparation_error(snapshot: &PreparationSnapshot, operation: &str) -> Option<String> {
-    if !snapshot.is_pending() {
-        return None;
-    }
     match snapshot.state.as_ref() {
         Some(mj_core::relay::HarnessPreparation::Preparing { step, .. }) => Some(format!(
             "harness is preparing at {step}; {operation} is not available yet"
         )),
-        Some(mj_core::relay::HarnessPreparation::Failed { step, error, .. }) => {
-            Some(format!("harness preparation failed at {step}: {error}"))
-        }
-        Some(mj_core::relay::HarnessPreparation::Started) => None,
         // Standalone/reviewer socket handlers have no primary preparation
-        // supervisor; their explicit services are already available.
-        None => None,
+        // supervisor (`None`); their explicit services are already available.
+        // This worker never reports `Failed`: a harness that cannot start
+        // ends the worker instead.
+        Some(
+            mj_core::relay::HarnessPreparation::Started
+            | mj_core::relay::HarnessPreparation::Failed { .. },
+        )
+        | None => None,
     }
 }
 
@@ -565,6 +615,7 @@ pub(crate) async fn wait_for_change(
     state_digest: Option<&str>,
 ) -> Result<RelayResponseBody> {
     let mut releases = Some(relay.releases());
+    let mut jev = mj_core::jev::rate_limit_changes();
     let mut preparation = preparation.cloned();
     // A finished preparation closes its channel but keeps its last value,
     // which an attach still reads; keep reading it, stop awaiting it.
@@ -581,6 +632,7 @@ pub(crate) async fn wait_for_change(
         if let Some(generations) = &mut generations {
             generations.borrow_and_update();
         }
+        jev.borrow_and_update();
         let harness_preparation = preparation
             .as_mut()
             .and_then(|receiver| receiver.borrow_and_update().state.clone());
@@ -626,6 +678,7 @@ pub(crate) async fn wait_for_change(
                     None => std::future::pending().await,
                 }
             } => if !changed { preparation_open = false },
+            _ = jev.changed() => {}
             () = tokio::time::sleep_until(deadline) => return Ok(observed),
         }
     }
@@ -921,9 +974,21 @@ pub async fn run_daemon_owned(
         .target_environment
         .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
         .map(PathBuf::from);
+    config
+        .target_environment
+        .remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV);
+    if let Some(key) = config
+        .target_environment
+        .remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT)
+    {
+        anyhow::ensure!(
+            crate::acp::verdict_client::FASTINO_KEY.set(key).is_ok(),
+            "the worker's Fastino key was already initialized"
+        );
+    }
     let mut target_environment = config.target_environment.clone();
-    target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     target_environment.extend(config.environment);
+    target_environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
     target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     config.environment = target_environment;
     let startup_directory = std::env::current_dir()?;
@@ -985,7 +1050,12 @@ pub async fn run_daemon_owned(
     // failed startup must never leave a fresh endpoint that looks live.
     super::record_startup_step(&root, "durable-relay");
     let mut durable_relay = if checkpoint_only {
-        DurableRelay::open_for_checkpoint(&root, &config.session_id, env!("CARGO_PKG_VERSION"))?
+        DurableRelay::open_for_checkpoint_with_initial_commands(
+            &root,
+            &config.session_id,
+            env!("CARGO_PKG_VERSION"),
+            &config.initial_commands,
+        )?
     } else {
         DurableRelay::open_for_harness(
             &root,
@@ -998,6 +1068,13 @@ pub async fn run_daemon_owned(
     // Only Claude Code's adapter marks the end of a turn it started on its
     // own, so only it can model those turns without leaving a session stuck
     // Running. See `.agents/docs/claude-autonomous-turns.md`.
+    durable_relay.recovers_child_quota = config.subagent_kind
+        == Some(mj_core::subagent::SubagentKind::Worker)
+        && !mj_core::jev::disabled_by_environment()
+        && !config
+            .environment
+            .get(mj_core::jev::DISABLED_ENVIRONMENT)
+            .is_some_and(|value| value == "1");
     durable_relay.set_managed_subagent(config.is_managed_subagent())?;
     durable_relay.set_turn_verdict_harness(config.harness);
     if config.harness == HarnessKind::Claude {
@@ -1020,7 +1097,7 @@ pub async fn run_daemon_owned(
     });
     record_imported_native_identity(&config, &mut durable_relay)?;
     let resume_session = select_resume_session(&config, &durable_relay);
-    let native_session_may_have_history = durable_relay.native_session_may_have_history();
+    let native_session_history = durable_relay.native_session_history();
     let mut project_memory = ProjectMemoryEndpoint::new(config.project_memory.clone());
     project_memory.cwd = config.cwd.clone();
     // Startup succeeded far enough to own this root, so claim it. A failed
@@ -1164,6 +1241,7 @@ pub async fn run_daemon_owned(
             since_ms: chrono::Utc::now().timestamp_millis(),
         }),
         services: None,
+        step_deadline: None,
     });
     let preparation_cancel = CancellationToken::new();
     let (dispatch_wake_tx, dispatch_wake_rx) = mpsc::channel(1);
@@ -1171,6 +1249,9 @@ pub async fn run_daemon_owned(
         .context("install worker shutdown signal handler")?;
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    // The adoption regression loses only its controller before this worker
+    // accepts any ACK, so the ordinary genesis path is exercised end to end.
+    mj_core::test_hooks::reach_test_hook("adoption_orphan_before_serving")?;
     // The relay is recovered; accept immediately while harness work runs
     // under its own supervisor.
     let (listener, socket_guard) = publish_control_socket(&root, &socket)?;
@@ -1185,7 +1266,7 @@ pub async fn run_daemon_owned(
         ConnectionRuntime {
             project_memory,
             cpu: Some(cpu_rx),
-            preparation: Some(preparation_rx.clone()),
+            preparation: Some(preparation_rx),
             preparation_cancel: Some(preparation_cancel.clone()),
             has_subagent_tools,
             ..Default::default()
@@ -1202,10 +1283,10 @@ pub async fn run_daemon_owned(
         credentials,
         kimi_task_home,
         resume_session,
-        native_session_may_have_history,
+        native_session_history,
         capture,
     };
-    let prep_status = preparation_tx.clone();
+    let prep_status = preparation_tx;
     let prep_cancel = preparation_cancel.clone();
     let mut prep_task = mj_core::runtime::spawn(async move {
         supervise_harness_preparation(
@@ -1218,20 +1299,19 @@ pub async fn run_daemon_owned(
     });
     let _cancel_preparation_on_drop = CancelPreparationOnDrop(preparation_cancel.clone());
 
-    let preparation_result = tokio::select! {
+    // A Close during preparation cancels it from the request handler; the
+    // supervisor then returns `Cancelled` once its threads have returned.
+    let preparation_outcome = tokio::select! {
         biased;
-        result = &mut prep_task => Some(result),
-        _ = preparation_cancel.cancelled() => None,
+        result = &mut prep_task => result,
         fatal = fatal_rx.recv() => {
-            preparation_cancel.cancel();
-            let _ = prep_task.await;
+            stop_preparation(&preparation_cancel, &mut prep_task).await;
             client_task.abort();
             return Err(fatal.unwrap_or_else(|| anyhow::anyhow!("relay failure report was lost"))
                 .context("relay durable state became unwritable"));
         }
         accepted = &mut client_task => {
-            preparation_cancel.cancel();
-            let _ = prep_task.await;
+            stop_preparation(&preparation_cancel, &mut prep_task).await;
             let error = accepted
                 .context("worker proxy accept task stopped")?
                 .err()
@@ -1239,78 +1319,62 @@ pub async fn run_daemon_owned(
             return Err(error);
         }
         _ = &mut ctrl_c => {
-            preparation_cancel.cancel();
-            let _ = prep_task.await;
+            stop_preparation(&preparation_cancel, &mut prep_task).await;
             client_task.abort();
             return Ok(());
         }
         _ = terminate.recv() => {
-            preparation_cancel.cancel();
-            let _ = prep_task.await;
+            stop_preparation(&preparation_cancel, &mut prep_task).await;
             client_task.abort();
             return Ok(());
         }
     };
 
-    let mut idle_dispatch_wakes = None;
-    let running_harness = match preparation_result {
-        Some(Ok(completion)) => {
-            idle_dispatch_wakes = completion.idle_dispatch_wakes;
-            match completion.result {
-                Ok(running) => Some(running),
-                Err(error) => {
-                    tracing::warn!(%error, "harness preparation failed; keeping relay available");
-                    None
+    let running_harness = match preparation_outcome {
+        Ok(PreparationOutcome::Started(running)) => *running,
+        Ok(PreparationOutcome::Failed(error)) => {
+            // The exit record carries the typed failure, so the daemon stops
+            // restarting this harness and reports why it could not start.
+            client_task.abort();
+            return Err(error);
+        }
+        Ok(PreparationOutcome::Cancelled(dispatch_wakes)) => {
+            // A Close sealed the relay before the bridge started. Serve it
+            // without a harness so the controller can finish its checkpoint.
+            // The wake receiver stays open: a request that releases the
+            // close's barrier still wakes dispatch, and the handler
+            // completes the Close locally.
+            let _dispatch_wakes = dispatch_wakes;
+            tokio::select! {
+                fatal = fatal_rx.recv() => {
+                    client_task.abort();
+                    return Err(fatal.unwrap_or_else(|| anyhow::anyhow!("relay failure report was lost"))
+                        .context("relay durable state became unwritable"));
+                }
+                accepted = &mut client_task => {
+                    let error = accepted
+                        .context("worker proxy accept task stopped")?
+                        .err()
+                        .unwrap_or_else(|| anyhow::anyhow!("worker proxy accept task stopped"));
+                    return Err(error);
+                }
+                _ = &mut ctrl_c => {
+                    client_task.abort();
+                    return Ok(());
+                }
+                _ = terminate.recv() => {
+                    client_task.abort();
+                    return Ok(());
                 }
             }
         }
-        Some(Err(error)) => {
+        Err(error) => {
             client_task.abort();
             return Err(anyhow::anyhow!("harness preparation task stopped: {error}"));
-        }
-        None => {
-            // The supervisor publishes Failed before it returns from cancellation.
-            if let Ok(completion) = (&mut prep_task).await {
-                idle_dispatch_wakes = completion.idle_dispatch_wakes;
-                if let Ok(running) = completion.result {
-                    shutdown_running_harness(running).await;
-                }
-            }
-            None
-        }
-    };
-
-    let Some(running_harness) = running_harness else {
-        // Keep the wake channel open while a failed or closed relay remains
-        // attachable. Its bounded queue coalesces requests; no ACP work is
-        // dispatched until the worker has a coordinator.
-        let _idle_dispatch_wakes = idle_dispatch_wakes;
-        tokio::select! {
-            fatal = fatal_rx.recv() => {
-                client_task.abort();
-                return Err(fatal.unwrap_or_else(|| anyhow::anyhow!("relay failure report was lost"))
-                    .context("relay durable state became unwritable"));
-            }
-            accepted = &mut client_task => {
-                let error = accepted
-                    .context("worker proxy accept task stopped")?
-                    .err()
-                    .unwrap_or_else(|| anyhow::anyhow!("worker proxy accept task stopped"));
-                return Err(error);
-            }
-            _ = &mut ctrl_c => {
-                client_task.abort();
-                return Ok(());
-            }
-            _ = terminate.recv() => {
-                client_task.abort();
-                return Ok(());
-            }
         }
     };
 
     let RunningHarness {
-        idle_dispatch_wakes: _idle_dispatch_wakes,
         mut acp_task,
         mut event_task,
         acp_shutdown,
@@ -1431,20 +1495,17 @@ pub async fn run_daemon_owned(
     if let Some(task) = harness_gc {
         task.abort();
     }
-    let preparation_failed = matches!(
-        preparation_rx.borrow().state,
-        Some(mj_core::relay::HarnessPreparation::Failed { .. })
-    );
-    if !closed && !preparation_failed {
+    if !closed {
+        // Includes a harness that did not open its session: the coordinator's
+        // typed startup failure ends the worker and reaches the exit record.
         client_task.abort();
         return acp_result;
     }
-
-    if preparation_failed && let Err(error) = &acp_result {
-        tracing::warn!(%error, "ACP stopped after harness startup failure");
+    if let Err(error) = &acp_result {
+        tracing::warn!(%error, "ACP stopped with an error after the relay closed");
     }
-    // Closed and failed relays remain attachable so the controller can finish
-    // its checkpoint or Restart agent. Harness-only operations are rejected.
+    // A closed relay remains attachable so the controller can finish its
+    // checkpoint. Harness-only operations are rejected.
     tokio::select! {
         fatal = fatal_rx.recv() => {
             client_task.abort();
@@ -1521,8 +1582,10 @@ where
     T: Send + 'static,
 {
     // Synchronous filesystem/socket calls cannot be forcibly interrupted.
-    // On timeout or cancellation this detaches the blocking thread; worker
-    // process teardown reclaims it if the call never returns.
+    // On timeout or cancellation this stops awaiting the thread; the
+    // preparation's thread tracker (see `supervise_preparation`) still counts
+    // it, so a cancelled preparation waits for it and a failed one ends the
+    // worker, which ends the thread.
     let step_cancel = cancel.child_token();
     let operation_cancel = step_cancel.clone();
     let task = mj_core::runtime::spawn_blocking(move || operation(operation_cancel));
@@ -1551,73 +1614,105 @@ async fn supervise_harness_preparation(
     dispatch_wake_rx: mpsc::Receiver<()>,
     status: watch::Sender<PreparationSnapshot>,
     cancel: CancellationToken,
-) -> HarnessPreparationCompletion {
+) -> PreparationOutcome {
     let root = setup.root.clone();
-    let mut idle_dispatch_wakes = Some(dispatch_wake_rx);
+    let mut dispatch_wakes = Some(dispatch_wake_rx);
     let result = supervise_preparation(
         &root,
         &status,
         &cancel,
-        prepare_and_start_harness(setup, &mut idle_dispatch_wakes, &status, &cancel),
+        prepare_and_start_harness(setup, &mut dispatch_wakes, &status, &cancel),
     )
     .await;
-    HarnessPreparationCompletion {
-        result,
-        idle_dispatch_wakes,
+    match result {
+        Ok(running) => PreparationOutcome::Started(Box::new(running)),
+        Err(PreparationStop::Cancelled) => PreparationOutcome::Cancelled(dispatch_wakes),
+        Err(PreparationStop::Failed(error)) => PreparationOutcome::Failed(error),
     }
 }
 
+/// Run one harness preparation to an end it owns: prepared, cancelled, or
+/// failed with the typed startup failure the worker exits with.
+///
+/// Commands the preparation runs through the shared subprocess helpers stop
+/// when it is cancelled or ends, including those on blocking threads, and
+/// every thread it hands to the blocking pool is counted until it returns. A
+/// failed preparation lets those threads stop their commands, within the
+/// failed step's own bound, before the worker exits; the exit ends any thread
+/// still blocked. A cancelled one returns at once: either the worker is
+/// stopping, or it keeps serving a sealed relay while the cancelled threads
+/// finish under their step's bound, and the controller stops the worker
+/// before it removes any of its files.
 async fn supervise_preparation<T>(
     root: &std::path::Path,
     status: &watch::Sender<PreparationSnapshot>,
     cancel: &CancellationToken,
     preparation: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
+) -> std::result::Result<T, PreparationStop> {
+    let threads = tokio_util::task::TaskTracker::new();
+    // Boxed before it is wrapped: the whole harness preparation is a large
+    // future, and each wrapper would otherwise copy it on the stack.
+    let preparation = mj_core::runtime::track_blocking_work(
+        threads.clone(),
+        mj_core::subprocess::with_preparation_cancellation(
+            cancel.child_token(),
+            Box::pin(preparation),
+        ),
+    );
     let result = tokio::select! {
         biased;
-        _ = cancel.cancelled() => Err(anyhow::anyhow!("{PREPARATION_CANCELLED_ERROR}")),
-        result = catch_preparation_panic(preparation) => match result {
-            Ok(result) => result,
-            Err(error) => Err(error),
-        },
+        _ = cancel.cancelled() => None,
+        result = catch_preparation_panic(preparation) => Some(result.and_then(|result| result)),
     };
-    if let Err(error) = &result {
-        let snapshot = status.borrow().clone();
-        let step = match snapshot.state {
-            Some(mj_core::relay::HarnessPreparation::Preparing { step, .. })
-            | Some(mj_core::relay::HarnessPreparation::Failed { step, .. }) => step,
+    // The preparation future is gone: its commands were stopped with it.
+    threads.close();
+    let (step, step_deadline) = {
+        let snapshot = status.borrow();
+        let step = match &snapshot.state {
+            Some(mj_core::relay::HarnessPreparation::Preparing { step, .. }) => step.clone(),
             _ => "bridge-start".to_owned(),
         };
-        let message = if cancel.is_cancelled() {
-            PREPARATION_CANCELLED_ERROR.to_owned()
-        } else {
-            format!("{error:#}")
-        };
-        status.send_replace(PreparationSnapshot {
-            state: Some(mj_core::relay::HarnessPreparation::Failed {
-                step: step.clone(),
-                error: message.clone(),
-                at_ms: chrono::Utc::now().timestamp_millis(),
-            }),
-            services: None,
-        });
-        let root = root.to_owned();
-        let record_step = step.clone();
-        let record_message = message.clone();
-        let record = mj_core::runtime::spawn_blocking(move || {
-            super::record_startup_failure(&root, &record_step, &record_message);
-        });
-        match tokio::time::timeout(LOCAL_PREPARATION_STEP_TIMEOUT, record).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(%error, %step, "failed to record worker preparation failure")
-            }
-            Err(_) => {
-                tracing::warn!(%step, "recording worker preparation failure exceeded its deadline")
-            }
+        // Threads are bounded by the step that started them.
+        let deadline = snapshot
+            .step_deadline
+            .unwrap_or_else(|| tokio::time::Instant::now() + LOCAL_PREPARATION_STEP_TIMEOUT);
+        (step, deadline)
+    };
+    let error = match result {
+        Some(Ok(prepared)) => return Ok(prepared),
+        Some(Err(error)) if !cancel.is_cancelled() => error,
+        // A step that saw the cancellation first fails with it; that is
+        // still a cancellation.
+        _ => return Err(PreparationStop::Cancelled),
+    };
+    let message = format!("harness preparation failed at {step}: {error:#}");
+    let record_root = root.to_owned();
+    let record_step = step.clone();
+    let record_message = format!("{error:#}");
+    let record = mj_core::runtime::spawn_blocking(move || {
+        super::record_startup_failure(&record_root, &record_step, &record_message);
+    });
+    match tokio::time::timeout(LOCAL_PREPARATION_STEP_TIMEOUT, record).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, %step, "failed to record worker preparation failure")
+        }
+        Err(_) => {
+            tracing::warn!(%step, "recording worker preparation failure exceeded its deadline")
         }
     }
-    result
+    // Let commands the failed step left running stop before the worker exits,
+    // within that step's bound (already spent when the step timed out); the
+    // exit ends any thread that does not.
+    if tokio::time::timeout_at(step_deadline, threads.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!(%step, "a preparation thread was still running when preparation failed");
+    }
+    Err(PreparationStop::Failed(anyhow::Error::new(
+        mj_core::relay::WorkerHarnessStartupFailure { message },
+    )))
 }
 
 fn catch_preparation_panic<F>(future: F) -> impl std::future::Future<Output = Result<F::Output>>
@@ -1678,6 +1773,9 @@ async fn prepare_project_tools(
                 step: "Install project tools".into(),
                 since_ms: chrono::Utc::now().timestamp_millis(),
             });
+            // Planning has no bound of its own; its threads get a local step's.
+            snapshot.step_deadline =
+                Some(tokio::time::Instant::now() + LOCAL_PREPARATION_STEP_TIMEOUT);
         });
         let breadcrumb_root = root.to_owned();
         mj_core::runtime::spawn_blocking(move || {
@@ -1742,7 +1840,7 @@ async fn prepare_and_start_harness(
         credentials,
         kimi_task_home,
         resume_session,
-        native_session_may_have_history,
+        native_session_history,
         capture,
     } = setup;
     let project_tools_roots = super::project_tools::take_roots(&mut config.environment)?;
@@ -1965,6 +2063,14 @@ async fn prepare_and_start_harness(
                     .environment
                     .entry("DISABLE_AUTOUPDATER".into())
                     .or_insert_with(|| "1".into());
+                // Claude Code otherwise reminds a child that has gone several
+                // steps without text that "the user hasn't heard from you",
+                // prompting status messages nobody reads; the parent sees
+                // only the child's report.
+                config
+                    .environment
+                    .entry("CLAUDE_CODE_SILENT_TURN_REMINDER".into())
+                    .or_insert_with(|| "false".into());
             }
             // `config.environment` keeps only overrides; the login shell's
             // HOME, which the harness inherits, is in the base environment.
@@ -2019,6 +2125,15 @@ async fn prepare_and_start_harness(
             .await?;
             let root = root.to_owned();
             let mut environment = config.environment.clone();
+            // Under configured approvals the Mjolnir guardian answers
+            // OpenCode's permission requests, and its hook makes OpenCode ask.
+            let guardian_roots = (config.execution_policy
+                == mj_core::config::ExecutionPolicy::ConfiguredApprovals)
+                .then(|| {
+                    std::iter::once(config.cwd.clone())
+                        .chain(config.additional_directories.iter().cloned())
+                        .collect::<Vec<_>>()
+                });
             config.environment =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
@@ -2027,6 +2142,13 @@ async fn prepare_and_start_harness(
                         );
                     }
                     super::subagents::configure_opencode_mailbox_hook(&root, &mut environment)?;
+                    if let Some(roots) = &guardian_roots {
+                        super::json_gh_rules::configure_opencode_guardian(
+                            &root,
+                            roots,
+                            &mut environment,
+                        )?;
+                    }
                     Ok(environment)
                 })
                 .await?;
@@ -2167,7 +2289,7 @@ async fn prepare_and_start_harness(
         supervisor_spec: prepared_harness.spec,
         relay: relay.clone(),
         resume_session,
-        native_session_may_have_history,
+        native_session_history,
         profile_registration,
         managed_subagent,
         subagent_role,
@@ -2182,7 +2304,7 @@ async fn prepare_and_start_harness(
     })
     .await?;
 
-    let bridge_budget = preparation_step(
+    preparation_step(
         root,
         status,
         "bridge-start",
@@ -2190,33 +2312,20 @@ async fn prepare_and_start_harness(
         cancel,
     )
     .await?;
-    let dispatch_wakes = dispatch_wake_rx
-        .take()
-        .context("preparation lost ownership of relay dispatch wake channel")?;
     let install_relay = relay.clone();
-    let relay = relay.clone();
-    let bridge_runtime = tokio::runtime::Handle::current();
-    let bridge_cancel = cancel.clone();
-    let startup = HarnessStartup::new(status.clone());
-    // This stage only schedules prepared async tasks on the captured runtime;
+    // This stage only schedules prepared async tasks on the current runtime;
     // it performs no filesystem or process I/O and cannot block a runtime
-    // thread. The bounded future keeps cancellation ahead of task creation.
-    let started = bounded_preparation_step(&bridge_budget, async move {
-        if bridge_cancel.is_cancelled() {
-            bail!("preparation cancelled before bridge start");
-        }
-        start_bridge(
-            prepared_acp,
-            relay,
-            dispatch_wakes,
-            kimi_task_home,
-            capture,
-            bridge_runtime,
-            bridge_cancel,
-            startup,
-        )
-    })
-    .await?;
+    // thread, so it needs no bound of its own.
+    let started = start_bridge(
+        prepared_acp,
+        relay,
+        dispatch_wake_rx,
+        kimi_task_home,
+        capture,
+        tokio::runtime::Handle::current(),
+        cancel,
+        status,
+    )?;
     let mut running = started.into_running();
     running._managed_harness = managed_harness;
     running._managed_node = managed_node;
@@ -2225,6 +2334,18 @@ async fn prepare_and_start_harness(
     });
 
     Ok(running)
+}
+
+/// Stop a preparation the worker no longer wants, including a harness it
+/// started just before the stop.
+async fn stop_preparation(
+    cancel: &CancellationToken,
+    task: &mut tokio::task::JoinHandle<PreparationOutcome>,
+) {
+    cancel.cancel();
+    if let Ok(PreparationOutcome::Started(running)) = task.await {
+        shutdown_running_harness(*running).await;
+    }
 }
 
 async fn shutdown_running_harness(mut running: RunningHarness) {
@@ -2248,6 +2369,7 @@ async fn shutdown_running_harness(mut running: RunningHarness) {
 /// and the supervisor that later uses the same runtime never overlap.
 pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<()> {
     let mut environment = config.target_environment.clone();
+    environment.remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV);
     environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     environment.extend(config.environment);
     environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
@@ -2381,6 +2503,7 @@ pub(super) async fn serve_client_with_memory(
     let mut checkpoint_barriers = BTreeSet::new();
     let mut subagent_feed = super::subagents::SubagentFeed::default();
     let mut project_memory_transfer = ConnectionProjectMemoryTransfer::default();
+    let mut live_baseline_download = None;
     let serving_result = async {
         while let Some(line) =
             read_bounded_line(&mut reader, mj_core::relay::MAX_FRAME_BYTES).await?
@@ -2479,6 +2602,68 @@ pub(super) async fn serve_client_with_memory(
                     body: RelayResponseBody::Ok { payload: RelayResponsePayload::Status(state) },
                 };
                 write_logged_response(&mut writer, &response, &session_id, "set_operator_away").await?;
+                continue;
+            }
+            if matches!(&envelope.request, RelayRequest::BeginLiveBaseline | RelayRequest::ReadLiveBaselinePage { .. } | RelayRequest::AbortLiveBaseline) {
+                let cut = if matches!(envelope.request, RelayRequest::BeginLiveBaseline) {
+                    let mut releases = relay.releases();
+                    let mut receiver = relay.lock().expect("relay state lock poisoned").reserve_live_baseline();
+                    // A harness that cannot start ends this worker, which ends
+                    // the wait with the connection.
+                    let operation = async {
+                        let mut previous = None;
+                        loop {
+                            releases.borrow_and_update();
+                            let blockers = relay.observe().expect("relay state lock poisoned").adoption_blockers();
+                            if previous.as_ref() != Some(&blockers) {
+                                if !blockers.is_empty() {
+                                    write_logged_response(&mut writer, &RelayResponseEnvelope {
+                                        request_id: envelope.request_id.clone(), protocol_version: envelope.protocol_version,
+                                        body: RelayResponseBody::Ok { payload: RelayResponsePayload::LiveBaselineWaiting { blockers: blockers.clone() } },
+                                    }, &session_id, "live_baseline_waiting").await?;
+                                }
+                                previous = Some(blockers);
+                            }
+                            tokio::select! {
+                                biased;
+                                cut = &mut receiver => break cut.context("worker dropped its adoption cut")?.map_err(anyhow::Error::msg),
+                                changed = releases.changed() => changed.context("worker adoption observation stopped")?,
+                            }
+                        }
+                    };
+                    let result: Result<Option<mj_core::relay::LiveSessionBaseline>> = tokio::select! {
+                        biased;
+                        disconnected = reader.fill_buf() => disconnected.map(|_| None).map_err(anyhow::Error::from),
+                        result = operation => result.map(Some),
+                    };
+                    drop(receiver);
+                    relay.lock().expect("relay state lock poisoned").resume_after_adoption_wait()?;
+                    let _ = dispatch_wake.try_send(());
+                    match result {
+                        Ok(Some(cut)) => Some(cut),
+                        Ok(None) => return Ok(()),
+                        Err(error) => {
+                            write_logged_response(&mut writer, &RelayResponseEnvelope {
+                                request_id: envelope.request_id.clone(), protocol_version: envelope.protocol_version,
+                                body: compaction_error(RelayErrorCode::InvalidState, &format!("{error:#}")),
+                            }, &session_id, "live_baseline_refused").await?;
+                            continue;
+                        }
+                    }
+                } else { None };
+                let request_id = envelope.request_id.clone();
+                let protocol_version = envelope.protocol_version;
+                let mut download = live_baseline_download.take();
+                let (result, download) = mj_core::runtime::spawn_blocking(move || {
+                    let result = mj_core::relay::live_baseline_reply(&envelope.request, cut, &mut download, &envelope.request_id, protocol_version);
+                    (result, download)
+                }).await.context("live recovery baseline download task failed")?;
+                live_baseline_download = download;
+                let body = match result {
+                    Ok(payload) => RelayResponseBody::Ok { payload },
+                    Err(error) => compaction_error(RelayErrorCode::InvalidRequest, &format!("{error:#}")),
+                };
+                write_logged_response(&mut writer, &RelayResponseEnvelope { request_id, protocol_version, body }, &session_id, "live_baseline").await?;
                 continue;
             }
             if matches!(
@@ -2802,13 +2987,6 @@ pub(super) async fn serve_client_with_memory(
                 RelayRequest::DrainMailbox { .. } | RelayRequest::AckMailbox { .. }
             );
             let checkpoint_change = checkpoint_change(&envelope.request);
-            let close_request = matches!(
-                &envelope.request,
-                RelayRequest::Submit {
-                    command: RelayCommand::Close { .. },
-                    ..
-                }
-            );
             let operation = envelope.request.method_name();
             // An attach's state carries the preparation before the relay
             // digests it, so a changed preparation is never mistaken for a
@@ -2827,18 +3005,28 @@ pub(super) async fn serve_client_with_memory(
                     return Err(error);
                 }
             };
-            let current_preparation = preparation
-                .as_ref()
-                .map(|receiver| receiver.borrow().clone())
-                .unwrap_or_default();
-            let preparation_pending =
-                preparation.is_some() && current_preparation.is_pending();
-            if preparation_pending {
-                relay
-                    .lock()
-                    .expect("relay state lock poisoned")
-                    .dispatch_preparation_lifecycle()?;
-            }
+            // One relay lock decides who owns the relay-local lifecycle work
+            // this request may have queued. Until preparation publishes
+            // Started, which `start_bridge` does under this same lock, this
+            // handler completes checkpoint and Close commands itself, and a
+            // Close that sealed the relay cancels preparation so no bridge
+            // starts. Once Started is visible here, the coordinator owns them.
+            let current_preparation = {
+                let mut state = relay.lock().expect("relay state lock poisoned");
+                let current = preparation
+                    .as_ref()
+                    .map(|receiver| receiver.borrow().clone())
+                    .unwrap_or_default();
+                if preparation.is_some() && current.is_pending() {
+                    state.dispatch_preparation_lifecycle()?;
+                    if state.sealed_by_close()
+                        && let Some(cancel) = &preparation_cancel
+                    {
+                        cancel.cancel();
+                    }
+                }
+                current
+            };
             if worker_root_was_removed(&response.body, &relay_root) {
                 // One report is enough; the daemon is already winding down.
                 report_fatal(
@@ -2858,22 +3046,6 @@ pub(super) async fn serve_client_with_memory(
                         | RelayResponsePayload::IdleReservation { ordinal: Some(_) }
                 }
             );
-            let execution = relay
-                .lock()
-                .expect("relay state lock poisoned")
-                .operational_state()
-                .execution;
-            if close_request
-                && preparation_pending
-                && matches!(
-                    execution,
-                    mj_core::relay::RelayExecutionState::Closing
-                        | mj_core::relay::RelayExecutionState::Closed
-                )
-                && let Some(cancel) = &preparation_cancel
-            {
-                cancel.cancel();
-            }
             if accepted {
                 match checkpoint_change {
                     Some(CheckpointChange::Begin(command_id)) => {
@@ -2995,6 +3167,230 @@ mod preparation_tests {
     }
 
     #[tokio::test]
+    async fn adoption_wait_captures_between_turns_and_disconnect_releases_queued_work() {
+        use base64::Engine as _;
+        use mj_core::relay::{LiveSessionBaseline, RelayCommandOutcome};
+        for mode in ["served", "disconnect", "another-waiter"] {
+            let temp = tempfile::tempdir().unwrap();
+            let relay = test_relay(temp.path());
+            let (wake, _wakes) = mpsc::channel(1);
+            let (_status, preparation) = watch::channel(PreparationSnapshot::default());
+            let (accept, mut reader, mut writer) = start_control_server(
+                temp.path(),
+                relay.clone(),
+                wake,
+                preparation,
+                CancellationToken::new(),
+            )
+            .await;
+            request(
+                &mut reader,
+                &mut writer,
+                "hello",
+                RelayRequest::Hello {
+                    controller_version: "test".into(),
+                    supported: RelayVersionRange::CURRENT,
+                },
+            )
+            .await;
+            for (id, command) in [
+                (
+                    "running-prompt",
+                    RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::from("first")],
+                    },
+                ),
+                (
+                    "next-prompt",
+                    RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::from("second")],
+                    },
+                ),
+                (
+                    "queued-shell",
+                    RelayCommand::RunUserShell {
+                        command: "printf next".into(),
+                    },
+                ),
+            ] {
+                let response = request(
+                    &mut reader,
+                    &mut writer,
+                    id,
+                    RelayRequest::Submit {
+                        command_id: id.into(),
+                        command,
+                    },
+                )
+                .await;
+                assert!(
+                    matches!(response.body, RelayResponseBody::Ok { .. }),
+                    "{response:?}"
+                );
+            }
+            relay.lock().unwrap().claim_pending_commands(true).unwrap();
+            let response = request(
+                &mut reader,
+                &mut writer,
+                "cut",
+                RelayRequest::BeginLiveBaseline,
+            )
+            .await;
+            assert!(matches!(
+                response.body,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::LiveBaselineWaiting { .. }
+                }
+            ));
+            assert!(
+                relay
+                    .lock()
+                    .unwrap()
+                    .claim_pending_user_shell_commands_up_to(1)
+                    .unwrap()
+                    .is_empty()
+            );
+            if mode == "another-waiter" {
+                let peer = UnixStream::connect(temp.path().join("control.sock"))
+                    .await
+                    .unwrap();
+                let (read, write) = peer.into_split();
+                let mut other_reader = BufReader::new(read);
+                let mut other_writer = write;
+                request(
+                    &mut other_reader,
+                    &mut other_writer,
+                    "hello-other",
+                    RelayRequest::Hello {
+                        controller_version: "other".into(),
+                        supported: RelayVersionRange::CURRENT,
+                    },
+                )
+                .await;
+                let other = request(
+                    &mut other_reader,
+                    &mut other_writer,
+                    "cut-other",
+                    RelayRequest::BeginLiveBaseline,
+                )
+                .await;
+                assert!(matches!(
+                    other.body,
+                    RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::LiveBaselineWaiting { .. }
+                    }
+                ));
+                drop(reader);
+                drop(writer);
+                reader = other_reader;
+                writer = other_writer;
+                assert!(
+                    relay
+                        .lock()
+                        .unwrap()
+                        .claim_pending_user_shell_commands_up_to(1)
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            if mode == "disconnect" {
+                drop(writer);
+                drop(reader);
+                // The current turn still runs: EOF alone must remove the hold.
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if !relay
+                            .lock()
+                            .unwrap()
+                            .claim_pending_user_shell_commands_up_to(1)
+                            .unwrap()
+                            .is_empty()
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                relay
+                    .lock()
+                    .unwrap()
+                    .record_command_completed(
+                        "running-prompt",
+                        RelayCommandOutcome::Prompt {
+                            stop_reason: "end_turn".into(),
+                            diagnostic: None,
+                            usage: None,
+                            work_facts: None,
+                        },
+                    )
+                    .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+                assert!(matches!(
+                    response.body,
+                    RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::LiveBaselineStarted { .. }
+                    }
+                ));
+                let mut bytes = Vec::new();
+                let mut offset = 0;
+                loop {
+                    let response = request(
+                        &mut reader,
+                        &mut writer,
+                        "page",
+                        RelayRequest::ReadLiveBaselinePage { offset },
+                    )
+                    .await;
+                    let RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::LiveBaselinePage { page },
+                    } = response.body
+                    else {
+                        panic!("{response:?}")
+                    };
+                    bytes.extend(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(&page.chunk)
+                            .unwrap(),
+                    );
+                    offset = page.next_offset;
+                    if page.complete {
+                        break;
+                    }
+                }
+                let cut: LiveSessionBaseline = serde_json::from_slice(&bytes).unwrap();
+                assert!(cut.state.active_prompt.is_none());
+                assert_eq!(cut.queue[0].command_id, "next-prompt");
+                assert_eq!(cut.state.active_user_shells[0].command_id, "queued-shell");
+                assert!(cut.state.active_user_shells[0].started_at_ms.is_none());
+                relay.lock().unwrap().claim_pending_commands(true).unwrap();
+                assert_eq!(
+                    relay
+                        .lock()
+                        .unwrap()
+                        .operational_state()
+                        .active_prompt
+                        .unwrap()
+                        .command_id,
+                    "next-prompt"
+                );
+                assert!(relay.lock().unwrap().latest_ordinal() > cut.state.latest_ordinal);
+                drop(writer);
+                drop(reader);
+            }
+            accept.abort();
+            let _ = accept.await;
+        }
+    }
+
+    #[tokio::test]
     async fn failing_project_recipe_records_notice_and_continues_preparation() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
@@ -3095,6 +3491,7 @@ mod preparation_tests {
                 }),
                 subagents: None,
             })),
+            ..Default::default()
         };
         let (preparation_started, started) = tokio::sync::oneshot::channel();
         let (release_preparation, release) = tokio::sync::oneshot::channel();
@@ -3250,143 +3647,20 @@ mod preparation_tests {
         accept.abort();
     }
 
-    #[tokio::test]
-    async fn failed_preparation_stays_attachable_and_checkpointable() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let relay = test_relay(root);
-        let (status, preparation) = watch::channel(PreparationSnapshot::default());
-        let cancellation = CancellationToken::new();
-        let (dispatch_wake, _dispatch_wakes) = mpsc::channel(1);
-        let (accept, mut reader, mut writer) = start_control_server(
-            root,
-            relay,
-            dispatch_wake,
-            preparation,
-            cancellation.clone(),
-        )
-        .await;
-        let prep_root = root.to_path_buf();
-        let prep_status = status.clone();
-        let prep_cancellation = cancellation.clone();
-        let step_cancellation = prep_cancellation.clone();
-        let error = supervise_preparation::<()>(root, &status, &prep_cancellation, async move {
-            preparation_step(
-                &prep_root,
-                &prep_status,
-                "harness-resolve",
-                LOCAL_PREPARATION_STEP_TIMEOUT,
-                &step_cancellation,
-            )
-            .await?;
-            anyhow::bail!("fake pinned install failed")
-        })
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("fake pinned install failed"));
-
-        let attached = request(
-            &mut reader,
-            &mut writer,
-            "attach-after-failure",
-            RelayRequest::Attach {
-                after_ordinal: 0,
-                after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
-                known_state_digest: None,
-            },
-        )
-        .await;
-        let RelayResponseBody::Ok {
-            payload: RelayResponsePayload::Attached { state, .. },
-        } = attached.body
-        else {
-            panic!("relay stopped serving Attach after preparation failed");
+    /// The typed failure a stopped preparation ends with, which becomes the
+    /// worker's exit record.
+    fn startup_failure(stop: PreparationStop) -> mj_core::relay::WorkerHarnessStartupFailure {
+        let PreparationStop::Failed(error) = stop else {
+            panic!("preparation was cancelled instead of failing");
         };
-        assert!(matches!(
-            state.harness_preparation,
-            Some(mj_core::relay::HarnessPreparation::Failed { ref step, ref error, .. })
-                if step == "harness-resolve" && error.contains("fake pinned install failed")
-        ));
-        let startup: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(root.join(super::super::WORKER_STARTUP_FILE)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(startup["failure"]["step"], "harness-resolve");
-        assert!(
-            startup["failure"]["error"]
-                .as_str()
-                .unwrap()
-                .contains("fake pinned install failed")
-        );
-
-        let checkpoint = request(
-            &mut reader,
-            &mut writer,
-            "checkpoint",
-            RelayRequest::Submit {
-                command_id: "checkpoint-during-failure".into(),
-                command: RelayCommand::BeginCheckpoint { reason: None },
-            },
-        )
-        .await;
-        assert!(matches!(checkpoint.body, RelayResponseBody::Ok { .. }));
-        let completed = request(
-            &mut reader,
-            &mut writer,
-            "complete-after-failure",
-            RelayRequest::Submit {
-                command_id: "complete-after-failure".into(),
-                command: RelayCommand::CompleteCheckpoint {
-                    barrier_command_id: "checkpoint-during-failure".into(),
-                },
-            },
-        )
-        .await;
-        assert!(matches!(completed.body, RelayResponseBody::Ok { .. }));
-        let prompt = request(
-            &mut reader,
-            &mut writer,
-            "prompt-after-failure",
-            RelayRequest::Submit {
-                command_id: "prompt-after-failure".into(),
-                command: RelayCommand::Prompt {
-                    prompt: vec![ContentBlock::Text(TextContent::new("queue after failure"))],
-                },
-            },
-        )
-        .await;
-        assert!(matches!(prompt.body, RelayResponseBody::Ok { .. }));
-        let status_response = request(
-            &mut reader,
-            &mut writer,
-            "status-after-checkpoint",
-            RelayRequest::Status,
-        )
-        .await;
-        let RelayResponseBody::Ok {
-            payload: RelayResponsePayload::Status(state),
-        } = status_response.body
-        else {
-            panic!("status unavailable after failed preparation");
-        };
-        assert!(state.checkpoint_ready.is_none());
-        assert!(
-            state
-                .active_prompt
-                .as_ref()
-                .is_some_and(|prompt| prompt.command_id == "prompt-after-failure")
-                || state
-                    .queued_prompts
-                    .iter()
-                    .any(|prompt| prompt.command_id == "prompt-after-failure"),
-            "accepted prompt was not represented in relay state: {state:?}"
-        );
-        writer.shutdown().await.unwrap();
-        accept.abort();
+        error
+            .downcast_ref::<mj_core::relay::WorkerHarnessStartupFailure>()
+            .unwrap_or_else(|| panic!("untyped preparation failure: {error:#}"))
+            .clone()
     }
 
     #[tokio::test]
-    async fn panicking_preparation_publishes_a_terminal_failure() {
+    async fn panicking_preparation_ends_with_a_typed_startup_failure() {
         fn panic_fake_preparation() -> Result<()> {
             panic!("fake profile step panicked");
         }
@@ -3397,146 +3671,226 @@ mod preparation_tests {
                 step: "subagent-profile".into(),
                 since_ms: chrono::Utc::now().timestamp_millis(),
             }),
-            services: None,
+            ..Default::default()
         });
         let cancellation = CancellationToken::new();
         let result = supervise_preparation::<()>(temp.path(), &status, &cancellation, async {
             panic_fake_preparation()
         })
         .await;
+        let failure = startup_failure(result.unwrap_err());
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("fake profile step panicked")
+            failure
+                .message
+                .starts_with("harness preparation failed at subagent-profile: ")
+                && failure.message.contains("fake profile step panicked"),
+            "{failure:?}"
         );
         assert!(matches!(
-            status.borrow().state.as_ref(),
-            Some(mj_core::relay::HarnessPreparation::Failed {
-                step,
-                error,
-                ..
-            }) if step == "subagent-profile" && error.contains("fake profile step panicked")
+            status.borrow().state,
+            Some(mj_core::relay::HarnessPreparation::Preparing { .. })
         ));
     }
 
+    // A step whose thread blocks past its deadline fails the preparation at
+    // once: the worker exits, which is the only way to end that thread.
     #[tokio::test]
-    async fn blocking_preparation_deadline_fails_step_while_hello_and_attach_keep_working() {
+    async fn blocking_preparation_deadline_fails_without_waiting_for_its_thread() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let relay = test_relay(root);
-        let (status, preparation) = watch::channel(PreparationSnapshot::default());
+        let root = temp.path().to_path_buf();
+        let (status, _preparation) = watch::channel(PreparationSnapshot::default());
         let cancellation = CancellationToken::new();
-        let (dispatch_wake, _dispatch_wakes) = mpsc::channel(1);
-        let (accept, mut reader, mut writer) = start_control_server(
-            root,
-            relay,
-            dispatch_wake,
-            preparation,
-            cancellation.clone(),
-        )
-        .await;
-        let prep_root = root.to_path_buf();
-        let prep_status = status.clone();
-        let prep_cancellation = cancellation.clone();
-        let status_for_step = prep_status.clone();
-        let cancellation_for_step = prep_cancellation.clone();
-        let (blocking_started_tx, blocking_started_rx) = tokio::sync::oneshot::channel();
-        let (release_blocking_tx, release_blocking_rx) = std::sync::mpsc::channel();
+        let step_root = root.clone();
+        let step_status = status.clone();
+        let step_cancellation = cancellation.clone();
+        let (release_blocking_tx, release_blocking_rx) = std::sync::mpsc::channel::<()>();
         let (blocking_finished_tx, blocking_finished_rx) = std::sync::mpsc::channel();
-        let prep = mj_core::runtime::spawn(async move {
-            supervise_preparation(&prep_root, &prep_status, &prep_cancellation, async move {
-                status_for_step.send_replace(PreparationSnapshot {
-                    state: Some(mj_core::relay::HarnessPreparation::Preparing {
-                        step: "acp-setup".into(),
-                        since_ms: chrono::Utc::now().timestamp_millis(),
-                    }),
-                    services: None,
-                });
-                let budget = PreparationStepBudget::new("acp-setup", Duration::from_millis(200));
-                bounded_blocking_preparation_step(&budget, &cancellation_for_step, move |_| {
-                    let _ = blocking_started_tx.send(());
-                    release_blocking_rx
-                        .recv()
-                        .context("test did not release blocked preparation")?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            supervise_preparation::<()>(&root, &status, &cancellation, async move {
+                let budget = preparation_step(
+                    &step_root,
+                    &step_status,
+                    "acp-setup",
+                    Duration::from_millis(200),
+                    &step_cancellation,
+                )
+                .await?;
+                bounded_blocking_preparation_step(&budget, &step_cancellation, move |_| {
+                    let _ = release_blocking_rx.recv();
                     let _ = blocking_finished_tx.send(());
                     Ok(())
                 })
                 .await
-            })
-            .await
-        });
-        blocking_started_rx.await.unwrap();
-        let preparation_result = tokio::time::timeout(Duration::from_secs(2), prep)
-            .await
-            .expect("the injected preparation deadline should expire")
-            .unwrap();
-        let error = preparation_result.unwrap_err();
-        assert!(error.to_string().contains("acp-setup"));
-        assert!(error.to_string().contains("deadline"));
-        assert!(matches!(
-            status.borrow().state.as_ref(),
-            Some(mj_core::relay::HarnessPreparation::Failed {
-                step,
-                error,
-                ..
-            }) if step == "acp-setup" && error.contains("200ms deadline")
-        ));
+            }),
+        )
+        .await
+        .expect("an expired step must not wait for its blocked thread");
+        let failure = startup_failure(result.unwrap_err());
+        assert!(
+            failure.message.contains("acp-setup") && failure.message.contains("200ms deadline"),
+            "{failure:?}"
+        );
         assert!(matches!(
             blocking_finished_rx.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
-
-        let hello = request(
-            &mut reader,
-            &mut writer,
-            "hello-after-preparation-timeout",
-            RelayRequest::Hello {
-                controller_version: "test".into(),
-                supported: RelayVersionRange::CURRENT,
-            },
+        let startup: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join(super::super::WORKER_STARTUP_FILE)).unwrap(),
         )
-        .await;
-        assert!(matches!(
-            hello.body,
-            RelayResponseBody::Ok {
-                payload: RelayResponsePayload::Hello { .. }
-            }
-        ));
-        let attached = request(
-            &mut reader,
-            &mut writer,
-            "attach-after-preparation-timeout",
-            RelayRequest::Attach {
-                after_ordinal: 0,
-                after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
-                known_state_digest: None,
-            },
-        )
-        .await;
-        let RelayResponseBody::Ok {
-            payload: RelayResponsePayload::Attached { state, .. },
-        } = attached.body
-        else {
-            panic!("Attach failed while timed-out setup thread was blocked");
-        };
-        assert!(matches!(
-            state.harness_preparation,
-            Some(mj_core::relay::HarnessPreparation::Failed { ref step, .. })
-                if step == "acp-setup"
-        ));
-        assert!(matches!(
-            blocking_finished_rx.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        ));
-
+        .unwrap();
+        assert_eq!(startup["failure"]["step"], "acp-setup");
         release_blocking_tx.send(()).unwrap();
         mj_core::runtime::spawn_blocking(move || blocking_finished_rx.recv())
             .await
             .unwrap()
             .unwrap();
-        writer.shutdown().await.unwrap();
-        accept.abort();
+    }
+
+    // A Close accepted during preparation and the Started publication are
+    // decided under the relay lock, in one order or the other: a sealed relay
+    // never gets a bridge, and a started bridge's coordinator owns lifecycle
+    // work the handler then leaves alone. A seal that `publish_started` finds
+    // before the handler has cancelled preparation is still a cancellation,
+    // not a startup failure that would end the worker mid-Close.
+    // Hard-won: #1617: a Close racing Started cancelled a coordinator that held it InFlight.
+    #[tokio::test]
+    async fn a_close_during_preparation_and_started_have_one_order() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Order {
+            CloseThroughHandler,
+            StartedFirst,
+            SealedBeforeHandlerCancels,
+        }
+        for order in [
+            Order::CloseThroughHandler,
+            Order::StartedFirst,
+            Order::SealedBeforeHandlerCancels,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            let relay = test_relay(root);
+            let (status, preparation) = watch::channel(PreparationSnapshot {
+                state: Some(mj_core::relay::HarnessPreparation::Preparing {
+                    step: "acp-setup".into(),
+                    since_ms: 1,
+                }),
+                ..Default::default()
+            });
+            let cancellation = CancellationToken::new();
+            let (dispatch_wake, dispatch_wakes) = mpsc::channel(1);
+            let mut dispatch_wakes = Some(dispatch_wakes);
+            let (commands, _command_requests) = mpsc::channel(1);
+            let services = || PreparedConnectionServices {
+                commands: commands.clone(),
+                reviewer: Arc::new(ReviewCapture {
+                    session_id: "preparation-test".into(),
+                    cwd: root.into(),
+                    additional_directories: Vec::new(),
+                    primary_relay: relay.clone(),
+                    operation: tokio::sync::Mutex::new(()),
+                }),
+                subagents: None,
+            };
+            let (accept, mut reader, mut writer) = start_control_server(
+                root,
+                relay.clone(),
+                dispatch_wake,
+                preparation,
+                cancellation.clone(),
+            )
+            .await;
+            // Held as the coordinator would hold it.
+            let _coordinator_wakes = (order == Order::StartedFirst).then(|| {
+                publish_started(
+                    &relay,
+                    &cancellation,
+                    &status,
+                    &mut dispatch_wakes,
+                    services(),
+                )
+                .unwrap()
+            });
+            let checkpoint = request(
+                &mut reader,
+                &mut writer,
+                "checkpoint-before-close",
+                RelayRequest::Submit {
+                    command_id: "close-barrier".into(),
+                    command: RelayCommand::BeginCheckpoint { reason: None },
+                },
+            )
+            .await;
+            assert!(matches!(checkpoint.body, RelayResponseBody::Ok { .. }));
+            let RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Status(state),
+            } = request(&mut reader, &mut writer, "cursor", RelayRequest::Status)
+                .await
+                .body
+            else {
+                panic!("status unavailable during preparation");
+            };
+            if order == Order::StartedFirst {
+                assert!(
+                    state.checkpoint_ready.is_none(),
+                    "the handler completed a checkpoint the coordinator owns"
+                );
+                assert!(!cancellation.is_cancelled());
+                writer.shutdown().await.unwrap();
+                accept.abort();
+                continue;
+            }
+            let close = RelayRequest::Submit {
+                command_id: "close-during-preparation".into(),
+                command: RelayCommand::Close {
+                    barrier_command_id: "close-barrier".into(),
+                    expected: state.checkpoint_ready.unwrap(),
+                },
+            };
+            if order == Order::CloseThroughHandler {
+                let closed = request(&mut reader, &mut writer, "close", close).await;
+                assert!(matches!(closed.body, RelayResponseBody::Ok { .. }));
+                assert!(cancellation.is_cancelled());
+            } else {
+                // Accepted, as by a handler that has not yet taken the lock
+                // again to cancel preparation.
+                let closed = relay.lock().unwrap().handle(RelayRequestEnvelope {
+                    protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                    request_id: "close".into(),
+                    request: close,
+                });
+                assert!(matches!(closed.body, RelayResponseBody::Ok { .. }));
+                assert!(!cancellation.is_cancelled());
+            }
+            let fake_relay = relay.clone();
+            let fake_cancellation = cancellation.clone();
+            let fake_status = status.clone();
+            let fake_wakes = &mut dispatch_wakes;
+            let fake_services = services();
+            let stop = supervise_preparation(root, &status, &cancellation, async move {
+                publish_started(
+                    &fake_relay,
+                    &fake_cancellation,
+                    &fake_status,
+                    fake_wakes,
+                    fake_services,
+                )
+                .map(drop)
+            })
+            .await
+            .expect_err("a bridge started for a relay a Close had sealed");
+            assert!(
+                matches!(stop, PreparationStop::Cancelled),
+                "{order:?}: {stop:?}"
+            );
+            assert!(status.borrow().is_pending());
+            assert!(
+                dispatch_wakes.is_some(),
+                "the sealed relay lost its dispatch wakes"
+            );
+            writer.shutdown().await.unwrap();
+            accept.abort();
+        }
     }
 
     #[tokio::test]
@@ -3659,14 +4013,14 @@ mod preparation_tests {
             .await
             .expect("close cancels the preparation owner")
             .unwrap();
-        assert!(preparation_result.is_err());
+        assert!(matches!(
+            preparation_result,
+            Err(PreparationStop::Cancelled)
+        ));
         assert!(matches!(
             status.borrow().state.as_ref(),
-            Some(mj_core::relay::HarnessPreparation::Failed {
-                step,
-                error,
-                ..
-            }) if step == "harness-resolve" && error.contains("closing")
+            Some(mj_core::relay::HarnessPreparation::Preparing { step, .. })
+                if step == "harness-resolve"
         ));
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -3697,10 +4051,10 @@ mod preparation_tests {
             final_state.execution,
             mj_core::relay::RelayExecutionState::Closed
         );
-        assert!(matches!(
+        // A sealed relay is not a startup failure; Closed is the fact.
+        assert!(!matches!(
             final_state.harness_preparation,
-            Some(mj_core::relay::HarnessPreparation::Failed { ref error, .. })
-                if error.contains("closing")
+            Some(mj_core::relay::HarnessPreparation::Failed { .. })
         ));
         drop(dispatch_wakes);
         writer.shutdown().await.unwrap();

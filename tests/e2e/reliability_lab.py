@@ -544,6 +544,9 @@ class Lab:
     ) -> int:
         if fake_acp_prompt_delay_ms is None:
             fake_acp_prompt_delay_ms = fake_acp_delay_ms
+        # This fixture is a machine that has run a daemon, which is what keeps
+        # the first-launch placement question from waiting in the terminal.
+        (self.data / "mj.sqlite3").touch()
         self.git_output(["init", "--initial-branch=main"], self.project)
         self.git_output(["config", "user.name", "Hel Reliability"], self.project)
         self.git_output(["config", "user.email", "reliability@invalid"], self.project)
@@ -556,11 +559,12 @@ class Lab:
         fixture_bin.mkdir()
         (fixture_bin / "python3").symlink_to(sys.executable)
         (fixture_bin / "sh").symlink_to("/bin/sh")
-        # The Python harness needs no Node installation, but launch preflight
-        # still checks the configured profile's toolchain.
+        # The Python harness needs no Node installation. Answer the runtime's
+        # version probe so each isolated cache can stay free of real downloads.
         for name in ["node", "npm", "npx"]:
             tool = fixture_bin / name
-            tool.write_text("#!/bin/sh\nexit 0\n")
+            version = 'if [ "$1" = --version ]; then echo v24.0.0; fi\n' if name == "node" else ""
+            tool.write_text(f"#!/bin/sh\n{version}exit 0\n")
             tool.chmod(0o700)
         bridge_script = """#!/usr/bin/env python3
 import json
@@ -1579,17 +1583,16 @@ pull_policy = "never"
         self.write_trace()
 
     def submit_prompt(self, session_id: str, text: str) -> None:
-        # A session reports "running" before it can take a prompt: the worker
-        # is still configuring its harness, and a prompt sent into that window
-        # is refused with 409. Wait for an idle chat phase, then retry the
-        # refusal for as long as the scenario's own timeout allows.
+        # A provisional session can have an idle chat phase while Create
+        # still owns it. Wait until the viewer can send a prompt.
         self.wait_snapshot(
-            lambda value: (self.session(value, session_id) or {}).get("chat_phase") == "idle",
+            lambda value: (row := self.session(value, session_id) or {}).get("chat_phase") == "idle"
+            and row.get("capabilities", {}).get("prompt"),
             "session ready for a prompt",
         )
         deadline = time.monotonic() + TIMEOUT
         while True:
-            status, _ = self.request(
+            status, body = self.request(
                 "POST",
                 "/api/actions",
                 {"action": "prompt", "session_id": session_id, "text": text},
@@ -1597,7 +1600,7 @@ pull_policy = "never"
             if status == 202:
                 break
             if status != 409 or time.monotonic() >= deadline:
-                raise ScenarioFailure(f"prompt action returned {status}")
+                raise ScenarioFailure(f"prompt action returned {status}: {body!r}")
             time.sleep(0.2)
         self.record_action("prompt", session_id=session_id, text=text)
 

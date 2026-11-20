@@ -178,7 +178,16 @@ pub const RELAY_NOTIFICATION_STACK_PROTOCOL: u32 = 71;
 /// 72 atomically transfers an interrupted prompt into restart recovery. The
 /// continuation ID is digest-covered, so older readers must not consume it.
 pub const RELAY_RESTART_RECOVERY_PROTOCOL: u32 = 72;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_RESTART_RECOVERY_PROTOCOL;
+
+/// Operation-owned command retention and acknowledgement-only journal GC.
+pub const RELAY_COMMAND_RETENTION_PROTOCOL: u32 = 73;
+/// 74 reserves the next quiescent boundary for cancellable adoption cuts.
+pub const RELAY_LIVE_BASELINE_PROTOCOL: u32 = 74;
+/// 75 reports the mail the relay holds at a ready checkpoint cut.
+pub const RELAY_CHECKPOINT_MAILBOX_PROTOCOL: u32 = 75;
+/// 76 names the tool call in permission forms, which older readers reject.
+pub const RELAY_PERMISSION_TOOL_CALL_PROTOCOL: u32 = 76;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_PERMISSION_TOOL_CALL_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -219,7 +228,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 25 is breaking: older readers reject it. Upgrading seeds `withdrawn_ordinal` from the legacy flag.
 // Revision 26 is breaking: an older writer drops `set_aside_through`, so a dismissed ask would count again.
 // Revision 27 is breaking: older writers cannot preserve notification entries or replay their commands.
-pub const RELAY_STATE_VERSION: u32 = 27;
+// Revision 28 is breaking: older writers lose command pins and native-use evidence.
+pub const RELAY_STATE_VERSION: u32 = 28;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";
@@ -245,6 +255,20 @@ pub const WORKER_STARTUP_FILE: &str = "worker-startup.json";
 pub const WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT: &str = "login-environment";
 /// File a dying worker daemon writes with the reason it stopped.
 pub const WORKER_EXIT_FILE: &str = "worker-exit.json";
+
+/// An ACP failure before this worker first recorded a configured session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerHarnessStartupFailure {
+    pub message: String,
+}
+
+impl std::fmt::Display for WorkerHarnessStartupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for WorkerHarnessStartupFailure {}
 /// File in which a worker records which untracked paths each repository held
 /// when its review baseline was taken, so a restart measures new files against
 /// the same point the baseline belongs to.
@@ -392,6 +416,12 @@ pub struct RestoredRelaySeed {
     /// reads as `false`: the imported identity counts as used.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub native_session_unused: bool,
+    /// The archived worker's mail, already selected by the restore spec's
+    /// queue policy: pending events are absent when the controller admits them
+    /// after readiness, and claimed prompt mail is absent when the queue is
+    /// dropped. Seeds from older releases omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox: Option<crate::archive::CanonicalMailbox>,
 }
 
 impl RestoredRelaySeed {
@@ -403,6 +433,9 @@ impl RestoredRelaySeed {
         }
         if let Some(value) = &self.assessment_state {
             crate::assessment::Checkpoint::decode(value)?;
+        }
+        if let Some(mailbox) = &self.mailbox {
+            mailbox.validate()?;
         }
         validate_relay_digest(
             &self.event_frontier_digest,
@@ -432,3 +465,6 @@ pub fn clear_native_session_identity(root: &Path) -> Result<()> {
         Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
     }
 }
+
+mod live_baseline;
+pub use live_baseline::*;

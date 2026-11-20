@@ -2,6 +2,9 @@
 //! resumes quota recoveries, seeds authorization context, and tells review when
 //! a session settles. User input always wins over automatic work.
 use super::*;
+
+// Preserve the ten-minute ceiling previously shared with automatic checkpoints.
+const QUOTA_RETRY_BACKOFF_CEILING: Duration = Duration::from_secs(10 * 60);
 use mj_controller::session_manager::{
     CoalescedUpdateSender, ManagedSessionView, SessionManagerUpdate, SessionManagerUpdates,
     coalesced_update_channel,
@@ -21,21 +24,14 @@ enum Phase {
     /// Resolving the reset deadline of a quota-limited turn.
     Resolving(mj_controller::upgrade::Work),
     WaitingQuota,
-    Submitting(mj_controller::upgrade::Work),
+    Submitting(Option<mj_controller::upgrade::Work>),
 }
 
 impl Phase {
     fn work(&self) -> &mj_controller::upgrade::Work {
         match self {
-            Self::Resolving(work) | Self::Submitting(work) => work,
-            Self::WaitingQuota => unreachable!("quota waits hold no admission"),
-        }
-    }
-
-    fn submitting(self) -> Self {
-        match self {
-            Self::Resolving(work) | Self::Submitting(work) => Self::Submitting(work),
-            Self::WaitingQuota => unreachable!("quota waits must readmit before submission"),
+            Self::Resolving(work) | Self::Submitting(Some(work)) => work,
+            _ => unreachable!("this quota phase holds no admission"),
         }
     }
 }
@@ -72,9 +68,9 @@ fn failed_quota_attempt(
         .filter(|r| r.revision == revision)
         .map_or(1, |r| r.failures.saturating_add(1));
     // Retain the existing 30-second retry cadence and recovery policy ceiling.
-    let delay = crate::recovery::backoff_delay(
+    let delay = mj_controller::backoff::backoff_delay(
         Duration::from_secs(30),
-        crate::recovery::AUTO_CHECKPOINT_INTERVAL,
+        QUOTA_RETRY_BACKOFF_CEILING,
         failures,
     );
     retries.insert(
@@ -376,7 +372,11 @@ fn claim(state: &RuntimeState, session: &str) -> Claim {
     if lifecycle.is_none()
         && controller.config.quota_recovery_enabled()
         && controller.state.sessions.contains_key(session)
-        && !controller.state.subagents.contains_key(session)
+        && controller
+            .state
+            .subagents
+            .get(session)
+            .is_none_or(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
     {
         Claim::Allowed
     } else {
@@ -403,6 +403,7 @@ struct Environment {
     review: ReviewObserver,
     quota: quota::Resolver,
     start_quota_move: quota::StartMove,
+    child_switch_runtime: Option<Arc<RuntimeState>>,
     profile: ProfileLookup,
 }
 type ProfileLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -519,7 +520,7 @@ pub(super) fn spawn(
             }
         },
         control: state.session_manager.clone(),
-        session_gate: state.recovery_observer.gate.clone(),
+        session_gate: state.session_gate.clone(),
         schedules: Default::default(),
         allowed: {
             let state = state.clone();
@@ -540,6 +541,7 @@ pub(super) fn spawn(
                 Box::pin(async move { quota::prepare(&state, &id, &view).await })
             })
         },
+        child_switch_runtime: Some(state.clone()),
         start_quota_move: {
             let state = state.clone();
             Arc::new(move |request, reason, continuation| {
@@ -729,7 +731,7 @@ fn spawn_with_gate(
                     }
                     // The worker's assessment decides whether the turn hit a
                     // quota; each assessment revision is acted on once.
-                    let worker_assessment = view.snapshot.as_ref().filter(|s| unified(s)).and_then(|s| s.operational.assessment.as_ref()).filter(|a| a.current() && (a.verdict.is_some() || a.glide.is_some()));
+                    let worker_assessment = view.snapshot.as_ref().filter(|s| unified(s)).and_then(|s| s.operational.assessment.as_ref()).filter(|a| a.current() && (a.verdict.is_some() || a.glide.is_some() || a.action == Some(mj_core::assessment::Action::RecoverQuota)));
                     let new_completion = worker_assessment.is_some_and(|a| assessed.get(&id).copied() != Some(a.revision));
                     // A deferred recovery is released once it can be recorded.
                     let released = !new_completion && deferred.contains_key(&id) && quota_schedulable(&view);
@@ -854,13 +856,16 @@ fn spawn_with_gate(
                                         }
                                         Ok(recovery) if (environment.allowed)(&id) && quota_schedulable(&p.view) => {
                                             let env = environment.clone(); let session = id.clone(); let view = p.view.clone();
-                                            let task_work = p.phase.work().clone();
+                                            // Child staging uses lifecycle admission and can be cancelled by handoff.
+                                            let work = (!matches!(*recovery, quota::Plan::ChildSwitch { .. }))
+                                                .then(|| p.phase.work().clone());
+                                            let task_work = work.clone();
                                             let abort = jobs.spawn(async move {
                                                 let _task_work = task_work;
                                                 let result = quota::schedule(&env, &session, view, *recovery).await;
                                                 (session, epoch, Outcome::Submitted(result))
                                             });
-                                            pending.insert(id, Pending { abort, phase: p.phase.submitting(), ..p });
+                                            pending.insert(id, Pending { abort, phase: Phase::Submitting(work), ..p });
                                         }
                                         result => {
                                             tracing::warn!(session=%id, ?result, "quota recovery could not be scheduled");
@@ -983,7 +988,7 @@ fn spawn_with_gate(
                             let result = quota::resume(&env, &session, &current, clear).await;
                             (session, epoch, Outcome::Submitted(result))
                         });
-                        pending.insert(id.clone(), Pending { phase: Phase::Submitting(upgrade_work), generation: epoch, abort,
+                        pending.insert(id.clone(), Pending { phase: Phase::Submitting(Some(upgrade_work)), generation: epoch, abort,
                             view: view.clone(), user: recovery.user_command_id.clone(), completed: recovery.completed_command_id.clone(), evidence_ordinal: evidence_ordinal(view) });
                     }
                     for (id, view) in &latest {

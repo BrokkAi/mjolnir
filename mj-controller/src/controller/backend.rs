@@ -439,7 +439,7 @@ fn push_unique(paths: &mut Vec<String>, more: impl IntoIterator<Item = String>) 
 
 /// Check a target before a launch, resume, or move uses it.
 ///
-/// An SSH host's container runtime is verified by `mj setup`, `mj doctor`,
+/// An SSH host's container runtime is verified by first-run setup, `mj doctor`,
 /// and the Targets pane's Test action; here it is assumed to still be as
 /// they left it, and only the host's reachability is checked. That probe
 /// joins an open shared connection, so it usually costs one SSH channel.
@@ -761,60 +761,7 @@ impl ContainerOverrides {
     }
 }
 
-/// OCI platform of a container target, before its container exists.
-pub(crate) fn session_image_platform(
-    template: &TargetTemplate,
-    executor: &impl CommandExecutor,
-) -> Result<String> {
-    let (host, container) = template
-        .image_host()
-        .context("image operation requires a container target")?;
-    let architecture = if let Some(platform) = &container.platform {
-        platform
-            .split('/')
-            .find_map(|part| targets::normalize_architecture(part).ok())
-            .context("unsupported container platform")?
-    } else if matches!(
-        host,
-        targets::ImageHost::AppleContainer | targets::ImageHost::SshAppleContainer(_)
-    ) {
-        "aarch64"
-    } else {
-        // The engine owns its native architecture, including Docker Desktop
-        // on a Windows daemon host where uname is not available.
-        let args = match host.engine() {
-            "podman" => vec![
-                "podman".into(),
-                "info".into(),
-                "--format".into(),
-                "{{.Host.Arch}}".into(),
-            ],
-            "docker" => vec![
-                "docker".into(),
-                "info".into(),
-                "--format".into(),
-                "{{.Architecture}}".into(),
-            ],
-            _ => vec!["uname".into(), "-sm".into()], // Nitro hosts run Linux.
-        };
-        let output =
-            super::execute_checked(executor, host.command(args, "detect image platform".into()))?;
-        let output = std::str::from_utf8(&output.stdout)?;
-        if matches!(host, targets::ImageHost::SshNitro(_)) {
-            targets::TargetPlatform::parse(output)?.architecture
-        } else {
-            targets::normalize_architecture(output.trim())?
-        }
-    };
-    Ok(format!(
-        "linux/{}",
-        match architecture {
-            "x86_64" => "amd64",
-            "aarch64" => "arm64",
-            _ => unreachable!(),
-        }
-    ))
-}
+pub(crate) use targets::session_image_platform;
 
 /// Resolve the project assignment before preflight, creation, or recreation.
 /// A target without project images does not require an additional host probe.

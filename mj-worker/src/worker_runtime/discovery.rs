@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::acp::{self, AcceptedSessionConfig, CommandRequest, LaunchSpec, RuntimeEvent};
+use crate::relay::NativeSessionHistory;
 use anyhow::{Context, Result, bail};
 use mj_core::config::ExecutionPolicy;
 use mj_core::worker_launch::{ProfileConfig, ProfileProbeSpec};
@@ -106,15 +107,16 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         project_memory: None,
         extra_mcp_servers: vec![],
         resume_session: None,
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Arc::new(Mutex::new(AcceptedSessionConfig::default())),
         initial_model: None,
         harness: spec.harness,
         execution_policy: policy,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: Default::default(),
         step_clock: Default::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: None,
         stall_policy: None,
@@ -353,15 +355,16 @@ for line in sys.stdin:
             project_memory: None,
             extra_mcp_servers: vec![],
             resume_session: None,
-            native_session_may_have_history: false,
+            native_session_history: NativeSessionHistory::LoadBeforeReplace,
             accepted_config: Arc::new(Mutex::new(AcceptedSessionConfig::default())),
             initial_model: None,
             harness: mj_core::config::HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: Default::default(),
             step_clock: Default::default(),
             tools_in_flight: Default::default(),
+            terminal_owner: None,
             turn_context: Default::default(),
             verdict: None,
             stall_policy: None,

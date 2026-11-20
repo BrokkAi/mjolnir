@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::session_manager::{SessionManagerControl, new_command_id};
+use crate::session_manager::{SessionManagerControl, new_command_id, worker_connect_needs_restart};
 use mj_core::state::{CheckpointMetadata, ManagedCheckoutKind, SessionRecord, SessionState};
 
 use crate::targets::{self, CommandExecutor, ProcessExecutor, ProvisionStage, ProvisionStageGuard};
@@ -13,7 +13,8 @@ use mj_core::relay::{RelayCommand, RelayExecutionState};
 
 use super::backend::backend_locator;
 use super::checkpoint::{
-    CheckpointExportPolicy, LatchExclusivity, prune_replaced_checkpoint,
+    CheckpointExportPolicy, ControllerRelayLease, LatchExclusivity,
+    adopt_restarted_checkpoint_relay, prune_replaced_checkpoint,
     release_projection_behind_checkpoint, verify_installed_checkpoint_gate, wait_for_relay_closed,
 };
 use super::worker_restart::WorkerRestartLeftNoWorker;
@@ -30,6 +31,7 @@ pub enum LifecycleFailureReason {
     Cleanup,
     RetainedMoveSource,
     UnsealedMoveSource,
+    HarnessUnavailable,
 }
 
 impl std::fmt::Display for LifecycleFailureReason {
@@ -40,6 +42,7 @@ impl std::fmt::Display for LifecycleFailureReason {
             Self::Cleanup => "Suspension could not finish removing its target. Retry suspension to finish cleanup; retained environments and recovery data were kept.",
             Self::RetainedMoveSource => "Suspension interrupted Move before the destination was ready; the source workspace was kept. Resume the session to repair its runtime, then retry suspension.",
             Self::UnsealedMoveSource => "Suspension could not establish a sealed Move checkpoint. Resume the session to repair its runtime, then retry suspension; existing environments and recovery data were kept.",
+            Self::HarnessUnavailable => "Suspension could not save the session without its harness, which failed to open; the environment was kept. Resume the session to retry its harness, or destroy it.",
         })
     }
 }
@@ -135,6 +138,7 @@ impl Controller {
                 None,
                 None,
                 LatchExclusivity::HoldThroughClose,
+                None,
             )
             .await?
         {
@@ -170,6 +174,7 @@ impl Controller {
             before_close,
             None,
             LatchExclusivity::HoldThroughClose,
+            None,
         )
         .await
     }
@@ -209,6 +214,7 @@ impl Controller {
             } else {
                 LatchExclusivity::HoldThroughClose
             },
+            None,
         )
         .await?;
         Ok(())
@@ -267,6 +273,7 @@ impl Controller {
                     None,
                     source_relay.take(),
                     exclusivity,
+                    None,
                 )
                 .await
             },
@@ -291,6 +298,7 @@ impl Controller {
         before_close: Option<BeforeClose>,
         held_relay: Option<super::checkpoint::ControllerRelayLease>,
         exclusivity: LatchExclusivity,
+        harness_failure: Option<&mj_core::relay::WorkerHarnessStartupFailure>,
     ) -> Result<bool> {
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
@@ -340,11 +348,21 @@ impl Controller {
                     // The target is kept even when the restart left no worker:
                     // a forced destroy and a resume's pre-clean both use it to
                     // tear down the dead container.
-                    apply_close_checkpoint_failure(record, &previous, &error, now());
+                    apply_close_checkpoint_failure(
+                        record,
+                        &previous,
+                        &error,
+                        now(),
+                        harness_failure,
+                    );
                 }
                 return Err(
                     self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error)
-                        .context(LifecycleFailureReason::Checkpoint)
+                        .context(if harness_failure.is_some() {
+                            LifecycleFailureReason::HarnessUnavailable
+                        } else {
+                            LifecycleFailureReason::Checkpoint
+                        })
                 );
             }
         };
@@ -623,6 +641,12 @@ impl Controller {
     /// publication check uses `acknowledge_unpublished_work` as the caller
     /// sent it. A relay already sealed was checked by the close that sealed
     /// it, and that close can only go forward.
+    ///
+    /// A worker that died because its harness could not open the session is
+    /// started again without the harness, and the close finishes from there.
+    /// A close that then fails stops that worker, and a failed checkpoint
+    /// leaves the session in `Error` rather than running on a worker that
+    /// cannot run a turn (#1619).
     #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
     pub async fn recover_interrupted_close_managed(
         &mut self,
@@ -676,25 +700,53 @@ impl Controller {
                 .wait_for_session(session_id, Duration::from_secs(5))
                 .await?;
             phase = "lease worker connection";
-            let mut lease = handle.lease_connection(admission).await?;
+            let lease = handle.lease_connection(admission).await?;
+            let mut relay = ControllerRelayLease::Managed {
+                handle,
+                lease: Some(lease),
+            };
             phase = "read worker execution state";
-            let execution = lease.connection_mut().sync().await?.operational.execution;
-            anyhow::Ok((lease, execution))
+            let execution = relay.connection_mut().sync().await?.operational.execution;
+            anyhow::Ok((relay, execution))
         }
         .await;
-        let (mut lease, execution) = match connection {
-            Ok(connected) => connected,
+        let (mut relay, execution, harness_failure) = match connection {
+            Ok((relay, execution)) => (relay, execution, None),
             Err(error) => {
                 tracing::warn!(
                     session_id,
                     phase,
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     error = format!("{error:#}"),
-                    "suspension could not query its worker; retaining target and checkpoint"
+                    "suspension could not query its worker"
                 );
-                self.diagnose_suspension_worker(session_id, phase).await;
-                return Err(error.context(format!("{phase} while recovering suspension"))
-                    .context(LifecycleFailureReason::WorkerContact));
+                let probe = self.diagnose_suspension_worker(session_id, phase).await;
+                // Only a worker proved dead, whose own exit record says its
+                // harness could not open the session, is started again here.
+                // Anything else keeps its target and checkpoint untouched.
+                let failure = probe
+                    .filter(|probe| probe.pids.is_empty() && worker_connect_needs_restart(&error))
+                    .and_then(|probe| probe.exit)
+                    .and_then(|exit| exit.harness_failed_to_open().cloned());
+                let Some(failure) = failure else {
+                    return Err(error.context(format!("{phase} while recovering suspension"))
+                        .context(LifecycleFailureReason::WorkerContact));
+                };
+                let (relay, execution) = async {
+                    let mut relay = self
+                        .reopen_closing_relay_without_harness(
+                            admission, session_id, executor, manager, &failure,
+                        )
+                        .await?;
+                    let execution = relay.connection_mut().sync().await?.operational.execution;
+                    anyhow::Ok((relay, execution))
+                }
+                .await
+                .with_context(|| {
+                    format!("start the worker without its harness, which failed to open: {failure}")
+                })
+                .context(LifecycleFailureReason::WorkerContact)?;
+                (relay, execution, Some(failure))
             }
         };
         tracing::info!(
@@ -703,49 +755,130 @@ impl Controller {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "suspension recovery read the worker's execution state"
         );
-        match execution {
-            RelayExecutionState::Closed => {}
-            RelayExecutionState::Closing => {
-                let _closing = ProvisionStageGuard::new(executor, ProvisionStage::Closing);
-                wait_for_relay_closed(lease.connection_mut()).await?;
+        let closed = async {
+            match execution {
+                RelayExecutionState::Closed => {}
+                RelayExecutionState::Closing => {
+                    let _closing = ProvisionStageGuard::new(executor, ProvisionStage::Closing);
+                    wait_for_relay_closed(relay.connection_mut()).await?;
+                }
+                RelayExecutionState::Idle | RelayExecutionState::Running => {
+                    relay.release();
+                    return self
+                        .suspend_session_controlled_with_manager(admission,
+                            session_id,
+                            executor,
+                            Some(manager),
+                            None,
+                            SourceTargetDisposition::Destroy,
+                            if ignore_nested_repositories {
+                                CheckpointExportPolicy::IgnoreNestedRepositories
+                            } else {
+                                CheckpointExportPolicy::ReuseUnchangedArchive
+                            },
+                            acknowledge_unpublished_work,
+                            before_close,
+                            None,
+                            LatchExclusivity::HoldThroughClose,
+                            harness_failure.as_ref(),
+                        )
+                        .await;
+                }
             }
-            RelayExecutionState::Idle | RelayExecutionState::Running => {
-                lease.release();
-                return self
-                    .suspend_session_controlled_with_manager(admission,
-                        session_id,
-                        executor,
-                        Some(manager),
-                        None,
-                        SourceTargetDisposition::Destroy,
-                        if ignore_nested_repositories {
-                            CheckpointExportPolicy::IgnoreNestedRepositories
-                        } else {
-                            CheckpointExportPolicy::ReuseUnchangedArchive
-                        },
-                        acknowledge_unpublished_work,
-                        before_close,
-                        None,
-                        LatchExclusivity::HoldThroughClose,
-                    )
-                    .await;
+            relay.release();
+            let verified = verified.context("closed relay has no verified checkpoint")?;
+            // The relay is sealed already, so this close can only go forward.
+            if let Some(before_close) = before_close {
+                before_close.await?;
             }
+            self.destroy_after_verified_checkpoint(session_id, &verified, executor)
+                .context(LifecycleFailureReason::Cleanup)
         }
-        lease.release();
-        let verified = verified.context("closed relay has no verified checkpoint")?;
-        // The relay is sealed already, so this close can only go forward.
-        if let Some(before_close) = before_close {
-            before_close.await?;
+        .await;
+        if closed.is_err() && harness_failure.is_some() {
+            // The worker started without its harness existed only to finish
+            // this close. Left running, a Resume would adopt it instead of
+            // starting the harness again, and a running record would point at
+            // a worker that cannot run a turn.
+            self.stop_worker_started_without_harness(session_id, executor);
         }
-        self.destroy_after_verified_checkpoint(session_id, &verified, executor)
-            .context(LifecycleFailureReason::Cleanup)
+        closed
 
         }).await
     }
 
+    /// Stop the worker a close started without its harness, once the close
+    /// has failed. Failing to stop it does not change the close's outcome; it
+    /// is reported here.
+    fn stop_worker_started_without_harness(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) {
+        let stopped = (|| {
+            let (backend, worker_root) = self.worker_placement(session_id)?;
+            let owner = crate::worker_lifecycle::require(session_id)?;
+            super::worker_binary::stop_worker(&owner, executor, &backend, &worker_root)
+        })();
+        if let Err(error) = stopped {
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "could not stop the worker a failed close started without its harness; \
+                 a Resume may attach to it instead of starting the harness"
+            );
+        }
+    }
+
+    /// Start a closing session's worker again without its harness, so the
+    /// close can ask its relay whether it was sealed and checkpoint it if not.
+    ///
+    /// The worker died because its harness could not open the session, and
+    /// starting that harness again would only repeat the failure (#1619). A
+    /// close needs only the relay journal and the files on the target, as a
+    /// checkpoint whose restarted harness did not come back does (R4-3).
+    async fn reopen_closing_relay_without_harness(
+        &self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+        failure: &mj_core::relay::WorkerHarnessStartupFailure,
+    ) -> Result<ControllerRelayLease> {
+        tracing::warn!(
+            session_id,
+            %failure,
+            "the closing session's harness failed to open; finishing the close without it"
+        );
+        executor.notify_notice(&format!(
+            "Saving the session without starting its harness, which failed to open: {failure}"
+        ));
+        let (backend, worker_root) = self.worker_placement(session_id)?;
+        let reconnect = targets::reconnect_plan(&backend, session_id)?
+            .commands
+            .into_iter()
+            .next()
+            .context("reconnect plan is empty")?;
+        let connection = self
+            .restart_worker_for_checkpoint_only(
+                session_id,
+                executor,
+                &backend,
+                &worker_root,
+                &reconnect,
+            )
+            .await?;
+        adopt_restarted_checkpoint_relay(admission, session_id, Some(manager), connection).await
+    }
+
     /// A missing socket does not establish worker death or a safe checkpoint
-    /// cut. Gather its own records and process state without changing either.
-    async fn diagnose_suspension_worker(&self, session_id: &str, phase: &str) {
+    /// cut. Gather its own records and process state without changing either,
+    /// and return them for the caller to judge.
+    async fn diagnose_suspension_worker(
+        &self,
+        session_id: &str,
+        phase: &str,
+    ) -> Option<super::worker_binary::WorkerProbe> {
         let placement = self.worker_placement(session_id);
         let probe = match placement {
             Ok((backend, worker_root)) => mj_core::runtime::spawn_blocking(move || {
@@ -762,20 +895,26 @@ impl Controller {
             Err(error) => Err(error.context("resolve the retained suspension worker")),
         };
         match probe {
-            Ok(probe) => tracing::warn!(
-                session_id,
-                phase,
-                worker_pids = ?probe.pids,
-                worker_startup_step = ?probe.step(),
-                worker_state = %probe,
-                "suspension failure worker diagnostic; no recovery mutation was attempted"
-            ),
-            Err(error) => tracing::warn!(
-                session_id,
-                phase,
-                error = format!("{error:#}"),
-                "suspension failure worker diagnostic was unavailable; worker state remains unknown"
-            ),
+            Ok(probe) => {
+                tracing::warn!(
+                    session_id,
+                    phase,
+                    worker_pids = ?probe.pids,
+                    worker_startup_step = ?probe.step(),
+                    worker_state = %probe,
+                    "suspension failure worker diagnostic"
+                );
+                Some(probe)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    phase,
+                    error = format!("{error:#}"),
+                    "suspension failure worker diagnostic was unavailable; worker state remains unknown"
+                );
+                None
+            }
         }
     }
 
@@ -833,12 +972,27 @@ impl Controller {
         cause: &str,
         observed_updated_at: &str,
     ) -> Result<bool> {
-        self.fail_unready_session_with(
+        let cause = match self.state.sessions.get(session_id) {
+            Some(record) => super::provisioning::launch_failure_text(
+                &self.config,
+                &record.last_profile,
+                cause,
+                "use Restart agent in the existing session",
+            ),
+            None => cause.to_owned(),
+        };
+        let Some(record) = crate::database::fail_unready_session(
             session_id,
-            cause,
+            &cause,
+            SessionState::Running,
             observed_updated_at,
-            crate::database::save_lifecycle_session,
         )
+        .context("persist a session whose harness never became usable")?
+        else {
+            return Ok(false);
+        };
+        self.state.sessions.insert(session_id.to_owned(), record);
+        Ok(true)
     }
 
     /// Persist a worker-reported harness failure from an async lifecycle
@@ -860,33 +1014,6 @@ impl Controller {
         .await
         .context("record harness preparation failure task panicked")??;
         Ok(())
-    }
-
-    fn fail_unready_session_with(
-        &mut self,
-        session_id: &str,
-        cause: &str,
-        observed_updated_at: &str,
-        persist: impl Fn(&SessionRecord) -> Result<()>,
-    ) -> Result<bool> {
-        let Some(record) = self.state.sessions.get_mut(session_id) else {
-            return Ok(false);
-        };
-        if record.state != SessionState::Running || record.updated_at != observed_updated_at {
-            return Ok(false);
-        }
-        let previous = record.clone();
-        record.state = SessionState::Error;
-        record.updated_at = now();
-        record.last_error = Some(cause.to_owned());
-        persist_session_record_transition_or_restore(
-            &mut self.state,
-            session_id,
-            &previous,
-            "persist a session whose harness never became usable",
-            &persist,
-        )?;
-        Ok(true)
     }
 
     /// Publish a safe lifecycle failure even if a previous internal error exists.
@@ -1683,13 +1810,23 @@ fn apply_close_checkpoint_started(record: &mut SessionRecord, updated_at: String
 /// had. A restart that left no live worker cannot return to Running, because
 /// nothing is listening there any more; it records `Error` so the session stops
 /// being polled, and keeps its target for a later resume or forced close.
+/// Neither can a close running on a worker started without its harness, which
+/// failed to open (`harness_failure`): nothing there can run a turn.
 fn apply_close_checkpoint_failure(
     record: &mut SessionRecord,
     previous: &SessionRecord,
     error: &anyhow::Error,
     updated_at: String,
+    harness_failure: Option<&mj_core::relay::WorkerHarnessStartupFailure>,
 ) {
-    if WorkerRestartLeftNoWorker::marks(error) {
+    if let Some(failure) = harness_failure {
+        record.state = SessionState::Error;
+        record.last_error = Some(format!(
+            "the harness failed to open the session ({failure}), and the close could not save \
+             the session without it; resume to retry the harness, or explicitly destroy it \
+             with mj destroy: {error:#}"
+        ));
+    } else if WorkerRestartLeftNoWorker::marks(error) {
         record.state = SessionState::Error;
         record.last_error = Some(format!(
             "close failed and left the session without a live worker; retry the close, \

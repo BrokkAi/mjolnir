@@ -52,7 +52,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use mj_core::config::{Config, config_path};
+use mj_core::config::Config;
 use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -60,7 +60,6 @@ use std::io::{self, Write};
 use mj_controller::controller::update::StartupUpdateNotice;
 #[cfg(test)]
 use mj_controller::targets::ProcessExecutor;
-use mj_setup::setup::run_setup_command;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -120,14 +119,16 @@ enum Command {
     Doctor(DoctorArgs),
     /// Create, list, or destroy persistent EC2 hosts with rootless Podman.
     Ec2(ec2::Ec2Args),
-    /// Rerun agent and repository discovery, preserving existing configuration.
+    /// Former spelling of `mj doctor instructions`.
+    #[command(hide = true)]
     Setup(SetupArgs),
     /// Adopt a native coding-agent session as a stopped Mjolnir session.
     Import(ImportArgs),
     /// Find, adopt, or explicitly destroy managed workers missing from state.
     Recover(RecoverArgs),
-    /// Create a verified recovery copy for an active session.
-    Checkpoint(CheckpointArgs),
+    /// Removed; suspend saves the session.
+    #[command(hide = true)]
+    Checkpoint(RemovedCommandArgs),
     /// Move a session to another configured profile and/or target.
     Move(MoveArgs),
     /// Preview or explicitly queue a storage-preserving container upgrade.
@@ -262,6 +263,9 @@ struct RemovedCommandArgs {
 /// What a removed command was replaced by, for a command that was removed.
 fn replacement_notice(command: Option<&Command>) -> Option<&'static str> {
     match command {
+        Some(Command::Checkpoint(_)) => {
+            Some("`mj checkpoint` was removed; `mj suspend` saves the session")
+        }
         Some(Command::Close(_)) => Some("`mj close` was replaced by `mj suspend` and `mj destroy`"),
         Some(Command::CancelTurn(_)) => {
             Some("`mj cancel-turn` was replaced by `mj interrupt-turn`")
@@ -335,13 +339,6 @@ struct DaemonStopArgs {
     /// pushed.
     #[arg(long, requires = "suspend_sessions")]
     acknowledge_unpublished_work: bool,
-}
-
-#[derive(Debug, Args)]
-struct CheckpointArgs {
-    /// Session id, as `mj sessions` lists it.
-    #[arg(long)]
-    session: String,
 }
 
 #[derive(Debug, Args)]
@@ -529,6 +526,8 @@ enum RecoverCommand {
 
 #[derive(Debug, Args)]
 struct DoctorArgs {
+    #[command(subcommand)]
+    command: Option<DoctorCommand>,
     /// Emit a machine-readable array of prerequisite checks.
     #[arg(long)]
     json: bool,
@@ -540,11 +539,11 @@ struct DoctorArgs {
 #[derive(Debug, Args)]
 struct SetupArgs {
     #[command(subcommand)]
-    command: Option<SetupCommand>,
+    command: DoctorCommand,
 }
 
 #[derive(Debug, Subcommand)]
-enum SetupCommand {
+enum DoctorCommand {
     /// Print coding-agent instructions for preparing a host.
     Instructions {
         /// Platform to prepare.
@@ -1005,6 +1004,28 @@ async fn run_command(
     update_notice: Option<StartupUpdateNotice>,
     no_splash: bool,
 ) -> Result<DashboardExit> {
+    // A computer that has never run a daemon is asked where it runs before
+    // anything connects to one. `go` and `simple` prepare their project
+    // against the daemon, so the answer has to come before they do.
+    // `go` and `simple` refuse `--workspace` below; that usage error comes
+    // before a question whose answer would be saved.
+    let refused_workspace = requested_workspace.is_some()
+        && matches!(command, Some(Command::Go(_) | Command::Simple(_)));
+    if !refused_workspace
+        && matches!(
+            command,
+            None | Some(Command::Go(_) | Command::Simple(_))
+                | Some(Command::Workspaces(WorkspacesArgs { command: None }))
+        )
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && matches!(
+            daemon::choice::ask_where_daemon_runs().await?,
+            daemon::choice::PlacementChoice::Cancelled
+        )
+    {
+        return Ok(DashboardExit::Interrupted);
+    }
     match command {
         None => {
             run_workspace_dashboard(
@@ -1080,6 +1101,13 @@ async fn run_command(
             }
             ec2::run(args).await.map(|()| DashboardExit::Normal)
         }
+        Some(Command::Doctor(DoctorArgs {
+            command: Some(command),
+            ..
+        })) => {
+            print_setup_instructions(command);
+            Ok(DashboardExit::Normal)
+        }
         Some(Command::Doctor(args)) => {
             if daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await? {
                 return Ok(DashboardExit::Normal);
@@ -1087,10 +1115,8 @@ async fn run_command(
             doctor(args).await.map(|()| DashboardExit::Normal)
         }
         Some(Command::Setup(args)) => {
-            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), true).await? {
-                return Ok(DashboardExit::Normal);
-            }
-            setup(args).map(|()| DashboardExit::Normal)
+            print_setup_instructions(args.command);
+            Ok(DashboardExit::Normal)
         }
         Some(Command::Import(args)) => {
             let workspace_id =
@@ -1102,17 +1128,6 @@ async fn run_command(
             Ok(DashboardExit::Normal)
         }
         Some(Command::Recover(args)) => recover(args).await.map(|()| DashboardExit::Normal),
-        Some(Command::Checkpoint(args)) => {
-            let checkpoint = daemon::connect_or_start()
-                .await?
-                .checkpoint_session(args.session.clone())
-                .await?;
-            println!(
-                "saved recovery copy for {} at event {}",
-                args.session, checkpoint.event_frontier
-            );
-            Ok(DashboardExit::Normal)
-        }
         Some(Command::UpgradeContainer {
             session,
             acknowledge_writable_layer_loss,
@@ -1291,7 +1306,7 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         // Answered in `main` before anything starts.
-        Some(command @ (Command::Close(_) | Command::CancelTurn(_))) => {
+        Some(command @ (Command::Close(_) | Command::CancelTurn(_) | Command::Checkpoint(_))) => {
             bail!("{}", replacement_notice(Some(&command)).unwrap_or_default())
         }
     }
@@ -1433,6 +1448,33 @@ async fn move_session(args: MoveArgs) -> Result<()> {
     };
     if args.prepare {
         println!("{}", serde_json::to_string_pretty(&preparation)?);
+        return Ok(());
+    }
+    if let Some(preview) = preparation.container_upgrade.clone() {
+        anyhow::ensure!(
+            args.queue.is_none(),
+            "Container settings replacement waits for accepted work. Omit --queue or clear the queue before confirming."
+        );
+        if args.yes {
+            eprintln!("{}", preview.warning);
+        } else if !prompt_move_confirmation(&preparation, None).await? {
+            bail!("container settings replacement cancelled");
+        }
+        daemon
+            .upgrade_container(mj_core::state::ContainerUpgradeRequest {
+                selection: *preview,
+                acknowledge_writable_layer_loss: true,
+            })
+            .await?;
+        if args.json {
+            let mut outcome = move_error_outcome(&preparation, String::new());
+            outcome.outcome = "container-upgrade-pending".into();
+            outcome.error = None;
+            outcome.recovery = None;
+            print_move_json(&outcome)?;
+        } else {
+            eprintln!("Container settings replacement pending; accepted work will finish first.");
+        }
         return Ok(());
     }
     if !args.json
@@ -1753,6 +1795,10 @@ async fn prompt_move_confirmation(
     preparation: &mj_core::state::MovePreparation,
     queue: Option<ResumeQueueDisposition>,
 ) -> Result<bool> {
+    let settings_warning = preparation
+        .container_upgrade
+        .as_ref()
+        .map(|preview| preview.warning.clone());
     let active = preparation.active;
     let source_profile = preparation.source_profile_id.clone();
     let source_target = preparation.source_target_template_id.clone();
@@ -1772,6 +1818,10 @@ async fn prompt_move_confirmation(
     let queued_commands = preparation.queued_commands.clone();
     let session_id = preparation.selection.session_id.clone();
     mj_core::runtime::spawn_blocking(move || {
+        if let Some(warning) = settings_warning {
+            eprintln!("Apply container settings and restart?\n{warning}");
+            return confirm_move_prompt();
+        }
         eprintln!(
             "Move session {} from {source_profile}/{source_target} to {profile}/{target}.",
             session_id
@@ -1832,15 +1882,19 @@ async fn prompt_move_confirmation(
                 }
             );
         }
-        eprint!("Continue? [y/N] ");
-        io::stderr().flush()?;
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        Ok::<_, io::Error>(line.trim().eq_ignore_ascii_case("y"))
+        confirm_move_prompt()
     })
     .await
     .context("move confirmation prompt task failed")?
     .map_err(Into::into)
+}
+
+fn confirm_move_prompt() -> io::Result<bool> {
+    eprint!("Continue? [y/N] ");
+    io::stderr().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    Ok(line.trim().eq_ignore_ascii_case("y"))
 }
 
 fn move_error_outcome(
@@ -2569,9 +2623,9 @@ fn resolve_login_profile(config: &Config, requested: Option<&str>) -> Result<Str
             "several profiles are configured; pass --profile with one of: {}",
             profile_ids(config)
         ),
-        (None, _) => bail!(
-            "no enabled agent profiles are configured; add one in Settings → Agent Profiles, or run `mj setup`"
-        ),
+        (None, _) => {
+            bail!("no enabled agent profiles are configured; add one in Settings → Agent Profiles")
+        }
     }
 }
 
@@ -2641,9 +2695,26 @@ async fn recover(args: RecoverArgs) -> Result<()> {
             bundle,
             all_instances,
         } => {
-            daemon
-                .adopt_recovery(session.clone(), target, profile, bundle, all_instances)
-                .await?;
+            let installed = std::cell::Cell::new(false);
+            tokio::select! {
+                result = daemon.adopt_recovery(mj_client::daemon::RecoveryAdoptionRequest { session_id: session.clone(), target_id: target, profile, bundle, all_instances }, |event| {
+                    match event {
+                        mj_client::daemon::RecoveryAdoptionProgress::Waiting { blockers, destroy_command } => {
+                            eprintln!("Waiting for {}.", mj_core::transcript::sanitize_terminal_text(&blockers.join("; ")));
+                            if let Some(command) = destroy_command { eprintln!("If the worker never becomes idle, the only way forward is to destroy it: {command}"); }
+                        }
+                        mj_client::daemon::RecoveryAdoptionProgress::Installed { session_id } => {
+                            installed.set(true);
+                            eprintln!("adopted worker {session_id}; reattaching");
+                        }
+                    }
+                }) => result?,
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    if installed.get() { anyhow::bail!("worker adopted; reattaching interrupted; check this instance's session state"); }
+                    anyhow::bail!("adoption outcome unknown: no final reply was received; the install may still complete. Check this instance's session state before retrying recover adopt");
+                }
+            }
             println!("adopted worker {session}");
             Ok(())
         }
@@ -2662,18 +2733,13 @@ async fn recover(args: RecoverArgs) -> Result<()> {
     }
 }
 
-fn setup(args: SetupArgs) -> Result<()> {
-    match args.command {
-        Some(SetupCommand::Instructions { platform }) => {
-            let platform = match platform {
-                SetupPlatform::Linux => mj_setup::doctor::InstructionsPlatform::Linux,
-                SetupPlatform::Macos => mj_setup::doctor::InstructionsPlatform::Macos,
-            };
-            print!("{}", mj_setup::doctor::setup_instructions(platform));
-            Ok(())
-        }
-        None => run_setup_command(&config_path()),
-    }
+fn print_setup_instructions(command: DoctorCommand) {
+    let DoctorCommand::Instructions { platform } = command;
+    let platform = match platform {
+        SetupPlatform::Linux => mj_setup::doctor::InstructionsPlatform::Linux,
+        SetupPlatform::Macos => mj_setup::doctor::InstructionsPlatform::Macos,
+    };
+    print!("{}", mj_setup::doctor::setup_instructions(platform));
 }
 
 /// How long doctor waits for the daemon to report one profile's catalogue.
@@ -3076,6 +3142,10 @@ mod tests {
     fn a_removed_command_names_its_replacement_whatever_it_was_given() {
         for (argv, replacement) in [
             (
+                vec!["mj", "checkpoint", "--session", "s1"],
+                "`mj suspend` saves the session",
+            ),
+            (
                 vec!["mj", "close", "--session", "s1"],
                 "`mj suspend` and `mj destroy`",
             ),
@@ -3093,7 +3163,10 @@ mod tests {
             .render_help()
             .to_string();
         assert!(
-            !help.contains("cancel-turn"),
+            !help.contains("cancel-turn")
+                && !help
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("checkpoint ")),
             "the old names stay out of --help"
         );
     }

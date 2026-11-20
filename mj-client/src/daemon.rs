@@ -136,8 +136,7 @@ impl FirstRunSetupReport {
         let mut lines = Vec::new();
         if self.agents.is_empty() {
             lines.push(
-                "No installed coding agent was found. Mjolnir can install and sign in to one for you."
-                    .to_owned(),
+                "No coding agent found yet. Mjolnir can install one and sign you in.".to_owned(),
             );
         } else {
             lines.push(format!(
@@ -748,6 +747,26 @@ pub struct WorkspaceDrafts {
     pub drafts: Vec<DraftPreview>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryAdoptionRequest {
+    pub session_id: String,
+    pub target_id: String,
+    pub profile: Option<String>,
+    pub bundle: Option<String>,
+    pub all_instances: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryAdoptionProgress {
+    Waiting {
+        blockers: Vec<String>,
+        destroy_command: Option<String>,
+    },
+    Installed {
+        session_id: String,
+    },
+}
+
 /// `Ping`, `Status`, and `Stop` form the frozen management subset: their wire
 /// encoding — together with `RequestEnvelope`, `ResponseEnvelope`,
 /// `DaemonStatus`, and `WebViewerStatus` — must never change shape, because
@@ -756,6 +775,7 @@ pub struct WorkspaceDrafts {
 /// `UpgradePending` replies are also frozen from protocol 33 onward: they
 /// drain accepted work before closing admission atomically. Every other
 /// action may change freely behind a `PROTOCOL_VERSION` bump.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
@@ -884,6 +904,10 @@ pub enum DaemonAction {
     /// environment. A client in another placement asks its daemon instead of
     /// writing the client's `config.toml`.
     RunFirstRunSetup,
+    /// Use the client's directory when both processes can see the same paths.
+    RunFirstRunSetupIn {
+        project_directory: PathBuf,
+    },
     /// Run the doctor in the daemon's own environment and return the
     /// actionable errors, which a client shows after first-run setup.
     RunDoctor,
@@ -1007,6 +1031,7 @@ pub enum DaemonAction {
         detail: String,
         updated_at: String,
     },
+    /// Legacy wire tombstone: rejected with guidance to suspend.
     CheckpointSession {
         session_id: String,
     },
@@ -1057,13 +1082,7 @@ pub enum DaemonAction {
     ScanRecovery {
         all_instances: bool,
     },
-    AdoptRecovery {
-        session_id: String,
-        target_id: String,
-        profile: Option<String>,
-        bundle: Option<String>,
-        all_instances: bool,
-    },
+    AdoptRecovery(RecoveryAdoptionRequest),
     DestroyRecovery {
         session_id: String,
         target_id: String,
@@ -1155,6 +1174,8 @@ pub enum DaemonAction {
     /// Every host and fleet with the capacity service's latest CPU, RAM and
     /// filesystem readings. Added in protocol 101.
     HostCapacity,
+    /// Re-read the daemon probe definitions and sample every host.
+    RefreshCapacity,
     /// Ask the daemon's quota poller to probe now. The daemon is the only
     /// process that probes; the result arrives in the runtime feed. Added in
     /// protocol 43.
@@ -1388,6 +1409,14 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    AdoptionInstalled {
+        session_id: String,
+    },
+    AdoptionWaiting {
+        blockers: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destroy_command: Option<String>,
+    },
     IdentityProof {
         mac: Vec<u8>,
     },
@@ -1398,10 +1427,6 @@ pub enum DaemonReply {
         std::collections::BTreeMap<String, std::result::Result<Option<u64>, String>>,
     ),
     SetupDiscovery(Box<crate::discovery::SetupDetection>),
-    Availability(
-        #[serde(deserialize_with = "deserialize_availability")]
-        crate::availability::AvailabilityChecked,
-    ),
     ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
     NewSessionPreflight(PreflightNew),
     PathCompletion(mj_core::path_completion::PathCompletion),
@@ -1476,7 +1501,6 @@ pub enum DaemonReply {
     Ordinal(u64),
     Text(String),
     OptionalSessionState(Option<SessionState>),
-    Checkpoint(mj_core::state::CheckpointMetadata),
     RecoveryScan(mj_core::state::RecoveryScan),
     WikiRows(WikiSearchPage),
     WikiSyncStatus(WikiSyncStatus),
@@ -2274,6 +2298,12 @@ impl DaemonClient {
         }
     }
 
+    /// Whether the connected daemon can resolve paths from this client.
+    pub fn shares_client_filesystem(&self, identity: &DaemonIdentity) -> bool {
+        !self.connector().is_some_and(|connector| connector.is_ssh())
+            && identity.placement.container() == mj_core::placement::daemon_container().as_deref()
+    }
+
     pub async fn first_run_setup_due(&mut self) -> Result<bool> {
         match self.request(DaemonAction::FirstRunSetupDue).await? {
             DaemonReply::FirstRunSetupDue(due) => Ok(due),
@@ -2281,8 +2311,15 @@ impl DaemonClient {
         }
     }
 
-    pub async fn run_first_run_setup(&mut self) -> Result<Option<FirstRunSetupReport>> {
-        match self.request(DaemonAction::RunFirstRunSetup).await? {
+    pub async fn run_first_run_setup(
+        &mut self,
+        project_directory: Option<PathBuf>,
+    ) -> Result<Option<FirstRunSetupReport>> {
+        let action = match project_directory {
+            Some(project_directory) => DaemonAction::RunFirstRunSetupIn { project_directory },
+            None => DaemonAction::RunFirstRunSetup,
+        };
+        match self.request(action).await? {
             DaemonReply::FirstRunSetup(report) => Ok(report),
             reply => bail!("unexpected first-run setup reply {reply:?}"),
         }
@@ -2430,6 +2467,14 @@ impl DaemonClient {
         match self.request(DaemonAction::HostCapacity).await? {
             DaemonReply::HostCapacity(rows) => Ok(rows),
             reply => bail!("unexpected host-capacity reply {reply:?}"),
+        }
+    }
+
+    /// Ask the daemon to refresh host capacity. Readings arrive on the feed.
+    pub async fn refresh_capacity(&mut self) -> Result<()> {
+        match self.request(DaemonAction::RefreshCapacity).await? {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected refresh-capacity reply {reply:?}"),
         }
     }
 
@@ -2756,7 +2801,7 @@ impl DaemonClient {
         resource_allocation: Option<SessionResourceAllocation>,
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
-    ) -> Result<()> {
+    ) -> Result<Option<mj_core::state::ContainerUpgradePreview>> {
         match self
             .request(DaemonAction::SetSessionContainerSettings {
                 session_id,
@@ -2766,7 +2811,8 @@ impl DaemonClient {
             })
             .await?
         {
-            DaemonReply::Done => Ok(()),
+            DaemonReply::Done => Ok(None),
+            DaemonReply::ContainerUpgradePreview(preview) => Ok(Some(preview)),
             reply => bail!("unexpected container-settings reply {reply:?}"),
         }
     }
@@ -2787,19 +2833,6 @@ impl DaemonClient {
         {
             DaemonReply::OptionalSessionState(state) => Ok(state),
             reply => bail!("unexpected target-missing reply {reply:?}"),
-        }
-    }
-
-    pub async fn checkpoint_session(
-        &mut self,
-        session_id: String,
-    ) -> Result<mj_core::state::CheckpointMetadata> {
-        match self
-            .request(DaemonAction::CheckpointSession { session_id })
-            .await?
-        {
-            DaemonReply::Checkpoint(checkpoint) => Ok(checkpoint),
-            reply => bail!("unexpected checkpoint reply {reply:?}"),
         }
     }
 
@@ -2966,24 +2999,58 @@ impl DaemonClient {
 
     pub async fn adopt_recovery(
         &mut self,
-        session_id: String,
-        target_id: String,
-        profile: Option<String>,
-        bundle: Option<String>,
-        all_instances: bool,
+        adoption: RecoveryAdoptionRequest,
+        mut progress: impl FnMut(RecoveryAdoptionProgress),
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::AdoptRecovery {
-                session_id,
-                target_id,
-                profile,
-                bundle,
-                all_instances,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected recovery-adopt reply {reply:?}"),
+        let mut stream = self.take_stream()?;
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        write_frame(
+            &mut stream,
+            &RequestEnvelope {
+                protocol_version: self.metadata.protocol_version,
+                request_id,
+                token: self.metadata.token.clone(),
+                action: DaemonAction::AdoptRecovery(adoption),
+            },
+        )
+        .await
+        .map_err(transport_lost)?;
+        loop {
+            let response = read_response(&mut stream).await.map_err(transport_lost)
+                .context("adoption connection ended before completion; check mj sessions, then rerun recover adopt if needed")?;
+            ensure!(
+                response.protocol_version == self.metadata.protocol_version,
+                "daemon changed protocol"
+            );
+            ensure!(
+                response.request_id == request_id,
+                "daemon crossed request IDs: expected {request_id}, received {}",
+                response.request_id
+            );
+            match response.result {
+                Ok(DaemonReply::AdoptionWaiting {
+                    blockers,
+                    destroy_command,
+                }) => {
+                    progress(RecoveryAdoptionProgress::Waiting {
+                        blockers,
+                        destroy_command,
+                    });
+                    continue;
+                }
+                Ok(DaemonReply::AdoptionInstalled { session_id }) => {
+                    progress(RecoveryAdoptionProgress::Installed { session_id });
+                    continue;
+                }
+                _ => {}
+            }
+            self.stream = Some(stream);
+            return match response.result {
+                Ok(DaemonReply::Done) => Ok(()),
+                Ok(reply) => bail!("unexpected recovery-adoption reply {reply:?}"),
+                Err(error) => bail!("{error}"),
+            };
         }
     }
 
@@ -3812,7 +3879,20 @@ pub const ALERT_EVENTS_PROTOCOL: u32 = 109;
 // Version 107: explicit SessionWiki sync generations and progress watches.
 // Version 109: the daemon answers whether first-run setup is due, so a
 // dashboard shows the first-run welcome only for an installation that needs it.
-pub const PROTOCOL_VERSION: u32 = ALERT_EVENTS_PROTOCOL;
+/// Explicit checkpoint actions were removed; legacy requests get a clear refusal.
+pub const SUSPEND_ONLY_CHECKPOINT_PROTOCOL: u32 = 110;
+/// Adoption streams cancellable quiescence waits before its atomic install.
+pub const QUIESCENT_ADOPTION_PROTOCOL: u32 = SUSPEND_ONLY_CHECKPOINT_PROTOCOL + 1;
+/// Tool permission forms name their transcript call, which older clients reject.
+pub const TOOL_PERMISSION_CALL_PROTOCOL: u32 = QUIESCENT_ADOPTION_PROTOCOL + 1;
+/// The runtime feed carries host capacity, and clients can refresh it.
+pub const RUNTIME_HOST_CAPACITY_PROTOCOL: u32 = TOOL_PERMISSION_CALL_PROTOCOL + 1;
+/// Availability checks are requested independently of their runtime feed results.
+pub const RUNTIME_AVAILABILITY_PROTOCOL: u32 = RUNTIME_HOST_CAPACITY_PROTOCOL + 1;
+pub const PROTOCOL_VERSION: u32 = RUNTIME_AVAILABILITY_PROTOCOL;
+/// Guidance for clients sending the removed checkpoint action.
+pub const REMOVED_CHECKPOINT_MESSAGE: &str =
+    "The checkpoint action was removed; suspend saves the session.";
 /// The first protocol with indexed stored transcript item reads.
 pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -3911,7 +3991,6 @@ impl DaemonAction {
                 | Self::CheckpointArchiveSizes { .. }
                 | Self::TestTarget { .. }
                 | Self::ProfileLoginStatuses
-                | Self::CheckAvailability
                 | Self::DiscoverSetup { .. }
                 | Self::PreflightNewSession { .. }
                 | Self::ValidateProjectDirectory { .. }
@@ -3995,12 +4074,6 @@ async fn reconnect_after_upload_refusal() -> Result<DaemonClient> {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-}
-
-fn deserialize_availability<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<crate::availability::AvailabilityChecked, D::Error> {
-    mj_core::config::with_environment_sources_only(|| serde::Deserialize::deserialize(deserializer))
 }
 
 #[cfg(test)]
@@ -4170,6 +4243,96 @@ mod tests {
         let error = client.request(DaemonAction::Ping).await.unwrap_err();
         assert!(format!("{error:#}").contains("connection lost to an interrupted request"));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn adoption_progress_keeps_response_identity_and_cancel_closes_its_connection() {
+        for cancel in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let metadata = cancellation_metadata(listener.local_addr().unwrap());
+            let (release, released) = tokio::sync::oneshot::channel();
+            let server = mj_core::runtime::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(request.action, DaemonAction::AdoptRecovery(_)));
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        request_id: request.request_id,
+                        protocol_version: request.protocol_version,
+                        result: Ok(DaemonReply::AdoptionWaiting {
+                            blockers: vec!["current turn".into()],
+                            destroy_command: Some("mj recover destroy".into()),
+                        }),
+                    },
+                )
+                .await
+                .unwrap();
+                if cancel {
+                    let mut byte = [0u8; 1];
+                    assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+                } else {
+                    released.await.unwrap();
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            request_id: request.request_id,
+                            protocol_version: request.protocol_version,
+                            result: Ok(DaemonReply::AdoptionInstalled {
+                                session_id: "orphan".into(),
+                            }),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            request_id: request.request_id,
+                            protocol_version: request.protocol_version,
+                            result: Ok(DaemonReply::Done),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            });
+            let mut client = DaemonClient::connect(metadata).await.unwrap();
+            let mut installed_notice = None;
+            let (observed, mut observations) = tokio::sync::mpsc::unbounded_channel();
+            {
+                let work = client.adopt_recovery(
+                    RecoveryAdoptionRequest {
+                        session_id: "orphan".into(),
+                        target_id: "podman".into(),
+                        profile: None,
+                        bundle: None,
+                        all_instances: false,
+                    },
+                    |event| match event {
+                        RecoveryAdoptionProgress::Waiting {
+                            blockers,
+                            destroy_command,
+                        } => observed.send((blockers, destroy_command)).unwrap(),
+                        RecoveryAdoptionProgress::Installed { session_id } => {
+                            installed_notice = Some(session_id);
+                        }
+                    },
+                );
+                tokio::pin!(work);
+                tokio::select! {
+                    result = &mut work => panic!("adoption ended before its boundary: {result:?}"),
+                    message = observations.recv() => assert_eq!(message.unwrap(), (vec!["current turn".to_owned()], Some("mj recover destroy".to_owned()))),
+                }
+                if !cancel {
+                    release.send(()).unwrap();
+                    work.await.unwrap();
+                }
+            }
+            assert_eq!(installed_notice.as_deref(), (!cancel).then_some("orphan"));
+            assert_eq!(client.stream.is_none(), cancel);
+            server.await.unwrap();
+        }
     }
 
     fn cancellation_metadata(address: std::net::SocketAddr) -> DaemonMetadata {

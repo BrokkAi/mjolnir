@@ -46,26 +46,9 @@ pub(crate) async fn resolve_workspace(
 ) -> Result<String> {
     let workspaces = daemon.list_workspaces().await?;
     let legacy_name = GoPreferences::workspace_name(&mode.directory);
-    let dashboard_name = crate::workspace_name_for_directory(&mode.directory);
-    let this_directory = mode.directory.clone();
-    let bound_elsewhere = mj_core::runtime::spawn_blocking(move || {
-        GoPreferences::load(&GoPreferences::path()).map(|preferences| {
-            preferences
-                .workspaces()
-                .filter(|binding| binding.directory != this_directory)
-                .map(|binding| binding.workspace_id.clone())
-                .collect::<std::collections::BTreeSet<_>>()
-        })
-    })
-    .await
-    .context("load project workspace bindings task failed")??;
-    let existing = directory_workspace(
-        &workspaces,
-        mode.workspace_id.as_deref(),
-        &legacy_name,
-        &dashboard_name,
-        &bound_elsewhere,
-    );
+    let existing =
+        existing_directory_workspace(&workspaces, &mode.directory, mode.workspace_id.as_deref())
+            .await?;
     let base = GoPreferences::directory_label(&mode.directory);
     let name = available_workspace_name(
         &base,
@@ -100,6 +83,44 @@ pub(crate) async fn resolve_workspace(
     .await
     .context("save project workspace task failed")??;
     Ok(id)
+}
+
+pub(crate) async fn inferred_workspace(
+    workspaces: &[crate::daemon::WorkspaceListing],
+    directory: &std::path::Path,
+) -> Result<Option<String>> {
+    Ok(existing_directory_workspace(workspaces, directory, None)
+        .await?
+        .map(|entry| entry.workspace.id.clone()))
+}
+
+async fn existing_directory_workspace<'a>(
+    workspaces: &'a [crate::daemon::WorkspaceListing],
+    directory: &std::path::Path,
+    bound_id: Option<&str>,
+) -> Result<Option<&'a crate::daemon::WorkspaceListing>> {
+    let key = directory.to_owned();
+    let preferences =
+        mj_core::runtime::spawn_blocking(|| GoPreferences::load(&GoPreferences::path()))
+            .await
+            .context("load project workspace bindings task failed")??;
+    let bound_id = bound_id.or_else(|| {
+        preferences
+            .workspace(&key)
+            .map(|binding| binding.workspace_id.as_str())
+    });
+    let bound_elsewhere = preferences
+        .workspaces()
+        .filter(|binding| binding.directory != key)
+        .map(|binding| binding.workspace_id.clone())
+        .collect();
+    Ok(directory_workspace(
+        workspaces,
+        bound_id,
+        &GoPreferences::workspace_name(directory),
+        &crate::workspace_name_for_directory(directory),
+        &bound_elsewhere,
+    ))
 }
 
 pub(crate) fn saved_workspace_modes() -> Result<Vec<mj_tui::GoMode>> {

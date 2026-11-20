@@ -109,6 +109,89 @@ impl DurableRelay {
                 Ok(payload) => payload,
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },
+            RelayRequest::ReadQueuedCommand { command_id } => RelayResponsePayload::QueuedCommand {
+                // One admitted command is bounded by RELAY_COMMAND_BYTE_BUDGET,
+                // independently of the total size of the durable queue.
+                command: self
+                    .snapshot
+                    .dispatches
+                    .get(command_id)
+                    .filter(|dispatch| dispatch.command.is_queue_entry())
+                    .map(|dispatch| dispatch.command.clone()),
+                accepted_ordinal: self
+                    .snapshot
+                    .handled_commands
+                    .get(command_id)
+                    .map(|handled| handled.accepted_ordinal),
+            },
+            RelayRequest::ReadCheckpointMailbox {
+                barrier_command_id,
+                cut,
+            } => match self.checkpoint_mailbox(barrier_command_id, cut)? {
+                Ok(mailbox) => RelayResponsePayload::CheckpointMailbox { mailbox },
+                Err(message) => {
+                    return Ok(relay_error(
+                        RelayErrorCode::InvalidState,
+                        message,
+                        false,
+                        None,
+                    ));
+                }
+            },
+            RelayRequest::ReadPendingElicitation { elicitation_id } => {
+                RelayResponsePayload::PendingElicitation {
+                    request: self
+                        .snapshot
+                        .pending_elicitations
+                        .get(elicitation_id)
+                        .cloned()
+                        .flatten(),
+                }
+            }
+            RelayRequest::BeginLiveBaseline
+            | RelayRequest::ReadLiveBaselinePage { .. }
+            | RelayRequest::AbortLiveBaseline => {
+                bail!("live baseline download requires its owning connection")
+            }
+            RelayRequest::CommandRetentionStatus => RelayResponsePayload::CommandRetentionState {
+                legacy_pending: self.snapshot.legacy_command_retention,
+                operation_ids: self.snapshot.command_retention.keys().cloned().collect(),
+            },
+            RelayRequest::UpdateCommandRetention {
+                operation_id,
+                command_ids,
+                reconcile_legacy,
+            } => {
+                if !reconcile_legacy || self.snapshot.legacy_command_retention {
+                    let mut next = self.snapshot.clone();
+                    if let Some(operation_id) = operation_id {
+                        super::commands::validate_identifier(
+                            operation_id,
+                            "retention operation id",
+                        )?;
+                        if command_ids.is_empty() {
+                            next.command_retention.remove(operation_id);
+                        } else {
+                            next.command_retention
+                                .insert(operation_id.clone(), command_ids.clone());
+                        }
+                    } else {
+                        anyhow::ensure!(
+                            *reconcile_legacy && command_ids.is_empty(),
+                            "retention requires an operation identity"
+                        );
+                    }
+                    // This publication precedes any following Submit on the connection.
+                    // A stale upgrade reconciliation becomes a no-op after this point.
+                    // Operation pin updates do not own the upgrade hold: a
+                    // different pending Move may still need reconciliation.
+                    if *reconcile_legacy {
+                        next.legacy_command_retention = false;
+                    }
+                    self.commit_snapshot(next)?;
+                }
+                RelayResponsePayload::CommandRetentionUpdated
+            }
             RelayRequest::Status => {
                 let state = self.operational_state();
                 ensure_serialized_budget(

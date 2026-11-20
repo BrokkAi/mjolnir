@@ -19,6 +19,11 @@ use agent_client_protocol::v1::schema::{
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+/// Earlier transcript evidence was lost when the daemon adopted a live worker.
+/// Until the archive carries native-use proof, this marker prevents an empty
+/// native capture from claiming that missing history proves an unused session.
+pub const ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID: &str = "system:adoption-history-unavailable";
+
 pub const SESSION_RESTART_TEXT: &str = "[session restarted]";
 pub const SESSION_RESTART_ITEM_PREFIX: &str = "system:session-restarted:";
 pub const WORK_INTERRUPTED_ITEM_PREFIX: &str = "system:work-interrupted:";
@@ -729,6 +734,9 @@ pub struct ChatEntry {
     /// completion is not the agent's finished work.
     #[serde(default, skip_serializing_if = "is_false")]
     pub ended_after_interrupt: bool,
+    /// Whether the session has an open permission request for this row.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub awaiting_approval: bool,
     /// The materialized transcript item this entry was derived from, when it
     /// came from the controller's projection. Provenance only, so it is
     /// neither serialized nor part of the entry's value.
@@ -826,6 +834,7 @@ impl ChatEntry {
             leading_omitted: false,
             raw_only: false,
             ended_after_interrupt: false,
+            awaiting_approval: false,
             source: TranscriptSource::default(),
         }
     }
@@ -915,6 +924,7 @@ impl ChatEntry {
             leading_omitted: false,
             raw_only: false,
             ended_after_interrupt: false,
+            awaiting_approval: false,
             source: TranscriptSource::default(),
         }
     }
@@ -948,6 +958,7 @@ impl ChatEntry {
             leading_omitted: false,
             raw_only: false,
             ended_after_interrupt: false,
+            awaiting_approval: false,
             source: TranscriptSource::default(),
         }
     }

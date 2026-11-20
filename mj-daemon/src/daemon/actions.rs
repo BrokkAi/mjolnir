@@ -16,7 +16,6 @@ pub(super) async fn handle_action(
         | DaemonAction::CheckpointArchiveSizes { .. }
         | DaemonAction::TestTarget { .. }
         | DaemonAction::DiscoverSetup { .. }
-        | DaemonAction::CheckAvailability
         | DaemonAction::ProfileLoginStatuses
         | DaemonAction::PreflightNewSession { .. }
         | DaemonAction::ValidateProjectDirectory { .. }
@@ -28,6 +27,10 @@ pub(super) async fn handle_action(
         | DaemonAction::ValidateMountSource { .. }
         | DaemonAction::ValidateSessionMounts { .. }) => {
             super::machine::execute(action, state, Arc::new(AtomicBool::new(false))).await
+        }
+        DaemonAction::CheckAvailability => {
+            state.request_availability_check()?;
+            Ok(DaemonReply::Done)
         }
         DaemonAction::UploadChunk { .. } => bail!("upload fragment outside upload transport"),
         DaemonAction::InstallAttachment { .. } | DaemonAction::TranscribeAudio { .. } => {
@@ -89,21 +92,21 @@ pub(super) async fn handle_action(
             .context("daemon first-run check task panicked")??;
             Ok(DaemonReply::FirstRunSetupDue(due))
         }
-        DaemonAction::RunFirstRunSetup => {
-            let report = blocking(|| {
+        DaemonAction::RunFirstRunSetup | DaemonAction::RunFirstRunSetupIn { .. } => {
+            let project_directory = match action {
+                DaemonAction::RunFirstRunSetupIn { project_directory } => Some(project_directory),
+                _ => None,
+            };
+            let report = blocking(move || {
                 let executor = mj_controller::targets::ProcessExecutor;
-                let report = mj_setup::setup::run_setup(
+                mj_setup::setup::run_setup(
                     &mj_core::config::config_path(),
                     &mj_core::config::data_dir(),
-                    false,
+                    project_directory.as_deref(),
                     &executor,
                     &|| false,
                     || {},
-                )?;
-                Ok(report.map(|report| FirstRunSetupReport {
-                    agents: report.agents,
-                    repository: report.repository,
-                }))
+                )
             })
             .await?;
             if report.is_some() {
@@ -122,7 +125,7 @@ pub(super) async fn handle_action(
                     mj_setup::doctor::current_apple_platform(&executor),
                     mj_setup::doctor::DoctorOptions { smoke: false },
                 );
-                mj_setup::setup::actionable_errors(&checks)
+                mj_setup::setup::welcome_errors(&checks)
             })
             .await
             .context("daemon doctor task panicked")?;
@@ -522,25 +525,17 @@ pub(super) async fn handle_action(
             mounts,
             mount_history,
         } => {
-            ensure!(
-                !mj_controller::controller::move_session::move_owns_session(&session_id),
-                "session is moving; change container settings after Move finishes"
-            );
-            state
-                .validate_container_settings_size(&session_id, resource_allocation.as_ref())
-                .await?;
-            blocking(move || {
-                Controller::load()?.update_session_container_settings(
-                    &session_id,
-                    resource_allocation,
-                    mounts,
-                    mount_history,
-                    &mj_controller::targets::ProcessExecutor,
-                )
-            })
-            .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
+            let settings = mj_core::state::ContainerSettingsChange {
+                resource_allocation,
+                mounts,
+                mount_history: Some(mount_history),
+            };
+            Ok(
+                match state.set_container_settings(session_id, settings).await? {
+                    Some(preview) => DaemonReply::ContainerUpgradePreview(preview),
+                    None => DaemonReply::Done,
+                },
+            )
         }
         DaemonAction::MarkSessionTargetMissing {
             session_id: _,
@@ -552,14 +547,14 @@ pub(super) async fn handle_action(
             // revision; a client-supplied detail may already be stale.
             Ok(DaemonReply::OptionalSessionState(None))
         }
-        DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
-            state.checkpoint_session_now(&session_id).await?,
-        )),
+        DaemonAction::CheckpointSession { .. } => {
+            anyhow::bail!(mj_client::daemon::REMOVED_CHECKPOINT_MESSAGE)
+        }
         DaemonAction::ProjectCatalog { refresh, retry } => Ok(DaemonReply::ProjectCatalog(
             state.project_catalog(refresh, retry).await?,
         )),
         DaemonAction::CreateProject { sources } => {
-            let created = state.create_bundle_from_sources(sources).await?;
+            let created = state.create_bundle_from_sources(sources, false).await?;
             let id = created.bundle_id;
             let bundle = created
                 .config
@@ -637,27 +632,8 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::RecoveryScan(scan))
         }
-        DaemonAction::AdoptRecovery {
-            session_id,
-            target_id,
-            profile,
-            bundle,
-            all_instances,
-        } => {
-            ensure_no_active_lifecycle(state)?;
-            let mut controller = blocking(Controller::load).await?;
-            controller
-                .adopt_orphan_worker(
-                    &session_id,
-                    &target_id,
-                    profile.as_deref(),
-                    bundle.as_deref(),
-                    all_instances,
-                    &ProcessExecutor,
-                )
-                .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
+        DaemonAction::AdoptRecovery(_) => {
+            bail!("adoption requires its dedicated cancellable connection")
         }
         DaemonAction::DestroyRecovery {
             session_id,
@@ -667,8 +643,7 @@ pub(super) async fn handle_action(
         } => {
             ensure_no_active_lifecycle(state)?;
             let admission = state
-                .recovery_observer
-                .gate
+                .session_gate
                 .enter_foreground(
                     &session_id,
                     "destroy recovered environment",
@@ -860,6 +835,15 @@ pub(super) async fn handle_action(
                 .context("the daemon capacity service is not running")?
                 .host_rows(),
         )),
+        DaemonAction::RefreshCapacity => {
+            anyhow::ensure!(
+                state
+                    .capacity_feed()
+                    .is_some_and(|feed| feed.request_refresh()),
+                "the daemon capacity service is not running"
+            );
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::RefreshQuota => {
             state.request_quota_refresh()?;
             Ok(DaemonReply::Done)
@@ -1211,8 +1195,7 @@ pub(super) async fn handle_action(
             let admission = if cleanup_operation_id.is_some() {
                 Some(
                     state
-                        .recovery_observer
-                        .gate
+                        .session_gate
                         .enter_foreground(
                             &session_id,
                             "retained Move source cleanup",
@@ -1365,12 +1348,15 @@ pub(super) fn upgrade_request_activity(
             // Answered from durable state, so it holds no daemon work and a
             // handoff does not wait for it; the client asks again.
             | DaemonAction::WaitCreateSession { .. }
+            | DaemonAction::AdoptRecovery(_)
             | DaemonAction::WikiSyncWatch { .. }
             | DaemonAction::MoveSession(_)
+            | DaemonAction::SetSessionContainerSettings { .. }
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade
             | DaemonAction::UpgradeBlockers
             | DaemonAction::Stop
+            | DaemonAction::CheckAvailability
             | DaemonAction::RuntimeChanges { .. }
             | DaemonAction::SessionTail { .. }
             | DaemonAction::SubagentOptions { .. }

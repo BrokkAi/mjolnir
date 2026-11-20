@@ -193,6 +193,7 @@ pub(crate) fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                     content: vec![json!({"type": "text", "text": "next"})],
                     queued_at_ms: 2,
                 }],
+                mailbox: None,
             },
             output_path: output.clone(),
         },
@@ -313,4 +314,230 @@ fn checkout_recovery_publishes_only_the_staged_checkout_and_preserves_a_new_curr
         fs::read(parent_relay.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
         b"current relay"
     );
+}
+
+fn parent_mail(key: &str, wake: bool) -> mj_core::mailbox::MailboxEvent {
+    mj_core::mailbox::MailboxEvent {
+        key: key.into(),
+        source: "parent".into(),
+        wake,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: format!("message {key}"),
+        },
+    }
+}
+
+/// Mail the worker accepted before a checkpoint cut, but had not handed to the
+/// agent, is archived from the relay at that cut and arrives exactly once from
+/// whichever relay restores it, in its order. Queue policies that defer mail
+/// leave it for the controller's admission, while a queued prompt's claimed
+/// mail is bound to its command ID before that prompt can start.
+#[test]
+fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
+    use crate::relay::DurableRelay;
+    use crate::relay::test_support::{ready_checkpoint, relay_request, submit_relay};
+    use mj_core::relay::{
+        RelayCommand, RelayCommandOutcome, RelayErrorCode, RelayObservation, RelayRequest,
+        RelayResponseBody, RelayResponsePayload,
+    };
+    let deliver = |event| RelayCommand::DeliverMailboxEvent { event };
+    let configured = |root: &Path| {
+        let mut relay = DurableRelay::open(root, SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        relay
+    };
+    let temp = tempfile::tempdir().unwrap();
+
+    // The source delivered one waking message and holds two that wait for the
+    // agent's next prompt.
+    let mut source = configured(&temp.path().join("source-relay"));
+    submit_relay(
+        &mut source,
+        "deliver-delivered",
+        deliver(parent_mail("delivered", true)),
+    );
+    let wake = source.claim_pending_commands(true).unwrap();
+    assert!(matches!(wake[0].command, RelayCommand::MailboxWake { .. }));
+    source
+        .record_command_completed(
+            &wake[0].command_id,
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                usage: None,
+                work_facts: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    submit_relay(
+        &mut source,
+        "deliver-first",
+        deliver(parent_mail("first", false)),
+    );
+    submit_relay(
+        &mut source,
+        "deliver-second",
+        deliver(parent_mail("second", false)),
+    );
+    let cut = ready_checkpoint(&mut source, "suspend-barrier");
+    let read_at_cut = |relay: &mut DurableRelay| {
+        relay
+            .handle(relay_request(
+                "read-mail",
+                RelayRequest::ReadCheckpointMailbox {
+                    barrier_command_id: "suspend-barrier".into(),
+                    cut: cut.clone(),
+                },
+            ))
+            .body
+    };
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::CheckpointMailbox { mailbox },
+    } = read_at_cut(&mut source)
+    else {
+        panic!("the relay refused to report its mail at the ready cut");
+    };
+    let pending = vec![parent_mail("first", false), parent_mail("second", false)];
+    assert_eq!(mailbox.pending_events, pending);
+    assert!(mailbox.delivered_event_keys.contains_key("delivered"));
+    // Mail accepted after the cut moves the relay past it, as it would refuse
+    // a Close there; the cut's mail can no longer be read.
+    submit_relay(
+        &mut source,
+        "deliver-late",
+        deliver(parent_mail("late", false)),
+    );
+    let RelayResponseBody::Error { error } = read_at_cut(&mut source) else {
+        panic!("the relay reported mail for a cut it has moved past");
+    };
+    assert_eq!(error.code, RelayErrorCode::InvalidState);
+
+    // The fixture's queued prompt carries claimed mail, as a recovery prompt
+    // does after a worker restart.
+    let (mut spec, _) = fixture(temp.path());
+    let claimed = "claimed mail for the queued prompt";
+    spec.canonical_session.mailbox = Some(CanonicalMailbox {
+        prompt_contexts: [("queued-1".to_owned(), claimed.to_owned())].into(),
+        ..mailbox
+    });
+    export_checkpoint(&spec).unwrap();
+    assert_eq!(
+        read_archive_verified(&spec.output_path)
+            .unwrap()
+            .manifest
+            .schema_version,
+        ARCHIVE_SCHEMA_VERSION_MAILBOX
+    );
+    let restore = |name: &str, queue_policy| {
+        let workspace = temp.path().join(format!("{name}-workspace"));
+        fs::create_dir_all(&workspace).unwrap();
+        git(
+            &workspace,
+            &[
+                "clone",
+                "--quiet",
+                spec.workspace_root.join("app").to_str().unwrap(),
+                "app",
+            ],
+        );
+        let relay_root = temp.path().join(format!("{name}-relay"));
+        restore_checkpoint(
+            &CheckpointRestoreSpec {
+                report_root: None,
+                archive_path: spec.output_path.clone(),
+                workspace_root: workspace,
+                relay_root: relay_root.clone(),
+                harness_home: temp.path().join(format!("{name}-home")),
+                restore_repositories: false,
+                restore_native: true,
+                queue_policy,
+                primary_repository_root: None,
+            },
+            &SystemGit,
+        )
+        .unwrap();
+        configured(&relay_root)
+    };
+    let pending_keys =
+        |relay: &DurableRelay| relay.operational_state().undelivered_mailbox_event_keys;
+    let next_prompt = || RelayCommand::Prompt {
+        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
+            "next",
+        )],
+    };
+
+    // The restored worker owns the mail at once. The queued prompt starts with
+    // its claimed mail and leaves the waiting messages for the next one. A
+    // producer's retry of a message under any command ID is acknowledged
+    // without a second copy, whether it is pending or was delivered.
+    let mut restored = restore("restored", QueueRestorePolicy::Restore);
+    assert_eq!(pending_keys(&restored), ["first", "second"]);
+    let started = restored.claim_pending_commands(true).unwrap();
+    assert_eq!(started[0].command_id, "queued-1");
+    assert!(
+        started[0]
+            .hidden_prompt_context
+            .as_deref()
+            .unwrap()
+            .contains(claimed)
+    );
+    submit_relay(
+        &mut restored,
+        "retry-first",
+        deliver(parent_mail("first", false)),
+    );
+    submit_relay(
+        &mut restored,
+        "retry-delivered",
+        deliver(parent_mail("delivered", true)),
+    );
+    assert_eq!(pending_keys(&restored), ["first", "second"]);
+
+    // Deferred: nothing pending until the controller admits it. The prompt it
+    // admits under its original ID finds its claimed mail before it starts.
+    let mut deferred = restore("deferred", QueueRestorePolicy::Defer);
+    assert!(pending_keys(&deferred).is_empty());
+    assert!(deferred.claim_pending_commands(true).unwrap().is_empty());
+    submit_relay(&mut deferred, "queued-1", next_prompt());
+    let started = deferred.claim_pending_commands(true).unwrap();
+    assert!(
+        started[0]
+            .hidden_prompt_context
+            .as_deref()
+            .unwrap()
+            .contains(claimed)
+    );
+    for event in &pending {
+        submit_relay(
+            &mut deferred,
+            &format!("admit-{}", event.key),
+            deliver(event.clone()),
+        );
+        submit_relay(
+            &mut deferred,
+            &format!("again-{}", event.key),
+            deliver(event.clone()),
+        );
+    }
+    assert_eq!(pending_keys(&deferred), ["first", "second"]);
+
+    // A discarded queue takes its claimed mail with it; pending mail still
+    // waits for the controller, and delivered keys still deduplicate.
+    let mut discarded = restore("discarded", QueueRestorePolicy::DiscardDeferringMail);
+    assert!(pending_keys(&discarded).is_empty());
+    submit_relay(
+        &mut discarded,
+        "retry-delivered",
+        deliver(parent_mail("delivered", true)),
+    );
+    assert!(pending_keys(&discarded).is_empty());
+    submit_relay(&mut discarded, "queued-1", next_prompt());
+    let started = discarded.claim_pending_commands(true).unwrap();
+    assert_eq!(started[0].command_id, "queued-1");
+    assert!(started[0].hidden_prompt_context.is_none());
 }

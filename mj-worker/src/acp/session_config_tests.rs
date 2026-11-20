@@ -219,15 +219,16 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
         project_memory: None,
         extra_mcp_servers: Vec::new(),
         resume_session: Some("native".into()),
-        native_session_may_have_history: false,
+        native_session_history: NativeSessionHistory::LoadBeforeReplace,
         accepted_config: Arc::new(Mutex::new(saved)),
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        claude_permission_mode: Default::default(),
+        approval_choices: Default::default(),
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        terminal_owner: None,
         turn_context: Default::default(),
         verdict: Some(crate::acp::VerdictSource::Disabled),
         stall_policy: None,
@@ -1050,6 +1051,7 @@ for line in sys.stdin:
         AcceptedSessionConfig::default(),
     );
     spec.harness = HarnessKind::Codex;
+    spec.native_session_history = NativeSessionHistory::MayHaveHistory;
     spec.bridge_spec_path = Some(spec_path.clone());
     spec.args = vec![
         script.to_string_lossy().into_owned(),
@@ -1477,7 +1479,7 @@ async fn resume_haiku_then_switch(refuse_auto: bool, switch_model: bool) -> Haik
     );
     spec.harness = HarnessKind::Claude;
     spec.resume_session = Some("missing-session".into());
-    spec.native_session_may_have_history = false;
+    spec.native_session_history = NativeSessionHistory::LoadBeforeReplace;
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
     prompt(&commands, "queued-before-startup").await;
@@ -1666,5 +1668,66 @@ async fn resume_and_context_restore_preserve_only_active_plan_under_guardian() {
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+}
+
+// Hard-won: ba25f84: adoption hid a model-recovery form still owned by the command loop.
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_owned_model_recovery_survives_adoption_until_answer_or_bridge_exit() {
+    for answer in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let mut relay =
+            DurableRelay::open(root.path().join("relay"), "model-recovery-cut", "test").unwrap();
+        let mut spec = launch(
+            root.path(),
+            dropped_model_harness(root.path()),
+            AcceptedSessionConfig {
+                model: Some("withdrawn-model".into()),
+                effort: None,
+            },
+        );
+        spec.operator_away = relay.operator_away.clone();
+        spec.operator_away.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        let saved = spec.accepted_config.clone();
+        let (commands, requests) = mpsc::channel(8);
+        let (events_tx, mut events) = mpsc::channel(64);
+        let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
+        let request = recovery_question(&mut events).await;
+        relay
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: request.clone(),
+            })
+            .unwrap();
+        let cut = relay.live_session_baseline().unwrap();
+        assert_eq!(cut.questions, vec![request.clone()]);
+        let adopted =
+            mj_transcript::projection::materialized_session_from_live_baseline(&cut).unwrap();
+        assert_eq!(adopted.pending_elicitations, vec![request.clone()]);
+        if answer {
+            answer_recovery(
+                &commands,
+                &request.id,
+                ElicitationResponse::Accept {
+                    content: BTreeMap::from([(
+                        "model".into(),
+                        ElicitationValue::String("chosen".into()),
+                    )]),
+                },
+            )
+            .await;
+            assert_eq!(saved.lock().unwrap().model.as_deref(), Some("chosen"));
+            // The owner retires it before its resolved event needs replaying.
+            assert!(relay.live_session_baseline().unwrap().questions.is_empty());
+        }
+        drop(commands);
+        let drain = mj_core::runtime::spawn(async move { while events.recv().await.is_some() {} });
+        let (runtime_result, drain_result) = tokio::join!(runtime, drain);
+        runtime_result.unwrap().unwrap();
+        drain_result.unwrap();
+        assert!(relay.live_session_baseline().unwrap().questions.is_empty());
     }
 }

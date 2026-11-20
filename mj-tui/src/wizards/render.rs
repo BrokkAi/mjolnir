@@ -106,13 +106,13 @@ fn target_step_choices<W: WizardDraft>(
         .collect();
     // What is not there has no row, so it is named here with the reason,
     // rather than missing from the list without a word.
-    help.extend(dashboard.missing_target_lines().into_iter().map(|line| {
+    help.extend(dashboard.missing_target_lines().iter().map(|line| {
         let style = if line.routine {
             theme::muted()
         } else {
             warning
         };
-        Line::styled(line.text, style)
+        Line::styled(line.text.clone(), style)
     }));
     (target_table(rows), help, selected_row)
 }
@@ -311,6 +311,7 @@ pub(crate) fn render_new_wizard(
                 review_notice: (raw_project && wizard.selected_review_turns_off(&dashboard.config))
                     .then_some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF),
                 conversion: None,
+                sandbox_offer: dashboard.sandbox_offer(wizard),
             },
             &mut form,
             surfaces,
@@ -336,15 +337,6 @@ pub(crate) fn render_new_wizard(
         );
         let field_row = intro.len() as u16 + 1;
         let mut details = vec![Line::raw("")];
-        if wizard.profile_step_skipped
-            && dashboard
-                .offered_profiles()
-                .nth(wizard.profile)
-                .is_some_and(|(_, profile)| needs_guardian_warning(profile.kind))
-        {
-            details.extend(wrap_lines([guardian_footnote()], width));
-            details.push(Line::raw(""));
-        }
 
         if let Some(error) = &wizard.project_directory_error {
             details.extend(wrap_lines(
@@ -586,13 +578,6 @@ pub(crate) fn render_new_wizard(
             );
         }
     }
-    if wizard.step == WizardStep::Profile
-        && dashboard
-            .offered_profiles()
-            .any(|(_, profile)| needs_guardian_warning(profile.kind))
-    {
-        help.push(guardian_footnote());
-    }
     if wizard.step == WizardStep::Profile {
         help.extend(missing_profile_help(dashboard));
     }
@@ -764,6 +749,7 @@ pub(crate) struct ReviewWizardView<'a> {
     /// Present only when a move converts a local checkout into an isolated
     /// workspace, so the review can say what travels before the confirmation.
     conversion: Option<&'a mj_core::state::RawConversionPreview>,
+    sandbox_offer: Option<super::dashboard::SandboxOffer>,
 }
 
 pub(crate) fn render_review_wizard(
@@ -805,6 +791,7 @@ pub(crate) fn render_review_wizard(
         local_changes_excluded,
         review_notice,
         conversion,
+        sandbox_offer,
     } = view;
     let target = &dashboard.config.targets[target_id];
     let can_attach = offers_attached_directories(target);
@@ -982,24 +969,24 @@ pub(crate) fn render_review_wizard(
         lines.push(Line::raw(""));
         lines.push(Line::raw(label.clone()));
     }
-    // Guardian targets rely on the harness's own approval mode rather than
-    // Hel-managed isolation.
-    if target.permission_mode() == Some(mj_core::config::PermissionMode::Guardian)
-        && let Some(kind) = dashboard
-            .config
-            .profiles
-            .get(profile_id)
-            .map(|profile| profile.kind)
-        && let Some(warning) = kind.unsandboxed_guardian_warning()
-    {
+    let sandbox_row = sandbox_offer.as_ref().and_then(|offer| {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            format!("{} {warning}", theme::glyphs().warning),
-            Style::default()
-                .fg(theme::palette().error)
-                .add_modifier(Modifier::BOLD),
+            format!("{} {}", theme::glyphs().warning, offer.warning),
+            Style::default().fg(theme::palette().warning),
         ));
-    }
+        if offer.alternative.is_some() {
+            let row = lines.len() as u16;
+            lines.push(Line::raw(""));
+            Some(row)
+        } else {
+            lines.push(Line::styled(
+                "No compatible sandbox is available. Check Runtimes in Settings.",
+                theme::muted(),
+            ));
+            None
+        }
+    });
     lines.push(Line::raw(""));
     if can_attach {
         lines.push(Line::from(vec![
@@ -1025,7 +1012,7 @@ pub(crate) fn render_review_wizard(
             lines.push(Line::raw(""));
             row
         });
-    let last_control_row = [worktree_row, subagent_row, oracle_row]
+    let last_control_row = [worktree_row, sandbox_row, subagent_row, oracle_row]
         .into_iter()
         .flatten()
         .map(|row| usize::from(row) + 1)
@@ -1047,6 +1034,7 @@ pub(crate) fn render_review_wizard(
     let lines = wrapped;
     let map_row = |row: u16| offsets[usize::from(row)];
     let worktree_row = worktree_row.map(map_row);
+    let sandbox_row = sandbox_row.map(map_row);
     let subagent_row = subagent_row.map(map_row);
     let oracle_row = oracle_row.map(map_row);
     let summary_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
@@ -1072,6 +1060,7 @@ pub(crate) fn render_review_wizard(
     let body = DialogShell::layout(inner, 1).body;
     let focused_row = match form.focused() {
         Some(WizardControl::CreateManagedWorktree) => worktree_row,
+        Some(WizardControl::UseSandboxedTarget) => sandbox_row,
         Some(WizardControl::Subagents) => subagent_row,
         Some(WizardControl::Oracle) => oracle_row,
         Some(WizardControl::ReviewAttachments) => Some(
@@ -1102,11 +1091,23 @@ pub(crate) fn render_review_wizard(
             WizardControl::CreateManagedWorktree,
         );
     }
+    if let Some((row, index)) = sandbox_row.zip(sandbox_offer.and_then(|offer| offer.alternative)) {
+        let id = nth_key(&dashboard.config.targets, index);
+        let label = format!("Use {id} instead (sandboxed)");
+        let area = viewport.row(row, 1);
+        let width = u16::try_from(label.chars().count().saturating_add(4)).unwrap_or(u16::MAX);
+        Dialog::render_actions(
+            frame,
+            Rect::new(area.x, area.y, width.min(area.width), area.height),
+            &[(WizardControl::UseSandboxedTarget, label.as_str(), true)],
+            form,
+        );
+    }
     let mut expanded_subagent_combo = None;
     if let Some((wizard, row)) = subagents.zip(subagent_row) {
         let mut selectors = vec![(
             WizardControl::Subagents,
-            "Delegation",
+            "Sub-agents",
             row,
             wizard.policies(),
             wizard.policy_index(),
@@ -1838,6 +1839,7 @@ pub(crate) fn render_resume_wizard(
                     .preparation
                     .as_ref()
                     .and_then(|preparation| preparation.conversion.as_deref()),
+                sandbox_offer: dashboard.sandbox_offer(wizard),
             },
             &mut form,
             surfaces,
@@ -1892,12 +1894,6 @@ pub(crate) fn render_resume_wizard(
                 help.push(picker_help(
                     "Same agent: the conversation continues natively.",
                 ));
-            }
-            if profiles
-                .iter()
-                .any(|(_, harness)| needs_guardian_warning(*harness))
-            {
-                help.push(guardian_footnote());
             }
             help.extend(missing_profile_help(dashboard));
             let step = format!(

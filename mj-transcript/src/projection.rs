@@ -1,11 +1,14 @@
 //! Controller-owned projection of the durable ACP relay stream.
 
+mod live;
 mod materialize;
+pub use live::*;
 mod observation;
 mod session_update;
 mod terminals;
 pub use materialize::*;
 pub use observation::*;
+pub use session_update::configuration_values;
 use session_update::*;
 use terminals::*;
 
@@ -75,11 +78,11 @@ pub fn historical_references(events: &[RelayEvent]) -> Result<HistoricalReferenc
             RelayObservation::SessionUpdate { update } => {
                 let value = match update.as_ref() {
                     SessionUpdate::ToolCall(call) => {
-                        ids.insert(format!("tool:{}", call.tool_call_id));
+                        ids.insert(crate::tool_item_id(&call.tool_call_id));
                         Some(serde_json::to_value(call)?)
                     }
                     SessionUpdate::ToolCallUpdate(update) => {
-                        ids.insert(format!("tool:{}", update.tool_call_id));
+                        ids.insert(crate::tool_item_id(&update.tool_call_id));
                         Some(serde_json::to_value(&update.fields)?)
                     }
                     SessionUpdate::AgentMessageChunk(chunk) => {

@@ -163,14 +163,8 @@ pub struct LaunchSpec {
     /// one it held when the worker started.
     pub bridge_spec_path: Option<PathBuf>,
     pub resume_session: Option<String>,
-    /// Whether Mjolnir's durable state shows the native session named by
-    /// `resume_session` may already hold conversation history. Codex writes a
-    /// thread's rollout, and Claude Code a session's transcript, only at the
-    /// first user message, so a native session that was created and never
-    /// prompted is missing on disk; when this is false, a resume that fails
-    /// because the harness has no such session is answered with a fresh
-    /// session in the same Mjolnir session instead of a dead worker.
-    pub native_session_may_have_history: bool,
+    /// History evidence for the native thread named by `resume_session`.
+    pub native_session_history: NativeSessionHistory,
     /// Accepted selectors for this logical session, shared across native
     /// bridge replacements. Workers seed this from their durable relay.
     pub accepted_config: Arc<Mutex<AcceptedSessionConfig>>,
@@ -182,9 +176,10 @@ pub struct LaunchSpec {
     /// idle session reloads once they change. Set when the bridge starts.
     pub imported_logins: Option<super::ImportedLogins>,
     pub execution_policy: ExecutionPolicy,
-    /// The Claude profile's permission mode under configured approvals, from
-    /// the launch config. Read only through `session_enforcement`.
-    pub claude_permission_mode: mj_core::config::ClaudePermissionMode,
+    /// The profile's approval choices from the launch config: the Claude
+    /// permission mode, read only through `session_enforcement`, and whether
+    /// the Mjolnir guardian reviews, read only through `Guardian::for_launch`.
+    pub approval_choices: mj_core::config::ApprovalChoices,
     pub acp_activity: AcpActivityClock,
     /// When the step the agent is on began. Marked from the same handlers as
     /// `acp_activity`, but only where a new step actually starts.
@@ -193,6 +188,9 @@ pub struct LaunchSpec {
     /// records them. The turn stall watchdog reads this: a turn blocked in a
     /// long tool call is working, however silent the protocol is (#1020).
     pub tools_in_flight: mj_core::activity::ToolsInFlight,
+    /// Primary workers admit terminals and native resumes through the cut owner.
+    /// Scratch ACP connections have no relay and leave this unset.
+    pub terminal_owner: Option<std::sync::Weak<crate::relay::RelayCell>>,
     /// How long a running turn may go without a sign of life. `None` reads the
     /// process environment, which is what every launch does; a test sets it
     /// directly so it does not have to reach for a global.
