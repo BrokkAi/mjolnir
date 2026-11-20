@@ -1257,13 +1257,35 @@ test('a held Move hides worker-issued turn controls', async ({ page }) => {
   await expect(page.locator('#cancel-turn')).toBeVisible();
   await expect(page.locator('#turn-actions')).toBeVisible();
 
-  parent.verdict = { live_dashboard: true, move_queue_held: true };
+  parent.verdict = { live_dashboard: true, move_queue_held: true, interrupt_count: 1, interrupt_member: false };
   parent.capabilities.interrupt_turn = false;
+  parent.capabilities.interrupt_all = true;
   await refresh(page, state);
   await expect(page.locator('#cancel-turn')).toBeHidden();
   await expect(page.locator('#turn-actions')).toBeHidden();
   await page.locator('#prompt-text').press('Escape');
   expect(state.actions).toHaveLength(0);
+
+  parent.steering = {
+    command_id: 'steering-one', active_prompt_id: 'turn-one', queued_prompt_id: 'next',
+    status: 'failed', message: 'The adapter refused to steer.',
+  };
+  await refresh(page, state);
+  const status = page.locator('#turn-control-status');
+  await expect(status).toContainText(parent.steering.message);
+  await expect(status.getByRole('button', { name: 'Interrupt', exact: true })).toHaveCount(0);
+
+  await page.locator('#back').click();
+  const row = card(page, parent.id);
+  await row.getByRole('button', { name: /^Actions for/ }).click();
+  let confirmation;
+  page.once('dialog', async dialog => {
+    confirmation = dialog.message();
+    await dialog.accept();
+  });
+  await row.getByRole('menuitem', { name: 'Interrupt all' }).click();
+  await expect.poll(() => state.actions.some(action => action.action === 'interrupt-all')).toBe(true);
+  expect(confirmation).toContain('Interrupt 1 sub-agent.');
 });
 
 test('a moved parent keeps 23 native histories without claiming any are working', async ({ page }) => {

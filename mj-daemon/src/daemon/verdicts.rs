@@ -186,6 +186,7 @@ fn own_verdict(
     let active_work = state.has_live_worker()
         && !form
         && (running
+            || live.is_some_and(mj_core::relay::RelayOperationalState::has_work_in_flight)
             || activity
                 .as_ref()
                 .is_some_and(|state| state.has_work_in_flight()));
@@ -828,11 +829,30 @@ mod tests {
                 .as_mut()
                 .unwrap();
             live.harness_turn = None;
+            live.active_agent_terminals.clear();
             live.activity = Some(activity);
             project(&mut capture, &before);
             assert!(!capture.verdicts["child"].unfinished);
             // Only the native child still counts toward lifecycle warnings.
             assert_eq!(capture.verdicts["parent"].unfinished_children, 1);
+
+            let before = capture.clone();
+            capture
+                .sessions
+                .get_mut("child")
+                .unwrap()
+                .operational
+                .as_mut()
+                .unwrap()
+                .active_agent_terminals
+                .push(mj_core::relay::ActiveAgentTerminal {
+                    terminal_id: "terminal".into(),
+                    command: "sleep 10".into(),
+                    started_at_ms: 1,
+                });
+            project(&mut capture, &before);
+            assert!(capture.verdicts["child"].active_work);
+            assert_eq!(capture.verdicts["parent"].unfinished_children, 2);
         }
     }
 }

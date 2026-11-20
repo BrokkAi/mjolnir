@@ -9787,8 +9787,7 @@ function renderTurnControl(session) {
     panel.setAttribute('role', 'status'); document.querySelector('.conversation-header').after(panel);
   }
   panel.replaceChildren();
-  if (held) return;
-  if (control.message && !control.pending && !control.uncertain) panel.append(el('p', 'turn-control-explanation', control.message));
+  if (!held && control.message && !control.pending && !control.uncertain) panel.append(el('p', 'turn-control-explanation', control.message));
   const signature = `${session.steering?.command_id}:${session.steering?.status}:${session.active_prompt_id || ''}`;
   const localError = failedTurnControls.get(session.id);
   if (!(control.uncertain || control.failed || localError) || dismissedTurnControls.get(session.id) === signature) return;
@@ -9797,6 +9796,7 @@ function renderTurnControl(session) {
   const keep = button('Keep queued');
   keep.onclick = () => { dismissedTurnControls.set(session.id, signature); panel.replaceChildren(); };
   panel.append(keep);
+  if (held) return;
   if (control.interrupt && session.active_prompt_id && (localError ? localError.activePromptId === session.active_prompt_id : session.steering?.active_prompt_id === session.active_prompt_id)) {
     const cancel = button('Interrupt');
     cancel.title = 'Interrupt this turn; queued input stays ordered.';
@@ -10294,7 +10294,14 @@ async function runSessionAction(dataset, errorNode, extra) {
     }
   }
   if (dataset.action === 'interrupt-all') {
-    if (!confirm('Interrupt all turns?\n\nInterrupt the running turns of this session and its sub-agents.')) return false;
+    const verdict = sessionById(dataset.id)?.verdict;
+    const parent = verdict?.interrupt_member === true;
+    const children = (verdict?.interrupt_count ?? 0) - Number(parent);
+    const targets = [
+      ...(parent ? ['this session'] : []),
+      ...(children > 0 ? [children === 1 ? '1 sub-agent' : `${children} sub-agents`] : []),
+    ];
+    if (!targets.length || !confirm(`Interrupt all turns?\n\nInterrupt ${targets.join(' and ')}.`)) return false;
   }
   if (dataset.action === 'suspend') {
     const session = sessionById(dataset.id);

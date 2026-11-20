@@ -570,11 +570,17 @@ fn interrupt_available(dashboard: &DashboardState) -> Availability {
         return Availability::Hidden;
     };
     let verdict = dashboard.verdict(session);
-    if verdict.interrupt || verdict.interrupt_shell {
-        Availability::Ready
-    } else {
-        Availability::Blocked("no turn is running")
+    if verdict.interrupt {
+        return Availability::Ready;
     }
+    if verdict.interrupt_shell {
+        return if dashboard.pane_for_session(session).is_some() {
+            Availability::Ready
+        } else {
+            Availability::Blocked("open the conversation to interrupt its shell")
+        };
+    }
+    Availability::Blocked("no turn is running")
 }
 
 /// Interrupt all stays listed with its reason when nothing in the session's
@@ -2680,13 +2686,25 @@ mod tests {
     #[test]
     fn interrupt_turn_can_dispatch_for_a_standalone_user_shell() {
         let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_current_session(None);
         dashboard.focus_sessions();
+        dashboard.command_session_override = Some("session-1".into());
         let mut verdict = dashboard.verdict("session-1");
         assert!(!verdict.interrupt);
         verdict.interrupt_shell = true;
         dashboard
             .session_verdicts
             .insert("session-1".into(), verdict);
+        assert_eq!(
+            interrupt_available(&dashboard),
+            Availability::Blocked("open the conversation to interrupt its shell")
+        );
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::InterruptTurn),
+            DashboardAction::None
+        );
+        dashboard.command_session_override = None;
+        dashboard.set_pane_session(dashboard.browse_pane(), Some("session-1"));
         assert_eq!(
             dashboard.dispatch_command(CommandId::InterruptTurn),
             DashboardAction::InterruptTurn {

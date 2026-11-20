@@ -146,14 +146,18 @@ pub(super) fn admit_phone_action(
         // The upgrade owner must be able to join a retry as soon as it has acknowledged it.
         return Ok(None);
     }
-    let closing = matches!(
+    let concurrent = matches!(
         action,
-        ControllerAction::Suspend { .. } | ControllerAction::Destroy { .. }
+        ControllerAction::Suspend { .. }
+            | ControllerAction::Destroy { .. }
+            // The daemon selects the tree's eligible workers. The root's slot
+            // cannot block cancellation on independent children.
+            | ControllerAction::InterruptAll { .. }
     );
     let session_id = controller_action_session_id(action);
     if let Some(session_id) = &session_id
         && !active_sessions.insert(session_id.clone())
-        && !closing
+        && !concurrent
     {
         return Err(ActionOutcome::SessionBusy);
     }

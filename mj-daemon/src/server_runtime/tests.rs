@@ -2292,6 +2292,15 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
         admit_phone_action(&prompt_action(), &mut active),
         Err(ActionOutcome::SessionBusy)
     );
+    // Interrupt All may select independent workers even when the root holds
+    // a slot, as it does while a browser-initiated Move drains its queue.
+    let interrupt = ControllerAction::InterruptAll {
+        session_id: "session-1".into(),
+    };
+    assert_eq!(
+        admit_phone_action(&interrupt, &mut active),
+        Ok(Some("session-1".into()))
+    );
     let close = ControllerAction::Suspend {
         session_id: "session-1".into(),
         acknowledge_unpublished_work: false,
