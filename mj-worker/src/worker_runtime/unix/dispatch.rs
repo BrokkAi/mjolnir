@@ -1614,10 +1614,8 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
 
 /// Which native thread this worker should try to resume. Always the identity
 /// the journal recorded last, if there is one: the launch configuration can
-/// still name a thread this session already replaced. Resuming is always
-/// attempted; whether a failure may be answered with a fresh thread is decided
-/// in `mj-worker/src/acp.rs` from the resume error and
-/// `DurableRelay::native_session_may_have_history`.
+/// still name a thread this session already replaced. ACP decides how to open
+/// that identity using `DurableRelay::native_session_history` as evidence.
 pub(crate) fn select_resume_session(
     config: &WorkerLaunchConfig,
     relay: &DurableRelay,
@@ -1632,9 +1630,9 @@ pub(crate) fn select_resume_session(
 /// somewhere other than this journal, which therefore cannot show what the
 /// thread contains. Record that durably before the thread is used again, so a
 /// later resume failure can never be answered by replacing it. The one
-/// exception is a relay restored from a checkpoint whose conversation shows
-/// the session never received a prompt (I2-7): the harness wrote nothing for
-/// it, so there is nothing a replacement could lose.
+/// exception is a relay restored from a checkpoint with no visible prompt
+/// on the thread (I2-7). That hint allows the typed missing-session fallback
+/// after a reload attempt.
 pub(crate) fn record_imported_native_identity(
     config: &WorkerLaunchConfig,
     relay: &mut DurableRelay,

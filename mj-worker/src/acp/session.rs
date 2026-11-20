@@ -334,7 +334,35 @@ pub(super) async fn serve_session(
     let mut replaced_unused_native_session_id = None;
     // The MCP servers the request that opened the session carried.
     let mut offered_mcp_servers = 0;
-    let loaded_session = if let Some(existing) = &spec.resume_session {
+    let codex_has_goal = spec.harness == HarnessKind::Codex
+        && spec
+            .goal_recovery
+            .lock()
+            .expect("goal lock poisoned")
+            .state
+            .snapshot
+            .is_some();
+    let loaded_session = if let Some(existing) = &spec.resume_session
+        && spec.harness == HarnessKind::Codex
+        && spec.native_session_history == NativeSessionHistory::CreatedHereUnused
+        && !codex_has_goal
+    {
+        // This bridge starts a new app-server. Codex keeps an unused thread
+        // in the old process until its first turn writes a rollout. The
+        // relay proves no turn reached this thread, so there is no history
+        // to recover and no need to ask Codex to load it.
+        emit_runtime_event(
+            events,
+            RuntimeEvent::Warning {
+                message: format!(
+                    "Codex session {existing} was never used; continuing in a new empty session"
+                ),
+            },
+        )
+        .await?;
+        replaced_unused_native_session_id = Some(existing.clone());
+        None
+    } else if let Some(existing) = &spec.resume_session {
         let session_id = SessionId::from(existing.clone());
         // Native children require replay to recover identity and transcripts.
         // Other adapters can resume without replaying the parent's history.
@@ -391,14 +419,8 @@ pub(super) async fn serve_session(
                 .with_context(|| format!("load ACP session {existing}"))
                 .map(|loaded| (loaded.meta, loaded.config_options, loaded.modes))
         };
-        // A failed reload normally means state a checkpoint restored would be
-        // discarded by starting fresh, so it fails the worker. The one
-        // exception is a native session that both sides agree is empty: Codex
-        // writes a thread's rollout, and Claude Code a session's transcript,
-        // at the first user message, so a session created and never prompted
-        // does not exist to resume, and failing over it forever would strand
-        // the session. Replace such a native session only when Mjolnir's own
-        // durable state also shows it was never used.
+        // For threads that must be loaded first, a typed missing-session
+        // error can confirm that the harness has no record of an unused thread.
         let reloaded = match reloaded {
             // The replay boundary, including its `ReplayCommit`, was already
             // decided where the load response arrived.
@@ -408,12 +430,12 @@ pub(super) async fn serve_session(
                     return Err(error);
                 }
                 let harness = spec.harness.display_name();
-                if spec.native_session_may_have_history {
-                    // The native session was used, so a new one would silently
-                    // drop the conversation. Say what is missing instead.
+                if spec.native_session_history == NativeSessionHistory::MayHaveHistory
+                    || codex_has_goal
+                {
                     return Err(error.context(format!(
-                        "{harness} has no native history for session {existing}, which this \
-                         session has already used, so the conversation cannot be resumed"
+                        "{harness} has no native history for session {existing}; the existing \
+                         conversation or goal cannot be resumed"
                     )));
                 }
                 emit_runtime_event(

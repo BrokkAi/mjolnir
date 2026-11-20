@@ -34,6 +34,7 @@ use session::*;
 use session_config::*;
 pub use verdict_client::VerdictSource;
 
+use crate::relay::NativeSessionHistory;
 use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;
 mod claude_usage;
@@ -440,6 +441,11 @@ async fn run_inner(
             .is_some();
         if did_open {
             spec.context_restore = None;
+            // The proof at worker startup was for the thread named by the
+            // relay then. Do not reuse it for a subsequent bridge restart.
+            if spec.native_session_history == NativeSessionHistory::CreatedHereUnused {
+                spec.native_session_history = NativeSessionHistory::LoadBeforeReplace;
+            }
         }
         if did_open && spec.clear_context_request.is_some() {
             spec.clear_context_request = None;
@@ -453,9 +459,9 @@ async fn run_inner(
                 emit_runtime_event(&events, RuntimeEvent::CommandRejected {
                     request_id, message: format!("Could not clear context; restoring the previous conversation: {error:#}"),
                  reason: mj_core::event_outcome::OutcomeReason::CommandFailed }).await?;
-                let (previous, used, goal) = rollback.take().expect("clear rollback identity");
+                let (previous, history, goal) = rollback.take().expect("clear rollback identity");
                 spec.resume_session = Some(previous);
-                spec.native_session_may_have_history = used;
+                spec.native_session_history = history;
                 spec.goal_recovery = goal;
                 replacing_previous_bridge = true;
                 continue;
@@ -465,16 +471,19 @@ async fn run_inner(
                 Some(restart) => restart,
             },
         };
+        if restart.native_session_used {
+            spec.native_session_history = NativeSessionHistory::MayHaveHistory;
+        }
         if let Some((request_id, previous)) = restart.clear_context {
             rollback = Some((
                 previous,
-                spec.native_session_may_have_history || restart.native_session_used,
+                spec.native_session_history,
                 spec.goal_recovery.clone(),
             ));
             spec.goal_recovery = Arc::new(Mutex::new(Default::default()));
             spec.clear_context_request = Some(request_id);
             spec.resume_session = None;
-            spec.native_session_may_have_history = false;
+            spec.native_session_history = NativeSessionHistory::LoadBeforeReplace;
             replacing_previous_bridge = true;
             continue;
         }
@@ -502,7 +511,6 @@ async fn run_inner(
             .state
             .restart();
         spec.resume_session = restart.resume_session;
-        spec.native_session_may_have_history |= restart.native_session_used;
         replacing_previous_bridge = true;
     }
 }

@@ -7035,7 +7035,7 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
 }
 
 #[test]
-fn an_unused_codex_thread_is_still_resumed_before_any_decision() {
+fn a_queued_prompt_keeps_the_unused_codex_thread_eligible_for_replacement() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     relay
@@ -7053,15 +7053,15 @@ fn an_unused_codex_thread_is_still_resumed_before_any_decision() {
     );
     let mut config = launch_config("/profile");
     config.native_session_id = Some("unused".into());
-    // Resuming is always attempted; only the harness's answer decides what
-    // happens next.
+    // ACP still needs the original identity so it can name the thread it replaces.
     assert_eq!(
         unix::select_resume_session(&config, &relay).as_deref(),
         Some("unused")
     );
-    // A queued prompt that never reached the agent is not history, so the
-    // thread may be replaced if Codex says it does not exist.
-    assert!(!relay.native_session_may_have_history());
+    assert_eq!(
+        relay.native_session_history(),
+        crate::relay::NativeSessionHistory::CreatedHereUnused
+    );
     assert_eq!(
         relay.operational_state().active_prompt.unwrap().command_id,
         "first-prompt"

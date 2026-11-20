@@ -29,7 +29,7 @@ use super::{
 
 use crate::acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
 use crate::relay::{
-    ClaimedRelayCommand, DeferredRelayAttach, DurableRelay, RELAY_STATE_FILE,
+    ClaimedRelayCommand, DeferredRelayAttach, DurableRelay, NativeSessionHistory, RELAY_STATE_FILE,
     RESTORED_RELAY_SEED_FILE, RelayCell, RelayCommand, RelayCommandOutcome, RelayErrorCode,
     RelayObservation, RelayProtocolError, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
     RelayResponseEnvelope, RelayResponsePayload, invalid_relay_request_response,
@@ -104,7 +104,7 @@ struct HarnessPreparationSetup {
     credentials: std::result::Result<CredentialEndpoint, String>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
     resume_session: Option<String>,
-    native_session_may_have_history: bool,
+    native_session_history: NativeSessionHistory,
     /// What a sub-agent's worker observes at the end of each turn.
     capture: Option<crate::work_facts::WorkObserver>,
 }
@@ -146,7 +146,7 @@ struct AcpPreparationSetup {
     supervisor_spec: AcpSupervisorSpec,
     relay: Arc<RelayCell>,
     resume_session: Option<String>,
-    native_session_may_have_history: bool,
+    native_session_history: NativeSessionHistory,
     profile_registration: bool,
     /// Read from the launch before preparation strips the marker from the
     /// harness environment, so the ACP runtime knows the session is a child.
@@ -238,7 +238,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         supervisor_spec,
         relay,
         resume_session,
-        native_session_may_have_history,
+        native_session_history,
         profile_registration,
         managed_subagent,
         subagent_role,
@@ -384,7 +384,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         }),
         project_memory: config.project_memory,
         resume_session,
-        native_session_may_have_history,
+        native_session_history,
         accepted_config,
         initial_model: config.initial_model,
         harness: config.harness,
@@ -1020,7 +1020,7 @@ pub async fn run_daemon_owned(
     });
     record_imported_native_identity(&config, &mut durable_relay)?;
     let resume_session = select_resume_session(&config, &durable_relay);
-    let native_session_may_have_history = durable_relay.native_session_may_have_history();
+    let native_session_history = durable_relay.native_session_history();
     let mut project_memory = ProjectMemoryEndpoint::new(config.project_memory.clone());
     project_memory.cwd = config.cwd.clone();
     // Startup succeeded far enough to own this root, so claim it. A failed
@@ -1202,7 +1202,7 @@ pub async fn run_daemon_owned(
         credentials,
         kimi_task_home,
         resume_session,
-        native_session_may_have_history,
+        native_session_history,
         capture,
     };
     let prep_status = preparation_tx.clone();
@@ -1742,7 +1742,7 @@ async fn prepare_and_start_harness(
         credentials,
         kimi_task_home,
         resume_session,
-        native_session_may_have_history,
+        native_session_history,
         capture,
     } = setup;
     let project_tools_roots = super::project_tools::take_roots(&mut config.environment)?;
@@ -2148,7 +2148,7 @@ async fn prepare_and_start_harness(
         supervisor_spec: prepared_harness.spec,
         relay: relay.clone(),
         resume_session,
-        native_session_may_have_history,
+        native_session_history,
         profile_registration,
         managed_subagent,
         subagent_role,
