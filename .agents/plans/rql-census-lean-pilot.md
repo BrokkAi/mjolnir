@@ -71,6 +71,8 @@ Selection: sort eligible keys, seeded shuffle within each repo, take 17 from mjo
 
 **Judgments** (Slice 6): `/mnt/optane/review-arms-pilot/judge/<opaque id>.json` holds `{"catch": bool, "recovered_facts": [fact ids], "matched_defects": [...]}` for reviewer outputs and `{"contains_decisive": bool, "contained_facts": [...], "states_defect": bool}` for briefs, with the private ID map kept apart as in `brief_score.py`. Every judged output also gets a blind Fable/high hand check, as in the full design, and the readout uses the hand-checked labels.
 
+**Isolation and audit** (all slices): the existing Podman target doesn't enforce provider-only egress, and it mounts the host's git cache at `/run/hel/git-cache`, which holds full histories. So sealing rests on the sealed launch flags, prompt prohibitions and a mandatory transcript audit, as in the earlier review-arms stages (`audit.py`). Every writer, reviewer, engine, judge and hand-check session is audited before its output counts. A session that read `/run/hel/git-cache`, ran a history or diff command beyond its own checkout's single commit or pin, or used the network other than through its harness's provider is void, and its job reruns. The engine is the most sensitive, since reading the real history would show it the fix. The readout reports the void count per session kind, and states that isolation was enforced by audit, not by the target.
+
 ## Plan of Work
 
 The slices and their ownership. Each slice owns its files, and no two slices edit the same file.

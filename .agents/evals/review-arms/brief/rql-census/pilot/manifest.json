@@ -1,0 +1,4423 @@
+{
+  "diffs": [
+    {
+      "base": "e2d09485b3d4657fa5870ee020bb2cc7fe04fab2",
+      "id": "csharp-single-file-namespace-prunes-usages",
+      "intro": "88fa9bb729af44cc316e5b18c68ca7443cfb25c5",
+      "key": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "label_line": 155,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "8f11273e451dd41ba0b3fff1e73fbf41e57d3158",
+      "id": "dependency-failure-drops-independent-model-evidence",
+      "intro": "dc0ba96f220bf0066892f98a6757a4c96d38335f",
+      "key": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "label_line": 145,
+      "replicates": {
+        "G": 2,
+        "R": 2,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "58f59aa767dc1ed86efc9a4ff2e5647644f50de2",
+      "id": "go-nilness-ignores-modeled-nonreturn",
+      "intro": "09b006454e308fe885b4b6b10b35aaa7e86dcb7f",
+      "key": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "label_line": 152,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "5d35b1cee7daf81b46ed9cda1d14aca4275a7716",
+      "id": "incompatible-semantic-bundle-late-gate",
+      "intro": "3e51cfde577a31b83a72b8686694f3a2c0ea70ed",
+      "key": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "label_line": 133,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "c6e05f1044055726082a50f194221451db3fef8f",
+      "id": "java-static-getter-drops-incomplete-route",
+      "intro": "02a3329d1d54ec101e636f31a3427178edd97f58",
+      "key": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "label_line": 153,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "d64255dfec7971fa22bc48a85960fedfa149ef56",
+      "id": "js-synthetic-owner-leaks-file-summary",
+      "intro": "b73a383797683a2128fe176f85d9457a5f073ad0",
+      "key": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "label_line": 159,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "5a8370cfadcec547065ee1704af3142989baf840",
+      "id": "jvm-protected-unindexed-hierarchy-denied",
+      "intro": "41f159d3e2b88a6b8444444e59ad590ca6cadba5",
+      "key": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "label_line": 141,
+      "replicates": {
+        "G": 2,
+        "R": 2,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "3f2ebbee4f13dcd764c7b767c4370c5f5dfe1f97",
+      "id": "kotlin-value-class-this-loses-underlying-projection",
+      "intro": "ba47ae3f428ea3e1d51d999176397a21ea71bff5",
+      "key": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "label_line": 151,
+      "replicates": {
+        "G": 2,
+        "R": 2,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "28fde2ac5cea47e9bb8457670c6bf571ed925831",
+      "id": "matching-analyzer-epoch-needs-writer-slot",
+      "intro": "e21778d1d9516d5180308a4fd5dd503bbe5296c8",
+      "key": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "label_line": 143,
+      "replicates": {
+        "G": 2,
+        "R": 2,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "91d814e88dba028fc8f32e30986ca444093755a5",
+      "id": "mcp-default-advisory-reported-clean",
+      "intro": "a830471d19390c947b93e047483ab4e41f49ebe5",
+      "key": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "label_line": 137,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "fcee1114ea49e78a3289b2015fd2ec7c0e1996ce",
+      "id": "model-overload-unknown-competitor-discarded",
+      "intro": "2dc7a9b231a028ebd9412c5241b90beea841c589",
+      "key": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "label_line": 136,
+      "replicates": {
+        "G": 2,
+        "R": 2,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "96f5f3a9b099cfe72e83994dbc99dcad3db6b516",
+      "id": "python-filescope-enclosing-tie",
+      "intro": "8ea28a492d39d520bc5e8c41d676460147910400",
+      "key": "bifrost-dev/python-filescope-enclosing-tie",
+      "label_line": 131,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "530ffcf825709529232c4e602cd7cdf1f43dfe7a",
+      "id": "python-module-mutation-repeated-scan-budget",
+      "intro": "6ac4593deee3adba092ab6e72cada15f431e731e",
+      "key": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "label_line": 144,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "b203b4e4b11864fb2b9570a5c76e5b7b133f9ed7",
+      "id": "ruby-constant-navigation-climbs-to-terminal",
+      "intro": "cc45d8f092e525615117108fbecf9453aed29bc4",
+      "key": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "label_line": 157,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "f17ed0beb870ebae6c8c9b7fc5d7fc23dca1038a",
+      "id": "rust-enum-variant-named-fields-omitted",
+      "intro": "33fba95a5b77052176035d9c7c282258a3fd0c05",
+      "key": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "label_line": 147,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "b86e575a81a55cecbe08f225fd1275e5f7c05540",
+      "id": "rust-importer-planning-widens-to-code-mentions",
+      "intro": "8f0d2a75baddda42ce1cb9a7252b71ff3ae8a7b6",
+      "key": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "label_line": 149,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "77128367087b647353e3c68bb64edd49efa04d61",
+      "id": "rust-option-return-implicitly-unwrapped",
+      "intro": "309939da522fa0c3cf51ec922c15c1f5f81ff31a",
+      "key": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "label_line": 160,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "ead7aa834e2ab6718e6e7dea058cda2986db2ecf",
+      "id": "rust-while-let-binder-body-field",
+      "intro": "eea67f99599410a874c7c37dea4fb40b0f9c187c",
+      "key": "bifrost-dev/rust-while-let-binder-body-field",
+      "label_line": 140,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "d168808255cd5b27586a76332aeaced62dfd0bc9",
+      "id": "activity-recorder-kills-api",
+      "intro": "efbd4bc08e28931aedd2a7f708d00ce8c1d9c4ac",
+      "key": "mjolnir/activity-recorder-kills-api",
+      "label_line": 215,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "c6db3389e149b0df7b78d457d3bb9768b4ce5f3b",
+      "id": "archive-resume-hint-without-prompt",
+      "intro": "6f26caa20f1e2277a240719da2276318649f3464",
+      "key": "mjolnir/archive-resume-hint-without-prompt",
+      "label_line": 202,
+      "replicates": {
+        "G": 2,
+        "R": 2,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "c67da5c93a719fb2dd62b51c6175cf71d9292ec6",
+      "id": "catalog-cache-key-collision",
+      "intro": "fab5471bc81b5cc405ad911d9e8e2b4a13924fe7",
+      "key": "mjolnir/catalog-cache-key-collision",
+      "label_line": 223,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "15c466d5f4e3d13adfc96c283ee797539c5e6fba",
+      "id": "child-model-wrong-efforts",
+      "intro": "435b4ed941720b8dfa04fdb454ffa3ae3645f625",
+      "key": "mjolnir/child-model-wrong-efforts",
+      "label_line": 218,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "16e952f7c22ec339f78b282631f2b4dc3f2bea39",
+      "id": "codex-effort-alias-lost",
+      "intro": "a78a57a9054529423ed459e7ddd28b3d487e1e0a",
+      "key": "mjolnir/codex-effort-alias-lost",
+      "label_line": 208,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "749dab36aaf26a7eee6c5e8bc1d647fe756a42cb",
+      "id": "container-env-lost-during-worker-bootstrap",
+      "intro": "66bf1421ed813dcd64be9fce94a0fcc44d257c74",
+      "key": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "label_line": 199,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "16a98b712b0d7b7e22b51299afb9368b93bf8f14",
+      "id": "dropdown-click-hits-covered-field",
+      "intro": "8a203905e89e13cb91d60de8a7200a259d2d413c",
+      "key": "mjolnir/dropdown-click-hits-covered-field",
+      "label_line": 209,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "b4c94833467fa5541021450b1978c967b3d2da69",
+      "id": "held-prompt-ignores-interrupt",
+      "intro": "a583fa1036f534039bae407b3b22750b259111e8",
+      "key": "mjolnir/held-prompt-ignores-interrupt",
+      "label_line": 200,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "32a2ba2bf2e3932a0556e93b0ed9ca9584f12985",
+      "id": "metadata-checkpoint-overwrites-checkout",
+      "intro": "86494146fd9e2c0fc03b1a2422bc2f952a2e4a3a",
+      "key": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "label_line": 216,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "e658ba0a893be7bcdeec5d8f751185367b4fab9c",
+      "id": "palette-scattered-match-beats-literal",
+      "intro": "33b58e3c7deeec595d7d61c42af7589bf0069d7c",
+      "key": "mjolnir/palette-scattered-match-beats-literal",
+      "label_line": 213,
+      "replicates": {
+        "G": 2,
+        "R": 2,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "d6be08b5ed1cdcf081dddda81c9f876807720f92",
+      "id": "pending-assessment-hidden-when-idle",
+      "intro": "b72adcc6f7c8697e329bdf880780bbd3cc70a1b7",
+      "key": "mjolnir/pending-assessment-hidden-when-idle",
+      "label_line": 204,
+      "replicates": {
+        "G": 2,
+        "R": 2,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "946136494c584a1eecc9cb25ced3d7e20e19970d",
+      "id": "reserved-workspace-internal-error",
+      "intro": "3bea50170905667a07c42fc420386d1d6a0c08d7",
+      "key": "mjolnir/reserved-workspace-internal-error",
+      "label_line": 214,
+      "replicates": {
+        "G": 2,
+        "R": 2,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "46a989498779787df98f2f362d4b0439bd295e64",
+      "id": "shortcut-escape-opens-unvisited-manager",
+      "intro": "981532a239c40960a673b7f10a369082d666c57b",
+      "key": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "label_line": 217,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "8df3b13ffa92dfa90d09c534ce491abfd7bad338",
+      "id": "stale-model-launch-spec",
+      "intro": "c0ca1fe93c6c0a1ce9f75d42153fb08bed11660d",
+      "key": "mjolnir/stale-model-launch-spec",
+      "label_line": 201,
+      "replicates": {
+        "G": 2,
+        "R": 2,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "8552aea82feabe1357101ee1af7a62f9ae69a87b",
+      "id": "stop-awk-multiline-variable",
+      "intro": "2f859c8fb591e3fcd01e83674ba391a4fed5a6ce",
+      "key": "mjolnir/stop-awk-multiline-variable",
+      "label_line": 205,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "d7882be1efaf9e4064536c797426435116f54d32",
+      "id": "symbol-change-keeps-cached-transcript",
+      "intro": "a02c94fed9337f212ebc400da9ceb50556e70c3d",
+      "key": "mjolnir/symbol-change-keeps-cached-transcript",
+      "label_line": 211,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    },
+    {
+      "base": "4ef1f218b798f48250d24d8258bd625e69ab1b35",
+      "id": "terminal-id-reused",
+      "intro": "bdb55db1b7bc30bdf113c2f6e85287ca6db41baa",
+      "key": "mjolnir/terminal-id-reused",
+      "label_line": 197,
+      "replicates": {
+        "G": 1,
+        "R": 1,
+        "R-loc": 1
+      },
+      "repo": "mjolnir"
+    }
+  ],
+  "duplicates": [],
+  "eligible_pool": [
+    {
+      "base": "cf916ccd7dc0afc240f9bf3ad382039dbef6e2c5",
+      "id": "cpp-template-inherited-base-signature",
+      "intro": "9c367d3f2eb0eabcbc97c36596d09052e1c3395d",
+      "label_line": 132,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "e2d09485b3d4657fa5870ee020bb2cc7fe04fab2",
+      "id": "csharp-single-file-namespace-prunes-usages",
+      "intro": "88fa9bb729af44cc316e5b18c68ca7443cfb25c5",
+      "label_line": 155,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "8f11273e451dd41ba0b3fff1e73fbf41e57d3158",
+      "id": "dependency-failure-drops-independent-model-evidence",
+      "intro": "dc0ba96f220bf0066892f98a6757a4c96d38335f",
+      "label_line": 145,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "58f59aa767dc1ed86efc9a4ff2e5647644f50de2",
+      "id": "go-nilness-ignores-modeled-nonreturn",
+      "intro": "09b006454e308fe885b4b6b10b35aaa7e86dcb7f",
+      "label_line": 152,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "82151e1e5636bfc3215ccce8ed64b079b68f1dc4",
+      "id": "go-receiver-poisons-package-result-contract-discovery",
+      "intro": "69e3afb5d2c4a2799c14e9d5e092b8619c9f8e1f",
+      "label_line": 138,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "5d35b1cee7daf81b46ed9cda1d14aca4275a7716",
+      "id": "incompatible-semantic-bundle-late-gate",
+      "intro": "3e51cfde577a31b83a72b8686694f3a2c0ea70ed",
+      "label_line": 133,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "c6e05f1044055726082a50f194221451db3fef8f",
+      "id": "java-static-getter-drops-incomplete-route",
+      "intro": "02a3329d1d54ec101e636f31a3427178edd97f58",
+      "label_line": 153,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "d64255dfec7971fa22bc48a85960fedfa149ef56",
+      "id": "js-synthetic-owner-leaks-file-summary",
+      "intro": "b73a383797683a2128fe176f85d9457a5f073ad0",
+      "label_line": 159,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "5a8370cfadcec547065ee1704af3142989baf840",
+      "id": "jvm-protected-unindexed-hierarchy-denied",
+      "intro": "41f159d3e2b88a6b8444444e59ad590ca6cadba5",
+      "label_line": 141,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "afba7e70c9da9f081212d1846854589227f04a40",
+      "id": "kotlin-source-constructor-steals-class-header-comment",
+      "intro": "48c156c965b70729c1aa2bac2f148d530166fda0",
+      "label_line": 135,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "3f2ebbee4f13dcd764c7b767c4370c5f5dfe1f97",
+      "id": "kotlin-value-class-this-loses-underlying-projection",
+      "intro": "ba47ae3f428ea3e1d51d999176397a21ea71bff5",
+      "label_line": 151,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "28fde2ac5cea47e9bb8457670c6bf571ed925831",
+      "id": "matching-analyzer-epoch-needs-writer-slot",
+      "intro": "e21778d1d9516d5180308a4fd5dd503bbe5296c8",
+      "label_line": 143,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "91d814e88dba028fc8f32e30986ca444093755a5",
+      "id": "mcp-default-advisory-reported-clean",
+      "intro": "a830471d19390c947b93e047483ab4e41f49ebe5",
+      "label_line": 137,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "3db1a9254c99537ef2d42942dd9b5c1b88c9c3fb",
+      "id": "mcp-timed-out-progress-survives-response",
+      "intro": "25bbd98914912722170d90ca34c72d3b4a8eed85",
+      "label_line": 154,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "fcee1114ea49e78a3289b2015fd2ec7c0e1996ce",
+      "id": "model-overload-unknown-competitor-discarded",
+      "intro": "2dc7a9b231a028ebd9412c5241b90beea841c589",
+      "label_line": 136,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "b8750280dd21c94110c4e0dfdf39700cfbf66305",
+      "id": "php-indexed-write-reenters-current-rhs",
+      "intro": "e55ed6f4a8aa392bd5186df034d9e4eede8eb250",
+      "label_line": 148,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "96f5f3a9b099cfe72e83994dbc99dcad3db6b516",
+      "id": "python-filescope-enclosing-tie",
+      "intro": "8ea28a492d39d520bc5e8c41d676460147910400",
+      "label_line": 131,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "be40e535ab21de550581f7b39fc5f700c7e63820",
+      "id": "python-module-binding-representative-after-event",
+      "intro": "776315a465bc83ad98650b4f283762ab981659ca",
+      "label_line": 139,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "530ffcf825709529232c4e602cd7cdf1f43dfe7a",
+      "id": "python-module-mutation-repeated-scan-budget",
+      "intro": "6ac4593deee3adba092ab6e72cada15f431e731e",
+      "label_line": 144,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "b0b914fcc274025118adee8cc655b6b707676a29",
+      "id": "retained-fill-java-memo-loses-gap",
+      "intro": "38ac5b5b2b51de7742b7995669f6e335fd78afe2",
+      "label_line": 134,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "b203b4e4b11864fb2b9570a5c76e5b7b133f9ed7",
+      "id": "ruby-constant-navigation-climbs-to-terminal",
+      "intro": "cc45d8f092e525615117108fbecf9453aed29bc4",
+      "label_line": 157,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "5332c0c72a8c84e77db1ad9b3bd73419485ff5f5",
+      "id": "rust-bare-value-admits-associated-constant",
+      "intro": "db238908013acbe1691445f9470ce5f2f78fde4a",
+      "label_line": 156,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "f17ed0beb870ebae6c8c9b7fc5d7fc23dca1038a",
+      "id": "rust-enum-variant-named-fields-omitted",
+      "intro": "33fba95a5b77052176035d9c7c282258a3fd0c05",
+      "label_line": 147,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "b86e575a81a55cecbe08f225fd1275e5f7c05540",
+      "id": "rust-importer-planning-widens-to-code-mentions",
+      "intro": "8f0d2a75baddda42ce1cb9a7252b71ff3ae8a7b6",
+      "label_line": 149,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "5bbe305e567f7c0856bb0a358644f8887a956afd",
+      "id": "rust-item-macro-evades-plain-struct-drop-proof",
+      "intro": "d5c9845b7488e63b08987de579d381e76f751b5e",
+      "label_line": 150,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "77128367087b647353e3c68bb64edd49efa04d61",
+      "id": "rust-option-return-implicitly-unwrapped",
+      "intro": "309939da522fa0c3cf51ec922c15c1f5f81ff31a",
+      "label_line": 160,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "ead7aa834e2ab6718e6e7dea058cda2986db2ecf",
+      "id": "rust-while-let-binder-body-field",
+      "intro": "eea67f99599410a874c7c37dea4fb40b0f9c187c",
+      "label_line": 140,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "c07ddd4c89ec3333fbeec270d510b35320cdcc37",
+      "id": "unproven-override-family-certifies-empty",
+      "intro": "f5cf77da184060e453f69b0c4f04e27d1ba2ae8b",
+      "label_line": 158,
+      "repo": "bifrost-dev"
+    },
+    {
+      "base": "d168808255cd5b27586a76332aeaced62dfd0bc9",
+      "id": "activity-recorder-kills-api",
+      "intro": "efbd4bc08e28931aedd2a7f708d00ce8c1d9c4ac",
+      "label_line": 215,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "c6db3389e149b0df7b78d457d3bb9768b4ce5f3b",
+      "id": "archive-resume-hint-without-prompt",
+      "intro": "6f26caa20f1e2277a240719da2276318649f3464",
+      "label_line": 202,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "c67da5c93a719fb2dd62b51c6175cf71d9292ec6",
+      "id": "catalog-cache-key-collision",
+      "intro": "fab5471bc81b5cc405ad911d9e8e2b4a13924fe7",
+      "label_line": 223,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "15c466d5f4e3d13adfc96c283ee797539c5e6fba",
+      "id": "child-model-wrong-efforts",
+      "intro": "435b4ed941720b8dfa04fdb454ffa3ae3645f625",
+      "label_line": 218,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "16e952f7c22ec339f78b282631f2b4dc3f2bea39",
+      "id": "codex-effort-alias-lost",
+      "intro": "a78a57a9054529423ed459e7ddd28b3d487e1e0a",
+      "label_line": 208,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "749dab36aaf26a7eee6c5e8bc1d647fe756a42cb",
+      "id": "container-env-lost-during-worker-bootstrap",
+      "intro": "66bf1421ed813dcd64be9fce94a0fcc44d257c74",
+      "label_line": 199,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "16a98b712b0d7b7e22b51299afb9368b93bf8f14",
+      "id": "dropdown-click-hits-covered-field",
+      "intro": "8a203905e89e13cb91d60de8a7200a259d2d413c",
+      "label_line": 209,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "38da2a57665ae3232e131c4f9b1e49059204052f",
+      "id": "export-relative-read-root",
+      "intro": "e9929f997ccdafcc07a99b1a82d3af1247c5efc0",
+      "label_line": 225,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "406376a5ee9098dc5530241b3d31e7616be6e363",
+      "id": "github-token-in-container-argv",
+      "intro": "3348d75b51c3328bee6bdf12515223f38e22ce1e",
+      "label_line": 212,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "fbcfa472156046d21d80aaee042aad51d9dd453d",
+      "id": "handback-reminder-stops-work",
+      "intro": "a6674529c3117ef9b8ace7c02cd95487a1b6e372",
+      "label_line": 207,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "b4c94833467fa5541021450b1978c967b3d2da69",
+      "id": "held-prompt-ignores-interrupt",
+      "intro": "a583fa1036f534039bae407b3b22750b259111e8",
+      "label_line": 200,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "d367d8c78587e99990892c887e9c8c4a54512753",
+      "id": "journal-valid-json-corruption",
+      "intro": "e0f4c8db0868f6e3545455d7b36fc1acd0083db8",
+      "label_line": 224,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "32a2ba2bf2e3932a0556e93b0ed9ca9584f12985",
+      "id": "metadata-checkpoint-overwrites-checkout",
+      "intro": "86494146fd9e2c0fc03b1a2422bc2f952a2e4a3a",
+      "label_line": 216,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "e658ba0a893be7bcdeec5d8f751185367b4fab9c",
+      "id": "palette-scattered-match-beats-literal",
+      "intro": "33b58e3c7deeec595d7d61c42af7589bf0069d7c",
+      "label_line": 213,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "d6be08b5ed1cdcf081dddda81c9f876807720f92",
+      "id": "pending-assessment-hidden-when-idle",
+      "intro": "b72adcc6f7c8697e329bdf880780bbd3cc70a1b7",
+      "label_line": 204,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "e063b7f41d7749f696326060cb72c8194a1a8b94",
+      "id": "pinned-worker-disappears",
+      "intro": "29310d2d795305389d96a50b60e1c2705d03c4cf",
+      "label_line": 203,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "b5b20b5f5d985e78d2aa17858ecba4b1a6457d7a",
+      "id": "projection-mixed-sqlite-snapshots",
+      "intro": "4bec091887a2a7e43a98e0652aa69a83fb50a5fe",
+      "label_line": 226,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "946136494c584a1eecc9cb25ced3d7e20e19970d",
+      "id": "reserved-workspace-internal-error",
+      "intro": "3bea50170905667a07c42fc420386d1d6a0c08d7",
+      "label_line": 214,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "46a989498779787df98f2f362d4b0439bd295e64",
+      "id": "shortcut-escape-opens-unvisited-manager",
+      "intro": "981532a239c40960a673b7f10a369082d666c57b",
+      "label_line": 217,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "1fa0b26839ee60058ba1e6f605727b56adc05d97",
+      "id": "ssh-user-hostkey-policy-overridden",
+      "intro": "ee78904517fada56c3c080a50055adbded64619c",
+      "label_line": 219,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "8df3b13ffa92dfa90d09c534ce491abfd7bad338",
+      "id": "stale-model-launch-spec",
+      "intro": "c0ca1fe93c6c0a1ce9f75d42153fb08bed11660d",
+      "label_line": 201,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "8552aea82feabe1357101ee1af7a62f9ae69a87b",
+      "id": "stop-awk-multiline-variable",
+      "intro": "2f859c8fb591e3fcd01e83674ba391a4fed5a6ce",
+      "label_line": 205,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "d7882be1efaf9e4064536c797426435116f54d32",
+      "id": "symbol-change-keeps-cached-transcript",
+      "intro": "a02c94fed9337f212ebc400da9ceb50556e70c3d",
+      "label_line": 211,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "4ef1f218b798f48250d24d8258bd625e69ab1b35",
+      "id": "terminal-id-reused",
+      "intro": "bdb55db1b7bc30bdf113c2f6e85287ca6db41baa",
+      "label_line": 197,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "bf620d3884b2de1c6f5f089694a9caea714f8803",
+      "id": "unused-thread-above-archive-floor",
+      "intro": "0cfac73ccb7d40bab2d4bce620cc24a8047a5688",
+      "label_line": 220,
+      "repo": "mjolnir"
+    },
+    {
+      "base": "cfe8dccdb8819101a6a304952b5cc63adeb3f3c0",
+      "id": "web-feed-self-deadlock",
+      "intro": "7b6948038500a5883dc6edb0e96b11176fb49d31",
+      "label_line": 206,
+      "repo": "mjolnir"
+    }
+  ],
+  "eligible_pool_sha256": "d0fd469a4d0d5a22e7ac8833c0607ed4901e7432e81c0586187a2a457dbafc0d",
+  "inputs": {
+    "catalogue_sha256": "0ceb62a3c5b5e465fe7df216d191b2133b081ac2cc01ff54544df238d84a8551",
+    "labels_sha256": "3ef33b1029f3ed9b500da49960993b5d2fdf215f88f7d3c7973c4b1472181ff7",
+    "labels_snapshot_sha256": "c1c143eeb5b8e107f9785300b839bbf3f8f9d7ca99c9a563eb6fb2e6c868ea02",
+    "menu_sha256": "2059cb17f85cc02e6362bc205ca850f21c26064abde21bdb0449cf24cef828d3",
+    "steps_sha256": "033deac2faeebdc5dc28e8eb69aa4a6d56bc14d2ca26acaa5f70c80ce9b68105"
+  },
+  "jobs": [
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "job": "bifrost-dev/csharp-single-file-namespace-prunes-usages/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "job": "bifrost-dev/csharp-single-file-namespace-prunes-usages/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "job": "bifrost-dev/csharp-single-file-namespace-prunes-usages/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "job": "bifrost-dev/csharp-single-file-namespace-prunes-usages/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "job": "bifrost-dev/csharp-single-file-namespace-prunes-usages/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "job": "bifrost-dev/csharp-single-file-namespace-prunes-usages/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "job": "bifrost-dev/csharp-single-file-namespace-prunes-usages/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "job": "bifrost-dev/csharp-single-file-namespace-prunes-usages/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "job": "bifrost-dev/csharp-single-file-namespace-prunes-usages/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "job": "bifrost-dev/csharp-single-file-namespace-prunes-usages/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/csharp-single-file-namespace-prunes-usages",
+      "job": "bifrost-dev/csharp-single-file-namespace-prunes-usages/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/G/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/G/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/G/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/R/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/R/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/R/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/dependency-failure-drops-independent-model-evidence",
+      "job": "bifrost-dev/dependency-failure-drops-independent-model-evidence/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "job": "bifrost-dev/go-nilness-ignores-modeled-nonreturn/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "job": "bifrost-dev/go-nilness-ignores-modeled-nonreturn/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "job": "bifrost-dev/go-nilness-ignores-modeled-nonreturn/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "job": "bifrost-dev/go-nilness-ignores-modeled-nonreturn/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "job": "bifrost-dev/go-nilness-ignores-modeled-nonreturn/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "job": "bifrost-dev/go-nilness-ignores-modeled-nonreturn/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "job": "bifrost-dev/go-nilness-ignores-modeled-nonreturn/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "job": "bifrost-dev/go-nilness-ignores-modeled-nonreturn/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "job": "bifrost-dev/go-nilness-ignores-modeled-nonreturn/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "job": "bifrost-dev/go-nilness-ignores-modeled-nonreturn/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/go-nilness-ignores-modeled-nonreturn",
+      "job": "bifrost-dev/go-nilness-ignores-modeled-nonreturn/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "job": "bifrost-dev/incompatible-semantic-bundle-late-gate/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "job": "bifrost-dev/incompatible-semantic-bundle-late-gate/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "job": "bifrost-dev/incompatible-semantic-bundle-late-gate/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "job": "bifrost-dev/incompatible-semantic-bundle-late-gate/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "job": "bifrost-dev/incompatible-semantic-bundle-late-gate/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "job": "bifrost-dev/incompatible-semantic-bundle-late-gate/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "job": "bifrost-dev/incompatible-semantic-bundle-late-gate/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "job": "bifrost-dev/incompatible-semantic-bundle-late-gate/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "job": "bifrost-dev/incompatible-semantic-bundle-late-gate/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "job": "bifrost-dev/incompatible-semantic-bundle-late-gate/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/incompatible-semantic-bundle-late-gate",
+      "job": "bifrost-dev/incompatible-semantic-bundle-late-gate/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "job": "bifrost-dev/java-static-getter-drops-incomplete-route/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "job": "bifrost-dev/java-static-getter-drops-incomplete-route/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "job": "bifrost-dev/java-static-getter-drops-incomplete-route/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "job": "bifrost-dev/java-static-getter-drops-incomplete-route/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "job": "bifrost-dev/java-static-getter-drops-incomplete-route/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "job": "bifrost-dev/java-static-getter-drops-incomplete-route/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "job": "bifrost-dev/java-static-getter-drops-incomplete-route/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "job": "bifrost-dev/java-static-getter-drops-incomplete-route/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "job": "bifrost-dev/java-static-getter-drops-incomplete-route/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "job": "bifrost-dev/java-static-getter-drops-incomplete-route/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/java-static-getter-drops-incomplete-route",
+      "job": "bifrost-dev/java-static-getter-drops-incomplete-route/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "job": "bifrost-dev/js-synthetic-owner-leaks-file-summary/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "job": "bifrost-dev/js-synthetic-owner-leaks-file-summary/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "job": "bifrost-dev/js-synthetic-owner-leaks-file-summary/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "job": "bifrost-dev/js-synthetic-owner-leaks-file-summary/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "job": "bifrost-dev/js-synthetic-owner-leaks-file-summary/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "job": "bifrost-dev/js-synthetic-owner-leaks-file-summary/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "job": "bifrost-dev/js-synthetic-owner-leaks-file-summary/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "job": "bifrost-dev/js-synthetic-owner-leaks-file-summary/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "job": "bifrost-dev/js-synthetic-owner-leaks-file-summary/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "job": "bifrost-dev/js-synthetic-owner-leaks-file-summary/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/js-synthetic-owner-leaks-file-summary",
+      "job": "bifrost-dev/js-synthetic-owner-leaks-file-summary/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/G/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/G/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/G/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/R/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/R/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/R/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied",
+      "job": "bifrost-dev/jvm-protected-unindexed-hierarchy-denied/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/G/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/G/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/G/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/R/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/R/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/R/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection",
+      "job": "bifrost-dev/kotlin-value-class-this-loses-underlying-projection/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/G/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/G/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/G/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/R/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/R/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/R/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot",
+      "job": "bifrost-dev/matching-analyzer-epoch-needs-writer-slot/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "job": "bifrost-dev/mcp-default-advisory-reported-clean/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "job": "bifrost-dev/mcp-default-advisory-reported-clean/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "job": "bifrost-dev/mcp-default-advisory-reported-clean/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "job": "bifrost-dev/mcp-default-advisory-reported-clean/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "job": "bifrost-dev/mcp-default-advisory-reported-clean/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "job": "bifrost-dev/mcp-default-advisory-reported-clean/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "job": "bifrost-dev/mcp-default-advisory-reported-clean/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "job": "bifrost-dev/mcp-default-advisory-reported-clean/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "job": "bifrost-dev/mcp-default-advisory-reported-clean/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "job": "bifrost-dev/mcp-default-advisory-reported-clean/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/mcp-default-advisory-reported-clean",
+      "job": "bifrost-dev/mcp-default-advisory-reported-clean/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/G/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/G/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/G/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/R/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/R/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/R/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/model-overload-unknown-competitor-discarded",
+      "job": "bifrost-dev/model-overload-unknown-competitor-discarded/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/python-filescope-enclosing-tie",
+      "job": "bifrost-dev/python-filescope-enclosing-tie/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/python-filescope-enclosing-tie",
+      "job": "bifrost-dev/python-filescope-enclosing-tie/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/python-filescope-enclosing-tie",
+      "job": "bifrost-dev/python-filescope-enclosing-tie/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/python-filescope-enclosing-tie",
+      "job": "bifrost-dev/python-filescope-enclosing-tie/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/python-filescope-enclosing-tie",
+      "job": "bifrost-dev/python-filescope-enclosing-tie/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/python-filescope-enclosing-tie",
+      "job": "bifrost-dev/python-filescope-enclosing-tie/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/python-filescope-enclosing-tie",
+      "job": "bifrost-dev/python-filescope-enclosing-tie/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/python-filescope-enclosing-tie",
+      "job": "bifrost-dev/python-filescope-enclosing-tie/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/python-filescope-enclosing-tie",
+      "job": "bifrost-dev/python-filescope-enclosing-tie/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/python-filescope-enclosing-tie",
+      "job": "bifrost-dev/python-filescope-enclosing-tie/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/python-filescope-enclosing-tie",
+      "job": "bifrost-dev/python-filescope-enclosing-tie/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "job": "bifrost-dev/python-module-mutation-repeated-scan-budget/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "job": "bifrost-dev/python-module-mutation-repeated-scan-budget/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "job": "bifrost-dev/python-module-mutation-repeated-scan-budget/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "job": "bifrost-dev/python-module-mutation-repeated-scan-budget/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "job": "bifrost-dev/python-module-mutation-repeated-scan-budget/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "job": "bifrost-dev/python-module-mutation-repeated-scan-budget/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "job": "bifrost-dev/python-module-mutation-repeated-scan-budget/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "job": "bifrost-dev/python-module-mutation-repeated-scan-budget/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "job": "bifrost-dev/python-module-mutation-repeated-scan-budget/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "job": "bifrost-dev/python-module-mutation-repeated-scan-budget/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/python-module-mutation-repeated-scan-budget",
+      "job": "bifrost-dev/python-module-mutation-repeated-scan-budget/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "job": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "job": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "job": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "job": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "job": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "job": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "job": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "job": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "job": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "job": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal",
+      "job": "bifrost-dev/ruby-constant-navigation-climbs-to-terminal/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "job": "bifrost-dev/rust-enum-variant-named-fields-omitted/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "job": "bifrost-dev/rust-enum-variant-named-fields-omitted/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "job": "bifrost-dev/rust-enum-variant-named-fields-omitted/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "job": "bifrost-dev/rust-enum-variant-named-fields-omitted/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "job": "bifrost-dev/rust-enum-variant-named-fields-omitted/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "job": "bifrost-dev/rust-enum-variant-named-fields-omitted/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "job": "bifrost-dev/rust-enum-variant-named-fields-omitted/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "job": "bifrost-dev/rust-enum-variant-named-fields-omitted/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "job": "bifrost-dev/rust-enum-variant-named-fields-omitted/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "job": "bifrost-dev/rust-enum-variant-named-fields-omitted/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/rust-enum-variant-named-fields-omitted",
+      "job": "bifrost-dev/rust-enum-variant-named-fields-omitted/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "job": "bifrost-dev/rust-importer-planning-widens-to-code-mentions/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "job": "bifrost-dev/rust-importer-planning-widens-to-code-mentions/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "job": "bifrost-dev/rust-importer-planning-widens-to-code-mentions/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "job": "bifrost-dev/rust-importer-planning-widens-to-code-mentions/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "job": "bifrost-dev/rust-importer-planning-widens-to-code-mentions/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "job": "bifrost-dev/rust-importer-planning-widens-to-code-mentions/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "job": "bifrost-dev/rust-importer-planning-widens-to-code-mentions/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "job": "bifrost-dev/rust-importer-planning-widens-to-code-mentions/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "job": "bifrost-dev/rust-importer-planning-widens-to-code-mentions/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "job": "bifrost-dev/rust-importer-planning-widens-to-code-mentions/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/rust-importer-planning-widens-to-code-mentions",
+      "job": "bifrost-dev/rust-importer-planning-widens-to-code-mentions/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "job": "bifrost-dev/rust-option-return-implicitly-unwrapped/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "job": "bifrost-dev/rust-option-return-implicitly-unwrapped/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "job": "bifrost-dev/rust-option-return-implicitly-unwrapped/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "job": "bifrost-dev/rust-option-return-implicitly-unwrapped/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "job": "bifrost-dev/rust-option-return-implicitly-unwrapped/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "job": "bifrost-dev/rust-option-return-implicitly-unwrapped/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "job": "bifrost-dev/rust-option-return-implicitly-unwrapped/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "job": "bifrost-dev/rust-option-return-implicitly-unwrapped/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "job": "bifrost-dev/rust-option-return-implicitly-unwrapped/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "job": "bifrost-dev/rust-option-return-implicitly-unwrapped/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/rust-option-return-implicitly-unwrapped",
+      "job": "bifrost-dev/rust-option-return-implicitly-unwrapped/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-while-let-binder-body-field",
+      "job": "bifrost-dev/rust-while-let-binder-body-field/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-while-let-binder-body-field",
+      "job": "bifrost-dev/rust-while-let-binder-body-field/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "bifrost-dev/rust-while-let-binder-body-field",
+      "job": "bifrost-dev/rust-while-let-binder-body-field/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-while-let-binder-body-field",
+      "job": "bifrost-dev/rust-while-let-binder-body-field/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-while-let-binder-body-field",
+      "job": "bifrost-dev/rust-while-let-binder-body-field/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "bifrost-dev/rust-while-let-binder-body-field",
+      "job": "bifrost-dev/rust-while-let-binder-body-field/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-while-let-binder-body-field",
+      "job": "bifrost-dev/rust-while-let-binder-body-field/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-while-let-binder-body-field",
+      "job": "bifrost-dev/rust-while-let-binder-body-field/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "bifrost-dev/rust-while-let-binder-body-field",
+      "job": "bifrost-dev/rust-while-let-binder-body-field/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/rust-while-let-binder-body-field",
+      "job": "bifrost-dev/rust-while-let-binder-body-field/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "bifrost-dev/rust-while-let-binder-body-field",
+      "job": "bifrost-dev/rust-while-let-binder-body-field/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/activity-recorder-kills-api",
+      "job": "mjolnir/activity-recorder-kills-api/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/activity-recorder-kills-api",
+      "job": "mjolnir/activity-recorder-kills-api/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/activity-recorder-kills-api",
+      "job": "mjolnir/activity-recorder-kills-api/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/activity-recorder-kills-api",
+      "job": "mjolnir/activity-recorder-kills-api/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/activity-recorder-kills-api",
+      "job": "mjolnir/activity-recorder-kills-api/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/activity-recorder-kills-api",
+      "job": "mjolnir/activity-recorder-kills-api/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/activity-recorder-kills-api",
+      "job": "mjolnir/activity-recorder-kills-api/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/activity-recorder-kills-api",
+      "job": "mjolnir/activity-recorder-kills-api/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/activity-recorder-kills-api",
+      "job": "mjolnir/activity-recorder-kills-api/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/activity-recorder-kills-api",
+      "job": "mjolnir/activity-recorder-kills-api/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/activity-recorder-kills-api",
+      "job": "mjolnir/activity-recorder-kills-api/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/G/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/G/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/G/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/R/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/R/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/R/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/archive-resume-hint-without-prompt",
+      "job": "mjolnir/archive-resume-hint-without-prompt/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/catalog-cache-key-collision",
+      "job": "mjolnir/catalog-cache-key-collision/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/catalog-cache-key-collision",
+      "job": "mjolnir/catalog-cache-key-collision/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/catalog-cache-key-collision",
+      "job": "mjolnir/catalog-cache-key-collision/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/catalog-cache-key-collision",
+      "job": "mjolnir/catalog-cache-key-collision/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/catalog-cache-key-collision",
+      "job": "mjolnir/catalog-cache-key-collision/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/catalog-cache-key-collision",
+      "job": "mjolnir/catalog-cache-key-collision/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/catalog-cache-key-collision",
+      "job": "mjolnir/catalog-cache-key-collision/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/catalog-cache-key-collision",
+      "job": "mjolnir/catalog-cache-key-collision/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/catalog-cache-key-collision",
+      "job": "mjolnir/catalog-cache-key-collision/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/catalog-cache-key-collision",
+      "job": "mjolnir/catalog-cache-key-collision/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/catalog-cache-key-collision",
+      "job": "mjolnir/catalog-cache-key-collision/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/child-model-wrong-efforts",
+      "job": "mjolnir/child-model-wrong-efforts/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/child-model-wrong-efforts",
+      "job": "mjolnir/child-model-wrong-efforts/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/child-model-wrong-efforts",
+      "job": "mjolnir/child-model-wrong-efforts/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/child-model-wrong-efforts",
+      "job": "mjolnir/child-model-wrong-efforts/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/child-model-wrong-efforts",
+      "job": "mjolnir/child-model-wrong-efforts/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/child-model-wrong-efforts",
+      "job": "mjolnir/child-model-wrong-efforts/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/child-model-wrong-efforts",
+      "job": "mjolnir/child-model-wrong-efforts/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/child-model-wrong-efforts",
+      "job": "mjolnir/child-model-wrong-efforts/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/child-model-wrong-efforts",
+      "job": "mjolnir/child-model-wrong-efforts/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/child-model-wrong-efforts",
+      "job": "mjolnir/child-model-wrong-efforts/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/child-model-wrong-efforts",
+      "job": "mjolnir/child-model-wrong-efforts/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/codex-effort-alias-lost",
+      "job": "mjolnir/codex-effort-alias-lost/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/codex-effort-alias-lost",
+      "job": "mjolnir/codex-effort-alias-lost/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/codex-effort-alias-lost",
+      "job": "mjolnir/codex-effort-alias-lost/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/codex-effort-alias-lost",
+      "job": "mjolnir/codex-effort-alias-lost/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/codex-effort-alias-lost",
+      "job": "mjolnir/codex-effort-alias-lost/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/codex-effort-alias-lost",
+      "job": "mjolnir/codex-effort-alias-lost/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/codex-effort-alias-lost",
+      "job": "mjolnir/codex-effort-alias-lost/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/codex-effort-alias-lost",
+      "job": "mjolnir/codex-effort-alias-lost/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/codex-effort-alias-lost",
+      "job": "mjolnir/codex-effort-alias-lost/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/codex-effort-alias-lost",
+      "job": "mjolnir/codex-effort-alias-lost/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/codex-effort-alias-lost",
+      "job": "mjolnir/codex-effort-alias-lost/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "job": "mjolnir/container-env-lost-during-worker-bootstrap/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "job": "mjolnir/container-env-lost-during-worker-bootstrap/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "job": "mjolnir/container-env-lost-during-worker-bootstrap/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "job": "mjolnir/container-env-lost-during-worker-bootstrap/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "job": "mjolnir/container-env-lost-during-worker-bootstrap/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "job": "mjolnir/container-env-lost-during-worker-bootstrap/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "job": "mjolnir/container-env-lost-during-worker-bootstrap/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "job": "mjolnir/container-env-lost-during-worker-bootstrap/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "job": "mjolnir/container-env-lost-during-worker-bootstrap/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "job": "mjolnir/container-env-lost-during-worker-bootstrap/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/container-env-lost-during-worker-bootstrap",
+      "job": "mjolnir/container-env-lost-during-worker-bootstrap/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/dropdown-click-hits-covered-field",
+      "job": "mjolnir/dropdown-click-hits-covered-field/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/dropdown-click-hits-covered-field",
+      "job": "mjolnir/dropdown-click-hits-covered-field/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/dropdown-click-hits-covered-field",
+      "job": "mjolnir/dropdown-click-hits-covered-field/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/dropdown-click-hits-covered-field",
+      "job": "mjolnir/dropdown-click-hits-covered-field/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/dropdown-click-hits-covered-field",
+      "job": "mjolnir/dropdown-click-hits-covered-field/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/dropdown-click-hits-covered-field",
+      "job": "mjolnir/dropdown-click-hits-covered-field/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/dropdown-click-hits-covered-field",
+      "job": "mjolnir/dropdown-click-hits-covered-field/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/dropdown-click-hits-covered-field",
+      "job": "mjolnir/dropdown-click-hits-covered-field/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/dropdown-click-hits-covered-field",
+      "job": "mjolnir/dropdown-click-hits-covered-field/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/dropdown-click-hits-covered-field",
+      "job": "mjolnir/dropdown-click-hits-covered-field/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/dropdown-click-hits-covered-field",
+      "job": "mjolnir/dropdown-click-hits-covered-field/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/held-prompt-ignores-interrupt",
+      "job": "mjolnir/held-prompt-ignores-interrupt/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/held-prompt-ignores-interrupt",
+      "job": "mjolnir/held-prompt-ignores-interrupt/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/held-prompt-ignores-interrupt",
+      "job": "mjolnir/held-prompt-ignores-interrupt/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/held-prompt-ignores-interrupt",
+      "job": "mjolnir/held-prompt-ignores-interrupt/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/held-prompt-ignores-interrupt",
+      "job": "mjolnir/held-prompt-ignores-interrupt/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/held-prompt-ignores-interrupt",
+      "job": "mjolnir/held-prompt-ignores-interrupt/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/held-prompt-ignores-interrupt",
+      "job": "mjolnir/held-prompt-ignores-interrupt/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/held-prompt-ignores-interrupt",
+      "job": "mjolnir/held-prompt-ignores-interrupt/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/held-prompt-ignores-interrupt",
+      "job": "mjolnir/held-prompt-ignores-interrupt/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/held-prompt-ignores-interrupt",
+      "job": "mjolnir/held-prompt-ignores-interrupt/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/held-prompt-ignores-interrupt",
+      "job": "mjolnir/held-prompt-ignores-interrupt/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "job": "mjolnir/metadata-checkpoint-overwrites-checkout/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "job": "mjolnir/metadata-checkpoint-overwrites-checkout/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "job": "mjolnir/metadata-checkpoint-overwrites-checkout/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "job": "mjolnir/metadata-checkpoint-overwrites-checkout/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "job": "mjolnir/metadata-checkpoint-overwrites-checkout/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "job": "mjolnir/metadata-checkpoint-overwrites-checkout/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "job": "mjolnir/metadata-checkpoint-overwrites-checkout/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "job": "mjolnir/metadata-checkpoint-overwrites-checkout/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "job": "mjolnir/metadata-checkpoint-overwrites-checkout/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "job": "mjolnir/metadata-checkpoint-overwrites-checkout/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/metadata-checkpoint-overwrites-checkout",
+      "job": "mjolnir/metadata-checkpoint-overwrites-checkout/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/G/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/G/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/G/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/R/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/R/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/R/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/palette-scattered-match-beats-literal",
+      "job": "mjolnir/palette-scattered-match-beats-literal/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/G/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/G/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/G/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/R/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/R/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/R/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/pending-assessment-hidden-when-idle",
+      "job": "mjolnir/pending-assessment-hidden-when-idle/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/G/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/G/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/G/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/R/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/R/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/R/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/reserved-workspace-internal-error",
+      "job": "mjolnir/reserved-workspace-internal-error/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "job": "mjolnir/shortcut-escape-opens-unvisited-manager/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "job": "mjolnir/shortcut-escape-opens-unvisited-manager/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "job": "mjolnir/shortcut-escape-opens-unvisited-manager/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "job": "mjolnir/shortcut-escape-opens-unvisited-manager/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "job": "mjolnir/shortcut-escape-opens-unvisited-manager/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "job": "mjolnir/shortcut-escape-opens-unvisited-manager/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "job": "mjolnir/shortcut-escape-opens-unvisited-manager/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "job": "mjolnir/shortcut-escape-opens-unvisited-manager/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "job": "mjolnir/shortcut-escape-opens-unvisited-manager/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "job": "mjolnir/shortcut-escape-opens-unvisited-manager/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/shortcut-escape-opens-unvisited-manager",
+      "job": "mjolnir/shortcut-escape-opens-unvisited-manager/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/G/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/G/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/G/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/R/r2/writer",
+      "kind": "writer",
+      "replicate": 2,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/R/r2/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/R/r2/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 2,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/stale-model-launch-spec",
+      "job": "mjolnir/stale-model-launch-spec/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/stop-awk-multiline-variable",
+      "job": "mjolnir/stop-awk-multiline-variable/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/stop-awk-multiline-variable",
+      "job": "mjolnir/stop-awk-multiline-variable/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/stop-awk-multiline-variable",
+      "job": "mjolnir/stop-awk-multiline-variable/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/stop-awk-multiline-variable",
+      "job": "mjolnir/stop-awk-multiline-variable/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/stop-awk-multiline-variable",
+      "job": "mjolnir/stop-awk-multiline-variable/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/stop-awk-multiline-variable",
+      "job": "mjolnir/stop-awk-multiline-variable/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/stop-awk-multiline-variable",
+      "job": "mjolnir/stop-awk-multiline-variable/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/stop-awk-multiline-variable",
+      "job": "mjolnir/stop-awk-multiline-variable/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/stop-awk-multiline-variable",
+      "job": "mjolnir/stop-awk-multiline-variable/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/stop-awk-multiline-variable",
+      "job": "mjolnir/stop-awk-multiline-variable/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/stop-awk-multiline-variable",
+      "job": "mjolnir/stop-awk-multiline-variable/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/symbol-change-keeps-cached-transcript",
+      "job": "mjolnir/symbol-change-keeps-cached-transcript/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/symbol-change-keeps-cached-transcript",
+      "job": "mjolnir/symbol-change-keeps-cached-transcript/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/symbol-change-keeps-cached-transcript",
+      "job": "mjolnir/symbol-change-keeps-cached-transcript/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/symbol-change-keeps-cached-transcript",
+      "job": "mjolnir/symbol-change-keeps-cached-transcript/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/symbol-change-keeps-cached-transcript",
+      "job": "mjolnir/symbol-change-keeps-cached-transcript/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/symbol-change-keeps-cached-transcript",
+      "job": "mjolnir/symbol-change-keeps-cached-transcript/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/symbol-change-keeps-cached-transcript",
+      "job": "mjolnir/symbol-change-keeps-cached-transcript/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/symbol-change-keeps-cached-transcript",
+      "job": "mjolnir/symbol-change-keeps-cached-transcript/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/symbol-change-keeps-cached-transcript",
+      "job": "mjolnir/symbol-change-keeps-cached-transcript/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/symbol-change-keeps-cached-transcript",
+      "job": "mjolnir/symbol-change-keeps-cached-transcript/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/symbol-change-keeps-cached-transcript",
+      "job": "mjolnir/symbol-change-keeps-cached-transcript/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/terminal-id-reused",
+      "job": "mjolnir/terminal-id-reused/G/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/terminal-id-reused",
+      "job": "mjolnir/terminal-id-reused/G/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "G",
+      "diff": "mjolnir/terminal-id-reused",
+      "job": "mjolnir/terminal-id-reused/G/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/terminal-id-reused",
+      "job": "mjolnir/terminal-id-reused/R/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/terminal-id-reused",
+      "job": "mjolnir/terminal-id-reused/R/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R",
+      "diff": "mjolnir/terminal-id-reused",
+      "job": "mjolnir/terminal-id-reused/R/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/terminal-id-reused",
+      "job": "mjolnir/terminal-id-reused/R-loc/r1/writer",
+      "kind": "writer",
+      "replicate": 1,
+      "slot": null
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/terminal-id-reused",
+      "job": "mjolnir/terminal-id-reused/R-loc/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "R-loc",
+      "diff": "mjolnir/terminal-id-reused",
+      "job": "mjolnir/terminal-id-reused/R-loc/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/terminal-id-reused",
+      "job": "mjolnir/terminal-id-reused/N/r1/reviewer-1",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 1
+    },
+    {
+      "arm": "N",
+      "diff": "mjolnir/terminal-id-reused",
+      "job": "mjolnir/terminal-id-reused/N/r1/reviewer-2",
+      "kind": "reviewer",
+      "replicate": 1,
+      "slot": 2
+    }
+  ],
+  "model_versions": {
+    "fable": "Fable 5.2"
+  },
+  "models": {
+    "engine": "fable/high",
+    "judge": "fable/high",
+    "reviewer": "gpt-6.1-terra/high",
+    "writer": "gpt-6.1-sol/high"
+  },
+  "page_rows": 50,
+  "plan_commit": "c37716a98cb4785c659b4862f43665474893bd72",
+  "seed": 20261120,
+  "version": 1
+}
