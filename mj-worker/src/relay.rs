@@ -1058,17 +1058,17 @@ impl DurableRelay {
             };
             // The queue observation may be collected before delivery. The
             // durable dispatch still owns the active prompt and its boundary.
-            let mut prompts: BTreeMap<String, String> = relay
+            let mut prompts: BTreeMap<String, Option<String>> = relay
                 .snapshot
                 .dispatches
                 .iter()
                 .filter_map(|(id, dispatch)| {
-                    prompt_text(&dispatch.command).map(|text| (id.clone(), text))
+                    prompt_text(&dispatch.command).map(|text| (id.clone(), Some(text)))
                 })
                 .collect();
             // Terminal records retain command kinds after dispatch bodies are
-            // gone. Their starts still establish boundaries; missing text is
-            // supplied only as empty, never inferred from another request.
+            // gone. Their starts still establish boundaries; an unavailable
+            // body stays distinct from an empty prompt.
             for event in &relay.hot_events {
                 let command_id = match &event.observation {
                     RelayObservation::CommandCompleted {
@@ -1120,7 +1120,7 @@ impl DurableRelay {
                 } = &event.observation
                     && let Some(text) = prompt_text(command)
                 {
-                    prompts.insert(command_id.clone(), text);
+                    prompts.insert(command_id.clone(), Some(text));
                 }
                 let prompt = if let Some(command_id) =
                     mj_transcript::turn_context::delivered_prompt_command_id(&event.observation)
@@ -1134,9 +1134,16 @@ impl DurableRelay {
                     }
                     None
                 };
-                relay
-                    .turn_context
-                    .observe_relay(&event.observation, prompt.as_deref());
+                if let Some(prompt) = prompt {
+                    relay.turn_context.observe_prompt_delivery(
+                        mj_transcript::turn_context::delivered_prompt_command_id(
+                            &event.observation,
+                        ),
+                        prompt.as_deref(),
+                    );
+                } else {
+                    relay.turn_context.observe_relay(&event.observation, None);
+                }
             }
             // The latest persisted human instructions govern every turn,
             // including mailbox wakes and restart continuations. Use what

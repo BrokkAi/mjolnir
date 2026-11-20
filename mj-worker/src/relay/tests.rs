@@ -10807,3 +10807,46 @@ fn restart_continuation_starts_a_new_authorization_message_for_an_unlabelled_que
     );
     assert_eq!(evidence.assistant_text_tail, "Which option?");
 }
+
+// Hard-won: 7211dfd7b: an autonomous unlabelled reply inherited a completed prompt's explicit ID.
+#[test]
+fn autonomous_reply_after_completed_prompt_has_its_own_judgment_tail() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "human-reply").unwrap();
+    relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+    submit_relay(&mut relay, "human-prompt", prompt("do the work"));
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk", "messageId":"human-reply",
+                "content":{"type":"text","text":"finished human work"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    finish_prompt(&mut relay, "human-prompt");
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"autonomous reply"}
+    })).unwrap()).unwrap();
+    assert!(relay.snapshot.harness_turn.is_some());
+    let check = |relay: &DurableRelay| {
+        assert_eq!(
+            relay
+                .turn_context()
+                .evidence(
+                    mj_core::config::HarnessKind::Claude,
+                    mj_core::activity::verdict::TurnPhase::Running,
+                    &Default::default(),
+                    0,
+                )
+                .assistant_text_tail,
+            "autonomous reply"
+        );
+    };
+    check(&relay);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "autonomous-reopen").unwrap();
+    check(&relay);
+}

@@ -1791,7 +1791,9 @@ fn restored_relay_continues_after_canonical_event_frontier() {
             .ordinal,
         42
     );
-    let mut relay = relay;
+    // Hard-won: 7211dfd7b: an unavailable saved prompt became an initialized empty tail.
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "recovery-still-queued").unwrap();
     let recovery = relay
         .snapshot
         .queued_prompts
@@ -1805,6 +1807,19 @@ fn restored_relay_continues_after_canonical_event_frontier() {
         })
         .unwrap();
     relay.claim_pending_commands(true).unwrap();
+    assert_eq!(
+        relay
+            .turn_context()
+            .evidence(
+                mj_core::config::HarnessKind::Codex,
+                mj_core::activity::verdict::TurnPhase::Running,
+                &Default::default(),
+                0,
+            )
+            .user_prompt_tail,
+        "continue offline"
+    );
+
     relay
         .record_command_completed(
             &recovery,
