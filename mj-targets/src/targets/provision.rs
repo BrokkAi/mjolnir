@@ -44,6 +44,19 @@ pub fn provision_plan_named(
         "invalid target resource generation"
     );
     bundle.validate()?;
+    if template.container_engine().is_some()
+        && let Some(source) = bundle.repositories.iter().find_map(|repository| {
+            repository.url.as_deref().filter(|source| {
+                repository.reference.is_none()
+                    && mj_core::remote_git::is_host_only_git_source(source)
+            })
+        })
+    {
+        return Err(mj_core::refusal::Refusal::precondition(format!(
+            "Git source {} is host-only and needs a container host with the Git cache. Choose a target that can mount the cache or configure a reachable Git source.",
+            mj_core::remote_git::display_url(source)
+        )).into());
+    }
     let workspace = container_workspace_root(container_workspace);
     if !additional_mounts.is_empty()
         && !matches!(

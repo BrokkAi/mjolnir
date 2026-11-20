@@ -191,12 +191,17 @@ pub fn clone_commands(
         .purpose("create bundle workspace")
         .stage(ProvisionStage::Cloning),
     ];
+    let mut restore_origins = Vec::new();
     for repository in &bundle.repositories {
         let destination = format!("{workspace}/{}", repository.destination);
         let url = repository
             .url
             .as_ref()
             .expect("validated network repository");
+        let checkout_snapshot = repository
+            .reference
+            .as_ref()
+            .filter(|_| mj_core::remote_git::is_host_only_git_source(url));
         let wrap_fetch = |args: Vec<String>| {
             if let Some(token) = github_token
                 && mj_core::remote_git::is_github_https_url(url)
@@ -220,18 +225,74 @@ pub fn clone_commands(
             );
             continue;
         }
-        let mut args = vec!["git".to_owned(), "clone".to_owned()];
+        let mut args = vec!["git".to_owned()];
+        if let Some(snapshot) = checkout_snapshot {
+            // A mounted cache can have a different owner from the container
+            // user. Git needs to trust this particular read-only repository.
+            args.extend(["-c".into(), format!("safe.directory={snapshot}")]);
+        }
+        args.push("clone".into());
+        if let Some(snapshot) = checkout_snapshot {
+            // Clone normally transfers branches and tags. Include the
+            // private exact-checkout pin, if the host prepared one, before
+            // dissociation copies the borrowed objects into the checkout.
+            let namespace = mj_core::targets::HOST_SNAPSHOT_EXACT_REFS;
+            let refspec = format!("+{namespace}/*:{namespace}/*");
+            args.extend([
+                "--no-local".into(),
+                "--dissociate".into(),
+                "--reference".into(),
+                snapshot.clone(),
+                "--config".into(),
+                format!("remote.origin.fetch={refspec}"),
+            ]);
+            restore_origins.push(
+                wrap(step_script([
+                    CommandStep::new(
+                        "remove the temporary snapshot refspec",
+                        [
+                            "git",
+                            "-C",
+                            &destination,
+                            "config",
+                            "--local",
+                            "--fixed-value",
+                            "--unset-all",
+                            "remote.origin.fetch",
+                            &refspec,
+                        ],
+                    ),
+                    CommandStep::new(
+                        "configure the source origin",
+                        [
+                            "git",
+                            "-C",
+                            &destination,
+                            "remote",
+                            "set-url",
+                            "origin",
+                            url,
+                        ],
+                    ),
+                ]))
+                .purpose(format!("configure origin for {}", repository.destination))
+                .stage(ProvisionStage::Cloning)
+                .parallel_group(BUNDLE_REPOSITORIES_PARALLEL_GROUP + 1),
+            );
+        }
         for push_url in &repository.push_urls {
             args.extend([
                 "--config".into(),
                 format!("remote.origin.pushurl={push_url}"),
             ]);
         }
-        if let Some(reference) = &repository.reference {
+        if checkout_snapshot.is_none()
+            && let Some(reference) = &repository.reference
+        {
             args.extend(["--reference-if-able".to_owned(), reference.clone()]);
         }
         args.push("--".to_owned());
-        args.push(url.clone());
+        args.push(checkout_snapshot.unwrap_or(url).clone());
         args.push(destination);
         commands.push(
             wrap_fetch(args)
@@ -240,6 +301,7 @@ pub fn clone_commands(
                 .parallel_group(BUNDLE_REPOSITORIES_PARALLEL_GROUP),
         );
     }
+    commands.extend(restore_origins);
     commands
 }
 

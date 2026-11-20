@@ -32,6 +32,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import threading
 import time
 
@@ -44,8 +45,13 @@ p = argparse.ArgumentParser()
 p.add_argument("verify")
 p.add_argument("--concurrency", type=int, default=7)
 p.add_argument("--kind", choices=["verify", "judge", "task"], default="verify")
-# Model and profiles of the sessions; rounds A to F used Opus on the Claude profiles.
+p.add_argument("--text-only", action="store_true",
+               help="pilot judgment task: one pinned profile and a sealed empty Podman checkout")
+p.add_argument("--instance", help="named instance for sealed pilot judges")
+p.add_argument("--seal-probe", type=pathlib.Path, help="trusted isolation probe for sealed pilot judges")
+p.add_argument("--provider-model", help="concrete provider-reported Fable model ID")
 p.add_argument("--output", help="task: the file each unit's session writes, fetched into the unit directory")
+# Model and profiles of the sessions; rounds A to F used Opus on the Claude profiles.
 p.add_argument("--model", default="opus")
 p.add_argument("--profiles", default=",".join(PROFILES), help="comma-separated mj profiles, used in turn")
 # Judge rounds normally run both judges with one model; --judges A (or B) runs one side, so the
@@ -69,6 +75,26 @@ if instance != "default":
 if a.kind == "task" and not a.output:
     p.error("--kind task needs --output")
 PROFILES = a.profiles.split(",")
+if a.text_only:
+    import re
+    if (a.kind != "task" or a.output != "verdicts.jsonl" or not a.instance or not a.bundle
+            or not re.fullmatch(r"[0-9a-f]{40}", a.repo_commit) or not a.seal_probe
+            or not os.access(a.seal_probe, os.X_OK) or len(PROFILES) != 1 or not PROFILES[0]
+            or a.model != "fable" or not re.fullmatch(r"claude-fable-(?:[0-9]+-)*[0-9]+", a.provider_model or "")):
+        p.error("--text-only requires a named instance, pinned profile, Fable provider model, "
+                "empty bundle commit, executable seal probe and verdicts.jsonl task")
+    import tomllib
+    import driver as pilot_driver
+    config_path = pilot_driver.use_named_instance(a.instance) / "config.toml"
+    config = tomllib.loads(config_path.read_text())
+    bundle = config["bundles"][a.bundle]
+    repositories = bundle["repositories"]
+    if len(repositories) != 1 or repositories[0]["id"] != bundle["primary_repo"]:
+        p.error("the sealed judge bundle must contain exactly one repository")
+    JUDGE_DESTINATION = repositories[0]["destination"]
+    pilot_driver.workspace_id()
+elif a.instance or a.seal_probe or a.provider_model:
+    p.error("--instance, --seal-probe and --provider-model require --text-only")
 REPO_NAME = a.bundle or os.environ.get("REVIEW_ARMS_REPO_DIR", "mjolnir")
 V = ROOT / a.verify
 REPO = ROOT / "verify/repo"
@@ -98,7 +124,8 @@ def ensure_checkout():
         tmp.rename(REPO)
 
 
-ensure_checkout()
+if not a.text_only:
+    ensure_checkout()
 for sub in ("out", "sessions", "prompts"):
     (V / sub).mkdir(parents=True, exist_ok=True)
 if a.kind == "verify" and not (V / "SPEC.md").exists():  # verifiers read the spec from the verify dir
@@ -123,8 +150,9 @@ def ensure_workspace():
         os.replace(tmp, WORKSPACE_RECORD)
 
 
-ensure_workspace()
-WORKSPACE = json.loads(WORKSPACE_RECORD.read_text())["workspace"]["id"]
+if not a.text_only:
+    ensure_workspace()
+    WORKSPACE = json.loads(WORKSPACE_RECORD.read_text())["workspace"]["id"]
 
 
 def mj(*args, timeout=300):
@@ -183,6 +211,10 @@ INPUT = "review-input"  # workspace folder that receives SPEC.md and the batch
 
 def prompt_text(batch_path, judge):
     if a.kind == "task":
+        if a.text_only:
+            return (f"Read {INPUT}/{batch_path.name}/INSTRUCTIONS.md and follow it exactly. "
+                    f"Read only the files in {INPUT}/{batch_path.name}/. "
+                    f"Write {a.output} in your current working directory. Do not use the network.")
         first = (f"Before you read anything, run `git checkout -q --detach {a.repo_commit}` in your working "
                  "directory, and do not open .agents/evals/ at any point.\n\n") if a.bundle else ""
         return first + f"""Read {INPUT}/{batch_path.name}/INSTRUCTIONS.md and follow it exactly. Your unit's files are in {INPUT}/{batch_path.name}/.
@@ -210,12 +242,20 @@ The {REPO_NAME} checkout with full history is your current working directory. Re
 """
 
 
+def invocation(*args):
+    return pilot_driver.mj_invocation(*args) if a.text_only else [str(MJX), *args]
+
+
 def upload_inputs(sid, batch_path):
     if a.kind == "task":
-        for src in sorted(f for f in batch_path.rglob("*") if f.is_file() and f.name != a.output):
+        if a.text_only:
+            sources = [batch_path / name for name in ("INSTRUCTIONS.md", "SPEC.md", "PILOT.md", "items.json")]
+        else:
+            sources = sorted(f for f in batch_path.rglob("*") if f.is_file() and f.name != a.output)
+        for src in sources:
             rel = src.relative_to(batch_path)
-            r = subprocess.run([str(MJX), "put-file", "--session", sid, "--path", f"{INPUT}/{batch_path.name}/{rel}",
-                                "--overwrite", str(src)], capture_output=True, timeout=300)
+            r = subprocess.run(invocation("put-file", "--session", sid, "--path", f"{INPUT}/{batch_path.name}/{rel}",
+                                          "--overwrite", str(src)), capture_output=True, timeout=300)
             if r.returncode:
                 raise RuntimeError(f"put-file {rel} into {sid}: {r.stderr.decode()[-400:]}")
         return
@@ -228,7 +268,7 @@ def upload_inputs(sid, batch_path):
 
 def fetch_output(sid):
     name = a.output if a.kind == "task" else "verdicts.jsonl" if a.kind == "judge" else "verify-out.json"
-    r = subprocess.run([str(MJX), "fetch", "--session", sid, "--path", name, "--stdout"],
+    r = subprocess.run(invocation("fetch", "--session", sid, "--path", name, "--stdout"),
                        capture_output=True, timeout=300)
     if r.returncode:
         raise RuntimeError(f"session {sid} left no {name}: {r.stderr.decode()[-400:]}")
@@ -254,7 +294,161 @@ def run(batch_path, judge=None):
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError(f"unit {tag} is being run by another invocation") from None
+        if a.text_only:
+            return run_sealed_judge(batch_path)
         return run_unit(batch_path, judge)
+
+
+def suspend(sid):
+    mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+
+
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def attest_judge(attempt, sid):
+    state = pilot_driver.wait_idle(sid)
+    if (state.get("no_later_history") is not True or state.get("at") != a.repo_commit
+            or state.get("base") != a.repo_commit or state.get("profile_id") != PROFILES[0]):
+        raise RuntimeError(f"judge {sid} did not launch with the pinned profile and checkout")
+    place = pilot_driver.container(sid)
+    place["cwd"] = f"/workspace/{sid}/{JUDGE_DESTINATION}"
+    before = pilot_driver.inventory(place, "audit", a.repo_commit)
+    if (before["head"] != a.repo_commit or before["head_tree"] != EMPTY_TREE
+            or before["commits"] != [a.repo_commit] or before["object_count"] != 2
+            or before["remotes"] or before["alternates"] or before["status"] or before["ignored"]):
+        raise RuntimeError(f"judge {sid} checkout is not a clean empty parentless commit")
+    evidence = pilot_driver.attest_pilot_cache(attempt, place, a.repo_commit, a.repo_commit)
+    if (len(evidence["snapshots"]) != 1
+            or next(iter(evidence["snapshots"].values()))["commits"] != [a.repo_commit]):
+        raise RuntimeError(f"judge {sid} has an unexpected Git cache")
+    process = subprocess.run([str(a.seal_probe.resolve()), place["container"]], capture_output=True, timeout=300)
+    save(attempt / "isolation.json", {"placement": place, "checkout": before, "probe_exit": process.returncode,
+                                      "probe_stdout": process.stdout.decode(errors="replace"),
+                                      "probe_stderr": process.stderr.decode(errors="replace")})
+    if process.returncode:
+        raise RuntimeError(f"judge {sid} failed its isolation probe")
+
+
+def durable_files(*paths):
+    # A receipt can outlive its worker. Flush the evidence and directory records before teardown.
+    directories = {path.parent for path in paths}
+    for path in [*paths, *directories, *(path.parent for path in directories)]:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def publish_sealed_judge(attempt, batch_path, output_path):
+    from pilot_judge import EVIDENCE_FILES, load, sha, validate_payload_verdicts, verify_capture
+
+    receipt_path = attempt / "receipt.json"
+    receipt = load(receipt_path)
+    producer = verify_capture(attempt, receipt, a.provider_model)
+    sid = producer["session_id"]
+    if (producer["profile"], producer["launch_profile"]) != (PROFILES[0], PROFILES[0]):
+        raise RuntimeError(f"judge {sid} receipt is for another profile")
+    data = (attempt / a.output).read_bytes()
+    validate_payload_verdicts(load(batch_path / "items.json"), data)
+    if sha(data) != producer["output_sha256"]:
+        raise ValueError(f"judge {sid}: fetched verdict differs from receipt")
+    durable_files(receipt_path, attempt / "launch.json", *(attempt / name for name in EVIDENCE_FILES))
+    cleanup = attempt / "destroy.json"
+    if not cleanup.is_file():
+        live = pilot_driver.mj("sessions", "--all")["sessions"]
+        result = (pilot_driver.mj("destroy", "--session", sid, timeout=900)
+                  if any(row["id"] == sid for row in live) else {"already_absent": True})
+        save(cleanup, result)
+    (batch_path / a.output).write_bytes(data)
+    save(output_path, receipt)
+
+
+def run_sealed_judge(batch_path):
+    import audit
+    import brief_driver
+    from pilot_judge import EVIDENCE_FILES, load, provider_model, sha, validate_payload_verdicts
+
+    tag = batch_path.name
+    output_path = V / "out" / f"task-{tag}.json"
+    home = V / "sessions" / tag
+    attempt = home / "attempt"
+    attempt.mkdir(parents=True, exist_ok=True)
+    prompt = V / "prompts" / f"prompt-{tag}.txt"
+    prompt.write_text(prompt_text(batch_path, None))
+    while True:
+        launch_path = attempt / "launch.json"
+        if (attempt / "void.json").is_file():
+            sid = load(launch_path)["session_id"]
+            attempt.rename(home / f"void-{sid}")
+            attempt.mkdir()
+        if not launch_path.is_file():
+            launch_intent = attempt / "launch-intent.json"
+            if launch_intent.exists():
+                raise RuntimeError(f"{attempt}: launch has no recorded session ID; reconcile before retrying")
+            profile = pick_profile()
+            if hold := pilot_driver.pilot_weekly_hold(profile, scope=a.model):
+                raise RuntimeError("held before judge launch: " + hold)
+            title = f"Assessment {tag}"
+            scope = {"profile": profile, "instance": a.instance, "bundle": a.bundle, "commit": a.repo_commit}
+            save(launch_intent, {**scope, "title": title})
+            sid = brief_driver.sealed_launch(a.bundle, a.repo_commit, profile, title,
+                                             base=a.repo_commit, effort="high")
+            save(launch_path, {**scope, "session_id": sid})
+        launch = load(launch_path)
+        sid = launch["session_id"]
+        if (launch["profile"], launch["instance"], launch["bundle"], launch["commit"]) != (
+                PROFILES[0], a.instance, a.bundle, a.repo_commit):
+            raise RuntimeError(f"judge {sid} has a different recorded launch configuration")
+        if (attempt / "receipt.json").is_file():
+            publish_sealed_judge(attempt, batch_path, output_path)
+            return tag, "done"
+        settings_path, request_path = attempt / "settings.json", attempt / "request.json"
+        command = f"judge-{tag}-{sid[:12]}"
+        if not settings_path.is_file():
+            attest_judge(attempt, sid)
+            save(settings_path, brief_driver.configure_pilot_model_ready(
+                sid, a.model, "high", wait_idle=pilot_driver.wait_idle))
+        if not request_path.is_file():
+            upload_inputs(sid, batch_path)
+            save(request_path, pilot_driver.mj("message", "--session", sid, "--command-id", command,
+                                                "--prompt-file", prompt))
+        turn = load(request_path)["turn_id"]
+        waited = pilot_driver.mj("wait", "--session", sid, "--turn", turn, "--return-on-input",
+                                 "--timeout", 1800, timeout=1830)
+        if waited.get("turn_id") != turn or waited["outcome"] != "finished":
+            raise RuntimeError(f"judge {sid} turn {turn} ended with {waited['outcome']}; session retained")
+        state = pilot_driver.session(sid)
+        if (state.get("profile_id") != PROFILES[0]
+                or (state["last_turn_outcome"]["outcome"]).get("kind") != "completed"):
+            raise RuntimeError(f"judge {sid} changed profiles or did not complete; session retained")
+        try:
+            transcript_path = attempt / "transcript.json"
+            save(transcript_path, pilot_driver.transcript(sid))
+            verdict = audit.audit_pilot(transcript_path, sid, commits=(a.repo_commit,), single_commit=True)
+            save(attempt / "audit.json", verdict)
+            if not verdict["passed"]:
+                if any(hit["kind"] == "missing-or-unreadable-transcript" for hit in verdict["hits"]):
+                    raise RuntimeError("the transcript capture could not be audited")
+                save(attempt / "void.json", {"session_id": sid, "reason": "transcript audit failed"})
+                print(json.dumps({"batch": tag, "state": "void", "retained_session": sid}),
+                      file=sys.stderr, flush=True)
+                continue
+            usage = pilot_driver.mj("usage", "--session", sid)
+            save(attempt / "usage.json", usage)
+            model = provider_model(usage, command, turn, a.provider_model)
+            data = fetch_output(sid)["text"].encode("utf-8")
+            (attempt / a.output).write_bytes(data)
+            validate_payload_verdicts(load(batch_path / "items.json"), data)
+            producer = {"sealed": True, "session_id": sid, "profile": state["profile_id"],
+                        "launch_profile": launch["profile"], "config": load(settings_path),
+                        "provider_model": model, "command": command, "turn": turn, "output_sha256": sha(data)}
+            save(attempt / "receipt.json", {"producer": producer,
+                                          "evidence_sha256": {name: sha((attempt / name).read_bytes())
+                                                              for name in EVIDENCE_FILES}})
+        except (OSError, KeyError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f"judge {sid}: {error}; session retained") from error
 
 
 def run_unit(batch_path, judge=None):
@@ -266,7 +460,8 @@ def run_unit(batch_path, judge=None):
     if out_path.exists():
         # An existing output from another model is not this invocation's result: say so rather than
         # republish it (for example judge B first run on Opus, then rerun with --model gpt-6.1-sol).
-        producer = json.loads(out_path.read_text()).get("producer") or {}
+        cached = json.loads(out_path.read_text())
+        producer = cached.get("producer") or {}
         made_by = (producer.get("config") or {}).get("model")
         made_on = producer.get("profile")
         # A split-judge invocation pins one side's model, so an output that predates producer records
@@ -308,7 +503,8 @@ def run_unit(batch_path, judge=None):
         source = ["--bundle", a.bundle] if a.bundle else ["--project-directory", REPO]
         sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", a.target,
                  *source, "--effort", "high", "--review", "off", "--no-project-memory",
-                 "--no-github-events", "--no-github-credentials", "--subagents", "none", "--title", f"review-arms {V.name} {tag}",
+                 "--no-github-events", "--no-github-credentials", "--subagents", "none",
+                 "--title", f"review-arms {V.name} {tag}",
                  timeout=900)["session_id"]
         rec = {"session_id": sid, "profile": profile, "time_ns": time.time_ns()}
         save(rec_path, rec)
@@ -360,7 +556,7 @@ def run_unit(batch_path, judge=None):
         # Each retry marks its profile exhausted, so the retries end.
         with lock:
             exhausted.update({rec["profile"], s.get("profile_id")} - {None})
-        mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+        suspend(sid)
         rec_path.rename(V / "sessions" / f"quota-batch-{tag}-{sid[:12]}.json")
         print(json.dumps({"batch": tag, "state": "quota", "session": sid, "profile": s.get("profile_id")}), flush=True)
         return run_unit(batch_path, judge)
@@ -391,7 +587,7 @@ def run_unit(batch_path, judge=None):
     save(out_path, out)
     # A valid replacement makes the unit eligible again.
     (V / "out" / f"invalid-{tag}.json").unlink(missing_ok=True)
-    mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+    suspend(sid)
     return tag, "done"
 
 

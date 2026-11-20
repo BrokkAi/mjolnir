@@ -401,6 +401,47 @@ fn network_url(url: &str, strip_http_userinfo: bool) -> Result<std::borrow::Cow<
     Ok(value.into())
 }
 
+/// Whether a Git source names the host's filesystem or loopback network.
+/// Bundle validation rejects local paths and file URLs before checkout.
+pub fn is_host_only_git_source(source: &str) -> bool {
+    let source = source.trim();
+    if crate::path_completion::looks_like_path(source) {
+        return true;
+    }
+    if source.contains("://")
+        || source
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:"))
+    {
+        return Url::parse(source).is_ok_and(|url| {
+            url.scheme() == "file" || url.host_str().is_some_and(is_loopback_git_host)
+        });
+    }
+    let Some((authority, _)) = source.split_once(':') else {
+        return true; // Git interprets a bare name as a relative filesystem path.
+    };
+    if authority.contains(['/', '\\']) {
+        return true;
+    }
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    if host.starts_with('[') {
+        // Git recognizes the colon after a bracketed IPv6 host as the path separator.
+        let endpoint = &source[authority.len() - host.len()..];
+        return endpoint
+            .split_once("]:")
+            .is_some_and(|(host, _)| is_loopback_git_host(host));
+    }
+    is_loopback_git_host(host)
+}
+
+fn is_loopback_git_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 /// Return a URL suitable for diagnostics or persistence in user-visible state.
 /// Userinfo is removed from both URL and scp-style SSH spellings.
 pub fn display_url(url: &str) -> String {
@@ -1007,8 +1048,31 @@ mod tests {
             "ssh://git@example.com/repo.git",
             "git://example.com/repo.git",
             "git@example.com:org/repo.git",
+            "git@example.com:path@[::1]:repo.git",
         ] {
             assert!(validate_network_url(url).is_ok(), "rejected {url}");
+            assert!(
+                !is_host_only_git_source(url),
+                "classified {url} as host-only"
+            );
+        }
+        for url in [
+            "git://127.192.1.9/repo.git",
+            "ssh://git@[::1]/repo.git",
+            "git@LOCALHOST:repo.git",
+        ] {
+            assert!(validate_network_url(url).is_ok(), "rejected {url}");
+            assert!(
+                is_host_only_git_source(url),
+                "missed host-only source {url}"
+            );
+        }
+        for url in ["file:///tmp/repo", "relative/repo", r"C:\git\repo"] {
+            assert!(validate_network_url(url).is_err(), "accepted {url}");
+            assert!(
+                is_host_only_git_source(url),
+                "missed host-only source {url}"
+            );
         }
     }
 

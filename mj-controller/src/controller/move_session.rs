@@ -2894,6 +2894,60 @@ impl Controller {
         Ok(())
     }
 
+    /// A captured Move still clones the recorded origin before unpacking the
+    /// transfer. Check it while the source barrier can still be released.
+    fn validate_move_bundle_sources(
+        &self,
+        operation: &MoveOperation,
+        manifest: &mj_checkpoint::archive::ArchiveManifest,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        let target = operation
+            .selection
+            .target_template_id
+            .as_ref()
+            .and_then(|id| self.config.targets.get(id));
+        if !target.is_some_and(|target| target.container().is_some()) {
+            return Ok(());
+        }
+        let Some(origin) = manifest
+            .repositories
+            .iter()
+            .map(|repository| repository.metadata.origin.as_str())
+            .find(|origin| {
+                !origin.is_empty() && mj_core::remote_git::is_host_only_git_source(origin)
+            })
+        else {
+            return Ok(());
+        };
+        use mj_core::targets::storage::{LOCAL_STORAGE_HOST, session_storage_paths};
+        let host = operation.source_target.as_ref().map(|source| {
+            session_storage_paths(source, &operation.selection.session_id, None).host
+        });
+        let host = match host.as_deref() {
+            Some(host) if host != LOCAL_STORAGE_HOST => host.to_owned(),
+            Some(_) => {
+                // Read the name of the engine host, outside the source container.
+                let command =
+                    crate::targets::CommandSpec::new("hostname", std::iter::empty::<&str>())
+                        .purpose("identify the source container host");
+                executor
+                    .execute(&command)
+                    .ok()
+                    .filter(|output| output.status == 0)
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .map(|name| name.trim().to_owned())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "the local container host".into())
+            }
+            None => "the source host".into(),
+        };
+        Err(mj_core::refusal::Refusal::precondition(format!(
+            "Git source {} is reachable only from {host}, and Move clones from the source. Keep the existing environment on {host} for an in-place Move, or set the checkout's origin to a URL the destination can reach and retry.",
+            mj_core::remote_git::display_url(origin)
+        )).into())
+    }
+
     pub(super) fn validate_move_checkpoint(
         &self,
         operation: &MoveOperation,
@@ -2912,6 +2966,34 @@ impl Controller {
             "destination configuration changed during move"
         );
         let id = &operation.selection.session_id;
+        let bundle_move = !operation.in_place && operation.workspace_transfer.is_some();
+        if bundle_move || preparation.is_some() {
+            let checkpoint = operation
+                .restore_artifact()
+                .or(self.state.sessions[id].checkpoint.as_deref())
+                .context("no move checkpoint")?;
+            let verified = verify_archive_streaming(&checkpoint.archive_path)?;
+            if bundle_move {
+                current.validate_move_bundle_sources(operation, &verified.manifest, executor)?;
+            }
+            if let Some(prepared) = preparation {
+                let actual: Vec<_> = verified
+                    .canonical_session
+                    .queued_prompts
+                    .iter()
+                    .map(|p| p.command_id.as_str())
+                    .collect();
+                let expected: Vec<_> = prepared
+                    .queued_commands
+                    .iter()
+                    .map(|p| p.command_id.as_str())
+                    .collect();
+                ensure!(
+                    actual == expected,
+                    "pending queue changed before checkpoint capture; source retained, confirm Move again"
+                );
+            }
+        }
         current.validate_move_destination_paths(
             &self.state.sessions[id],
             operation.selection.target_template_id.as_deref().unwrap(),
@@ -2930,28 +3012,6 @@ impl Controller {
             bail!(
                 "destination repository source is missing checkpoint commit {}; source retained",
                 mismatch.missing_commit
-            );
-        }
-        if let Some(prepared) = preparation {
-            let checkpoint = operation
-                .restore_artifact()
-                .or(self.state.sessions[id].checkpoint.as_deref())
-                .context("no move checkpoint")?;
-            let verified = verify_archive_streaming(&checkpoint.archive_path)?;
-            let actual: Vec<_> = verified
-                .canonical_session
-                .queued_prompts
-                .iter()
-                .map(|p| p.command_id.as_str())
-                .collect();
-            let expected: Vec<_> = prepared
-                .queued_commands
-                .iter()
-                .map(|p| p.command_id.as_str())
-                .collect();
-            ensure!(
-                actual == expected,
-                "pending queue changed before checkpoint capture; source retained, confirm Move again"
             );
         }
         Ok(())

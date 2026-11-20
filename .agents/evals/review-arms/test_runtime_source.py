@@ -31,6 +31,7 @@ elif args[0] == "sessions":
            "last_turn_outcome": {"command_id": s.get("command"), "outcome": {"kind": "completed"}}}
 elif args[0] == "message":
  s["command"] = opt("--command-id")
+ result = {"session_id": "fixture-session", "via": "turn", "turn_id": 1}
  text = pathlib.Path(opt("--prompt-file")).read_text()
  (root / "sent-prompt.txt").write_text(text)
  if "Write the brief" in text:

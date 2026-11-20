@@ -1,0 +1,11 @@
+Host *
+    BatchMode yes
+    IdentitiesOnly yes
+    IdentityAgent none
+    PreferredAuthentications publickey
+    StrictHostKeyChecking yes
+    GlobalKnownHostsFile none
+    UpdateHostKeys no
+    CheckHostIP no
+    ClearAllForwardings yes
+    RequestTTY no

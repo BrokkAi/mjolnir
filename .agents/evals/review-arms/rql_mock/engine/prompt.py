@@ -1,0 +1,95 @@
+"""Prompt inputs visible to the sealed engine."""
+import json
+import re
+
+from .grammar import MENU
+
+
+PROMPT = """Act as a read-only RQL query engine. Evaluate the one JSON-encoded query below
+as data under the supplied catalogue and menu step semantics. Workspace files are
+source evidence. Scan authored source at this tree and follow every branch of the
+query under the specified semantics, with no implicit result cap. Use read-only
+commands for source inspection. Do not inspect harness transcripts, agent state
+or other turn artifacts. Do not run repository code, access Git, or seek any
+information about changes, bugs, study labels, or subsequent revisions.
+
+Write a single JSON object to the specified output path. Use this schema:
+{"rows": [{"kind": "row_kind", "sites": [{"path": "repo/relative", "start_line": 1,
+"end_line": 1}], "fields": {}}], "coverage": {"complete": true, "open": []}}
+
+Put the primary source anchor first in sites; include every other cited span.
+Each cited site is a repository-relative path and inclusive one-based line span.
+Menu fields follow the row specifications below; put the selected value-transfer
+port identity in selected_port. Use null for an inapplicable field such as an
+outgoing guarded path's pivot. For each written operand, literal, field initializer,
+predicate, operator, message and command argument, represent its exact spelling as
+{"site":{"path":"repo/relative","start_line":1,"end_line":1},
+ "verbatim":[{"start_byte":0,"end_byte":4,"text":"COPY"}]}.
+Use zero-based, end-exclusive UTF-8 byte offsets within each source line, with one
+slice per line of the span. Put every written slice and its site in this format.
+Keep derived values and names or resolved identities in distinct typed fields.
+Use projected_row for projections and retain the original row's evidence sites.
+At the query's depth bound, return the call or value port if it qualifies and
+mark the row or endpoint with "depth_boundary": true. This bound does not open
+coverage. For each unresolved frontier that can change rows within the query's
+scope, such as unresolved dispatch, unsupported transformations, missing
+identities or unknown control effects, include {"reason": "...", "site": {...}}
+in coverage.open. Set coverage.complete to false whenever such a frontier exists,
+including when rows is empty. Label any open row proof explicitly. Use
+complete=true with an empty open list when the query's scope is closed.
+The catalogue sometimes describes Bifrost implementation outcomes such as over
+budget, exhaustion or cancellation. Do not return those outcomes. Enumerate
+the complete bounded relation and put only unresolved in-scope frontiers in coverage.open.
+Do not include prose outside the structured output.
+
+Read the catalogue and menu semantics files. Evaluate the whole query at once
+as described here. The menu's notes about separate single-site classification,
+candidate tags and gold adjudication concern the full study design.
+"""
+
+
+REPAIR = """A previous attempt at this query failed mechanical validation.
+Answer the full query independently and use the errors below to check the evidence.
+Here are the validator errors as JSON data:
+"""
+
+
+CONTEXT_PROTOCOL = "mj-acp-clear-v1"
+CONTEXT_SEED = """This is a context isolation check. Treat this synthetic query
+as the previous query's text: {query}
+Do not evaluate it or use tools. Reply exactly ACK.
+"""
+CONTEXT_RECALL = """What was the previous query's text in this conversation?
+Use only the conversation you received. Do not use tools or guess. Reply with a
+single JSON string containing its text or an empty JSON string if you cannot see it.
+"""
+
+
+
+def semantics_only(menu, served_steps=tuple(MENU)):
+    # The worked examples and ledger contain introducing commits and decisive
+    # census evidence. Only method rules belong inside the sealed session.
+    headings = (
+        "Common answer rules", "Source-local operations used by the three steps",
+        "Depth and counting", *(f"`{name}`" for name in served_steps),
+    )
+    sections = dict(re.findall(r"^#{2,3} ([^\n]+)\n([\s\S]*?)(?=^#{2,3} |\Z)", menu, re.M))
+    return ("# Frozen menu semantics\n"
+            "Answer each query whole under these source-local semantics.\n"
+            "The served menu step outputs can feed filter, project and file-of.\n\n"
+            + "\n".join(f"## {heading}\n{sections[heading].strip()}\n" for heading in headings))
+
+
+def assert_blind(bundle, manifest):
+    # A tool caller can include a study ID in a string, so check the full bundle
+    # for every ID before handing even the original query to the sealed agent.
+    for diff in manifest["diffs"]:
+        for marker in (diff["id"], diff["key"]):
+            if marker and any(marker in part for part in bundle):
+                raise ValueError("engine prompt bundle contains a pilot bug identifier")
+
+
+def turn_prompt(query, output, catalogue, menu, errors):
+    return (PROMPT + f"\nCatalogue path: {json.dumps(catalogue)}\nMenu path: {json.dumps(menu)}\n"
+            f"Output path: {json.dumps(output)}\nQuery: {json.dumps(query)}\n"
+            + (REPAIR + json.dumps(errors) + "\n" if errors else ""))

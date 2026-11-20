@@ -24,10 +24,11 @@ import threading
 import time
 import traceback
 
-SCRIPTS = pathlib.Path(__file__).resolve().parent
+SCRIPTS = pathlib.Path(os.environ.get("REVIEW_ARMS_SCRIPTS", pathlib.Path(__file__).resolve().parent)).resolve()
 # Experiment data (instance, corpus, runs) lives outside the repository.
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 MJX = SCRIPTS / "mjx"
+MJ_INSTANCE_ARGS = ()
 # The mj instance mjx reaches (see mjx): the default instance, or the private one of the
 # earlier stages. Each keeps its workspace record in its own directory under ROOT.
 if os.environ.get("REVIEW_ARMS_INSTANCE", "default") == "private":
@@ -97,6 +98,19 @@ ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
              "OX": ["gpt-6.1-terra:high"] * 3, "AF2": ["gpt-6.1-terra:high"] * 3})
 
 
+def use_named_instance(name):
+    """Point the study drivers at one named instance through mjx."""
+    if (not re.fullmatch(r"[a-zA-Z0-9._-]{1,64}", name) or name in (".", "..", "default")
+            or os.environ.get("REVIEW_ARMS_INSTANCE", "default") != "default"):
+        raise ValueError("use a dedicated named instance and unset REVIEW_ARMS_INSTANCE")
+    global INSTANCE, STORE, MJ_INSTANCE_ARGS
+    home = pathlib.Path.home()
+    INSTANCE = home / ".config/mjolnir/instances" / name
+    STORE = home / ".local/share/mjolnir/instances" / name / "mj.sqlite3"
+    MJ_INSTANCE_ARGS = ("--instance", name)
+    return INSTANCE
+
+
 def workspace_id():
     """Read the selected instance's workspace only when a new session is launched."""
     path = INSTANCE / "workspace.json"
@@ -114,11 +128,25 @@ def save(path, value):
     tmp.replace(path)
 
 
+def mj_invocation(*args):
+    return [str(MJX), *MJ_INSTANCE_ARGS, *map(str, args)]
+
+
 def mj(*args, timeout=300):
-    result = subprocess.run([str(MJX), *map(str, args), "--json"], capture_output=True, timeout=timeout)
+    result = subprocess.run(mj_invocation(*args, "--json"), capture_output=True, timeout=timeout)
+    try:
+        value = json.loads(result.stdout)
+    except ValueError:
+        if not result.returncode:
+            raise
+        value = None
+    # Both commands print the wait result before setting their exit status.
+    outcome = value.get("outcome") if isinstance(value, dict) else None
+    if args[0] in {"wait", "prompt"} and isinstance(outcome, str) and outcome:
+        return value
     if result.returncode:
-        raise RuntimeError(f"mj {' '.join(map(str, args[:2]))}: {result.stderr.decode()[-1500:]}")
-    return json.loads(result.stdout)
+        raise RuntimeError(f"mj {' '.join(map(str, args[:2]))}: {result.stderr.decode(errors='replace')[-1500:]}")
+    return value
 
 
 def session(sid):
@@ -126,31 +154,140 @@ def session(sid):
     return value["sessions"][0] if "sessions" in value else value
 
 
-def quota_hold(scope=None, *, floor=None, weekly=False, strict=False):
+def valid_usage(path):
+    try:
+        tokens = json.loads(path.read_text())["totals"]["total_tokens"]["tokens"]
+        return type(tokens) is int and tokens >= 0
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def image_digest(image):
+    return "sha256:" + image.removeprefix("sha256:")
+
+
+def retain_pilot_session(d, sid, reason, **evidence):
+    save(d / "failed.json", {"retained_session": sid, "reason": reason, **evidence})
+    return "retained-failure"
+
+
+def durable_pilot_files(root, d, paths):
+    directories = []
+    for ancestor in (d, *d.parents):
+        directories.append(ancestor)
+        if ancestor == root:
+            break
+    else:
+        raise ValueError("pilot evidence is outside the run root")
+    for path in (*paths, *directories):
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allow_rql=False):
+    """Validate and flush the recorded evidence before destroying its exact session."""
+    import audit
+
+    launch = json.loads((d / "launch.json").read_text())
+    if MJ_INSTANCE_ARGS != ("--instance", launch["instance"]) or launch["session_id"] != sid:
+        raise ValueError("pilot teardown requires the recorded launch in a named instance")
+    names = ("transcript.json", "usage.json", output, "cache-attestation.json", "mcp-reconnect-result.json",
+             "pre-inventory.json", "settings.json", "launch.json", "prompt-completion.json",
+             *(p.name for p in sorted(d.glob("fix-*-completion.json"))),
+             *((f"queries-{sid}.jsonl",) if allow_rql else ()))
+    paths = [d / name for name in names]
+    record = {"session_id": sid, "instance": MJ_INSTANCE_ARGS[-1], "profile": profile, "model": model,
+              "effort": effort, "output": output,
+              "evidence_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}}
+    if json.loads((d / "cache-attestation.json").read_text())["passed"] is not True:
+        raise ValueError(f"pilot check failed: {d / 'cache-attestation.json'}")
+    reconnect = json.loads((d / "mcp-reconnect-result.json").read_text())
+    if reconnect["passed"] is not True or reconnect["session_id"] != sid or not (d / output).read_bytes().strip():
+        raise ValueError("pilot capture lacks output or reconnect evidence for this session")
+    pages = json.loads((d / "transcript.json").read_text())
+    if not pages or any(page["session_id"] != sid for page in pages):
+        raise ValueError("pilot transcript is missing or belongs to another session")
+    usage = json.loads((d / "usage.json").read_text())
+    commands = (d / "prompt-completion.json", *sorted(d.glob("fix-*-completion.json")))
+    if usage["session_id"] != sid or not valid_usage(d / "usage.json"):
+        raise ValueError("pilot usage is missing or belongs to another session")
+    selection = {"model": model, "effort": effort}
+    settings = json.loads((d / "settings.json").read_text())
+    if (any(settings.get(key) != value for key, value in selection.items())
+            or any(usage["turn_selections"].get(json.loads(p.read_text())["command_id"]) != selection for p in commands)):
+        raise ValueError(f"pilot usage does not identify every model prompt as {model}/{effort}")
+    receipt = d / "receipt.json"
+    if receipt.exists():
+        if json.loads(receipt.read_text()) != record:
+            raise ValueError(f"pilot capture changed since it was recorded: {receipt}")
+    else:
+        save(receipt, record)
+    durable_pilot_files(root, d, [*paths, receipt])
+    before = json.loads((d / "pre-inventory.json").read_text())
+    commits = [*before["commits"], before["head_tree"], before["base_tree"]]
+    report = audit.audit_pilot(d / "transcript.json", sid, commits=commits, allow_rql=allow_rql)
+    save(d / "audit.json", report)
+    if not report["passed"]:
+        return retain_pilot_session(d, sid, "stored transcript did not pass the audit", void_reason=report["hits"])
+    durable_pilot_files(root, d, [d / "audit.json"])
+
+    cleanup = d / "destroy.json"
+    if not cleanup.exists():
+        try:
+            live = mj("sessions", "--all")["sessions"]
+            if any(row["id"] == sid and row.get("lifecycle") for row in live):
+                result = mj("destroy", "--session", sid, timeout=900)
+                if result.get("session_id") != sid or result.get("accepted") is not True:
+                    raise RuntimeError("destroy did not acknowledge the recorded session")
+            else:
+                result = {"session_id": sid, "already_absent": True}
+            save(cleanup, result)
+            durable_pilot_files(root, d, [cleanup])
+        except (OSError, KeyError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            save(d / "teardown-error.json", {"session_id": sid, "error": str(error)})
+            return "needs-recovery: inspect teardown-error.json"
+    return "done"
+
+
+def quota_hold(scope=None, *, floor=None, weekly=False, strict=False, short_floor=None):
     """Why a new job must not start, or None. REVIEW_ARMS_QUOTA_FLOOR="codex4=25,..." names
     shared profiles whose least window must keep that many percent (a coordinator's limit,
     2026-11-16: codex4 is shared with other sessions). Checked once per launch, from the
     daemon's stored report; a missing or unreadable report holds the job, since unknown is
     not "enough". A caller can supply its own floor, restrict it to weekly windows, and
-    require the remaining percentage to strictly exceed the floor."""
+    require the remaining percentage to strictly exceed the floor. A weekly Fable
+    check requires both the general and the Fable-specific weekly windows.
+    An optional short floor also requires a usable five-hour window."""
     if floor is None:
         floor = os.environ.get("REVIEW_ARMS_QUOTA_FLOOR")
     if not floor:
         return None
     for spec in floor.split(","):
         profile, _, percent = spec.partition("=")
-        rows = mj("quota", "--profile", profile).get("profiles") or []
-        report = (rows[0].get("report") or {}) if rows else {}
-        windows = report.get("windows") or []
+        try:
+            rows = mj("quota", "--profile", profile).get("profiles") or []
+            report = (rows[0].get("report") or {}) if rows else {}
+            windows = report.get("windows") or []
+            pools = [(window, (window.get("model_scope") or "").split(","))
+                     for window in windows]
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+                RuntimeError, OSError, subprocess.SubprocessError) as error:
+            return f"{profile}: no usable quota report ({error})"
         # Antigravity reports separate Gemini and Claude/GPT pools. Unscoped
         # windows apply to every model; an absent matching pool stays unknown.
         if scope:
-            windows = [w for w in windows if not w.get("model_scope")
-                       or scope in w["model_scope"].split(",")]
+            windows = [w for w, models in pools if models == [""] or scope in models]
+        short = [w for w in windows if w.get("duration_seconds") == 18_000] if short_floor is not None else None
         if weekly:
             windows = [w for w in windows if w.get("duration_seconds") == 7 * 24 * 60 * 60]
         left = [w.get("remaining_percent") for w in windows]
-        if not left or None in left or report.get("error"):
+        if (not left or any(type(value) not in {int, float} or not 0 <= value <= 100 for value in left)
+                or report.get("error")
+                or (weekly and scope == "fable"
+                    and {bool(w.get("model_scope")) for w in windows} != {False, True})):
             return f"{profile}: no usable quota report ({json.dumps(report)[:300]})"
         least = min(windows, key=lambda w: w["remaining_percent"])
         remaining = least["remaining_percent"]
@@ -161,7 +298,32 @@ def quota_hold(scope=None, *, floor=None, weekly=False, strict=False):
                         f"(resets {least.get('resets', 'unknown')}, "
                         f"epoch {least.get('resets_at_epoch_seconds')})")
             return f"{profile}: {remaining}% left, below the floor of {percent}%"
+        if short is not None:
+            left = [w.get("remaining_percent") for w in short]
+            if not left or any(type(value) not in {int, float} or not 0 <= value <= 100 for value in left):
+                return f"{profile}: no usable 5-hour quota report ({json.dumps(report)[:300]})"
+            if min(left) <= short_floor:
+                return f"{profile}: {min(left)}% 5-hour remaining, requires above {short_floor}%"
     return None
+
+
+PILOT_TERRA_QUOTA_COST = 20
+
+
+def pilot_weekly_hold(profile, *, scope=None, cost=0, quota=None):
+    """Check the pilot's weekly and applicable short-window floors from one report."""
+    # PLAN-rql-census.md sets the floor at 25%. There is no measured Fable
+    # per-session weekly cost in the pilot, so its launches use the floor itself.
+    threshold = 2500 + cost
+    floor = f"{profile}={threshold // 100}.{threshold % 100:02}"
+    quota = quota_hold if quota is None else quota
+    if scope is None:
+        return quota(floor=floor, weekly=True, strict=True)
+    if scope == "fable":
+        # Coordinator ruling, 2026-11-20: the Claude5 smoke measured 5–6 points
+        # per Fable/high answer. A 20% reserve leaves room for other sessions.
+        return quota(scope, floor=floor, weekly=True, strict=True, short_floor=20)
+    return quota(scope, floor=floor, weekly=True, strict=True)
 
 
 def wait_idle(sid, limit=1200):
@@ -359,6 +521,20 @@ def inventory(place, mode, base):
     if out.returncode:
         raise RuntimeError("inventory: " + out.stderr.decode()[-1500:])
     return json.loads(out.stdout)
+
+
+def attest_pilot_cache(d, place, intro, base):
+    """Check the mounted cache from inside the session before any model turn."""
+    command = ["podman", "exec", "-i", place["container"], "python3", "-c",
+               pathlib.Path(__file__).with_name("pilot_cache_probe.py").read_text(), place["cwd"], intro, base]
+    result = subprocess.run(command, capture_output=True, timeout=300)
+    if result.returncode:
+        raise RuntimeError(f"pilot cache probe failed: {result.stderr.decode()[-1500:]}")
+    evidence = json.loads(result.stdout)
+    save(d / "cache-attestation.json", evidence)
+    if not evidence["passed"]:
+        raise RuntimeError(f"pilot Git cache contains history outside its pin: {d / 'cache-attestation.json'}")
+    return evidence
 
 
 def transcript(sid):
