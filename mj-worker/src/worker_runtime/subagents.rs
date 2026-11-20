@@ -452,6 +452,32 @@ pub(super) fn configure_claude_mailbox_hook(
     Ok(true)
 }
 
+/// Turn off Claude Code behavior that costs a managed child inference, tools
+/// or network work while doing nothing for a headless coding task (audited
+/// against Claude Code 2.1.326 with claude-agent-acp 0.108.0). The bridge asks
+/// for predicted next prompts, which can spend an extra model request on a
+/// turn; claude.ai connectors are enumerated, connected and listed at startup
+/// on an eligible login. Project instructions, skills, plugins and configured
+/// MCP servers do not depend on either. A child overrides the inherited user
+/// settings, which still apply to top-level sessions; an explicitly exported
+/// `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` is a deliberate choice and still
+/// wins.
+pub(super) fn configure_claude_subagent_settings(
+    root: &Path,
+    session_id: &str,
+    home: &Path,
+) -> Result<()> {
+    let path = home.join("settings.json");
+    if !(private_staged_home(root, session_id, home) && regular_file_or_absent(&path)) {
+        return Ok(());
+    }
+    edit_profile_json(&path, "staged Claude settings", |settings| {
+        settings.insert("promptSuggestionEnabled".into(), false.into());
+        settings.insert("disableClaudeAiConnectors".into(), true.into());
+        Ok(())
+    })
+}
+
 /// Keep the person's `~/.claude/CLAUDE.md` out of the session's project
 /// instructions. The session's configuration lives in the staged profile, so
 /// Claude Code finds that file only as an ancestor of any checkout under the
@@ -511,7 +537,7 @@ pub(super) fn configure_codex_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
 ) -> Result<bool> {
-    configure_codex_mcp_with_mailboxes(root, "", home, role, policy, true, true, false)
+    configure_codex_mcp_with_mailboxes(root, "", home, role, policy, true, true, false, false)
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the worker startup policy and owned MCP options.
@@ -524,6 +550,7 @@ fn configure_codex_mcp_with_mailboxes(
     mailboxes_enabled: bool,
     subtle_subagents: bool,
     review_tools: bool,
+    managed_subagent: bool,
 ) -> Result<bool> {
     if !private_staged_home(root, session_id, home) {
         return Ok(false);
@@ -537,9 +564,79 @@ fn configure_codex_mcp_with_mailboxes(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
+    let changed = configure_codex_mcp_servers(
+        &mut config,
+        &path,
+        root,
+        role,
+        policy,
+        mailboxes_enabled,
+        subtle_subagents,
+        review_tools,
+    )?;
+    let changed =
+        (managed_subagent && disable_codex_subagent_features(&mut config, &path)?) || changed;
+    if changed {
+        mj_core::config::atomic_write(&path, toml::to_string(&config)?.as_bytes())
+            .with_context(|| format!("write staged Codex configuration {}", path.display()))?;
+    }
+    Ok(true)
+}
+
+/// Codex features that cost a managed child context, tools, network work or
+/// startup latency while doing nothing for a headless coding task (audited
+/// against Codex 0.170.0). `apps` adds hosted connector tools and guidance and
+/// can hold the first tool catalog on a cold connector fetch; `plugins` adds
+/// guidance and a background marketplace sync, though the staged home carries
+/// no plugin cache; `remote_plugin` and `tool_suggest` fetch plugin
+/// suggestions on the first turn and add an install tool; `image_generation`
+/// adds a ~500-token tool that spends image quota. AGENTS.md injection, staged
+/// skills and configured MCP servers do not depend on any of these. Flags that
+/// add nothing to a headless session (browser and computer use, skill search)
+/// are left alone. A child overrides the inherited user configuration, which
+/// still applies to top-level sessions; a project configuration or profile
+/// session override that enables a feature is a deliberate choice for that
+/// scope and still wins.
+const CODEX_SUBAGENT_DISABLED_FEATURES: [&str; 5] = [
+    "apps",
+    "plugins",
+    "remote_plugin",
+    "tool_suggest",
+    "image_generation",
+];
+
+fn disable_codex_subagent_features(config: &mut toml::Table, path: &Path) -> Result<bool> {
+    let features = config
+        .entry("features")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("features in {} must be a table", path.display()))?;
+    let mut changed = false;
+    for feature in CODEX_SUBAGENT_DISABLED_FEATURES {
+        let disabled = toml::Value::Boolean(false);
+        if features.get(feature) != Some(&disabled) {
+            features.insert(feature.into(), disabled);
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// Returns whether the configuration changed.
+#[allow(clippy::too_many_arguments)] // The owned MCP options of the caller.
+fn configure_codex_mcp_servers(
+    config: &mut toml::Table,
+    path: &Path,
+    root: &Path,
+    role: Option<mj_core::subagent::SubagentMcpRole>,
+    policy: mj_core::config::ExecutionPolicy,
+    mailboxes_enabled: bool,
+    subtle_subagents: bool,
+    review_tools: bool,
+) -> Result<bool> {
     let name = mj_core::subagent::SUBAGENT_MCP_SERVER;
     if role.is_none() && !config.contains_key("mcp_servers") {
-        return Ok(true);
+        return Ok(false);
     }
     let servers = config
         .entry("mcp_servers")
@@ -626,12 +723,8 @@ fn configure_codex_mcp_with_mailboxes(
         let removed_review = servers
             .remove(mj_core::subagent::REVIEW_MCP_SERVER)
             .is_some();
-        if !(removed_agents || removed_review) {
-            return Ok(true);
-        }
+        return Ok(removed_agents || removed_review);
     }
-    mj_core::config::atomic_write(&path, toml::to_string(&config)?.as_bytes())
-        .with_context(|| format!("write staged Codex configuration {}", path.display()))?;
     Ok(true)
 }
 
@@ -645,6 +738,7 @@ pub(super) fn configure_codex_profile(
     policy: mj_core::config::ExecutionPolicy,
     options: crate::subagent_mcp::ParentTools,
     review_tools: bool,
+    managed_subagent: bool,
 ) -> Result<bool> {
     configure_codex_mailbox_hook(root, environment)?;
     configure_codex_mcp_with_mailboxes(
@@ -656,6 +750,7 @@ pub(super) fn configure_codex_profile(
         options.agent_mailboxes_enabled,
         options.subtle_subagents,
         review_tools,
+        managed_subagent,
     )
 }
 
@@ -1698,20 +1793,21 @@ console.log("OpenCode durable mailbox bridge passed");
     }
 
     #[test]
-    fn claude_settings_exclude_the_default_config_instructions_once() {
+    fn claude_child_settings_exclude_the_default_instructions_and_drop_noise_once() {
         let login = tempfile::tempdir().unwrap();
         let root = login.path().join("worker");
         let home = root.join("profile");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
             home.join("settings.json"),
-            br#"{"model":"opus","claudeMdExcludes":["/work/CLAUDE.md"]}"#,
+            br#"{"model":"opus","claudeMdExcludes":["/work/CLAUDE.md"],"promptSuggestionEnabled":true}"#,
         )
         .unwrap();
 
         for _ in 0..2 {
             exclude_default_claude_instructions(&root, "session", &home, Some(login.path()))
                 .unwrap();
+            configure_claude_subagent_settings(&root, "session", &home).unwrap();
         }
         let settings: serde_json::Value =
             serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap()).unwrap();
@@ -1722,7 +1818,10 @@ console.log("OpenCode durable mailbox bridge passed");
                 "claudeMdExcludes": [
                     "/work/CLAUDE.md",
                     login.path().join(".claude/CLAUDE.md"),
-                ]
+                ],
+                // The child overrides the person's explicit setting.
+                "promptSuggestionEnabled": false,
+                "disableClaudeAiConnectors": true,
             })
         );
 
@@ -1730,6 +1829,7 @@ console.log("OpenCode durable mailbox bridge passed");
         let own = login.path().join(".claude");
         std::fs::create_dir_all(&own).unwrap();
         exclude_default_claude_instructions(&root, "session", &own, Some(login.path())).unwrap();
+        configure_claude_subagent_settings(&root, "session", &own).unwrap();
         assert!(!own.join("settings.json").exists());
     }
 
@@ -2274,6 +2374,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
 model = "parent-model"
 [features]
 hooks = true
+apps = true
 [features.code_mode]
 enabled = false
 excluded_tool_namespaces = ["mcp__user_hidden"]
@@ -2300,6 +2401,9 @@ enabled = false
                 let original: toml::Value = toml::from_str(original).unwrap();
                 assert_eq!(config["model"], original["model"]);
                 assert_eq!(config["features"]["hooks"], original["features"]["hooks"]);
+                // A top-level session keeps the user's features.
+                assert_eq!(config["features"]["apps"].as_bool(), Some(true));
+                assert!(config["features"].get("plugins").is_none());
                 let code_mode = &config["features"]["code_mode"];
                 assert_eq!(code_mode["enabled"].as_bool(), Some(false));
                 assert_eq!(
@@ -2352,6 +2456,36 @@ enabled = false
                         .and_then(toml::Value::as_str),
                     (policy == ExecutionPolicy::ConfiguredApprovals).then_some("approve")
                 );
+                if role == SubagentMcpRole::Child {
+                    let child = || {
+                        configure_codex_mcp_with_mailboxes(
+                            root.path(),
+                            "",
+                            &home,
+                            Some(role),
+                            policy,
+                            true,
+                            true,
+                            false,
+                            true,
+                        )
+                        .unwrap()
+                    };
+                    assert!(child());
+                    let staged = std::fs::read_to_string(&path).unwrap();
+                    assert!(child());
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), staged);
+                    let config: toml::Value = toml::from_str(&staged).unwrap();
+                    // The child overrides even the user's explicit setting.
+                    for feature in CODEX_SUBAGENT_DISABLED_FEATURES {
+                        assert_eq!(config["features"][feature].as_bool(), Some(false));
+                    }
+                    assert_eq!(config["features"]["hooks"].as_bool(), Some(true));
+                    assert_eq!(
+                        config["mcp_servers"]["user-server"],
+                        original["mcp_servers"]["user-server"]
+                    );
+                }
                 assert!(configure_codex_mcp(root.path(), &home, None, policy).unwrap());
                 let disabled: toml::Value =
                     toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -2436,7 +2570,8 @@ enabled = false
                         policy,
                         true,
                         true,
-                        false
+                        false,
+                        false,
                     )
                     .unwrap()
                 );
@@ -2451,7 +2586,8 @@ enabled = false
                 ExecutionPolicy::ConfiguredApprovals,
                 true,
                 true,
-                false
+                false,
+                false,
             )
             .unwrap()
         );
@@ -2520,6 +2656,7 @@ enabled = false
                     ExecutionPolicy::ConfiguredApprovals,
                     true,
                     true,
+                    false,
                     false,
                 )
                 .unwrap()
@@ -3355,6 +3492,7 @@ mod review_gate_tests {
                         true,
                         true,
                         tools,
+                        false,
                     )
                     .unwrap();
                     let servers = codex_servers(&home);
@@ -3463,6 +3601,7 @@ mod review_gate_tests {
             true,
             true,
             true,
+            false,
         )
         .unwrap();
         let servers = codex_servers(&home);
@@ -3498,6 +3637,7 @@ mod review_gate_tests {
             true,
             true,
             false,
+            false,
         )
         .unwrap();
         let servers = codex_servers(&home);
@@ -3529,6 +3669,7 @@ mod review_gate_tests {
             true,
             true,
             true,
+            false,
         )
         .unwrap();
         configure_codex_mcp_with_mailboxes(
@@ -3540,6 +3681,7 @@ mod review_gate_tests {
             true,
             true,
             true,
+            false,
         )
         .unwrap();
         let servers = codex_servers(&home);

@@ -99,8 +99,18 @@ pub(super) fn load_materialized_session_summary_from(
 
     #[cfg(test)]
     super::tests::after_materialized_frontier_read();
-    let last_user_message = last_materialized_user_message(&connection, session_id)?;
-    let last_agent_message = last_materialized_agent_message(&connection, session_id)?;
+    // `/clear` starts a new conversation; the summary describes only that
+    // conversation, never the one before the boundary.
+    let conversation_start = last_materialized_context_boundary(&connection, session_id)?;
+    let last_user_message = last_materialized_user_message(&connection, session_id)?
+        .filter(|(position, _)| conversation_start.is_none_or(|start| *position > start));
+    let last_agent_message = last_materialized_agent_message_in(
+        &connection,
+        session_id,
+        conversation_start.unwrap_or(0),
+        None,
+        None,
+    )?;
     let last_agent_message_follows_last_user =
         last_agent_message
             .as_ref()
@@ -264,6 +274,22 @@ pub(super) fn materialized_user_message(
     Ok(None)
 }
 
+/// Where the newest `/clear` boundary sits, if the session has one.
+fn last_materialized_context_boundary(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<u64>> {
+    Ok(connection.query_row(
+        "SELECT MAX(position) FROM materialized_transcript_items
+         WHERE session_id = ?1 AND stable_id GLOB ?2",
+        params![
+            session_id,
+            format!("{}*", mj_core::archive::CONTEXT_BOUNDARY_PREFIX)
+        ],
+        |row| row.get::<_, Option<u64>>(0),
+    )?)
+}
+
 /// SQL form of `TranscriptItem::is_turn_start`: a user prompt (a user item
 /// that is not an elicitation reply) or a harness-started turn marker. Every
 /// store query that finds turn boundaries uses this, so loaded windows agree
@@ -296,13 +322,6 @@ pub(super) fn last_materialized_turn_start(
             |row| row.get::<_, u64>(0),
         )
         .optional()?)
-}
-
-pub(super) fn last_materialized_agent_message(
-    connection: &Connection,
-    session_id: &str,
-) -> Result<Option<(u64, String)>> {
-    last_materialized_agent_message_in(connection, session_id, 0, None, None)
 }
 
 /// The newest nonempty agent message inside one turn, flattened to text.
