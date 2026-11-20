@@ -4,7 +4,7 @@ This ExecPlan is a living document. The sections `Progress`, `Surprises & Discov
 
 ## Purpose / Big Picture
 
-The study plan `.agents/evals/review-arms/brief/PLAN-rql-census.md` asks whether a suitably enhanced RQL helps a brief writer, and through its brief a reviewer, catch relation bugs. Its Stage 2 pilot was registered in a lean form on 2026-11-20 (the "Lean pilot" section of that plan, which governs the pilot): arms N, G, R and R-loc on 35 development relation diffs, a mock RQL engine that answers by documented semantics under one display budget, and Fable/high judges. This ExecPlan builds the harness that runs it. When it's done, one command per stage runs the frozen job matrix: writers, then reviewers, then judges. Each stage is resumable, records usage, and leaves a readout that compares R against G, and R-loc against R.
+The study plan `.agents/evals/review-arms/brief/PLAN-rql-census.md` asks whether a suitably enhanced RQL helps a brief writer, and through its brief a reviewer, catch relation bugs. Its Stage 2 pilot was registered in a lean form on 2026-11-20 (the "Lean pilot" section of that plan, which governs the pilot): arms N, G, R and R-loc on 35 development relation diffs, a mock RQL engine that answers by documented semantics under one display budget, and Fable/high judges. This ExecPlan builds the harness that runs it. When it's done, one command runs the frozen job matrix diff by diff: for each admitted diff, its writers and then its reviewers, so diffs complete whole. A second command judges completed diffs, and a third computes the readout comparing R against G and R-loc against R. Each command is resumable and records usage.
 
 The study plan says *what* is measured and *why*. This ExecPlan says how the harness is built. Where they differ, the study plan wins.
 
@@ -16,8 +16,8 @@ The study plan says *what* is measured and *why*. This ExecPlan says how the har
 - [ ] Slice 4: RQL tool transport into sealed writer sessions (the Oz pattern), with the display budget and R-loc reduction at the delivery boundary.
 - [ ] Slice 5: launch harness: writer arms G, R and R-loc with replicates, then reviewers for N and every brief.
 - [ ] Slice 6: judging and readout: catch, per-fact recovery, containment and leak audit, the hand-check queue, and the contrasts.
-- [ ] Smoke: one diff end to end on a few percent of codex2, before the codex3 reset.
-- [ ] Launch: on codex3 after its reset (about 2026-11-22 14Z), then codex4 (about 2026-11-24 15Z), running whole diffs in turn.
+- [ ] Smoke: one diff end to end, on codex3 just after its reset. codex2 (22%) is below the study's 25% floor.
+- [ ] Launch: on codex3 after its reset (about 2026-11-22 14Z), then codex4 after its reset (about 2026-11-24 15Z), both above the 25% floor, running whole diffs in turn.
 
 ## Surprises & Discoveries
 
@@ -62,7 +62,9 @@ Selection: sort eligible keys, seeded shuffle within each repo, take 17 from mjo
 
 **Engine** (host side, Slice 3): `answer(commit, query_text) -> {"status": "ok"|"parse_error"|"engine_error", "rows": [...], "total": int, "provenance": {...}}`. Rows are complete under the step's semantics and sorted in a stable order. The cache key is `(commit, normalized query)`, shared by R and R-loc. A query that doesn't parse against the frozen grammar (documented forms from the catalogue, plus the Slice 2 steps) gets `parse_error` with the parser's message, and no free text is answered. Provenance records the engine model, tokens and the steps answered, for H's later token matching.
 
-**Transport** (Slice 4): one MCP tool, `rql_query(query: string, page: int = 1)`, served over SSH into the sealed writer session as Oz does. The host server looks up the session's assigned diff and arm. It calls the engine (cached, so later pages cost nothing extra), then returns page `page` of `page_rows` rows in the engine's stable order, with `total`, `page` and `pages`. Every row stays reachable by paging. For R-loc it first reduces every row to its source locations (each path and line span the row carries, with snippets, signatures and values removed). Every call is logged with session, diff, arm, query, answer hash and latency.
+**Row shape** (Slices 3, 4 and 6): every engine row is `{"kind": "<row kind>", "sites": [{"path": "<repo-relative>", "start_line": N, "end_line": N}], "fields": {...}}`. `sites` lists every source location the row carries (for a flow row, both ends). `fields` holds the row's other content: values copied verbatim, names and signatures. R-loc's reduction keeps `kind` and `sites` and drops `fields`.
+
+**Transport** (Slice 4): one MCP tool, `rql_query(query: string, page: int = 1)`, served over SSH into the sealed writer session as Oz does. The host server looks up the session's assigned diff and arm. It calls the engine (cached, so later pages cost nothing extra), then returns page `page` of `page_rows` rows in the engine's stable order, with `total`, `page` and `pages`. Every row stays reachable by paging. For R-loc it first reduces every row to its source locations (each path and line span the row carries, with snippets, signatures and values removed). Every call is logged with session, diff, arm, query, the requested page, the delivered rows (or their per-row hashes), the answer hash and latency. The readout uses this to tell a decisive fact on a delivered page from one the writer never paged to.
 
 **Judgments** (Slice 6): `/mnt/optane/review-arms-pilot/judge/<opaque id>.json` holds `{"catch": bool, "recovered_facts": [fact ids], "matched_defects": [...]}` for reviewer outputs and `{"contains_decisive": bool, "contained_facts": [...], "states_defect": bool}` for briefs, with the private ID map kept apart as in `brief_score.py`. The hand-check queue is every diff whose arms' judged outcomes differ, plus the manifest's agreement sample.
 
@@ -76,13 +78,13 @@ The slices and their ownership. Each slice owns its files, and no two slices edi
 5. Launch: additive changes to `brief_driver.py` and `driver.py` behind new options (`--manifest`, `--arm`, `--replicate`), so earlier studies' commands behave as before.
 6. Judging and readout: new `pilot_judge.py` and `pilot_readout.py`, reusing `brief_score.py`'s blinding.
 
-Builds are Python only. Tests use hand-written fakes for the engine and the sessions. The only live model use before launch is the smoke run.
+Builds are Python only. Tests use hand-written fakes for the engine and the sessions. Live model use before launch is the smoke run and the fidelity measurement: real Fable engine answers on 20 queries per served step, Terra/high gold enumeration, and fresh re-asks for stability (study plan, Lean pilot).
 
 ## Validation and Acceptance
 
 - The manifest's draws are reproducible: rerunning `select_pilot.py` reproduces the file byte for byte.
 - Smoke: for one diff, every arm's writer and both reviewers run, the R and R-loc query logs show paging and the R-loc reduction, and judges produce records for every output.
-- Before launch, the engine's fidelity sample (20 queries per served step) is measured and reported, as the study plan requires.
+- Before launch, the engine's fidelity sample (20 queries per served step) is measured live and reported, as the study plan requires; an added step that fails is removed before the manifest is re-frozen.
 - The readout reproduces its numbers from the stored judgments alone.
 
 ## Idempotence and Recovery
