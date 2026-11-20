@@ -255,6 +255,10 @@ impl OriginDeltaSuspend {
                 let result = controller
                     .restart_worker_with_installed_binary(session_id, executor, restart)
                     .await;
+                // The restart releases admission only once the launch succeeds.
+                // Release it here too (idempotent) so a failed launch never
+                // waits for a draining handoff that is waiting for this hold.
+                executor.begin_resumable_work()?;
                 executor.end_resumable_work("record managed clone suspend worker readiness")?;
                 result?
             };

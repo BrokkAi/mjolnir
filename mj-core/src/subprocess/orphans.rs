@@ -37,7 +37,9 @@ pub fn become_subreaper() -> io::Result<()> {
 }
 
 fn start_ticks(pid: u32) -> io::Result<u64> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    // The command name may hold any bytes; only fields after its closing
+    // parenthesis are parsed, so lossy decoding cannot change them.
+    let stat = String::from_utf8_lossy(&fs::read(format!("/proc/{pid}/stat"))?).into_owned();
     stat.rsplit_once(')')
         .and_then(|(_, fields)| fields.split_whitespace().nth(19))
         .and_then(|ticks| ticks.parse().ok())
