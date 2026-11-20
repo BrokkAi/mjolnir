@@ -40,6 +40,10 @@ that is the same for every package.
   rule documents. Other people are building sibling packages in this same
   working tree at this moment.
 
+Do not start agents or forks of your own. The coordinator decides how many
+units run at once (the harness allows twenty in total, helpers included), and
+every one of them is paid for by the owner.
+
 ## How to work
 
 - Follow the Rust source. When you are unsure what Rust does, read the source

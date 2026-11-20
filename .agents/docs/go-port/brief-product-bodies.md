@@ -23,6 +23,10 @@ twice.
    `go/crates/...`), for the Go names of library functions. Never guess one:
    open the package.
 
+Do not start agents or forks of your own. The coordinator decides how many
+units run at once (the harness allows twenty in total, helpers included), and
+every one of them is paid for by the owner.
+
 ## How to work
 
 For each file, top to bottom:

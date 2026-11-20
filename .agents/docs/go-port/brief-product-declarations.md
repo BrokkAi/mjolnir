@@ -20,6 +20,10 @@ so the measure of your work is that nobody has to change a declaration later.
    the types whose `Arc` must be `rs.Arc`.
 3. The crate's `src/lib.rs` (or `main.rs`) and a skim of its modules.
 
+Do not start agents or forks of your own. The coordinator decides how many
+units run at once (the harness allows twenty in total, helpers included), and
+every one of them is paid for by the owner.
+
 ## Steps
 
 Run everything from the repository root.

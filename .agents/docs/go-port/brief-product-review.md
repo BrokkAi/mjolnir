@@ -17,6 +17,10 @@ mistakes below pass every test.
 `python3 go/port/portmap.py file <path.rs>`, then the Rust file and the Go
 file side by side.
 
+Do not start agents or forks of your own. The coordinator decides how many
+units run at once (the harness allows twenty in total, helpers included), and
+every one of them is paid for by the owner.
+
 ## What to look for
 
 Go through each function with both texts open. For each one ask:
