@@ -425,6 +425,12 @@ pub(super) async fn run_daemon_runtime(
         cancellation.clone(),
     ));
 
+    let jev_notice_state = state.clone();
+    let jev_notice_cancel = cancellation.clone();
+    let jev_notices = mj_core::runtime::spawn(async move {
+        super::jev_limit::publish_notices(&jev_notice_state, jev_notice_cancel).await
+    });
+
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
         cancellation.clone(),
@@ -1031,6 +1037,11 @@ pub(super) async fn run_daemon_runtime(
             .await
             .context("notification pruning task panicked")
             .and_then(std::convert::identity),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join Jev notice publisher",
+        jev_notices.await.map_err(anyhow::Error::new),
     );
     if let Some(phone_task) = phone_task {
         epilogue.record(

@@ -357,6 +357,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 capacity_retry: None,
                 retry_assessment_pending: false,
                 authentication_retry_waiting: None,
+                jev_rate_limit: None,
                 held_login_fingerprint: None,
                 authentication_retry_intent: None,
                 activity_turn_started_at_ms: None,

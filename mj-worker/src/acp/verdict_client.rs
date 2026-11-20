@@ -263,10 +263,20 @@ impl VerdictClient {
             .await
             .context("classify AFK question")?;
         let status = response.status();
+        if status.is_success() {
+            mj_core::jev::observe_response(status, None, &[]);
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .cloned();
         let bytes = response
             .bytes()
             .await
             .context("read AFK question verdict")?;
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            mj_core::jev::observe_response(status, retry_after.as_ref(), &bytes);
+        }
         ensure!(
             bytes.len() <= 64 * 1024,
             "AFK question verdict exceeds proxy response bound"
@@ -362,7 +372,17 @@ impl VerdictClient {
                 .await
                 .context("request question locator")?;
             let status = response.status();
+            if status.is_success() {
+                mj_core::jev::observe_response(status, None, &[]);
+            }
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .cloned();
             let bytes = response.bytes().await.context("read question locator")?;
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                mj_core::jev::observe_response(status, retry_after.as_ref(), &bytes);
+            }
             ensure!(
                 bytes.len() <= 64 * 1024,
                 "question locator response exceeds byte limit"
@@ -616,10 +636,16 @@ impl VerdictClient {
                 .await
                 .context("request GLiDE verdict")?;
             if response.status().is_success() {
+                mj_core::jev::observe_response(response.status(), None, &[]);
                 return Ok(response);
             }
             let status = response.status();
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .cloned();
             let bytes = response.bytes().await.context("read GLiDE refusal")?;
+            mj_core::jev::observe_response(status, retry_after.as_ref(), &bytes);
             if is_glide_size_refusal(status, &bytes) {
                 let mut smaller = None;
                 while glide_turn::shrink(&mut history) {

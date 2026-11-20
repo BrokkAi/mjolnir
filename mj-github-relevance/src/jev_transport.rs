@@ -26,11 +26,16 @@ pub async fn post_bounded_json(
     if let Some(key) = key {
         request = request.bearer_auth(key);
     }
-    let mut response = request
-        .send()
-        .await
-        .context(request_context)?
-        .error_for_status()?;
+    let mut response = request.send().await.context(request_context)?;
+    let status = response.status();
+    if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        mj_core::jev::observe_response(status, None, &[]);
+        response.error_for_status_ref()?;
+    }
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .cloned();
     ensure!(
         response
             .content_length()
@@ -44,6 +49,10 @@ pub async fn post_bounded_json(
             "oversized Jev response"
         );
         body.extend_from_slice(&chunk);
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        mj_core::jev::observe_response(status, retry_after.as_ref(), &body);
+        response.error_for_status_ref()?;
     }
     Ok(serde_json::from_slice(&body)?)
 }

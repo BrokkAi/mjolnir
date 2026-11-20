@@ -566,6 +566,7 @@ pub(crate) async fn wait_for_change(
     state_digest: Option<&str>,
 ) -> Result<RelayResponseBody> {
     let mut releases = Some(relay.releases());
+    let mut jev = mj_core::jev::rate_limit_changes();
     let mut preparation = preparation.cloned();
     // A finished preparation closes its channel but keeps its last value,
     // which an attach still reads; keep reading it, stop awaiting it.
@@ -582,6 +583,7 @@ pub(crate) async fn wait_for_change(
         if let Some(generations) = &mut generations {
             generations.borrow_and_update();
         }
+        jev.borrow_and_update();
         let harness_preparation = preparation
             .as_mut()
             .and_then(|receiver| receiver.borrow_and_update().state.clone());
@@ -627,6 +629,7 @@ pub(crate) async fn wait_for_change(
                     None => std::future::pending().await,
                 }
             } => if !changed { preparation_open = false },
+            _ = jev.changed() => {}
             () = tokio::time::sleep_until(deadline) => return Ok(observed),
         }
     }

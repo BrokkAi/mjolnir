@@ -1403,6 +1403,7 @@ impl DurableRelay {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         let mut state = self.snapshot.operational_state();
+        state.jev_rate_limit = mj_core::jev::current_rate_limit();
         state.acp_ready = Some(self.is_acp_ready());
         state.checkpoint_only = self.checkpoint_only;
         state.steering_supported = self.steering_supported;
