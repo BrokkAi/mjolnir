@@ -742,13 +742,18 @@ def source_clone(args, repo):
     return args.check_clones / repo.replace("/", "_")
 
 
+# mj resolves a bundle's local repository to that clone's remote and drops a bundle that
+# duplicates an existing project's remote, so these repos launch from the project bundles that
+# already existed for BrokkAi/mjolnir and BrokkAi/bifrost-dev (one GitHub repository each).
+EXISTING_BUNDLES = {"mjolnir": "mjolnir", "bifrost-dev": "bifrost-history"}
+
+
 def census_bundle(repo):
-    """The mj bundle a container session of this repo starts from: one local repository, the
-    clone source_clone names, with destination and primary repo the repo's short name. mj has no
-    command that creates a bundle, so these entries are written to config.toml with the user's
-    approval. The session gets only the pinned history (--at, --no-later-history)."""
-    name = repo.rsplit("/", 1)[-1]
-    return f"rql-census-{repo.replace('/', '-')}", name
+    """The mj bundle a container session of this repo starts from: one repository, started with
+    --at <pin> --no-later-history so the session gets only the pinned history. Outside repos use
+    the rql-census-* entries added to config.toml with the user's approval (mj has no command that
+    creates a bundle), each naming the clone source_clone gives."""
+    return EXISTING_BUNDLES.get(repo) or f"rql-census-{repo.replace('/', '-')}"
 
 
 def checkout(args, repo, revision, unit):
@@ -894,7 +899,7 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         else:
             # A container target takes a bundle. --no-later-history gives the session the
             # history up to the pin and nothing later: no later commits, branches, tags or origin.
-            project = ("--bundle", census_bundle(repo)[0], "--at", revision,
+            project = ("--bundle", census_bundle(repo), "--at", revision,
                        "--no-later-history", "--base", revision)
         sid = driver.mj("new", "--workspace", args.workspace, "--target", args.target, *project,
                         "--profile", profile, "--effort", "high",
