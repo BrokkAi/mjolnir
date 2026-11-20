@@ -545,7 +545,9 @@ pub struct RuntimeMetadata {
     pub container_sizes: SnapshotMap<String, mj_core::state::HostContainerSize>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub last_oracle_choices: BTreeMap<String, bool>,
-    #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
+    /// The browser reads this directly from the capture. Native paths may
+    /// contain bytes JSON cannot represent.
+    #[serde(skip)]
     pub mount_history: SnapshotMap<String, Vec<std::path::PathBuf>>,
     pub lifecycles: Vec<RuntimeLifecycleView>,
     pub reviews: Vec<RuntimeReviewView>,
@@ -1185,6 +1187,30 @@ mod tests {
             connected: false,
             error: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_browser_project_paths_do_not_break_control_frames() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::path::PathBuf;
+
+        let before = RuntimeProjection::default();
+        let mut after = before.clone();
+        let directory = PathBuf::from(OsString::from_vec(b"/project-\xff".to_vec()));
+        after
+            .metadata
+            .mount_history
+            .insert("local".into(), vec![directory.clone()]);
+        let delta = RuntimeDelta::between(&before, &after);
+        assert_eq!(
+            delta.metadata.as_ref().unwrap().mount_history["local"],
+            [directory]
+        );
+        let encoded = serde_json::to_vec(&delta).unwrap();
+        let decoded: RuntimeDelta = serde_json::from_slice(&encoded).unwrap();
+        assert!(decoded.metadata.unwrap().mount_history.is_empty());
     }
 
     #[test]
