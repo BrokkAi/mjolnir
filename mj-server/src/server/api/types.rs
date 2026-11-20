@@ -934,10 +934,6 @@ pub struct LaunchProfile {
     /// The harness kind, such as `codex` or `claude`. Which account it is, and
     /// where its credentials live, stay on the controller.
     pub harness: String,
-    #[serde(default)]
-    pub availability: LaunchAvailability,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unavailable_reason: Option<String>,
 }
 
 /// One runtime template a session can run on.
@@ -972,7 +968,7 @@ pub struct LaunchTarget {
 }
 
 /// The launch verdict for a configured profile or target.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LaunchAvailability {
     /// A check found the entry usable.
@@ -982,7 +978,6 @@ pub enum LaunchAvailability {
     /// A check found the entry missing or its engine is absent.
     Unavailable,
     /// The current configuration has no completed check. Offer the entry.
-    #[default]
     Unknown,
 }
 

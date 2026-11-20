@@ -6534,11 +6534,17 @@ async fn options_publish_the_daemon_verdicts_without_classifying_host_capacity()
     );
     assert!(target("podman").get("runtime_missing").is_none());
     assert_eq!(target("raw")["availability"], "unknown");
-    assert_eq!(body["profiles"][0]["availability"], "unavailable");
-    assert_eq!(
-        body["profiles"][0]["unavailable_reason"],
-        "Codex is not installed here."
-    );
+    // The previous CLI strictly decodes each profile in the stable options
+    // response, even when a daemon has probed its availability.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyLaunchProfile {
+        id: String,
+        harness: String,
+    }
+    let legacy: LegacyLaunchProfile = serde_json::from_value(body["profiles"][0].clone()).unwrap();
+    assert_eq!(legacy.id, "codex-1");
+    assert_eq!(legacy.harness, "codex");
 
     let response = app
         .oneshot(start_request(

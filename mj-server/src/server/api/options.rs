@@ -27,8 +27,6 @@ pub(super) fn launch_options(snapshot: &ViewerSnapshot, preferences_path: &Path)
             .map(|profile| LaunchProfile {
                 id: profile.id.clone(),
                 harness: profile.harness_kind.clone(),
-                availability: launch_availability(&profile.availability),
-                unavailable_reason: profile.availability.missing_reason().map(str::to_owned),
             })
             .collect(),
         targets: snapshot

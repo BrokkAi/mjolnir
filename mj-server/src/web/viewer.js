@@ -5277,11 +5277,13 @@ function updateResumeCard(card, session, rebuild = false) {
     const draft = resumeDraft(session);
     card._errorNode.textContent = draft.error;
     card._pendingNode.textContent = pendingActions.has(`destroy:${session.id}`) ? 'Destroying…' : pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '';
-    card._invalid = !draft.profileId || !draft.targetId || conversionBlocksResume(draft);
+    card._invalid = !session.failed_launch_retry && (!draft.profileId || !draft.targetId || conversionBlocksResume(draft));
     const submit = card.querySelector('button[data-action="resume"]');
     if (submit) {
-      submit.dataset.profile = draft.profileId;
-      submit.dataset.target = draft.targetId;
+      if (!session.failed_launch_retry) {
+        submit.dataset.profile = draft.profileId;
+        submit.dataset.target = draft.targetId;
+      }
       submit.disabled = pendingActions.has(`resume:${session.id}`) || card._invalid === true;
       submit.setAttribute('aria-busy', String(pendingActions.has(`resume:${session.id}`)));
     }
@@ -5293,17 +5295,19 @@ function updateResumeCard(card, session, rebuild = false) {
   const draft = resumeDraft(session);
   const targetItems = resumeTargetItems(session);
   const profileItems = offeredProfiles().map(profile => ({ id: profile.id, label: profile.id }));
-  if (!draft.initialized) {
-    if (!profileItems.some(item => item.id === draft.profileId)) {
-      draft.profileId = profileItems.length === 1 ? profileItems[0].id : '';
+  if (!session.failed_launch_retry) {
+    if (!draft.initialized) {
+      if (!profileItems.some(item => item.id === draft.profileId)) {
+        draft.profileId = profileItems.length === 1 ? profileItems[0].id : '';
+      }
+      if (!targetItems.some(item => item.id === draft.targetId)) {
+        draft.targetId = targetItems.length === 1 ? targetItems[0].id : '';
+      }
+      draft.initialized = true;
+    } else {
+      if (!profileItems.some(item => item.id === draft.profileId)) draft.profileId = '';
+      if (!targetItems.some(item => item.id === draft.targetId)) draft.targetId = '';
     }
-    if (!targetItems.some(item => item.id === draft.targetId)) {
-      draft.targetId = targetItems.length === 1 ? targetItems[0].id : '';
-    }
-    draft.initialized = true;
-  } else {
-    if (!profileItems.some(item => item.id === draft.profileId)) draft.profileId = '';
-    if (!targetItems.some(item => item.id === draft.targetId)) draft.targetId = '';
   }
   const body = el('div');
   const heading = el('h3', '', session.title || session.id);

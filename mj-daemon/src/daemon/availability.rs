@@ -690,6 +690,19 @@ mod tests {
         );
         assert_eq!(checked.targets["raw"], AvailabilityVerdict::Available);
 
+        // An unrelated publication must not retain another copy of the
+        // verdicts and diagnostic text in runtime history.
+        let before_notice = state.runtime_publication().unwrap();
+        state.push_notice("", "unrelated notice");
+        let after_notice = state.runtime_publication().unwrap();
+        assert_ne!(before_notice.revision, after_notice.revision);
+        assert!(
+            before_notice
+                .metadata
+                .availability
+                .ptr_eq(&after_notice.metadata.availability)
+        );
+
         config.profiles.get_mut("agent").unwrap().environment =
             [("CONFIGURED_KEY".to_owned(), "changed".to_owned())]
                 .into_iter()

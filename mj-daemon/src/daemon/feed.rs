@@ -255,12 +255,17 @@ impl RuntimeState {
         history
             .installed_engines
             .observe_check(availability_report.as_ref());
-        full.metadata.availability = super::availability::project(
+        let availability = super::availability::project(
             availability_report.as_deref(),
             &full.metadata.config,
             &mut history.installed_engines,
-        )
-        .into();
+        );
+        let previous = &history.full.metadata.availability;
+        full.metadata.availability = if **previous == availability {
+            previous.clone()
+        } else {
+            availability.into()
+        };
         full.metadata.container_upgrade_sessions =
             history.full.metadata.container_upgrade_sessions.clone();
         for (id, record) in history.full.records.changes(&full.records) {

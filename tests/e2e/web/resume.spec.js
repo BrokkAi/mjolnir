@@ -425,7 +425,11 @@ test('golden_viewer_resume', async ({ context }) => {
   failed.failed_launch_retry = true;
   failed.launch_error = 'Worker bootstrap failed.';
   failed.queued_prompts = [];
-  await refresh(selectedPage, selectedState);
+  // Hard-won: #1372: a cached Retry launch tried to validate hidden picker choices.
+  const unavailable = { status: 'missing', reason: 'The last check failed.' };
+  selectedState.snapshot.profiles.find(profile => profile.id === 'alpha').availability = unavailable;
+  selectedState.snapshot.targets.find(target => target.id === 'local').availability = unavailable;
+  for (let i = 0; i < 3; i++) await refresh(selectedPage, selectedState);
   await expect(selectedPage.getByRole('button', { name: 'Retry launch', exact: true })).toBeEnabled();
   await captureResumeState(output, selectedPage, 'failed first launch uses saved settings', selectedState);
   await selectedPage.getByRole('button', { name: 'Retry launch', exact: true }).click();
