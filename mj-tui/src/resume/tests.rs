@@ -677,6 +677,7 @@ fn a_session_its_harness_has_not_named_is_listed_by_its_created_title() {
         state_with(vec![stopped, running]),
         BTreeMap::new(),
     );
+    publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut dashboard, 1, Vec::new());
 
     assert_eq!(titles(&rows(&dashboard)), ["sibling via fake"]);
@@ -1008,6 +1009,7 @@ fn enter_on_a_focused_mjolnir_row_begins_its_resume() {
         state_with(vec![stopped_session()]),
         BTreeMap::new(),
     );
+    publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut dashboard, 1, Vec::new());
     let mut hit = wiki_row("wiki-1", false);
     hit.hel_session_id = Some("session-1".into());
@@ -1053,6 +1055,7 @@ fn dashboard_with_live_sessions_in_two_workspaces() -> DashboardState {
         sessions.push(session);
     }
     let mut dashboard = DashboardState::new(config(), state_with(sessions), BTreeMap::new());
+    publish_fixture_verdicts(&mut dashboard);
     dashboard.set_workspace_names(BTreeMap::from([
         ("default".into(), "Default".into()),
         ("other".into(), "Other".into()),

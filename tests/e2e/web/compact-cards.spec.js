@@ -169,6 +169,7 @@ async function mount(page, sessions, holdDetail = null, initialHash = `#workspac
     }
     if (pathname === '/api/actions') {
       const body = route.request().postDataJSON();
+      if (body.action === 'check-availability') return route.fulfill({ status: 202, body: '' });
       state.actions.push(body);
       if (state.failAction?.action === body.action) {
         return route.fulfill({

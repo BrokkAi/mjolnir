@@ -73,8 +73,9 @@ function fixtureSession(row, sessions) {
       destroy: 'destroying', stop: 'stopping', cleanup: 'destroying' })[operation] || 'starting'
     : null;
   const live = ['live', 'starting', 'suspending'].includes(row.lifecycle);
+  const reviewers = new Set(row.reviewer_session_ids || []);
   const working = (row.subagent_session_ids || []).filter(id =>
-    sessions.some(child => child.id === id && child.chat_phase === 'running')).length
+    !reviewers.has(id) && sessions.some(child => child.id === id && child.chat_phase === 'running')).length
     + new Set((row.native_subagents || []).filter(child => child.state === 'running')
       .map(child => child.stable_id || child.session_id)).size;
   const queueHeld = row.move_recovery?.queue_admission_started

@@ -85,6 +85,9 @@ fn retained_subagents_do_not_count_as_working_after_profile_move() {
     resumed[0].agent.state = NativeAgentState::Running;
     resumed[0].agent.availability = NativeAgentAvailability::Available;
     dashboard.set_native_agents(resumed);
+    let mut verdict = dashboard.verdict(&parent.id);
+    verdict.working_children = 1;
+    dashboard.set_session_verdict(&parent.id, verdict);
     assert_eq!(dashboard.working_subagent_count_for(&parent.id), 1);
 }
 
@@ -280,6 +283,7 @@ fn dashboard_with_live_sessions(count: usize, per_project: usize) -> DashboardSt
         },
         BTreeMap::new(),
     );
+    publish_fixture_verdicts(&mut dashboard);
     dashboard.select_active_session("session-0");
     dashboard
 }
@@ -301,6 +305,7 @@ fn the_selection_survives_the_list_changing_under_it() {
     let mut state = dashboard.state.clone();
     state.sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
     dashboard.set_state(state);
+    publish_fixture_verdicts(&mut dashboard);
     assert_eq!(dashboard.selected_session_id(), None);
     assert_eq!(dashboard.current_session_id(), None);
     dashboard.handle_key(key(KeyCode::Down));
@@ -850,6 +855,7 @@ fn session_order_cache_tracks_creation_visibility_and_workspace_changes() {
     second.created_at = "2026-01-02T00:00:00Z".into();
     let mut dashboard = dashboard_with_session(first);
     dashboard.state.sessions.insert(second.id.clone(), second);
+    publish_fixture_verdicts(&mut dashboard);
     let ids = |dashboard: &DashboardState| {
         dashboard
             .ordered_sessions()
@@ -867,8 +873,10 @@ fn session_order_cache_tracks_creation_visibility_and_workspace_changes() {
         .created_at = "2025-01-01T00:00:00Z".into();
     assert_eq!(ids(&dashboard), ["second", "first"]);
     dashboard.state.sessions.get_mut("second").unwrap().state = SessionState::Stopped;
+    publish_fixture_verdicts(&mut dashboard);
     assert_eq!(ids(&dashboard), ["first"]);
     dashboard.state.sessions.get_mut("second").unwrap().state = SessionState::Running;
+    publish_fixture_verdicts(&mut dashboard);
     assert_eq!(ids(&dashboard), ["second", "first"]);
     dashboard
         .state
@@ -1084,6 +1092,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         BTreeMap::new(),
     );
 
+    publish_fixture_verdicts(&mut dashboard);
     let mut second_child = stopped_session();
     second_child.id = "second-child".into();
     second_child.state = SessionState::Running;
@@ -1102,6 +1111,13 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         reported_finish: None,
         handback_tool: false,
     };
+    dashboard.set_session_verdict(
+        &second_child.id,
+        mj_client::runtime_feed::SessionVerdict {
+            live_dashboard: true,
+            ..Default::default()
+        },
+    );
     dashboard.set_state(State {
         last_oracle_choices: Default::default(),
         operator_presence: Default::default(),
@@ -1779,6 +1795,7 @@ fn dashboard_with_conversations(count: usize) -> DashboardState {
         },
         BTreeMap::new(),
     );
+    publish_fixture_verdicts(&mut dashboard);
     let transcript = numbered_conversation(14);
     for index in 0..count {
         apply_materialized_transcript_for(
@@ -2544,6 +2561,14 @@ fn a_stopped_notification_is_a_row_and_attention_advances() {
         record.state = state;
         record.last_error = Some("resume failed".into());
         let failure = mj_core::attention::FailureIdentity::of(record).unwrap();
+        let mut verdict = dashboard.verdict("quiet");
+        verdict.live_dashboard = false;
+        verdict.resume = if state == SessionState::Stopped {
+            mj_client::runtime_feed::SessionOffer::Ready
+        } else {
+            mj_client::runtime_feed::SessionOffer::NoRecoveryCopy
+        };
+        dashboard.set_session_verdict("quiet", verdict);
         crate::test_support::serve_attention(
             &mut dashboard,
             &["quiet"],
@@ -3702,16 +3727,7 @@ fn idle_suspension_runs_immediately_and_working_suspension_warns() {
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
     // Working suspension also explains that it interrupts the turn.
-    dashboard
-        .session_details
-        .get_mut("session-1")
-        .unwrap()
-        .current_turn_started_at = Some(1);
-    crate::test_support::serve_attention(
-        &mut dashboard,
-        &["session-1"],
-        mj_core::attention::SessionAttention::Working,
-    );
+    set_working(&mut dashboard, "session-1");
     assert_eq!(
         dashboard.attention_level("session-1"),
         AttentionLevel::Working
@@ -3886,6 +3902,7 @@ fn git_probes_reach_every_session_when_more_are_due_than_one_pass_reads() {
         session.target = Some(Box::new(target.clone()));
         dashboard.state.sessions.insert(id.into(), session);
     }
+    publish_fixture_verdicts(&mut dashboard);
     let start = std::time::Instant::now();
 
     let mut probed = dashboard.git_probe_candidates(start, 2);
@@ -4592,16 +4609,7 @@ fn parent_suspension_warns_only_about_subagents_still_at_their_task() {
         }
     );
 
-    dashboard
-        .session_details
-        .get_mut("child-session")
-        .unwrap()
-        .current_turn_started_at = Some(1);
-    crate::test_support::serve_attention(
-        &mut dashboard,
-        &["child-session"],
-        mj_core::attention::SessionAttention::Working,
-    );
+    set_working(&mut dashboard, "child-session");
 
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
     assert_eq!(
@@ -4983,11 +4991,7 @@ fn the_suspend_confirmation_names_three_working_sub_agents_and_counts_the_rest()
     }
     dashboard.set_state(state);
     for position in 0..5 {
-        dashboard
-            .session_details
-            .get_mut(&format!("child-{position}"))
-            .unwrap()
-            .current_turn_started_at = Some(1);
+        set_working(&mut dashboard, &format!("child-{position}"));
     }
     dashboard.focus_sessions();
     dashboard.select_active_session(&parent);
@@ -5091,23 +5095,7 @@ fn a_subagent_the_worker_reports_as_running_counts_as_working_for_its_parent() {
     let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
     assert_eq!(dashboard.working_subagent_count_for(&parent), 0);
 
-    dashboard.set_session_activity(
-        "child-session",
-        mj_client::usage_format::SessionActivity {
-            execution: Some(mj_core::relay::RelayExecutionState::Running),
-            state: Some(mj_core::activity::ActivityState::Turn {
-                started_at_ms: Some(1_000),
-                last_activity_at_ms: None,
-            }),
-            ..Default::default()
-        },
-    );
-
-    crate::test_support::serve_attention(
-        &mut dashboard,
-        &["child-session"],
-        mj_core::attention::SessionAttention::Working,
-    );
+    set_working(&mut dashboard, "child-session");
     assert_eq!(
         dashboard.attention_level("child-session"),
         AttentionLevel::Working,
