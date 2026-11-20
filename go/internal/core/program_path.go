@@ -7,6 +7,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -97,5 +98,55 @@ func FindExecutableOnPath(program string, path string, pathOK bool) (string, boo
 // its conventional install directory when a login shell has not added that
 // directory to PATH.
 func FindAntigravityProgram(ctx context.Context, environment map[string]string) (string, bool, error) {
-	panic("unported: mj-core/src/program_path.rs find_antigravity_program")
+	type found struct {
+		path string
+		ok   bool
+		err  error
+	}
+	search := make(map[string]string, len(environment))
+	for key, value := range environment {
+		search[key] = value
+	}
+	result, err := SpawnBlocking(func() found {
+		path, pathOK := search["PATH"]
+		if !pathOK {
+			path, pathOK = os.LookupEnv("PATH")
+		}
+		if program, ok := FindExecutableOnPath("agy", path, pathOK); ok {
+			resolved, err := canonicalizePath(program)
+			if err != nil {
+				return found{err: fmt.Errorf("resolve Antigravity executable: %w", err)}
+			}
+			return found{path: resolved, ok: true}
+		}
+		home, homeOK := search["HOME"]
+		if !homeOK {
+			home, homeOK = UserHome()
+		}
+		if homeOK {
+			bin := filepath.Join(home, ".local/bin")
+			if program, ok := FindExecutableOnPath("agy", bin, true); ok {
+				resolved, err := canonicalizePath(program)
+				if err != nil {
+					return found{err: fmt.Errorf("resolve Antigravity executable: %w", err)}
+				}
+				return found{path: resolved, ok: true}
+			}
+		}
+		return found{}
+	}).Join(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("find target Antigravity task failed: %w", err)
+	}
+	return result.path, result.ok, result.err
+}
+
+// canonicalizePath resolves path to an absolute path with every symbolic
+// link resolved, as std::fs::canonicalize does.
+func canonicalizePath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(absolute)
 }

@@ -12,12 +12,24 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"iter"
+	"log/slog"
+	"os"
+	"os/exec"
+	"os/user"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // LoginEnvironmentEnvironment is Rust's `login_environment::Environment`
@@ -25,7 +37,9 @@ import (
 type LoginEnvironmentEnvironment = map[string]string
 
 // loginEnvironmentCache is Rust's static `ENVIRONMENT`: successful discovery,
-// shared by session launches in this process.
+// shared by session launches in this process. mu is held across discovery,
+// as OnceCell::get_or_try_init makes concurrent callers wait for one
+// initialization.
 var loginEnvironmentCache struct {
 	mu    sync.Mutex
 	value LoginEnvironmentEnvironment
@@ -36,7 +50,32 @@ var loginEnvironmentCache struct {
 // environment explicitly. Seed the cache before starting its runtime, without
 // another shell startup.
 func InitializeFromParent() error {
-	panic("unported: mj-core/src/login_environment.rs initialize_from_parent")
+	environment := LoginEnvironmentEnvironment{}
+	for _, entry := range os.Environ() {
+		// As Rust's vars_os, a leading '=' (a Windows drive directory entry)
+		// belongs to the name.
+		index := strings.IndexByte(entry[min(1, len(entry)):], '=')
+		name, value := entry, ""
+		if index >= 0 {
+			index += min(1, len(entry))
+			name, value = entry[:index], entry[index+1:]
+		}
+		if !utf8.ValidString(name) {
+			return errors.New("login environment name is not UTF-8")
+		}
+		if !utf8.ValidString(value) {
+			return errors.New("login environment value is not UTF-8")
+		}
+		environment[name] = value
+	}
+	loginEnvironmentCache.mu.Lock()
+	defer loginEnvironmentCache.mu.Unlock()
+	if loginEnvironmentCache.set {
+		return errors.New("login environment already initialized")
+	}
+	loginEnvironmentCache.value = environment
+	loginEnvironmentCache.set = true
+	return nil
 }
 
 // Resolve: successful discovery is shared by session launches in this
@@ -44,7 +83,33 @@ func InitializeFromParent() error {
 // ambient inheritance. The returned map is shared; callers must not modify
 // it.
 func Resolve(ctx context.Context) (LoginEnvironmentEnvironment, error) {
-	panic("unported: mj-core/src/login_environment.rs resolve")
+	loginEnvironmentCache.mu.Lock()
+	defer loginEnvironmentCache.mu.Unlock()
+	if loginEnvironmentCache.set {
+		return loginEnvironmentCache.value, nil
+	}
+	type discovered struct {
+		environment LoginEnvironmentEnvironment
+		err         error
+	}
+	cancellation, cancellable := scopedPreparationCancellation(ctx)
+	result, err := SpawnBlocking(func() discovered {
+		if cancellable {
+			environment, err := discoverCancellable(cancellation)
+			return discovered{environment, err}
+		}
+		environment, err := Discover()
+		return discovered{environment, err}
+	}).Join(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("target login environment task failed: %w", err)
+	}
+	if result.err != nil {
+		return nil, result.err
+	}
+	loginEnvironmentCache.value = result.environment
+	loginEnvironmentCache.set = true
+	return result.environment, nil
 }
 
 func WithOverrides(ctx context.Context, overrides LoginEnvironmentEnvironment) (LoginEnvironmentEnvironment, error) {
@@ -113,7 +178,14 @@ func carriesImageVariable(name string) bool {
 // Bootstrap is the minimal account identity for recovery that must not
 // depend on shell startup. It requires a Unix account.
 func Bootstrap() (LoginEnvironmentEnvironment, error) {
-	panic("unported: mj-core/src/login_environment.rs bootstrap")
+	if runtime.GOOS == "windows" {
+		return nil, errors.New("target login environment requires a Unix account")
+	}
+	account, err := accountCurrent()
+	if err != nil {
+		return nil, err
+	}
+	return account.environment()
 }
 
 // LoginEnvironmentProbeTimeout is how long the login-shell probe may run. The
@@ -142,16 +214,50 @@ const LoginEnvironmentProbeTimeout = 240 * time.Second
 // its login shell, on Windows through the account's registry-backed
 // environment block (CreateEnvironmentBlock with bInherit = FALSE).
 func Discover() (LoginEnvironmentEnvironment, error) {
-	panic("unported: mj-core/src/login_environment.rs discover")
+	if runtime.GOOS == "windows" {
+		return discoverWindowsAccount()
+	}
+	started := time.Now()
+	account, err := accountCurrent()
+	if err != nil {
+		return nil, err
+	}
+	shell := account.shell
+	environment, err := discoverAccount(account, LoginEnvironmentProbeTimeout)
+	if err != nil {
+		return nil, err
+	}
+	pathEntries := 0
+	if path, ok := environment["PATH"]; ok {
+		pathEntries = len(filepath.SplitList(path))
+	}
+	slog.Info("resolved the account's shell environment",
+		"shell", shell,
+		"elapsed_ms", uint64(time.Since(started).Milliseconds()),
+		"path_entries", pathEntries)
+	return environment, nil
 }
 
 func discoverCancellable(cancellation context.Context) (LoginEnvironmentEnvironment, error) {
-	panic("unported: mj-core/src/login_environment.rs discover_cancellable")
+	if runtime.GOOS == "windows" {
+		return Discover()
+	}
+	executor := CancellableProcessExecutorWithTimeout(LoginEnvironmentProbeTimeout).
+		WithCancellation(cancellation).
+		WithForegroundTerminal()
+	account, err := accountCurrent()
+	if err != nil {
+		return nil, err
+	}
+	return discoverAccountWithExecutor(account, executor)
 }
 
 // AccountShell is the shell the probe starts, for diagnostics that explain
 // where a session's environment came from.
 func AccountShell() (string, error) {
+	if runtime.GOOS == "windows" {
+		return "", errors.New("target shell environment requires a Unix account")
+	}
 	account, err := accountCurrent()
 	if err != nil {
 		return "", err
@@ -162,6 +268,9 @@ func AccountShell() (string, error) {
 // AccountName is the effective user's account name from the account
 // database, as Node's `os.userInfo().username` reports it.
 func AccountName() (string, error) {
+	if runtime.GOOS == "windows" {
+		return "", errors.New("account names come from the Unix account database")
+	}
 	account, err := accountCurrent()
 	if err != nil {
 		return "", err
@@ -177,6 +286,12 @@ type Account struct {
 }
 
 func (a Account) environment() (LoginEnvironmentEnvironment, error) {
+	if !utf8.ValidString(a.shell) {
+		return nil, errors.New("target shell path is not UTF-8")
+	}
+	if !utf8.ValidString(a.home) {
+		return nil, errors.New("target home path is not UTF-8")
+	}
 	return LoginEnvironmentEnvironment{
 		"HOME":    a.home,
 		"USER":    a.user,
@@ -189,8 +304,85 @@ func (a Account) environment() (LoginEnvironmentEnvironment, error) {
 // accountCurrent reads the effective user's entry from the account
 // database. With the test-hooks build, `MJ_TEST_ACCOUNT_SHELL` lets a
 // subprocess fixture substitute a deliberately slow shell.
+//
+// Rust calls getpwuid_r, which consults every name service the system is
+// configured with. Go has no such call without cgo, so the entry comes from
+// the system's own account-database tool: `getent passwd` (NSS) or, on
+// macOS, Directory Services through `dscl`.
 func accountCurrent() (Account, error) {
-	panic("unported: mj-core/src/login_environment.rs Account::current")
+	var account Account
+	var err error
+	if runtime.GOOS == "darwin" {
+		account, err = accountFromDirectoryServices()
+	} else {
+		account, err = accountFromNameService()
+	}
+	if err != nil {
+		return Account{}, err
+	}
+	if account.shell == "" {
+		account.shell = "/bin/sh"
+	}
+	// Let a subprocess fixture substitute a deliberately slow shell.
+	if testHooksEnabled {
+		if shell, ok := os.LookupEnv("MJ_TEST_ACCOUNT_SHELL"); ok {
+			account.shell = shell
+		}
+	}
+	return account, nil
+}
+
+// accountFromNameService reads `getent passwd <euid>`:
+// name:password:uid:gid:gecos:home:shell.
+func accountFromNameService() (Account, error) {
+	output, err := Capture(context.Background(), exec.Command("getent", "passwd", strconv.Itoa(os.Geteuid())))
+	if err != nil {
+		return Account{}, fmt.Errorf("read target account: %w", err)
+	}
+	// getent exits 2 when the key is absent from the database.
+	if output.Status != nil && output.Status.ExitCode() == 2 {
+		return Account{}, errors.New("target account is absent from the account database")
+	}
+	if output.Status == nil || !output.Status.Success() {
+		return Account{}, fmt.Errorf("read target account: getent exited with %v", output.Status)
+	}
+	line, _, _ := strings.Cut(string(output.Stdout), "\n")
+	fields := strings.Split(line, ":")
+	if len(fields) != 7 {
+		return Account{}, errors.New("read target account: malformed account database entry")
+	}
+	if !utf8.ValidString(line) {
+		return Account{}, errors.New("read target account: entry is not UTF-8")
+	}
+	return Account{user: fields[0], home: fields[5], shell: fields[6]}, nil
+}
+
+// accountFromDirectoryServices reads the account's name and home through the
+// system library (os/user uses getpwuid_r on macOS) and its shell from
+// Directory Services.
+func accountFromDirectoryServices() (Account, error) {
+	current, err := user.LookupId(strconv.Itoa(os.Geteuid()))
+	if err != nil {
+		var unknown user.UnknownUserIdError
+		if errors.As(err, &unknown) {
+			return Account{}, errors.New("target account is absent from the account database")
+		}
+		return Account{}, fmt.Errorf("read target account: %w", err)
+	}
+	output, err := Capture(context.Background(), exec.Command("/usr/bin/dscl", ".", "-read", "/Users/"+current.Username, "UserShell"))
+	if err != nil {
+		return Account{}, fmt.Errorf("read target account: %w", err)
+	}
+	if output.Status == nil || !output.Status.Success() {
+		return Account{}, fmt.Errorf("read target account: dscl exited with %v", output.Status)
+	}
+	shell := ""
+	for _, line := range strings.Split(string(output.Stdout), "\n") {
+		if value, ok := strings.CutPrefix(line, "UserShell:"); ok {
+			shell = strings.TrimSpace(value)
+		}
+	}
+	return Account{user: current.Username, home: current.HomeDir, shell: shell}, nil
 }
 
 // discoverAccount reproduces the environment a terminal gives this account.
@@ -207,7 +399,39 @@ func discoverAccount(account Account, timeout time.Duration) (LoginEnvironmentEn
 }
 
 func discoverAccountWithExecutor(account Account, executor CommandExecutor) (LoginEnvironmentEnvironment, error) {
-	panic("unported: mj-core/src/login_environment.rs discover_account_with_executor")
+	var nonceBytes [16]byte
+	if _, err := rand.Read(nonceBytes[:]); err != nil {
+		return nil, fmt.Errorf("create login capture marker: %v", err)
+	}
+	nonce := hex.EncodeToString(nonceBytes[:])
+	marker := "\x00MJ_LOGIN_" + nonce + "\x00"
+	// Absolute env prevents a profile alias or PATH change from replacing the
+	// exporter. exec avoids logout hooks being appended to the captured records.
+	script := "printf '\\000MJ_LOGIN_" + nonce + "\\000'; exec /usr/bin/env -0"
+	probe, err := loginShellCommand(account.shell, script)
+	if err != nil {
+		return nil, err
+	}
+	probe.command.ClearEnv = true
+	home := account.home
+	probe.command.Cwd = &home
+	if probe.command.Env, err = account.environment(); err != nil {
+		return nil, err
+	}
+	var output CommandOutput
+	if probe.scriptOnStdin {
+		output, err = executor.ExecuteWithStdin(&probe.command, strings.NewReader(script))
+	} else {
+		output, err = executor.Execute(&probe.command)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Startup output can contain secrets. Never include it in errors or logs.
+	if output.Status != 0 {
+		return nil, fmt.Errorf("target login shell exited with status %d", output.Status)
+	}
+	return loginEnvironmentParse(output.Stdout, []byte(marker))
 }
 
 type LoginShellProbe struct {
@@ -216,7 +440,23 @@ type LoginShellProbe struct {
 }
 
 func loginShellCommand(shell, script string) (LoginShellProbe, error) {
-	panic("unported: mj-core/src/login_environment.rs login_shell_command")
+	if !utf8.ValidString(shell) {
+		return LoginShellProbe{}, errors.New("target shell path is not UTF-8")
+	}
+	var command CommandSpec
+	scriptOnStdin := false
+	if arg0, ok := cshLoginArgv0(shell); ok {
+		// `-c` leaves `$?prompt` unset while startup files run, even with
+		// `-i`. C-shell files commonly guard terminal setup with that flag.
+		command = NewCommandSpec(shell, []string{"-i", "-s"}).Arg0(arg0)
+		scriptOnStdin = true
+	} else {
+		command = NewCommandSpec(shell, []string{"-l", "-i", "-c", script})
+	}
+	return LoginShellProbe{
+		command:       command.WithPurpose("initialize target shell environment"),
+		scriptOnStdin: scriptOnStdin,
+	}, nil
 }
 
 func cshLoginArgv0(shell string) (string, bool) {
@@ -232,5 +472,30 @@ func cshLoginArgv0(shell string) (string, bool) {
 // loginEnvironmentParse is Rust's private `parse` (prefixed: the name is
 // activity/question_locator's).
 func loginEnvironmentParse(output, marker []byte) (LoginEnvironmentEnvironment, error) {
-	panic("unported: mj-core/src/login_environment.rs parse")
+	position := bytes.Index(output, marker)
+	if position < 0 {
+		return nil, errors.New("target login shell did not produce an environment frame")
+	}
+	records := output[position+len(marker):]
+	if !bytes.HasSuffix(records, []byte{0}) {
+		return nil, errors.New("target login environment was truncated")
+	}
+	environment := LoginEnvironmentEnvironment{}
+	for _, record := range bytes.Split(records[:len(records)-1], []byte{0}) {
+		if !utf8.Valid(record) {
+			return nil, errors.New("target login environment is not UTF-8")
+		}
+		name, value, ok := strings.Cut(string(record), "=")
+		if !ok {
+			return nil, errors.New("invalid target login environment record")
+		}
+		if name == "" {
+			return nil, errors.New("empty target login environment name")
+		}
+		environment[name] = value
+	}
+	if environment["PATH"] == "" {
+		return nil, errors.New("target login environment has no PATH")
+	}
+	return environment, nil
 }
