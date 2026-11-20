@@ -704,7 +704,7 @@ def quota(args, role):
     if role == "replication" and profile is None:
         previous = None
         while True:
-            readings, unavailable = {}, {}
+            readings, unavailable, exhausted = {}, {}, {}
             for candidate in args.profiles:
                 # A disabled or missing profile makes mj quota fail; it can't clear the floor,
                 # but the other allotted profiles still can.
@@ -714,26 +714,33 @@ def quota(args, role):
                     readings[candidate], unavailable[candidate] = None, str(error)[-300:]
                     continue
                 report = (report[0].get("report") or {}) if report else {}
-                windows = [window for window in report.get("windows", [])
-                           if (not window.get("model_scope") or scope in window["model_scope"].split(","))
-                           and window.get("duration_seconds") == 7 * 24 * 60 * 60]
+                scoped = [window for window in report.get("windows", [])
+                          if not window.get("model_scope") or scope in window["model_scope"].split(",")]
+                windows = [w for w in scoped if w.get("duration_seconds") == 7 * 24 * 60 * 60]
                 values = [w.get("remaining_percent") for w in windows]
                 readings[candidate] = (min(values) if values and None not in values
                                        and not report.get("error") else None)
+                # A shorter window (Claude's five hours) that is used up would stop the turn,
+                # whatever the week shows, so that profile waits for the window to reset.
+                spent = [w for w in scoped if w.get("duration_seconds") != 7 * 24 * 60 * 60
+                         and w.get("remaining_percent") is not None and w["remaining_percent"] <= 0]
+                if spent:
+                    exhausted[candidate] = min(w.get("resets") or "unknown" for w in spent)
             # Every allotted profile refused by mj quota is a configuration error (a misspelled
             # or disabled profile), not quota that will recover, so report it instead of holding.
             if len(unavailable) == len(args.profiles):
                 raise RuntimeError(f"no allotted replication profile is usable: {json.dumps(unavailable)}")
             eligible = [(value, candidate) for candidate, value in readings.items()
-                        if value is not None and value > 25]
+                        if value is not None and value > 25 and candidate not in exhausted]
             if eligible:
                 value, candidate = max(eligible)
                 log(args.labels_dir, "quota-cleared", role=role, profile=candidate, remaining_percent=value,
-                    unavailable=unavailable)
+                    unavailable=unavailable, short_window_spent=exhausted)
                 return candidate
-            if (readings, unavailable) != previous:
-                log(args.labels_dir, "quota-held", role=role, readings=readings, unavailable=unavailable)
-                previous = readings, unavailable
+            if (readings, unavailable, exhausted) != previous:
+                log(args.labels_dir, "quota-held", role=role, readings=readings, unavailable=unavailable,
+                    short_window_spent=exhausted)
+                previous = readings, unavailable, exhausted
             if args.check_quota:
                 return None
             time.sleep(60)
