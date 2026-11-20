@@ -36,6 +36,9 @@ ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": (None, "sonn
 # their id, round(10%) of them and at least one. Fixed before any replication label exists.
 REPLICATION_SHARE = 0.10
 REPLICATION_SALT = "rql-census-replication-sample-v1"
+# Replication must not reach the host that holds the primary labels; the coordinator approved
+# this container target for it.
+REPLICATION_TARGET = "s50-max-a"
 
 
 # The plan reserves codex4 for other sessions (PLAN-rql-census.md, Cost and quota).
@@ -698,9 +701,15 @@ def quota(args, role):
     if role == "replication" and profile is None:
         previous = None
         while True:
-            readings = {}
+            readings, unavailable = {}, {}
             for candidate in args.profiles:
-                report = driver.mj("quota", "--profile", candidate).get("profiles") or []
+                # A disabled or missing profile makes mj quota fail; it can't clear the floor,
+                # but the other allotted profiles still can.
+                try:
+                    report = driver.mj("quota", "--profile", candidate).get("profiles") or []
+                except RuntimeError as error:
+                    readings[candidate], unavailable[candidate] = None, str(error)[-300:]
+                    continue
                 report = (report[0].get("report") or {}) if report else {}
                 windows = [window for window in report.get("windows", [])
                            if (not window.get("model_scope") or scope in window["model_scope"].split(","))
@@ -712,11 +721,12 @@ def quota(args, role):
                         if value is not None and value > 25]
             if eligible:
                 value, candidate = max(eligible)
-                log(args.labels_dir, "quota-cleared", role=role, profile=candidate, remaining_percent=value)
+                log(args.labels_dir, "quota-cleared", role=role, profile=candidate, remaining_percent=value,
+                    unavailable=unavailable)
                 return candidate
-            if readings != previous:
-                log(args.labels_dir, "quota-held", role=role, readings=readings)
-                previous = readings
+            if (readings, unavailable) != previous:
+                log(args.labels_dir, "quota-held", role=role, readings=readings, unavailable=unavailable)
+                previous = readings, unavailable
             if args.check_quota:
                 return None
             time.sleep(60)
@@ -1032,8 +1042,9 @@ def main():
     parser.add_argument("--profile", help="pin this labeller to a profile of the same model family")
     parser.add_argument("--profiles", default="claude3,claude5,claude6",
                         help="replication profiles eligible for quota-based selection")
-    parser.add_argument("--target", default="localhost",
-                        help="mj target; a container target starts each session from the repo's census bundle")
+    parser.add_argument("--target", help="mj target (primary: localhost; replication: "
+                        f"{REPLICATION_TARGET}, never localhost); a container target starts each "
+                        "session from the repo's census bundle")
     parser.add_argument("--repo", help="run only this repo, e.g. 1jehuang/jcode")
     parser.add_argument("--limit", type=int, help="take only the first N selected items, before applying resume")
     parser.add_argument("--batch-size", type=int, default=5)
@@ -1060,6 +1071,11 @@ def main():
         if excluded:
             parser.error(f"profiles excluded from the census: {', '.join(sorted(excluded))}")
         args.profiles = profiles
+        args.target = args.target or REPLICATION_TARGET
+        if args.target == "localhost":
+            parser.error("replication runs on an isolated container target, not localhost")
+    else:
+        args.target = args.target or "localhost"
     if not args.inspect and (not args.labeller or (not args.split and not args.check_quota)):
         parser.error("choose --labeller and --split, or use --inspect")
     items, pins, unconfirmed_dev = item_sets()

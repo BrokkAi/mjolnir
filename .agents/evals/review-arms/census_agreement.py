@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 from census_label import (
-    LABELS, RUST, canonical_site, checkout_revision, exclude_families, input_documents, inputs_sha, item_sets, labeller_item,
+    LABELS, RUST, canonical_site, checkout_revision, exclude_families, input_documents, inputs_sha, item_sets, labeller_item, replication_sample,
     read_current_labels,
 )
 
@@ -174,15 +174,18 @@ def comparison(pairs, split):
 
 def compare_split(directory, split, cohort, documents, heads):
     items = {(item["repo"], item["id"]): labeller_item(item, split) for item in cohort}
+    # Replication labels only the sample, so agreement and coverage are over the sample. The
+    # primary's labels are read against the whole cohort, so its unsampled rows aren't stale.
+    sample = {(item["repo"], item["id"]) for item in replication_sample(cohort)}
 
-    def read_role(role):
-        expected = {key: inputs_sha(item, documents, role, heads[key[0]]) for key, item in items.items()}
+    def read_role(role, keys):
+        expected = {key: inputs_sha(items[key], documents, role, heads[key[0]]) for key in keys}
         return read_current_labels(directory / f"{split}-{role}.jsonl", expected)
 
-    first, stale_primary = read_role("primary")
-    second, stale_replication = read_role("replication")
+    first, stale_primary = read_role("primary", items.keys())
+    second, stale_replication = read_role("replication", sample)
     groups = defaultdict(set)
-    all_keys = items.keys()
+    all_keys = sample
     for key in all_keys:
         groups[key[0]].add(key)
 
@@ -191,7 +194,7 @@ def compare_split(directory, split, cohort, documents, heads):
         replication = keys & second.keys()
         both = primary & replication
         pairs = [(first[key], second[key]) for key in sorted(both)]
-        return {**comparison(pairs, split), "paired": len(both),
+        return {**comparison(pairs, split), "sampled": len(keys), "paired": len(both),
                 "missing_both": len(keys - (primary | replication)),
                 "missing_primary_only": len(replication - primary),
                 "missing_replication_only": len(primary - replication),
@@ -214,7 +217,10 @@ def main():
     heads = {repo: checkout_revision(repo, pins) for repo in repos}
     report = {
         "field_descriptions": {
-            "stale_rows": "Saved rows with missing or mismatched input hashes or outside the current cohort.",
+            "sampled": "Bugs in the replication sample (replication_sample in census_label.py). "
+                       "Agreement and the missing counts are over these bugs only.",
+            "stale_rows": "Saved rows with missing or mismatched input hashes, or outside the current "
+                          "cohort (primary) or the replication sample (replication).",
             "rql.locator_present": "Agreement on whether a locator query was supplied, "
                                    "among matched facts both labellers marked outside the diff.",
             "decisive_set_site_overlap": "Facts match by their cited sites. This measures whether "
