@@ -358,7 +358,8 @@ impl QuotaPool {
         let known = self.reported_members().next().is_some();
         format!(
             "{}{}%{}",
-            if self.unweighted { "avg " } else { "" },
+            // `~` marks an unweighted average: plan sizes are unknown.
+            if self.unweighted { "~" } else { "" },
             if known {
                 self.remaining.to_string()
             } else {

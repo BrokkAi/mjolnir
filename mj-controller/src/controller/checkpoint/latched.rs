@@ -523,6 +523,32 @@ impl Controller {
             canonical_session.notification_stack =
                 Some(barrier.operational.notification_stack.as_ref().clone());
         }
+        // The worker owns accepted mail; the daemon already marked it accepted
+        // and will not send it again. Ask the worker for it while the latch
+        // still holds the cut, before anything can move it.
+        if relay.connection_mut().protocol_version()
+            >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PROTOCOL
+        {
+            let mailbox = relay
+                .connection_mut()
+                .read_checkpoint_mailbox(barrier_command_id.clone(), cursor.clone())
+                .await
+                .context("read the worker's mail at the checkpoint cut")?;
+            canonical_session.mailbox = (!mailbox.is_empty()).then_some(mailbox);
+        } else if !barrier.operational.undelivered_mailbox_event_keys.is_empty() {
+            let keys = &barrier.operational.undelivered_mailbox_event_keys;
+            tracing::warn!(
+                session_id,
+                undelivered = ?keys,
+                "this worker predates checkpoint mail; its accepted, undelivered messages are not in the checkpoint"
+            );
+            executor.notify_notice(&format!(
+                "{} accepted message{} not yet delivered to this session could not be saved, because its worker predates saving them. {} not arrive after resume.",
+                keys.len(),
+                if keys.len() == 1 { "" } else { "s" },
+                if keys.len() == 1 { "It will" } else { "They will" },
+            ));
+        }
         let native_session_id = barrier
             .operational
             .native_session_id

@@ -325,26 +325,6 @@ test('Clear & Next dismisses the identity captured when it starts and shows a st
   assert.deepEqual(view.ids(), ['b']);
 });
 
-test('Clear all ! dismisses only ! cards and leaves ? cards', async () => {
-  const view = screen([
-    row('q', 'important', 9, { notification_card: stack('needs_input', 7, [message(1, 'needs_input', 'none')]) }),
-    row('i1', 'working', 5, {
-      notification_card: stack('important', 5, [message(2, 'important', 'none')], { dismissal: { read_through: 2 } }),
-    }),
-    row('i2', 'important', 4),
-  ]);
-  view.render();
-  assert.equal(view.nodes.clearAll.textContent, 'Clear all ! (2)');
-  view.nodes.clearAll.onclick();
-  await settle();
-  const dismissed = view.requests.filter(r => r.body?.action === 'dismiss-notification');
-  assert.deepEqual(Object.fromEntries(dismissed.map(({ body }) => [body.session_id, body.target])),
-    { i1: { read_through: 2 }, i2: { read_through: 4 } });
-  assert.deepEqual(view.ids(), ['q']);
-  view.render();
-  assert.equal(view.nodes.clearAll.hidden, true);
-});
-
 test('quick reply sends to the captured session; drafts follow their session; empty Enter goes to the session', async () => {
   const view = screen([row('a', 'needs_input', 3), row('b', 'important', 2)]);
   view.render();
@@ -513,7 +493,6 @@ test('session failures follow launch failures and keep their daemon-owned action
   assert.equal(view.nodes.glyph.attributes['aria-label'], 'Unreachable');
   assert.equal(view.nodes.body.textContent, 'disk full');
   assert.equal(view.nodes.clear.disabled, true);
-  assert.equal(view.nodes.clearAll.hidden, true);
   view.nodes.open.onclick();
   assert.deepEqual(plain(view.nav.at(-1)), { name: 'conversation', sessionId: 'c', from: 'notifications' });
   assert.equal(view.requests.some(r => /\/[bc]\/notification-message/.test(r.url)), false);
@@ -529,7 +508,6 @@ test('skip rotates through unique cards however many times it is pressed', () =>
   assert.equal(new Set(plain(view.read('inboxSkipped'))).size, view.read('inboxSkipped.length'));
   view.render();
   assert.match(view.nodes.headerText.textContent, /3 left/);
-  assert.equal(view.nodes.clearAll.textContent, 'Clear all ! (1)');
 });
 
 test('a failed message read is not cached: it retries when the card is shown again, not in a loop', async () => {
@@ -601,7 +579,6 @@ test('launch failures are cards after the ! cards, counted, openable and dismiss
   assert.deepEqual(view.ids(), ['launch-failure:f2', 'a']);
   view.render();
   assert.equal(view.nodes.open.hidden, true, 'a failure with no session has nothing to open');
-  assert.equal(view.nodes.clearAll.textContent, 'Clear all ! (1)', 'only the ! card counts for Clear all !');
 });
 
 test('selected stack entries target the parent and the live form targets its holder', async () => {

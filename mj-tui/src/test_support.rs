@@ -660,6 +660,7 @@ pub(crate) fn precision_storage(
                     "/home/jonathan/.local/share/hel/profiles".into(),
                     "/tmp".into(),
                 ],
+                quota_limited: false,
             },
             FilesystemSpace {
                 mount: "/home/jonathan/Projects".into(),
@@ -667,6 +668,7 @@ pub(crate) fn precision_storage(
                 total_bytes: 1000 << 30,
                 reserved_bytes: 0,
                 paths: vec!["/home/jonathan/Projects".into()],
+                quota_limited: false,
             },
         ],
         Some(1),

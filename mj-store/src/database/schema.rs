@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 137;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 142;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2730,6 +2730,21 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (141, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
              PRAGMA user_version = 141;
+             COMMIT;",
+        )?;
+    }
+    // Breaking: checkpoint archives now carry the worker's accepted,
+    // undelivered mail in their canonical session (archive schema 13). Older
+    // daemons reject that field, so they could not resume a session this
+    // daemon suspended, and the mail the daemon already marked accepted would
+    // be lost with it. Refuse their reads and writes. No table changes.
+    if version < 142 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 142 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (142, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 142;
              COMMIT;",
         )?;
     }

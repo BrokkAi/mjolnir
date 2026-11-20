@@ -1008,17 +1008,30 @@ mod tests {
              DROP TABLE push_entry_cutover;
              DROP TABLE alert_events;
              DELETE FROM schema_migrations WHERE version>=138;
+             UPDATE schema_compatibility SET minimum_compatible_version=137 WHERE singleton=1;
              PRAGMA user_version=137;
-             INSERT INTO push_episodes VALUES('s','legacy','{}','[]',1);",
+             INSERT INTO push_episodes VALUES('s','legacy','{}','[]',1);
+             CREATE TRIGGER stop_before_mail_fence BEFORE INSERT ON schema_migrations
+                 WHEN NEW.version=142 BEGIN SELECT RAISE(ABORT,'fixture boundary before mail fence'); END;",
         )
         .unwrap();
         db.execute(
             "INSERT INTO push_deliveries(endpoint,episode,payload,accepted) VALUES(?1,'legacy','{}',0)",
             [&subscription.endpoint],
         ).unwrap();
-        schema::migrate_schema(&db).unwrap();
+        // Test the push revisions' compatibility before the separate fence
+        // for checkpoint mail.
+        let error = schema::migrate_schema(&db).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("fixture boundary before mail fence"),
+            "{error:#}"
+        );
+        db.execute_batch("ROLLBACK; DROP TRIGGER stop_before_mail_fence;")
+            .unwrap();
         let schema = schema::read_schema_state(&db).unwrap();
-        assert_eq!(schema.revision, super::super::SCHEMA_VERSION);
+        assert_eq!(schema.revision, 141);
         schema.ensure_supported_by(137).unwrap();
 
         let mut runtime = runtime(true);

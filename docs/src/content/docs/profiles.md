@@ -188,7 +188,8 @@ configured approvals, since OpenCode's own default asks for nothing), and DSH
 asks before every write, command, and MCP tool call other than Mjolnir's own,
 but all three run commands on the host without a sandbox. On a raw target the
 [Mjolnir guardian](/security/#the-mjolnir-guardian) answers those requests with
-a review on the same harness and the session's model. Muse's guardian is
+a review on the same harness and the session's model, unless the profile
+[turns it off](#turn-off-the-mjolnir-guardian). Muse's guardian is
 muse-acp's auto-review; see [Harness limitations](#harness-limitations).
 Container runtimes and EC2
 machines instead run every harness unconstrained inside the isolation
@@ -536,6 +537,30 @@ next launch on. Runtimes that allow all actions (containers, EC2 machines, and
 SSH machines with `permissions = "yolo"`) always run Claude with
 `bypassPermissions`, whatever this setting says. The setting applies only to a
 Claude profile; setting it on any other profile is a configuration error.
+
+## Turn off the Mjolnir guardian
+
+On a runtime that keeps configured approvals, the
+[Mjolnir guardian](/security/#the-mjolnir-guardian) answers the permission
+requests of Kimi Code, OpenCode, and DSH sessions, and asks you only when it
+cannot decide. To answer every request yourself instead, set
+`mjolnir_guardian = false` on the profile:
+
+```toml
+[profiles.opencode]
+kind = "open-code"
+home = "/home/me/.config/opencode"
+mjolnir_guardian = false
+```
+
+The harness still asks before the same actions, and each request opens
+Mjolnir's permission form. You can also turn off **Mjolnir guardian** in
+Settings, on the profile's page. Every session the profile launches reads the
+setting when it starts, including when an existing session resumes, so a
+change applies from the next launch on. Runtimes that allow all actions never
+ask, so the setting changes nothing there. It applies only to Kimi Code,
+OpenCode, and DSH profiles, the harnesses without a guardian of their own;
+setting it on any other profile is a configuration error.
 
 ## Codex profile files
 

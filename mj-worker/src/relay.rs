@@ -899,6 +899,15 @@ impl DurableRelay {
                         created_at_ms: queued.queued_at_ms,
                     });
                 }
+                // The archived worker's mail, as the restore policy selected
+                // it. A claimed context may name a prompt the controller
+                // admits later under the same command ID; dispatch finds it
+                // there before that prompt starts.
+                if let Some(mailbox) = restored.mailbox {
+                    snapshot.pending_mailbox_events = mailbox.pending_events;
+                    snapshot.delivered_mailbox_event_keys = mailbox.delivered_event_keys;
+                    snapshot.mailbox_prompt_contexts = mailbox.prompt_contexts;
+                }
             }
             snapshot
         };

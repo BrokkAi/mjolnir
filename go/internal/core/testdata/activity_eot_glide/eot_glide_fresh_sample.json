@@ -1,0 +1,1406 @@
+[
+  {
+    "index": "E0001",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9969704536648182,
+        "probabilities": {
+          "none": 0.9980394070262751,
+          "transient_provider": 0.00042457929136897063,
+          "quota": 0.00013613942605957688,
+          "other": 0.001068953361456914,
+          "unclear": 0.00033092089483931805
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9694536482356231,
+        "probabilities": {
+          "none": 0.9809329120674154,
+          "redundant_request": 0.003865128903294996,
+          "required": 0.011479263831792288,
+          "unclear": 0.003722695197497222
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "authorized_unfinished",
+        "confidence": 0.5958677701721351,
+        "probabilities": {
+          "finished": 0.012191657295352088,
+          "authorized_unfinished": 0.7814784436243241,
+          "waiting": 0.18561067345218893,
+          "unclear": 0.020719225628134996
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.924100880955536,
+        "probabilities": {
+          "needed": 0.030517532778876446,
+          "unneeded": 0.014864053486711057,
+          "unclear": 0.9546184137344125
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "continue",
+        "confidence": 0.10397687820359225,
+        "probabilities": {
+          "recover_quota": 0.0015690682402833092,
+          "await_input": 0.005228958256034389,
+          "retry_provider": 0.0024831853659434892,
+          "wait": 0.431606586350749,
+          "continue": 0.5355834645543412,
+          "finished": 0.011542192485501236,
+          "unclear": 0.011986544747147268
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.8800519183085573,
+        "probabilities": {
+          "redundant_only": 0.03252392204309501,
+          "not_redundant_only": 0.03981727043459664,
+          "no_request": 0.9198691887431539,
+          "unknown": 0.007789618779154432
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "uncertain",
+    "background_needed": null
+  },
+  {
+    "index": "E0003",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "quota",
+        "confidence": 0.9957116240774975,
+        "probabilities": {
+          "none": 0.0019090906162326279,
+          "transient_provider": 0.0001878459801041739,
+          "quota": 0.9976207146937301,
+          "other": 0.00013935625216409173,
+          "unclear": 0.00014299245776898511
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9681326532774205,
+        "probabilities": {
+          "none": 0.9797561436257276,
+          "redundant_request": 0.006309305677948485,
+          "required": 0.011623490348307125,
+          "unclear": 0.0023110603480167714
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "waiting",
+        "confidence": 0.841589311371344,
+        "probabilities": {
+          "finished": 0.011338481404071309,
+          "authorized_unfinished": 0.0716071321545575,
+          "waiting": 0.9131964435259015,
+          "unclear": 0.0038579429154697305
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "needed",
+        "confidence": 0.938957172122829,
+        "probabilities": {
+          "needed": 0.9615976328653617,
+          "unneeded": 0.022640460742532727,
+          "unclear": 0.015761906392105687
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "recover_quota",
+        "confidence": 0.9801505450957578,
+        "probabilities": {
+          "recover_quota": 0.9870214116090449,
+          "await_input": 0.0007841187593222795,
+          "retry_provider": 0.00046564664071375555,
+          "wait": 0.00687086651328705,
+          "continue": 0.0037291257358307126,
+          "finished": 0.0006977582617797147,
+          "unclear": 0.0004310724800215922
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.8492245613509675,
+        "probabilities": {
+          "redundant_only": 0.05561415027515261,
+          "not_redundant_only": 0.032804965455527926,
+          "no_request": 0.9048387116261201,
+          "unknown": 0.006742172643199392
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": true,
+    "expected": "recover_quota",
+    "background_needed": true
+  },
+  {
+    "index": "E0009",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9981232732267363,
+        "probabilities": {
+          "none": 0.9986050276483778,
+          "transient_provider": 0.00044859485395375533,
+          "quota": 0.0002314832785407914,
+          "other": 0.0004817544216413927,
+          "unclear": 0.0002331397974863576
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9772403436065326,
+        "probabilities": {
+          "none": 0.9845197370910714,
+          "redundant_request": 0.007279393484538862,
+          "required": 0.0070093892519383725,
+          "unclear": 0.0011914801724512763
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "waiting",
+        "confidence": 0.9285421908635256,
+        "probabilities": {
+          "finished": 0.002772177898825854,
+          "authorized_unfinished": 0.03364568578606243,
+          "waiting": 0.962187876649588,
+          "unclear": 0.0013942596655236793
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "needed",
+        "confidence": 0.9708166652362207,
+        "probabilities": {
+          "needed": 0.9824863938681897,
+          "unneeded": 0.011669728631969018,
+          "unclear": 0.0058438774998413115
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "wait",
+        "confidence": 0.8767825713318544,
+        "probabilities": {
+          "recover_quota": 0.0013502665682007197,
+          "await_input": 0.004267620801618014,
+          "retry_provider": 0.0015097080053382002,
+          "wait": 0.931294459543847,
+          "continue": 0.05451188821199255,
+          "finished": 0.005009185319296627,
+          "unclear": 0.002056871549706838
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.8937502157621384,
+        "probabilities": {
+          "redundant_only": 0.03313363959403333,
+          "not_redundant_only": 0.034631884012144946,
+          "no_request": 0.9283820997742833,
+          "unknown": 0.003852376619538313
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": true,
+    "expected": "wait",
+    "background_needed": true
+  },
+  {
+    "index": "E0010",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "quota",
+        "confidence": 0.9910134655301276,
+        "probabilities": {
+          "none": 0.0018764509519211515,
+          "transient_provider": 0.0016851200800038911,
+          "quota": 0.9935252630519966,
+          "other": 0.0025117975218690025,
+          "unclear": 0.0004013683942092524
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9172174460403534,
+        "probabilities": {
+          "none": 0.9542320367556965,
+          "redundant_request": 0.004196797227617687,
+          "required": 0.03701459071534308,
+          "unclear": 0.004556575301342716
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "authorized_unfinished",
+        "confidence": 0.9864434011531443,
+        "probabilities": {
+          "finished": 0.0012857217106860934,
+          "authorized_unfinished": 0.991248440701846,
+          "waiting": 0.004805039548701732,
+          "unclear": 0.002660798038766062
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.9139776933745796,
+        "probabilities": {
+          "needed": 0.004485309030090832,
+          "unneeded": 0.04076849879766481,
+          "unclear": 0.9547461921722443
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "recover_quota",
+        "confidence": 0.993207035862206,
+        "probabilities": {
+          "recover_quota": 0.9955956792126509,
+          "await_input": 0.0007551401606582906,
+          "retry_provider": 0.0006609176822392682,
+          "wait": 0.00019969694284777798,
+          "continue": 0.002388643350444845,
+          "finished": 0.00018794791715370497,
+          "unclear": 0.00021197473400527252
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.7649303315545556,
+        "probabilities": {
+          "redundant_only": 0.0628652906709285,
+          "not_redundant_only": 0.08176324287743943,
+          "no_request": 0.846693574431995,
+          "unknown": 0.008677892019637116
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "recover_quota",
+    "background_needed": null
+  },
+  {
+    "index": "E0011",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9995377765734375,
+        "probabilities": {
+          "none": 0.9996611134991579,
+          "transient_provider": 0.00010778607728817567,
+          "quota": 3.254140645392034e-05,
+          "other": 7.522209137966969e-05,
+          "unclear": 0.00012333692572042803
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9973060130656263,
+        "probabilities": {
+          "none": 0.9983237176867495,
+          "redundant_request": 0.0003403473297848899,
+          "required": 0.0010177046211232866,
+          "unclear": 0.0003182303623422184
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.9976773709775223,
+        "probabilities": {
+          "finished": 0.9985688415897679,
+          "authorized_unfinished": 0.0008914706122456205,
+          "waiting": 0.00019239895732621194,
+          "unclear": 0.00034728884066019365
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.855113989691892,
+        "probabilities": {
+          "needed": 0.0021904474173909914,
+          "unneeded": 0.07134778144535846,
+          "unclear": 0.9264617711372505
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.9975218310199317,
+        "probabilities": {
+          "recover_quota": 5.809355101591428e-05,
+          "await_input": 0.00014137346460968138,
+          "retry_provider": 6.252591070669298e-05,
+          "wait": 0.00012720445285394007,
+          "continue": 0.0008584532504485258,
+          "finished": 0.9983802842703803,
+          "unclear": 0.00037206509998493763
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.9671492268453326,
+        "probabilities": {
+          "redundant_only": 0.010772688914660452,
+          "not_redundant_only": 0.008679922642567365,
+          "no_request": 0.977921915759993,
+          "unknown": 0.0026254726827793437
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "finished",
+    "background_needed": null
+  },
+  {
+    "index": "E0015",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9933627986944356,
+        "probabilities": {
+          "none": 0.9960943154369537,
+          "transient_provider": 0.0005311137052755209,
+          "quota": 0.00023416487926325016,
+          "other": 0.0027315167425181744,
+          "unclear": 0.0004088892359893302
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9971118319349185,
+        "probabilities": {
+          "none": 0.9980449473454674,
+          "redundant_request": 0.0008242154969254222,
+          "required": 0.0009331154105490039,
+          "unclear": 0.00019772174705806836
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.9971529897221157,
+        "probabilities": {
+          "finished": 0.998372882821086,
+          "authorized_unfinished": 0.0012198930989702603,
+          "waiting": 0.00021658051107191484,
+          "unclear": 0.0001906435688717832
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.9495860382403407,
+        "probabilities": {
+          "needed": 0.0007849927153247908,
+          "unneeded": 0.02481448452216727,
+          "unclear": 0.974400522762508
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.9970400420231871,
+        "probabilities": {
+          "recover_quota": 0.00010312484483999596,
+          "await_input": 0.000521140592937075,
+          "retry_provider": 8.35431553565689e-05,
+          "wait": 0.0002466634748592532,
+          "continue": 0.0009054528709059644,
+          "finished": 0.997945494894093,
+          "unclear": 0.00019458016700817386
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.9472385685361042,
+        "probabilities": {
+          "redundant_only": 0.01916329995789779,
+          "not_redundant_only": 0.012775057920830323,
+          "no_request": 0.966401868494002,
+          "unknown": 0.0016597736272697826
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "finished",
+    "background_needed": null
+  },
+  {
+    "index": "E0022",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "quota",
+        "confidence": 0.9924373854263163,
+        "probabilities": {
+          "none": 0.0012367278823239986,
+          "transient_provider": 0.002257699331315151,
+          "quota": 0.9946950847576315,
+          "other": 0.0014219373176255633,
+          "unclear": 0.0003885507111039053
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9590581604488333,
+        "probabilities": {
+          "none": 0.9721854994827491,
+          "redundant_request": 0.005820573400452438,
+          "required": 0.013127339033915875,
+          "unclear": 0.008866588082882494
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "authorized_unfinished",
+        "confidence": 0.8153819535796701,
+        "probabilities": {
+          "finished": 0.006393344321753153,
+          "authorized_unfinished": 0.8995813264495153,
+          "waiting": 0.08419937286984513,
+          "unclear": 0.009825956358886362
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.9534595469891419,
+        "probabilities": {
+          "needed": 0.013209348852422047,
+          "unneeded": 0.016665552079217983,
+          "unclear": 0.9701250990683599
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "recover_quota",
+        "confidence": 0.9767914081177069,
+        "probabilities": {
+          "recover_quota": 0.9854168049783117,
+          "await_input": 0.0008602760095691892,
+          "retry_provider": 0.008625396860604855,
+          "wait": 0.000553453355818505,
+          "continue": 0.0039766849552285615,
+          "finished": 0.0002473860810850746,
+          "unclear": 0.00031999775938202735
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.8535703073486391,
+        "probabilities": {
+          "redundant_only": 0.05033594538994215,
+          "not_redundant_only": 0.037050044463209496,
+          "no_request": 0.9039062527385813,
+          "unknown": 0.00870775740826709
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "recover_quota",
+    "background_needed": null
+  },
+  {
+    "index": "E0024",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "other",
+        "confidence": 0.32278226117779213,
+        "probabilities": {
+          "none": 0.0517146757901968,
+          "transient_provider": 0.08535111228983633,
+          "quota": 0.0036614199544355826,
+          "other": 0.5910275265716617,
+          "unclear": 0.26824526539386956
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9796473222170808,
+        "probabilities": {
+          "none": 0.9859434166731034,
+          "redundant_request": 0.003397612362252304,
+          "required": 0.006296094456022549,
+          "unclear": 0.004362876508621797
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "authorized_unfinished",
+        "confidence": 0.951992134708767,
+        "probabilities": {
+          "finished": 0.006166257612842825,
+          "authorized_unfinished": 0.9685401652788642,
+          "waiting": 0.008745546538195686,
+          "unclear": 0.016548030570097235
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.9547871661950593,
+        "probabilities": {
+          "needed": 0.002374358737204309,
+          "unneeded": 0.021419237533868145,
+          "unclear": 0.9762064037289274
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "continue",
+        "confidence": 0.37076736683832157,
+        "probabilities": {
+          "recover_quota": 0.005673586085604685,
+          "await_input": 0.11560353709540394,
+          "retry_provider": 0.2451386673074105,
+          "wait": 0.004224163732661621,
+          "continue": 0.6159060341457321,
+          "finished": 0.004065280104110572,
+          "unclear": 0.009388731529076587
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.8909129549481143,
+        "probabilities": {
+          "redundant_only": 0.042611605382797124,
+          "not_redundant_only": 0.017543685204844152,
+          "no_request": 0.9335245603309115,
+          "unknown": 0.006320149081447222
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "uncertain",
+    "background_needed": null
+  },
+  {
+    "index": "E0028",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9521353957722619,
+        "probabilities": {
+          "none": 0.9732140514169596,
+          "transient_provider": 0.0011880269690602847,
+          "quota": 0.021078655644697655,
+          "other": 0.003773625046789267,
+          "unclear": 0.0007456409224930577
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "required",
+        "confidence": 0.9315910512894934,
+        "probabilities": {
+          "none": 0.03155580124848276,
+          "redundant_request": 0.0038743900842627024,
+          "required": 0.9631468525379762,
+          "unclear": 0.0014229561292784102
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.3399018564186323,
+        "probabilities": {
+          "finished": 0.6616048266148679,
+          "authorized_unfinished": 0.32170297019623556,
+          "waiting": 0.008272844580847372,
+          "unclear": 0.008419358608049212
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.8741481551679666,
+        "probabilities": {
+          "needed": 0.006752277473560745,
+          "unneeded": 0.05954978367923638,
+          "unclear": 0.933697938847203
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "await_input",
+        "confidence": 0.8022333148559643,
+        "probabilities": {
+          "recover_quota": 0.03574545186545658,
+          "await_input": 0.8706771533337178,
+          "retry_provider": 0.0032442402251106487,
+          "wait": 0.0037790328707354628,
+          "continue": 0.01522184340818778,
+          "finished": 0.06844383847775347,
+          "unclear": 0.00288843981903819
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "not_redundant_only",
+        "confidence": 0.8414241067753516,
+        "probabilities": {
+          "redundant_only": 0.010762993438160002,
+          "not_redundant_only": 0.9133741956229181,
+          "no_request": 0.07195008884756648,
+          "unknown": 0.0039127220913553595
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "await_input",
+    "background_needed": null
+  },
+  {
+    "index": "E0034",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9968021671369426,
+        "probabilities": {
+          "none": 0.9976815135942387,
+          "transient_provider": 0.0007376037669787014,
+          "quota": 0.0002079696599311671,
+          "other": 0.0008793464572961106,
+          "unclear": 0.000493566521555277
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "required",
+        "confidence": 0.8282974656783624,
+        "probabilities": {
+          "none": 0.0819568819184251,
+          "redundant_request": 0.004799157874179393,
+          "required": 0.9102543475967875,
+          "unclear": 0.002989612610607974
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "authorized_unfinished",
+        "confidence": 0.8958683709445743,
+        "probabilities": {
+          "finished": 0.004116410366634447,
+          "authorized_unfinished": 0.9443982372438069,
+          "waiting": 0.04852986629923259,
+          "unclear": 0.0029554860903260073
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.9097174585832758,
+        "probabilities": {
+          "needed": 0.02207561924411776,
+          "unneeded": 0.03410346108630329,
+          "unclear": 0.943820919669579
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "await_input",
+        "confidence": 0.38284942737716854,
+        "probabilities": {
+          "recover_quota": 0.003014497558586509,
+          "await_input": 0.6275390351138621,
+          "retry_provider": 0.0026733214915423157,
+          "wait": 0.10612985077399566,
+          "continue": 0.24468960773669354,
+          "finished": 0.009761641175437104,
+          "unclear": 0.006192046149882734
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "not_redundant_only",
+        "confidence": 0.6389924804138828,
+        "probabilities": {
+          "redundant_only": 0.02126626351448456,
+          "not_redundant_only": 0.8058953133330551,
+          "no_request": 0.1669028329191723,
+          "unknown": 0.005935590233288059
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "await_input",
+    "background_needed": null
+  },
+  {
+    "index": "E0053",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9929836838742878,
+        "probabilities": {
+          "none": 0.9949391793232206,
+          "transient_provider": 0.001537548693804842,
+          "quota": 0.00047167748704507153,
+          "other": 0.001955495448932805,
+          "unclear": 0.001096099046996602
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9747920239787388,
+        "probabilities": {
+          "none": 0.9838805817371074,
+          "redundant_request": 0.004082316567485935,
+          "required": 0.009088557758368641,
+          "unclear": 0.002948543937038123
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "waiting",
+        "confidence": 0.8878249215244094,
+        "probabilities": {
+          "finished": 0.00294853306578913,
+          "authorized_unfinished": 0.05336367685782358,
+          "waiting": 0.941188598382233,
+          "unclear": 0.0024991916941541873
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.7640540502185064,
+        "probabilities": {
+          "needed": 0.11105202616396014,
+          "unneeded": 0.013841897453573341,
+          "unclear": 0.8751060763824665
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "wait",
+        "confidence": 0.8514914551379814,
+        "probabilities": {
+          "recover_quota": 0.0010669014763981003,
+          "await_input": 0.0024608312448758116,
+          "retry_provider": 0.0022178551729668213,
+          "wait": 0.9190988463176049,
+          "continue": 0.06760739117962347,
+          "finished": 0.0032900430704991776,
+          "unclear": 0.004258131538031693
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.8200078020964754,
+        "probabilities": {
+          "redundant_only": 0.0633887939206644,
+          "not_redundant_only": 0.04248556840246479,
+          "no_request": 0.8833965960171398,
+          "unknown": 0.010729041659730917
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "wait",
+    "background_needed": null
+  },
+  {
+    "index": "E0054",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.997351456594348,
+        "probabilities": {
+          "none": 0.998099760123099,
+          "transient_provider": 0.0006681792793787535,
+          "quota": 0.00014847464982759622,
+          "other": 0.000748303528751004,
+          "unclear": 0.0003352824189436441
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9753653340603128,
+        "probabilities": {
+          "none": 0.9860146213463529,
+          "redundant_request": 0.002353924693858004,
+          "required": 0.010649287286040098,
+          "unclear": 0.0009821666737490015
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "waiting",
+        "confidence": 0.8898890212571456,
+        "probabilities": {
+          "finished": 0.004576972298043853,
+          "authorized_unfinished": 0.0519328130113663,
+          "waiting": 0.941821834268512,
+          "unclear": 0.001668380422077987
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.916381695205945,
+        "probabilities": {
+          "needed": 0.03195288973039981,
+          "unneeded": 0.01971252533325542,
+          "unclear": 0.9483345849363448
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "wait",
+        "confidence": 0.6524343110642884,
+        "probabilities": {
+          "recover_quota": 0.0009868929657256627,
+          "await_input": 0.0032504760235940134,
+          "retry_provider": 0.001528127449176018,
+          "wait": 0.8109449265104341,
+          "continue": 0.15851061544614575,
+          "finished": 0.018645427157697375,
+          "unclear": 0.006133534447227111
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.9022870397874374,
+        "probabilities": {
+          "redundant_only": 0.03470559675882927,
+          "not_redundant_only": 0.025036583177716235,
+          "no_request": 0.9369926365462666,
+          "unknown": 0.0032651835171878143
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "wait",
+    "background_needed": null
+  },
+  {
+    "index": "E0084",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9965193999424276,
+        "probabilities": {
+          "none": 0.9975562595459724,
+          "transient_provider": 0.0007461862103371864,
+          "quota": 0.0002850371626580966,
+          "other": 0.0010368596035448161,
+          "unclear": 0.0003756574774875202
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9721269767639207,
+        "probabilities": {
+          "none": 0.9833003750259133,
+          "redundant_request": 0.004198550370709024,
+          "required": 0.011173398261992543,
+          "unclear": 0.0013276763413851895
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "waiting",
+        "confidence": 0.9819865521199873,
+        "probabilities": {
+          "finished": 0.0018290445942553376,
+          "authorized_unfinished": 0.007516746257072466,
+          "waiting": 0.9895032983770597,
+          "unclear": 0.0011509107716125412
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "needed",
+        "confidence": 0.875790192399663,
+        "probabilities": {
+          "needed": 0.9317676872295478,
+          "unneeded": 0.05597749482988484,
+          "unclear": 0.012254817940567382
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "wait",
+        "confidence": 0.9380669656524868,
+        "probabilities": {
+          "recover_quota": 0.0008958838564482565,
+          "await_input": 0.0027404386457489803,
+          "retry_provider": 0.001172916952397992,
+          "wait": 0.9635683844557006,
+          "continue": 0.025501418803213754,
+          "finished": 0.003941148598792634,
+          "unclear": 0.0021798086876977166
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.9030023607721166,
+        "probabilities": {
+          "redundant_only": 0.02407122089627399,
+          "not_redundant_only": 0.034215333344623164,
+          "no_request": 0.9372176941167397,
+          "unknown": 0.00449575164236318
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": true,
+    "expected": "wait",
+    "background_needed": true
+  },
+  {
+    "index": "E0101",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9969071611812282,
+        "probabilities": {
+          "none": 0.9981036701642417,
+          "transient_provider": 0.0003734552270907005,
+          "quota": 0.0001108213103520739,
+          "other": 0.0011965089830134857,
+          "unclear": 0.0002155443153020047
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9752620035664308,
+        "probabilities": {
+          "none": 0.9840313449900786,
+          "redundant_request": 0.0038293904862179767,
+          "required": 0.00876934142364782,
+          "unclear": 0.0033699231000555393
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "authorized_unfinished",
+        "confidence": 0.8990096819259511,
+        "probabilities": {
+          "finished": 0.006353360925759426,
+          "authorized_unfinished": 0.9413118536465442,
+          "waiting": 0.042302171720593106,
+          "unclear": 0.01003261370710329
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.9310127173963102,
+        "probabilities": {
+          "needed": 0.011290196985399945,
+          "unneeded": 0.028848542809144933,
+          "unclear": 0.9598612602054551
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "continue",
+        "confidence": 0.8436429771011841,
+        "probabilities": {
+          "recover_quota": 0.0008479796252284141,
+          "await_input": 0.0023801372120407145,
+          "retry_provider": 0.0008720094140634157,
+          "wait": 0.06883350439192736,
+          "continue": 0.9124764814931114,
+          "finished": 0.009990722626863487,
+          "unclear": 0.004599165236765212
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.9052952514913507,
+        "probabilities": {
+          "redundant_only": 0.031311896005709015,
+          "not_redundant_only": 0.023615586729639988,
+          "no_request": 0.9366071474970598,
+          "unknown": 0.008465369767591255
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "uncertain",
+    "background_needed": null
+  },
+  {
+    "index": "E0118",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "transient_provider",
+        "confidence": 0.9623509935067613,
+        "probabilities": {
+          "none": 0.017804970899128993,
+          "transient_provider": 0.9801559644058904,
+          "quota": 0.0006182676492547641,
+          "other": 0.0007193950934652306,
+          "unclear": 0.0007014019522606915
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9862881638537007,
+        "probabilities": {
+          "none": 0.9898714853416645,
+          "redundant_request": 0.0035833214879638442,
+          "required": 0.0034917603549854113,
+          "unclear": 0.0030534328153863305
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "authorized_unfinished",
+        "confidence": 0.9842428098355605,
+        "probabilities": {
+          "finished": 0.004088108990094935,
+          "authorized_unfinished": 0.9883309188256554,
+          "waiting": 0.003988534353883892,
+          "unclear": 0.003592437830365914
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.9003820988713794,
+        "probabilities": {
+          "needed": 0.0027114225213029338,
+          "unneeded": 0.04845323930365883,
+          "unclear": 0.9488353381750383
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "retry_provider",
+        "confidence": 0.974385512050104,
+        "probabilities": {
+          "recover_quota": 0.002130595837759216,
+          "await_input": 0.000666504323818638,
+          "retry_provider": 0.9853829077022893,
+          "wait": 0.00026953977537826546,
+          "continue": 0.010997395652185294,
+          "finished": 0.00023800234919353755,
+          "unclear": 0.00031505435937581876
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.875914001643306,
+        "probabilities": {
+          "redundant_only": 0.04486484127833501,
+          "not_redundant_only": 0.028389396206706618,
+          "no_request": 0.920778842921641,
+          "unknown": 0.005966919593317345
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "retry_provider",
+    "background_needed": null
+  },
+  {
+    "index": "E0144",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "quota",
+        "confidence": 0.9944634589066019,
+        "probabilities": {
+          "none": 0.0025108991628620325,
+          "transient_provider": 0.00019733822638556795,
+          "quota": 0.996974358069464,
+          "other": 0.00014767727659284943,
+          "unclear": 0.00016972726469553513
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9639057444856909,
+        "probabilities": {
+          "none": 0.9765037020331164,
+          "redundant_request": 0.007503768437249932,
+          "required": 0.012597957547425586,
+          "unclear": 0.003394571982207966
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "waiting",
+        "confidence": 0.8970387655920251,
+        "probabilities": {
+          "finished": 0.010050209761371772,
+          "authorized_unfinished": 0.04484821784553102,
+          "waiting": 0.9418869834375562,
+          "unclear": 0.00321458895554118
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "needed",
+        "confidence": 0.9709484020120654,
+        "probabilities": {
+          "needed": 0.9820588022147876,
+          "unneeded": 0.011110400202722094,
+          "unclear": 0.00683079758249025
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "recover_quota",
+        "confidence": 0.9893709283541048,
+        "probabilities": {
+          "recover_quota": 0.9935024503164879,
+          "await_input": 0.00033236659102022566,
+          "retry_provider": 0.00020551214972632507,
+          "wait": 0.004131521962383051,
+          "continue": 0.0013030312153912208,
+          "finished": 0.00034658223150911094,
+          "unclear": 0.000178535533482222
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.8583824815773042,
+        "probabilities": {
+          "redundant_only": 0.05291053734825343,
+          "not_redundant_only": 0.029484697819053617,
+          "no_request": 0.9112930189255577,
+          "unknown": 0.006311745907135305
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": true,
+    "expected": "recover_quota",
+    "background_needed": true
+  },
+  {
+    "index": "E0189",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9919727771921569,
+        "probabilities": {
+          "none": 0.9950207739029449,
+          "transient_provider": 0.0008721001051360734,
+          "quota": 0.0003699646565930364,
+          "other": 0.003047996710787898,
+          "unclear": 0.0006891646245380658
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9596084203846768,
+        "probabilities": {
+          "none": 0.972127399550757,
+          "redundant_request": 0.008880126335070921,
+          "required": 0.012518979166080293,
+          "unclear": 0.006473494948091877
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "authorized_unfinished",
+        "confidence": 0.9359476534838334,
+        "probabilities": {
+          "finished": 0.0035069729222781906,
+          "authorized_unfinished": 0.9636752682786041,
+          "waiting": 0.027727614794770677,
+          "unclear": 0.005090144004347114
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.9485478931294214,
+        "probabilities": {
+          "needed": 0.005024138402089877,
+          "unneeded": 0.023213984234244287,
+          "unclear": 0.9717618773636657
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "continue",
+        "confidence": 0.9208478521411676,
+        "probabilities": {
+          "recover_quota": 0.0032333487056855877,
+          "await_input": 0.005043363178804845,
+          "retry_provider": 0.0012703007599404403,
+          "wait": 0.023314915859831593,
+          "continue": 0.9441627680009992,
+          "finished": 0.014835890979854728,
+          "unclear": 0.00813941251488364
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.827895824301847,
+        "probabilities": {
+          "redundant_only": 0.056394100543140674,
+          "not_redundant_only": 0.05044953275593679,
+          "no_request": 0.8842899248449877,
+          "unknown": 0.008866441855934977
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "uncertain",
+    "background_needed": null
+  },
+  {
+    "index": "E0359",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "transient_provider",
+        "confidence": 0.9775290831613769,
+        "probabilities": {
+          "none": 0.010574958935753937,
+          "transient_provider": 0.9881040420971308,
+          "quota": 0.0003875059827858239,
+          "other": 0.0004991835085724481,
+          "unclear": 0.0004343094757571165
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.987287146052534,
+        "probabilities": {
+          "none": 0.9914575857755673,
+          "redundant_request": 0.0022463157084852323,
+          "required": 0.004170439723033305,
+          "unclear": 0.002125658792914219
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "waiting",
+        "confidence": 0.6145940133503418,
+        "probabilities": {
+          "finished": 0.009367707721389286,
+          "authorized_unfinished": 0.1851089152367858,
+          "waiting": 0.7997029285871277,
+          "unclear": 0.005820448454697338
+        }
+      },
+      "background": {
+        "type": "choice",
+        "choice": "unclear",
+        "confidence": 0.8103336135041926,
+        "probabilities": {
+          "needed": 0.08791609493294421,
+          "unneeded": 0.013834196629918917,
+          "unclear": 0.8982497084371368
+        }
+      },
+      "turn_state": {
+        "type": "choice",
+        "choice": "retry_provider",
+        "confidence": 0.9585081078917072,
+        "probabilities": {
+          "recover_quota": 0.001243973699602038,
+          "await_input": 0.0006661823770266837,
+          "retry_provider": 0.9720200489652605,
+          "wait": 0.013511941073553316,
+          "continue": 0.011154301400807271,
+          "finished": 0.0006881543747879274,
+          "unclear": 0.0007153981089622769
+        }
+      },
+      "permission_veto": {
+        "type": "choice",
+        "choice": "no_request",
+        "confidence": 0.8741626539863242,
+        "probabilities": {
+          "redundant_only": 0.047055219697425994,
+          "not_redundant_only": 0.02436887121877539,
+          "no_request": 0.9212178736837502,
+          "unknown": 0.007358035400048513
+        }
+      }
+    },
+    "authorization_complete": true,
+    "has_background": false,
+    "expected": "retry_provider",
+    "background_needed": null
+  }
+]

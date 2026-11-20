@@ -180,6 +180,7 @@ mod tests {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             codex_profile: None,
             models: models.iter().map(|value| (*value).to_owned()).collect(),

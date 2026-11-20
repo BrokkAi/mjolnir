@@ -607,8 +607,11 @@ pub enum HarnessPreparation {
     /// The harness bridge was started. `acp_ready` then reports whether its
     /// session is open.
     Started,
-    /// Preparation stopped at `step`. The worker keeps serving its relay, so
-    /// the session can still be checkpointed and closed.
+    /// Preparation stopped at `step`, and that worker kept serving its relay.
+    /// Only older workers report this. A current worker whose harness cannot
+    /// start exits, and its exit record carries a
+    /// [`crate::relay::WorkerHarnessStartupFailure`] instead. Daemons still
+    /// read it from older workers.
     Failed {
         step: String,
         error: String,
@@ -1156,6 +1159,7 @@ impl RelayOperationalState {
     }
 
     /// Terminal startup failure; this worker cannot retry preparation in place.
+    /// Only an older worker, still serving after the failure, reports it.
     #[must_use]
     pub fn harness_preparation_failed(&self) -> bool {
         matches!(

@@ -1682,6 +1682,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                     content: vec![json!({"type": "text", "text": "next"})],
                     queued_at_ms: 2,
                 }],
+                mailbox: None,
             },
             output_path: output.clone(),
         },
@@ -2234,6 +2235,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         }),
         execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
         claude_permission_mode: Default::default(),
+        mjolnir_guardian: true,
         observe_policy: None,
     }
     .write(&spec.relay_root.join("launch.json"))
@@ -4338,7 +4340,7 @@ fn incompatible_schema_is_rejected_before_restore_mutates_target() {
     for schema_version in [
         1,
         crate::archive::ARCHIVE_SCHEMA_VERSION + 1,
-        crate::archive::ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK + 1,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_MAILBOX + 1,
     ] {
         let incompatible = temp
             .path()

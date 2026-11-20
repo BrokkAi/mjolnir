@@ -1,18 +1,74 @@
 use super::*;
-use mj_core::state::{ContainerUpgradePreview, ContainerUpgradeRequest};
+use mj_core::state::{ContainerSettingsChange, ContainerUpgradePreview, ContainerUpgradeRequest};
+
+fn retained_upgrade_preview(
+    plan: &mj_controller::targets::RetainedContainer,
+    session: SessionRecord,
+) -> ContainerUpgradePreview {
+    if plan.replaces_settings() {
+        plan.settings_preview(
+            &session.id,
+            ContainerSettingsChange {
+                resource_allocation: session.resource_allocation,
+                mounts: session.additional_mounts,
+                mount_history: None,
+            },
+        )
+    } else {
+        plan.preview(&session.id)
+    }
+}
 
 impl RuntimeState {
+    /// Save deferred settings or return the confirmation for applying them now.
+    pub(crate) async fn set_container_settings(
+        self: &Arc<Self>,
+        session_id: String,
+        settings: ContainerSettingsChange,
+    ) -> Result<Option<ContainerUpgradePreview>> {
+        self.validate_container_settings_size(&session_id, settings.resource_allocation.as_ref())
+            .await?;
+        let preview = mj_core::runtime::spawn_blocking(move || {
+            ensure!(
+                !mj_controller::controller::move_session::move_owns_session(&session_id),
+                "session is moving; change container settings after Move finishes"
+            );
+            let mut controller = Controller::load()?;
+            if let Some(plan) = controller.plan_container_settings_replacement(
+                &session_id,
+                "preview",
+                &settings,
+                &ProcessExecutor,
+            )? {
+                return Ok(Some(plan.settings_preview(&session_id, settings)));
+            }
+            controller.update_session_container_settings(
+                &session_id,
+                settings.resource_allocation,
+                settings.mounts,
+                settings.mount_history,
+                &ProcessExecutor,
+            )?;
+            Ok(None)
+        })
+        .await
+        .context("container settings task panicked")??;
+        if preview.is_none() {
+            self.reload_controller().await?;
+        }
+        Ok(preview)
+    }
+
     pub async fn preview_container_upgrade(
         &self,
         session_id: String,
     ) -> Result<ContainerUpgradePreview> {
         blocking(move || {
-            if let Some(plan) = mj_controller::database::load_session_restarts()?
-                .into_iter()
-                .find(|intent| intent.session_id == session_id)
-                .and_then(|intent| intent.container_upgrade)
+            if let Some((intent, session)) =
+                mj_controller::database::load_restart_and_session(&session_id)?
+                && let Some(plan) = intent.container_upgrade
             {
-                return Ok(plan.preview(&session_id));
+                return Ok(retained_upgrade_preview(&plan, session));
             }
             Controller::load()?
                 .plan_container_upgrade(&session_id, "preview", &ProcessExecutor)
@@ -35,19 +91,20 @@ impl RuntimeState {
         let request_key = serde_json::to_string(&request.selection)?;
         let existing = blocking({
             let session_id = session_id.clone();
-            move || {
-                Ok(mj_controller::database::load_session_restarts()?
-                    .into_iter()
-                    .find(|intent| intent.session_id == session_id))
-            }
+            move || mj_controller::database::load_restart_and_session(&session_id)
         })
         .await?;
-        if let Some(intent) = &existing {
+        let settings = request.selection.settings.as_deref().cloned();
+        let existing = if let Some((intent, session)) = existing {
+            let mut selection = request.selection.clone();
+            if let Some(settings) = &mut selection.settings {
+                settings.mount_history = None;
+            }
             ensure!(
                 intent
                     .container_upgrade
                     .as_ref()
-                    .is_some_and(|plan| plan.preview(&session_id) == request.selection),
+                    .is_some_and(|plan| retained_upgrade_preview(plan, session) == selection),
                 "another Restart or upgrade already owns this environment"
             );
             if self
@@ -60,7 +117,10 @@ impl RuntimeState {
             {
                 return Ok(());
             }
-        }
+            Some(intent)
+        } else {
+            None
+        };
         let phase = if existing.as_ref().is_some_and(|intent| {
             intent.phase == mj_controller::database::SessionRestartPhase::RecreatingContainer
         }) {
@@ -68,58 +128,62 @@ impl RuntimeState {
         } else {
             LifecyclePhase::Executing
         };
-        let (accepted, acceptance) = tokio::sync::oneshot::channel();
-        let operation = self.admit_lifecycle(
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        let mut operation = self.admit_prepared_lifecycle(
             session_id,
             LifecycleKind::UpgradeContainer,
-            super::lifecycle::LifecycleStart {
-                origin: super::lifecycle::LifecycleOrigin::Person,
-                resume_workspace_id: None,
-                request_key: Some(request_key),
-                control: None,
-                phase,
-                move_operation_id: None,
-                deferrable_admission: None,
-                holds_through_drain: false,
-            },
+            super::lifecycle::LifecycleStart { phase, ..super::lifecycle::LifecycleStart::request(request_key, None, None) },
+            Some(acceptance),
             move |state, session_id, cancelled, session_admission| async move {
+                if let Some(settings) = &settings {
+                    state.validate_container_settings_size(&session_id, settings.resource_allocation.as_ref()).await?;
+                }
                 let admitted = blocking({
                     let session_id = session_id.clone();
                     let cancelled = cancelled.clone();
                     move || {
                         if let Some(intent) = existing { return Ok(intent); }
                         let operation_id = new_command_id("container-upgrade")?;
-                        let plan = Controller::load()?.plan_container_upgrade(&session_id, &operation_id, &CancellableProcessExecutor::new(cancelled.clone()))?;
+                        let controller = Controller::load()?;
+                        let executor = CancellableProcessExecutor::new(cancelled.clone());
+                        if let Some(settings) = settings {
+                            let plan = controller.plan_container_settings_replacement(&session_id, &operation_id, &settings, &executor)?
+                                .context("container settings or preservation preflight changed; review settings again")?;
+                            ensure!(plan.settings_preview(&session_id, settings.clone()) == request.selection,
+                                "container or settings changed since confirmation; review settings again");
+                            let history_host = controller.config.targets.get(&controller.state.sessions[&session_id].target_template_id)
+                                .and_then(mj_core::config::mount_history_host);
+                            if let Some(host) = history_host {
+                                if let Some(history) = &settings.mount_history {
+                                    mj_controller::database::replace_mount_history(host, history)?;
+                                }
+                                mj_controller::database::remember_mount_sources(host, &settings.mounts)?;
+                            }
+                            return mj_controller::database::begin_container_upgrade(&session_id, &operation_id, cancelled, plan, Some(settings));
+                        }
+                        let plan = controller.plan_container_upgrade(&session_id, &operation_id, &executor)?;
                         ensure!(plan.preview(&session_id) == request.selection, "container or image selection changed since confirmation; refresh the upgrade preview");
                         ensure!(request.selection.available, "this container already uses the selected image");
-                        mj_controller::database::begin_container_upgrade(&session_id, &operation_id, cancelled, plan)
+                        mj_controller::database::begin_container_upgrade(&session_id, &operation_id, cancelled, plan, None)
                     }
                 }).await;
-                let intent = match admitted {
-                    Ok(intent) => intent,
-                    Err(error) => {
-                        let _ = accepted.send(Err(format!("{error:#}")));
-                        return Err(error);
-                    }
-                };
+                let intent = admitted?;
                 state.bind_restart_intent(&session_id, &intent.operation_id)?;
-                let _ = accepted.send(Ok(()));
+                accepted.send_replace(Some(Ok(())));
                 state.restart_admitted(&session_admission, session_id, cancelled, Some(intent), false).await
             },
         ).await?;
         let runtime = self.clone();
+        let result = operation.result.clone();
         mj_core::runtime::spawn(async move {
-            if let Err(error) = Self::wait_lifecycle_result(operation.clone()).await {
+            if let Err(error) = Self::wait_lifecycle_result(result.clone()).await {
                 tracing::warn!(
                     error = format!("{error:#}"),
                     "container upgrade retained its environment and recovery intent"
                 );
             }
-            runtime.remove_completed_lifecycle(&operation);
+            runtime.remove_completed_lifecycle(&result);
         });
-        acceptance
-            .await
-            .context("container upgrade admission stopped before acceptance")?
-            .map_err(anyhow::Error::msg)
+        operation.confirm_acceptance().await.map(|_| ())
     }
 }

@@ -2192,11 +2192,16 @@ const FRESH_NATIVE_RESUME_CHILD: &str = "MJ_TEST_FRESH_NATIVE_RESUME_CHILD";
 #[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FreshNativeOpening {
-    /// A new native session that names the archived one it replaced because
-    /// this session never used it: what a restored worker does when the
-    /// harness has no record of a session that was never prompted.
+    /// The archive holds no native files, as for a session that never
+    /// received a prompt. The restore names no native session to load, so
+    /// the worker opens a new one and has nothing to explain.
+    NothingToLoad,
+    /// The archive holds the native session's files, but the harness has no
+    /// record of the session. The worker opens a new one and names the
+    /// archived one it replaced because this session never used it.
     ReplacesUnused,
-    /// A new native session with no reason given for the change.
+    /// The archive holds the native session's files, and the worker opens a
+    /// new session with no reason given for the change.
     Unexplained,
 }
 
@@ -2245,9 +2250,10 @@ fn fresh_native_resume_for_each_harness(
 /// over once the target exists, with a stand-in worker in the worker root.
 ///
 /// The stand-in serves a real durable relay over the worker's proxy command
-/// and journals what a restored worker does when the harness cannot reload the
-/// archived native session: a restart, the warning, and a `session_opened`
-/// with a new identity.
+/// and journals what a restored worker does when it opens a new native
+/// session: only a `session_opened` when its launch names none, and otherwise,
+/// because the harness cannot reload the archived one, a restart, the warning,
+/// and a `session_opened` with a new identity.
 #[cfg(unix)]
 fn fresh_native_resume(
     harness: mj_core::config::HarnessKind,
@@ -2285,8 +2291,14 @@ fn fresh_native_resume(
 
     // Never prompted: the archived transcript is empty, and the archive names
     // the native session the harness was given at launch.
-    let checkpoint =
-        write_checkpoint_gate_archive_for_harness(&archives, session_id, 2, harness, profile_id);
+    let checkpoint = write_checkpoint_gate_archive_for_harness(
+        &archives,
+        session_id,
+        2,
+        harness,
+        profile_id,
+        opening != FreshNativeOpening::NothingToLoad,
+    );
     let verified = verify_resume_checkpoint(session_id, &checkpoint).unwrap();
     assert_eq!(
         verified.manifest.session.native_session_id,
@@ -2300,7 +2312,7 @@ fn fresh_native_resume(
         FreshNativeOpening::ReplacesUnused => format!(
             "{LATCH_RELAY_REPLACED_UNUSED}=native-session\n    export {LATCH_RELAY_REPLACED_UNUSED}\n    "
         ),
-        FreshNativeOpening::Unexplained => String::new(),
+        FreshNativeOpening::NothingToLoad | FreshNativeOpening::Unexplained => String::new(),
     };
     let script = format!(
         r#"case "${{2:-}}" in
@@ -2348,7 +2360,8 @@ exit 0
     })
     .unwrap();
     // The record as `resume_session_controlled` leaves it once the target
-    // is provisioned: still provisioning, expecting the archived identity.
+    // is provisioned: still provisioning, expecting the archived identity
+    // when the archive holds that session's conversation.
     let mut session = checkpoint_test_session(session_id);
     session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
         straightforward: None,
@@ -2362,7 +2375,7 @@ exit 0
     }));
     session.project_directory = Some(checkout.clone());
     session.state = SessionState::Provisioning;
-    session.native_session_id = Some("native-session".into());
+    session.native_session_id = verified.native_session_to_load(true).map(str::to_owned);
     session.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(&session).unwrap();
     crate::database::save_materialized_session(&archived_projection).unwrap();
@@ -2434,6 +2447,12 @@ exit 0
     let launch: mj_core::worker_launch::WorkerLaunchConfig =
         serde_json::from_slice(&std::fs::read(worker_root.join("launch.json")).unwrap()).unwrap();
     assert_eq!(launch.cwd.as_os_str(), checkout.as_os_str());
+    // Only an archive with the native session's files makes the restored
+    // worker try to load it; Codex cannot load a thread it never wrote.
+    assert_eq!(
+        launch.native_session_id.as_deref(),
+        (opening != FreshNativeOpening::NothingToLoad).then_some("native-session")
+    );
     assert_eq!(
         restored_spec
             .primary_repository_root
@@ -2450,7 +2469,7 @@ exit 0
     };
 
     match opening {
-        FreshNativeOpening::ReplacesUnused => {
+        FreshNativeOpening::NothingToLoad | FreshNativeOpening::ReplacesUnused => {
             restored.unwrap_or_else(|error| panic!("{harness:?} resume failed: {error:#}"));
             // The new identity is the session's now, in memory and on disk, so
             // the next suspend archives it and the next resume expects it.
@@ -2517,18 +2536,20 @@ exit 0
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             });
-            // One line says the conversation started fresh.
+            // A replaced session gets one line saying the conversation started
+            // fresh. With nothing to load, nothing was replaced or restarted.
+            let replaced = usize::from(opening == FreshNativeOpening::ReplacesUnused);
             let durable = crate::database::load_materialized_session(session_id)
                 .unwrap()
                 .unwrap();
             for projection in [&answered, &durable] {
                 assert_eq!(
                     mentions(projection, "continuing in a new empty session"),
-                    1,
+                    replaced,
                     "{:#?}",
                     projection.transcript
                 );
-                assert_eq!(mentions(projection, "[session restarted]"), 1);
+                assert_eq!(mentions(projection, "[session restarted]"), replaced);
                 // The person sees one line about the stopped sub-agent.
                 assert_eq!(
                     mentions(projection, "Suspend stopped 1 working sub-agent"),
@@ -2579,16 +2600,17 @@ exit 0
 
 /// R7-5: a session suspended before its native session was ever prompted.
 /// Claude Code and Codex write nothing for a native session until its first
-/// prompt, so the restored worker cannot reload the archived one and opens a
-/// fresh one. The resume accepts it, records the new identity, and the session
-/// answers prompts.
+/// prompt, so its archive holds no native files and the restore names no
+/// native session to load. The worker opens a fresh one, the resume accepts
+/// it, records the new identity, and the session answers prompts.
 // Hard-won: 2f8ec62e13d6: retries of never-prompted sessions rejected the fresh native ID every time.
+// Hard-won: #1618: the restore asked Codex to load an archived thread that had no native files.
 #[cfg(unix)]
 #[test]
 fn a_never_prompted_session_resumes_into_the_fresh_native_session_its_worker_opened() {
     fresh_native_resume_for_each_harness(
         "a_never_prompted_session_resumes_into_the_fresh_native_session_its_worker_opened",
-        FreshNativeOpening::ReplacesUnused,
+        FreshNativeOpening::NothingToLoad,
         StoppedSubagents::None,
     );
 }

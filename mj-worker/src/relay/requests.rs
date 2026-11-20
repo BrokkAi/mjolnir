@@ -124,6 +124,20 @@ impl DurableRelay {
                     .get(command_id)
                     .map(|handled| handled.accepted_ordinal),
             },
+            RelayRequest::ReadCheckpointMailbox {
+                barrier_command_id,
+                cut,
+            } => match self.checkpoint_mailbox(barrier_command_id, cut)? {
+                Ok(mailbox) => RelayResponsePayload::CheckpointMailbox { mailbox },
+                Err(message) => {
+                    return Ok(relay_error(
+                        RelayErrorCode::InvalidState,
+                        message,
+                        false,
+                        None,
+                    ));
+                }
+            },
             RelayRequest::ReadPendingElicitation { elicitation_id } => {
                 RelayResponsePayload::PendingElicitation {
                     request: self
