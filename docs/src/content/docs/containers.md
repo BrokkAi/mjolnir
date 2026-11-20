@@ -25,7 +25,7 @@ calls.
 
 Bare localhost sessions preserve configured approvals. Codex, Claude Code,
 Grok Build, Muse Code, and Antigravity expose guardian modes. Kimi Code,
-OpenCode, and DSH do not: they ask before tools (OpenCode under rules
+OpenCode, and DSH do not: they ask before tools (OpenCode under a hook
 Mjolnir adds, DSH before every write, command, and MCP tool call) and run
 every command directly on the host without
 a sandbox, so the [Mjolnir guardian](/security/#the-mjolnir-guardian) answers

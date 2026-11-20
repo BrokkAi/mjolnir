@@ -646,6 +646,10 @@ async fn run_bridge(
     let transport = ByteStreams::new(stdin.compat_write(), skip_stdout_preamble(stdout).compat());
 
     let terminals = TerminalRegistry::new()?;
+    // Like the terminals, the guardian's reviewer outlives the protocol
+    // driver: it is stopped below, after this bridge's own teardown, on every
+    // exit path, so the next bridge never starts beside a live reviewer.
+    let guardian = guardian::Guardian::for_launch(spec);
     let (mut result, child_reaped) = {
         let drive = drive_with_terminals(
             transport,
@@ -654,7 +658,10 @@ async fn run_bridge(
             events.clone(),
             opened.clone(),
             session_open,
-            terminals.clone(),
+            BridgeOwned {
+                terminals: terminals.clone(),
+                guardian: guardian.clone(),
+            },
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -737,6 +744,11 @@ async fn run_bridge(
     // The bridge lifetime owner also covers cancellation of drive before its
     // ordinary shutdown path; no terminal from this connection may outlive it.
     terminals.shutdown(events).await;
+    // Nor may its guardian reviewer: the next bridge prepares the same staged
+    // home (OpenCode's login database included) only after this one is gone.
+    if let Some(guardian) = &guardian {
+        guardian.shutdown().await;
+    }
     emit_runtime_event(
         events,
         RuntimeEvent::BridgeRetired {

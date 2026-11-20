@@ -97,7 +97,7 @@ These are the integrations shipped with Mjolnir 2.x today:
 | Kimi Code | `kimi` | Yes | Yes | Yes | Yes (Mjolnir guardian) |
 | Grok Build | `grok` | Yes | Yes | Yes | Yes |
 | Muse Code | `muse` | Yes | Yes | Yes | Yes |
-| OpenCode | `opencode` | Yes | No | Yes | Yes (Mjolnir guardian) |
+| OpenCode | `open-code` | Yes | No | Yes | Yes (Mjolnir guardian) |
 | DSH | `dsh` | API key | No (usage-priced, shows `API`) | Yes | Yes (Mjolnir guardian) |
 
 “Native state” means Mjolnir can resume the harness's own session when the
@@ -106,9 +106,9 @@ workspace and supplies a size-bounded handoff derived from the canonical
 transcript. See [Durability and recovery](/durability/).
 
 Kimi Code, OpenCode, and DSH have no reviewer of their own and run commands on
-the host without a sandbox. On a bare runtime the
-[Mjolnir guardian](/security/#the-mjolnir-guardian) reviews each action they
-ask about, using the same harness and model. Muse Code currently accepts one workspace root, so use
+the host without a sandbox. On a raw target that keeps configured approvals
+the [Mjolnir guardian](/security/#the-mjolnir-guardian) reviews each action
+they ask about, using the same harness and model. Muse Code currently accepts one workspace root, so use
 either a one-repository bundle or one bare project directory, without attached
 directories.
 
