@@ -81,15 +81,15 @@ dependencies = [
 
 [[package]]
 name = "alloc-no-stdlib"
-version = "3.0.0"
+version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2fb6cfd47bf496ff64095c20eaba0c201404ee38714d4142fcfa1dc334fcc7a"
+checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
 
 [[package]]
 name = "alloc-stdlib"
-version = "0.3.0"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b5c1865780388bfa186411ab5f247819487fc4864c6e9c3106611fa347586e1"
+checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
 dependencies = [
  "alloc-no-stdlib",
 ]
@@ -276,9 +276,9 @@ dependencies = [
 
 [[package]]
 name = "async-compression"
-version = "0.4.50"
+version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee19bd99b43e3691acbad4e840420a4881cea6c0b66a208125a824f8fd53f5a1"
+checksum = "515a1f282e33d55983c499d7e9e87082e81cbc32974825bf9032f928392d5844"
 dependencies = [
  "compression-codecs",
  "compression-core",
@@ -486,6 +486,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bit-set"
@@ -1274,7 +1280,9 @@ version = "2.73.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "axum",
  "base64 0.22.1",
+ "brokk-mj-build-cache",
  "brokk-mj-checkpoint",
  "brokk-mj-controller",
  "brokk-mj-core",
@@ -1284,16 +1292,23 @@ dependencies = [
  "clap",
  "flate2",
  "getrandom 0.3.4",
+ "hex",
+ "hmac",
  "jsonc-parser",
  "libc",
  "mach2",
+ "mbx-cache-core",
+ "mbx-cache-protocol",
+ "percent-encoding",
  "proptest",
+ "quick-xml",
  "reqwest",
  "rusqlite",
  "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "socket2",
  "tar",
  "tempfile",
  "tokio",
@@ -1303,6 +1318,7 @@ dependencies = [
  "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-bash",
+ "url",
 ]
 
 [[package]]
@@ -1402,9 +1418,9 @@ dependencies = [
 
 [[package]]
 name = "brotli"
-version = "9.0.0"
+version = "8.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8b851b75c23ca7873623d612fe49bd1989aeb03d08fb9432187eb253d3d4c6b"
+checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -1413,9 +1429,9 @@ dependencies = [
 
 [[package]]
 name = "brotli-decompressor"
-version = "6.0.1"
+version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "941cd9bd4ddab83cb46fa5a2d428f1c857b24ac78cb876cf7beb710840934bd7"
+checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -1697,14 +1713,16 @@ dependencies = [
 
 [[package]]
 name = "compression-codecs"
-version = "0.4.45"
+version = "0.4.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98fc98460ba0ad5317075d3632b8dfc45d0be8c4a49347c2a38272019717614a"
+checksum = "2fe67f2944eef52fc7b106b8c9450d243a88701a0c065f7f57235e76abaed7df"
 dependencies = [
  "brotli",
  "compression-core",
  "flate2",
  "memchr",
+ "zstd",
+ "zstd-safe",
 ]
 
 [[package]]
@@ -2317,6 +2335,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "eyre"
+version = "0.6.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c08309dbcc659c5549a24ddb9b27027640641b282ef5768267c7e675558986a3"
+dependencies = [
+ "autocfg",
+ "indenter",
+ "once_cell",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2531,6 +2560,16 @@ name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
+
+[[package]]
+name = "fslock"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04412b8935272e3a9bae6f48c7bfff74c2911f60525404edfdd28e49884c3bfb"
+dependencies = [
+ "libc",
+ "winapi",
+]
 
 [[package]]
 name = "futures"
@@ -3122,6 +3161,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6"
 
 [[package]]
+name = "indenter"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "964de6e86d545b246d84badc0fef527924ace5134f30641c203ef52ba83f58d5"
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3588,6 +3633,54 @@ name = "maybe-owned"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
+
+[[package]]
+name = "mbx-cache-core"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ef0bc5625f923034fda63e7c157ec3041b5ab9192f8323ede591e329e339d04"
+dependencies = [
+ "async-compression",
+ "base64 0.23.1",
+ "blake3",
+ "bytes",
+ "eyre",
+ "fslock",
+ "futures-util",
+ "hex",
+ "libc",
+ "log",
+ "mbx-cache-protocol",
+ "memchr",
+ "rand 0.10.2",
+ "reflink-copy",
+ "reqwest",
+ "same-file",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "strum 0.28.0",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "url",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mbx-cache-protocol"
+version = "0.5.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be4a7f124359f10935f7c1afe21c082d76e93ccd1089f2f80e747fb4ff67695d"
+dependencies = [
+ "blake3",
+ "eyre",
+ "hex",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2 0.11.0",
+]
 
 [[package]]
 name = "memchr"
@@ -4569,6 +4662,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -4979,6 +5073,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "reflink-copy"
+version = "0.1.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20d23b61573e4e96a48e3196327eedc4d50e30ba1ea1eae3f08187b44542e642"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "regex"
 version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5251,6 +5357,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "ryu-js"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
+
+[[package]]
 name = "safe_arch"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5388,6 +5500,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_json_canonicalizer"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87f7bb64f8c7e9f783fdfe883b5fe93a90bee1597c63705baa91842c5f698620"
+dependencies = [
+ "ryu-js",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -6228,6 +6351,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
  "tokio",
  "tokio-util",

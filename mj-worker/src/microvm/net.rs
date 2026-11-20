@@ -134,6 +134,7 @@ table ip {TABLE} {{
         type filter hook input priority filter; policy accept;
         iifname "{TAP_PREFIX}*" ct state established,related accept
         iifname "{TAP_PREFIX}*" icmp type echo-request accept
+        iifname "{TAP_PREFIX}*" tcp dport {mbx_port} accept
         iifname "{TAP_PREFIX}*" drop
     }}
     chain forward {{
@@ -146,7 +147,8 @@ table ip {TABLE} {{
         iifname "{TAP_PREFIX}*" oifname != "{TAP_PREFIX}*" masquerade
     }}
 }}
-"#
+"#,
+        mbx_port = super::mbx_proxy::PORT
     )
 }
 

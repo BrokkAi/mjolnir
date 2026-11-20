@@ -22,9 +22,9 @@ use super::image::{self, PullPolicy};
 use super::net::{self, Link};
 use super::protocol::{AGENT_PORT, StartRequest, VolumeSpec};
 use super::state::{
-    ImageConfig, Layout, STATE_FORMAT, VmState, VmVolume, validate_label, validate_name,
+    ImageConfig, Layout, MbxRemote, STATE_FORMAT, VmState, VmVolume, validate_label, validate_name,
 };
-use super::{boot, sys, volume};
+use super::{boot, mbx_proxy, sys, volume};
 
 /// The Nitro hypervisor takes this much from the pool on top of the guest's memory.
 const POOL_OVERHEAD_BYTES: u64 = 2 << 20;
@@ -208,6 +208,7 @@ pub struct RunSpec {
     pub cpus: Option<f64>,
     pub memory_bytes: u64,
     pub env: Vec<String>,
+    pub mbx_remote: Option<MbxRemote>,
     pub user: Option<String>,
     pub workdir: Option<String>,
     pub volumes: Vec<VolumeArg>,
@@ -332,6 +333,7 @@ pub fn build_state(layout: &Layout, spec: &RunSpec, image_id: &str, slot: u32) -
         nano_cpus: (cpus * 1e9).round() as i64,
         memory_bytes: spec.memory_bytes,
         env,
+        mbx_remote: spec.mbx_remote.clone(),
         user: spec.user.clone().unwrap_or(image.user),
         working_dir: spec
             .workdir
@@ -755,6 +757,21 @@ fn launch(layout: &Layout, state: &mut VmState) -> Result<()> {
         )
         .context("start the VM unit")?;
     }
+    let mut env = state.env.clone();
+    if let Some(remote) = &state.mbx_remote {
+        mbx_proxy::start_unit(layout, state, &link, &boot)?;
+        for (key, value) in [
+            (
+                "MBX_REMOTE_URL",
+                format!("http://{}:{}", link.host, mbx_proxy::PORT),
+            ),
+            ("MBX_REMOTE_NAMESPACE", remote.namespaces[0].clone()),
+            ("MBX_REMOTE_MODE", "read-only".to_owned()),
+        ] {
+            env.retain(|entry| entry.split('=').next() != Some(key));
+            env.push(format!("{key}={value}"));
+        }
+    }
     let client = wait_for_agent(&state.name, &agent_socket(layout, state))?;
     // The agent starts after init has filled any new volume, and before the
     // command can write to one. Record that now, durably: a start that is
@@ -779,7 +796,7 @@ fn launch(layout: &Layout, state: &mut VmState) -> Result<()> {
     client
         .start(StartRequest {
             argv,
-            env: state.env.clone(),
+            env,
             cwd: if state.working_dir.is_empty() {
                 "/".to_owned()
             } else {
@@ -806,7 +823,7 @@ fn wait_for_agent(name: &str, socket: &Path) -> Result<Client<UnixStream>> {
         if activity(name)? == Activity::Stopped {
             bail!(
                 "the VM stopped before its guest agent answered:\n{}",
-                journal_tail(name)
+                unit_journal(&unit_name(name))
             );
         }
         if socket.exists()
@@ -818,13 +835,12 @@ fn wait_for_agent(name: &str, socket: &Path) -> Result<Client<UnixStream>> {
     }
 }
 
-fn journal_tail(name: &str) -> String {
-    let unit = unit_name(name);
+pub(super) fn unit_journal(unit: &str) -> String {
     sys::find_tool("journalctl")
         .and_then(|journalctl| {
             sys::run_unchecked(
                 &journalctl,
-                &["-u", unit.as_str(), "-n", "30", "--no-pager", "-o", "cat"],
+                &["-u", unit, "-n", "30", "--no-pager", "-o", "cat"],
             )
         })
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())

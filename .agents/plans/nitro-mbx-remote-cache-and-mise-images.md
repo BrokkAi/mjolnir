@@ -35,10 +35,11 @@ To see it working:
 - [x] (2026-11-20 15:58Z) Implemented Milestone 2: EC2 warming, host-scoped image reconciliation, builderless status, Doctor, and docs.
 - [x] (2026-11-20 16:17Z) Validated Milestone 2 with focused dev-profile tests and strict Clippy.
 - [x] (2026-11-20) Milestone 3: mbx in Nitro guests (pinned v1.30.0 musl release per guest architecture, staged through the worker binary store, launchers, guest-local store at /var/lib/hel/mbx). Ten focused filters passed one each; clippy clean on six crates. Live guest execution unverified until Milestone 6.
-- [ ] Milestone 4: the host proxy (engine verb, per-VM unit, firewall, host cache, trimming, tests).
+- [x] (2026-11-20) Milestone 4 implementation: engine verbs, TAP-bound systemd unit, typed VM state, signed S3 reads, verified filesystem cache and trimming. Fake-S3 and pinned mbx checks passed.
+- [ ] Milestone 4 privileged network test. Local `sudo -n true` requires interactive authentication. Run the gated test on a root-capable Linux host or cover it during Milestone 6.
 - [x] (2026-11-20 16:05Z) Milestone 5: implemented configuration, controller wiring, EC2 instance-role provisioning, the Doctor probe caller, and documentation in `nitro-mbx-wiring`.
 - [x] (2026-11-20 16:08Z) Milestone 5: five focused test filters passed one test each, and all 11 touched Rust crates passed Clippy with all targets and warnings denied.
-- [ ] Integrate Milestone 5 with the guest and engine changes, including the Milestone 4 `mbx-check` verb.
+- [x] (2026-11-20) Integrated Milestones 1-5 on local master; the two `maintain` halves are one verb (reconcile when `--keep-image` is given, always trim).
 - [ ] Milestone 6: live EC2 validation and measurements, tool-cache decision.
 - [ ] Integrated review, commit, push; update #1495; close it.
 
@@ -78,6 +79,17 @@ To see it working:
   stamped with the test identity. Existing Podman fixture runs also need a
   PATH that keeps the controller's own mbx installation out of the fake host.
   Evidence: the final `ec2::tests::` filter passed all 12 tests.
+
+- Observation: systemd 252 resolves bind mount sources while applying mounts in path order. `ProtectHome=yes` can mask the deployed engine in the SSH user's home before establishing its service-visible bind mount. The engine stages the running executable under the root-only boot asset directory and holds the existing boot reservation through systemd startup. Only the executable and cache are bound into the unit at service-visible paths under `/run/mj-mbx-proxy`. Boot pruning can later unlink the old executable while a running unit holds the mounted inode.
+  Evidence: [systemd v252 namespace setup](https://github.com/systemd/systemd/blob/v252/src/core/namespace.c), functions `mount_path_compare` and `apply_one_mount`. The staging and reservation are in `mj-worker/src/microvm/mbx_proxy.rs` and `boot.rs`.
+- Observation: AL2023 normally mounts `/tmp` on a separate tmpfs. A proxy can stage an uncached, verified fallback there after the host cache disk returns `ENOSPC`. If the private temporary area also lacks space, it returns 502 for the blob.
+  Evidence: [AL2023 temporary filesystem](https://docs.aws.amazon.com/linux/al2023/ug/filesystem-slash-tmp.html) and `mj-worker/src/microvm/mbx_proxy.rs`.
+- Observation: mbx-cache-core's zstd features select older compatible async-compression and compression-codecs versions. The newer codec's zstd 0.14 dependency conflicts with the workspace's existing zstd 0.13 graph. The worker still uses the workspace's rustls ring provider.
+  Evidence: `Cargo.lock` and `mj-worker/Cargo.toml`.
+- Observation: the pinned client needs `MBX_REMOTE_TRUST_WRITES=true` for a fixture seeding from outside trusted CI. A pre-existing `Cargo.lock` keeps the task manifest identity the same across the seed and read. The fixture reads through a cold local store and target and observes one prefetched hit with 4.5 MiB downloaded and zero bytes uploaded.
+  Evidence: `mj-worker/src/microvm/mbx_proxy/tests.rs`, test `mbx_proxy_real_client`.
+- Observation: the core IMDS provider exposes temporary credentials and expiration. Its role-list errors expose text but erase the HTTP status, so the engine's no-role diagnostic recognizes the specific core 0.21 empty-list and role-list 404 errors. Other IMDS errors surface as failed reads.
+  Evidence: mbx-cache-core 0.21.0 `imds.rs` and `mj-worker/src/microvm/mbx_proxy/s3.rs`.
 
 ## Decision Log
 
@@ -165,6 +177,14 @@ uses the crane path and version reported by the installed engine. Live EC2
 validation and confirmation with the combined engine work remain in
 Milestone 6.
 
+- Decision: superseding the original high-level S3 client path, the proxy and `mbx-check` send raw SigV4-signed GETs over the worker's rustls reqwest client. Keep mbx-cache-core for the shared IMDS provider and mbx-cache-protocol for digest and document validation. Treat `NoSuchKey` and plain 404 as absence, and surface `AccessDenied` and other S3 errors. Preserve validated action-result bytes and the strong S3 ETag on uncached manifests.
+  Rationale: core 0.21 maps a generic S3 403 to an absence on action results and manifests. That would silently disable a denied cache and make Doctor report it as readable.
+  Date/Author: 2026-11-20, parent session.
+
+## Outcomes & Retrospective
+
+Milestone 4 has implemented the proxy and real-client fixture. The fixture used the pinned mbx 1.30.0 and an independently cold local store and target. It observed one prefetched hit, 4.5 MiB downloaded, and zero bytes uploaded. Test and build counts are recorded in the Milestone 4 handback. The root-gated device binding and AL2023 service and IAM behavior remain to be verified.
+
 ## Context and Orientation
 
 The daemon (`mj daemon-run`, crate `mj-controller`, with lifecycle code split into crates such as `mj-targets`, `mj-build-cache`, `mj-worker-staging`) is the control plane. It owns configuration (`~/.config/mjolnir/config.toml`, types in `mj-core/src/config/`), the session database and session lifecycle. Each session has a worker (crate `mj-worker`, binary `hel`), which runs inside the session's environment and starts the agent's harness.
@@ -239,7 +259,7 @@ Tests: none of the "which tests to add" kinds fits a unit check here. Proof come
 
 ### Milestone 4: the host proxy (`mj-worker/src/microvm/`, new module `mbx_proxy.rs`)
 
-Add the dependencies `mbx-cache-core = "0.21"` and `mbx-cache-protocol = "0.5"` from crates.io to `mj-worker`, using rustls. Use the same versions for both, so the digest types are one crate identity.
+Add the dependencies `mbx-cache-core = "0.21"` and `mbx-cache-protocol = "0.5"` from crates.io to `mj-worker`. Use the workspace reqwest rustls backend. Use core for IMDSv2 and protocol for digests and wire document types.
 
 `run` accepts `--mbx-remote s3://<bucket>/<prefix>`, `--mbx-remote-region <region>` (optional) and `--mbx-namespace <ns>` (repeatable; the first is the default). Validate each namespace with the grammar in the Decision Log. Store them in `VmState` as a separate typed field, `mbx_remote: Option<MbxRemote>`, with serde defaults so older state reads as `None`. They are not part of the VM's environment list. When `mbx_remote` is set:
 
@@ -254,15 +274,12 @@ The proxy runs under a dedicated system user that the engine creates idempotentl
 
 In `ruleset()`, insert `iifname "mjt*" tcp dport 7461 accept` in the IPv4 input chain before the final drop. IPv6 stays fully dropped.
 
-Request handling follows the Decision Log:
+Request handling follows the Decision Log. The proxy keeps one refetchable set of instance-role credentials for all allowed namespaces. It obtains the region from `--mbx-remote-region` or IMDS. Its S3 GETs include the date, payload hash, optional session token and SigV4 authorization. It compares response status and the XML error code to distinguish a miss from denied credentials.
 
-- One `RemoteCacheClient::new_s3_with_instance_role` per allowed namespace, created lazily, all sharing one `InstanceRoleCredentials`.
-- The region is `--mbx-remote-region`, or else the host's region from IMDS.
-- Blobs: `get_blob_file` into a temporary file in the cache directory, then rename into place. That function verifies the digest before returning, and the response is served from the renamed file.
-- Action results: `get_action_result`, then serialize to JSON with the protocol media type and cache it.
-- Manifests: `get_action_manifest` on every request, returning 200 with `ETag: "<value>"`.
-- A cache hit updates the file's access time for trimming.
-- Map upstream failures as the Decision Log says. Prefer distinguishing S3 absence from authorization failure by S3's error code. If core does not expose it, map core's documented `Ok(None)` to 404 and all errors to 502.
+- Blobs stream to a temporary file, are verified with the protocol digest, and are published atomically. The response holds an open descriptor. If staging runs out of space in the cache directory, the proxy refetches and verifies into the unit's private temporary directory, then serves that file without caching it. If the private temporary directory cannot hold the object either, the error becomes 502.
+- Action results are parsed and checked for version and requested action identity before caching the original response bytes.
+- Manifests are fetched every time. The proxy validates their canonical form and selector and sends the S3 response's strong, quoted ETag.
+- Cache hits update the accessed timestamp on the opened file.
 
 `maintain` gains `--mbx-cache-budget <size>`. It removes cache files, least recently accessed first, until the cache fits the budget. It deletes only files, never directories that another proxy is writing into. A proxy that is streaming a deleted file keeps its open descriptor.
 
@@ -308,7 +325,7 @@ EC2 (`mj-cli/src/ec2.rs`): add `--mbx-remote` and `--mbx-remote-region` to `Crea
 
 A newly created instance profile can take seconds to become usable in `run-instances`. Handle the `InvalidParameterValue` "Invalid IAM Instance Profile" refusal by retrying with backoff until IAM reports the profile, because the other side reports this limit. Do not add a fixed sleep.
 
-Doctor: for a Nitro target with `remote`, invoke the short-lived `hel microvm mbx-check` read probe using the interface below. Report "remote cache readable", "role cannot read <bucket>/<prefix>: <S3 error>", or "no instance role attached".
+Doctor: for a Nitro target with `remote`, run `hel microvm mbx-check` on the host. The engine makes one signed GET of the zero-digest action result with size zero in the supplied namespace. It reports "remote cache readable", "role cannot read <bucket>/<prefix>: <error>", or "no instance role attached". Only the readable result exits zero.
 
 Docs: a "Shared build cache on Nitro" section in `docs/src/content/docs/project-environments.md` covering the config keys, the namespace default, the trust model (only trusted CI may write the bucket), the plain-HTTP warning, and a GitHub Actions job snippet:
 
@@ -322,7 +339,7 @@ Tests: extend the EC2 fixture test with `--mbx-remote` and assert the IAM calls,
 
 ### Milestone 6: live EC2 validation and measurements
 
-The parent runs this, because children cannot run the mj CLI against a daemon. Use an isolated instance launched with `env -i`, as described in the Nitro plan, with the Bedrock profile and a fixture bundle. Create a test bucket `mj-nitro-mbx-test-<random>` in the host's region and a Nitro host with `--mbx-remote s3://<bucket>/mbx`. Seed the bucket from this machine with a CI-style build of a medium Rust repository (for example `BurntSushi/ripgrep` at a fixed tag), using `MBX_REMOTE_URL=s3://<bucket>/mbx`, `MBX_REMOTE_NAMESPACE=BurntSushi/ripgrep`, and the user's AWS credentials. Then:
+The parent runs this, because children cannot run the mj CLI against a daemon. Use an isolated instance launched with `env -i`, as described in the Nitro plan, with the Bedrock profile and a fixture bundle. Create a test bucket `mj-nitro-mbx-test-<random>` in the host's region and a Nitro host with `--mbx-remote s3://<bucket>/mbx`. Seed the bucket from this machine with a CI-style build of a medium Rust repository (for example `BurntSushi/ripgrep` at a fixed tag), using `MBX_REMOTE_URL=s3://<bucket>/mbx`, `MBX_REMOTE_NAMESPACE=BurntSushi/ripgrep`, and the user's AWS credentials. A manual seed outside trusted CI also needs `MBX_REMOTE_TRUST_WRITES=true`. Seed the same build options and existing `Cargo.lock` the guest will use so mbx can find its task manifest. Then:
 
 1. Start a Nitro session for that repository on the default Noble image. Record the cold-start phases: worker staging, git bootstrap, bridge install, and mbx staging.
 2. In the session, run `cargo build --release` and record the wall time and the remote hits mbx reports.
@@ -335,7 +352,8 @@ The parent runs this, because children cannot run the mj CLI against a daemon. U
 5. Start a second session on the same host and confirm that the host cache serves it. Check the proxy log, or that the S3 request count falls.
 6. Start a session for the mjolnir bundle on its assigned `mj-dev` image. Record the image's cold pull and conversion time, and the cold-start phases.
 7. Run `mj doctor` and `mj image status` for the Nitro target.
-8. Restart the host engine binary by updating it, then stop and start a VM, and confirm its proxy comes back.
+8. Update the host engine binary, then stop and start a VM and confirm its proxy comes back. Verify that the old proxy remains available during the executable replacement, stops with the VM, and that the replacement binds the recreated TAP before the guest start request. Check `BindsTo`, `After`, `Type=notify`, the dedicated user, `CAP_NET_RAW`, and the executable and cache bind mounts on AL2023. Confirm that retaining and replacing a guest root restarts the same proxy configuration and that the cache is the only writable persistent mount exposed inside the unit. Try binding a fresh socket to the TAP as the proxy user without `CAP_NET_RAW`. If that works, remove the capability. Exercise a proxy startup failure and verify it reports the journal error and tears down the VM and TAP.
+9. Probe an absent S3 key, a denied prefix, and a host without a profile. Confirm that the role's prefix-conditioned `s3:ListBucket` produces 404 for the miss and that denial produces a distinct failure in the proxy and Doctor. Exercise explicit and IMDS-derived region selection. Check that a guest still cannot reach IMDS. Verify time-based credential renewal if the live run spans a rotation.
 
 Write the measurements into Surprises, and decide on the tool cache per the Decision Log. Afterwards, delete the bucket, the host (suspend its sessions first), the IAM role and the instance profile, and stop the isolated daemon.
 
@@ -344,10 +362,11 @@ Write the measurements into Surprises, and decide on the tool cache per the Deci
 Implementation happens in detached worktrees under `~/Projects/mjolnir-wt/<name>`, created with `git worktree add --detach ~/Projects/mjolnir-wt/<name> origin/master`. Each worktree builds and tests only its own crates. Use the focused commands, run outside any sandbox:
 
     cd ~/Projects/mjolnir-wt/<name>
-    cargo test -p mj-worker microvm
-    cargo clippy -p mj-worker --all-targets -- -D warnings
+    cargo test -p brokk-mj-worker-runtime microvm
+    cargo clippy -p brokk-mj-worker-runtime --all-targets -- -D warnings
+    cargo build -p brokk-mj-worker --target x86_64-unknown-linux-musl
 
-Run the privileged network test with the documented root gate, for example `sudo -E cargo test -p mj-worker mbx_proxy_device_binding -- --ignored`, or however the repository already gates root tests. Report the per-filter test counts, because a filter that matches nothing still reports `ok`.
+Run the pinned client fixture explicitly with `MJ_TEST_MBX_BIN=/path/to/pinned/mbx cargo test -p brokk-mj-worker-runtime mbx_proxy_real_client -- --ignored --nocapture`. The binary must match `mj-build-cache::mbx::MBX_VERSION` and can come from the Mjolnir-installed mbx or the same release artifact. Run the privileged network test by building the runtime test executable as the regular user and running that executable under root with `mbx_proxy_device_binding --ignored`. That test unshares its own network and mount namespaces. Report the per-filter test counts because Cargo exits successfully for a zero-match filter.
 
 The parent merges the worktrees onto master in milestone order, runs the boundary suites for the touched crates, requests review, and pushes.
 
@@ -389,6 +408,7 @@ Engine CLI, the contract between Milestones 4/1 and 5/2:
 
     hel microvm run ... [--mbx-remote s3://<bucket>/<prefix> [--mbx-remote-region <region>] --mbx-namespace <ns> [--mbx-namespace <ns> ...]]
     hel microvm maintain --keep-image <ref> [--keep-image <ref> ...] [--mbx-cache-budget <mbx size string>]
+    hel microvm mbx-check --bucket <b> [--prefix <p>] [--region <r>] --namespace <ns>
     hel microvm mbx-proxy --device <tap> --listen <gateway-ip>:7461 --bucket <b> [--prefix <p>] [--region <r>] --namespace <ns>... --cache-dir <dir>
         (internal; started only by `launch`)
     hel microvm mbx-check --bucket <b> [--prefix <p>] [--region <r>] --namespace <ns>

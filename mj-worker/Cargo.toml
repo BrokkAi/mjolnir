@@ -48,12 +48,26 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+axum = { workspace = true, default-features = false, features = ["http1", "json", "tokio"] }
+hex = "0.4"
+hmac.workspace = true
+# Use the workspace reqwest rustls backend and ring provider.
+mbx-cache-core = { version = "0.21", default-features = false }
+mbx-cache-protocol = "0.5"
+percent-encoding = "2"
+quick-xml = { version = "0.41", features = ["serialize"] }
+socket2 = { version = "0.6", features = ["all"] }
+url = "2"
+tokio-util = { workspace = true, features = ["io"] }
+
 # Mach time base for `proc_pid_rusage` CPU ticks; `libc` deprecated its own
 # bindings in favour of this crate.
 [target.'cfg(target_os = "macos")'.dependencies]
 mach2 = "0.4"
 
 [dev-dependencies]
+mj-build-cache = { path = "../mj-build-cache", package = "brokk-mj-build-cache" }
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 proptest = "1"
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
