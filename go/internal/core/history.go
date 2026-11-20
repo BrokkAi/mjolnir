@@ -6,6 +6,8 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"time"
 )
 
@@ -166,28 +168,47 @@ func DecodeHistoryQuery(data []byte) (HistoryQuery, error) {
 		"search_session", "read_session", "trace_file", "session_files", "blame_file")
 }
 
+func historyValidateQuery(query string) error {
+	if strings.TrimSpace(query) == "" || len(query) > 4096 {
+		return errors.New("query must contain 1–4096 bytes")
+	}
+	return nil
+}
+
 func (q HistoryQuerySearchSessions) Validate() error {
-	panic("unported: mj-core/src/history.rs HistoryQuery::validate")
+	return historyValidateQuery(q.Query)
 }
 
 func (q HistoryQueryGetSessionBrief) Validate() error { return nil }
 
 func (q HistoryQuerySearchSession) Validate() error {
-	panic("unported: mj-core/src/history.rs HistoryQuery::validate")
+	return historyValidateQuery(q.Query)
 }
 
 func (q HistoryQueryReadSession) Validate() error {
-	panic("unported: mj-core/src/history.rs HistoryQuery::validate")
+	if q.Role != nil && *q.Role != "user" && *q.Role != "assistant" && *q.Role != "tool" {
+		return errors.New("role must be user, assistant, or tool")
+	}
+	return nil
 }
 
 func (q HistoryQueryTraceFile) Validate() error {
-	panic("unported: mj-core/src/history.rs HistoryQuery::validate")
+	if strings.TrimSpace(q.Path) == "" || len(q.Path) > 4096 {
+		return errors.New("path must contain 1–4096 bytes")
+	}
+	return nil
 }
 
 func (q HistoryQuerySessionFiles) Validate() error { return nil }
 
 func (q HistoryQueryBlameFile) Validate() error {
-	panic("unported: mj-core/src/history.rs HistoryQuery::validate")
+	if q.Path == "" || len(q.Path) > 4096 {
+		return errors.New("invalid file path")
+	}
+	if !(q.StartLine > 0 && q.EndLine >= q.StartLine && q.EndLine-q.StartLine < 1000) {
+		return errors.New("request an inclusive range of 1–1000 lines")
+	}
+	return nil
 }
 
 type BlameEvidence struct {

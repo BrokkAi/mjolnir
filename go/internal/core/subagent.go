@@ -9,8 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
 )
 
 // SubagentPolicyMode is the "mode" tag of a SubagentPolicy.
@@ -215,7 +220,36 @@ func ParseStoredPolicy(text string) (SubagentPolicy, error) {
 // accepting the old scalar field (stored under the empty profile name) and
 // legacy boolean policy values used by durable snapshots.
 func DeserializePolicyMap(data []byte) (map[string]SubagentPolicy, error) {
-	panic("unported: mj-core/src/subagent.rs deserialize_policy_map")
+	value, err := jsonvalue.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	policies := map[string]SubagentPolicy{}
+	object, isObject := value.(jsonvalue.Object)
+	if _, hasMode := transcriptGetStr(value, "mode"); isObject && !hasMode {
+		for _, member := range object {
+			encoded, err := jsonvalue.Marshal(member.Value)
+			if err != nil {
+				return nil, err
+			}
+			policy, err := ParseStoredPolicy(string(encoded))
+			if err != nil {
+				return nil, err
+			}
+			policies[member.Key] = policy
+		}
+		return policies, nil
+	}
+	encoded, err := jsonvalue.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := ParseStoredPolicy(string(encoded))
+	if err != nil {
+		return nil, err
+	}
+	policies[""] = policy
+	return policies, nil
 }
 
 // ChoiceUnavailableCode is the refusal code for an unavailable sub-agent
@@ -244,7 +278,23 @@ func (o *SubagentOptions) UnmarshalJSON(data []byte) error {
 // Validate checks choice against the offered models and efforts. The error
 // text is shown as is.
 func (o *SubagentOptions) Validate(choice *SubagentChoice) error {
-	panic("unported: mj-core/src/subagent.rs SubagentOptions::validate")
+	model := choice.Model
+	if _, ok := ModelCatalogResolve(o.Models, model); strings.TrimSpace(model) == "" || !ok {
+		return fmt.Errorf("Selected subagent model %s is unavailable.%s %s",
+			debugString(model), choiceList(" Available models", o.Models), eligibilityNote)
+	}
+	if choice.Effort == nil {
+		return nil
+	}
+	if effort := *choice.Effort; effort != "adaptive" {
+		for _, offered := range o.Efforts {
+			if offered.Value == effort {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("Select an available effort for subagent model %s.%s %s",
+		debugString(model), choiceList(" Available efforts", o.Efforts), eligibilityNote)
 }
 
 // choiceList is "<label>: a, b." for a non-empty list of choices, otherwise
@@ -720,9 +770,11 @@ func DecodeSubagentToolAction(data []byte) (SubagentToolAction, error) {
 			params = nil
 		}
 	}
-	unit := func(action SubagentToolAction) (SubagentToolAction, error) {
+	// variant is the Rust wire enum's variant, which serde names in the
+	// error.
+	unit := func(action SubagentToolAction, variant string) (SubagentToolAction, error) {
 		if params != nil && string(params) != "null" {
-			return nil, errors.New("invalid type: map, expected unit")
+			return nil, errors.New("invalid type: map, expected unit variant SubagentToolActionWire::" + variant)
 		}
 		return action, nil
 	}
@@ -737,7 +789,7 @@ func DecodeSubagentToolAction(data []byte) (SubagentToolAction, error) {
 		err = transcriptStrictDecode(params, &v, true)
 		return SubagentToolActionFetch(v), err
 	case "list_profiles":
-		return unit(SubagentToolActionListProfiles{})
+		return unit(SubagentToolActionListProfiles{}, "ListProfiles")
 	case "request_review":
 		type plain SubagentToolActionRequestReview
 		var v plain
@@ -781,7 +833,7 @@ func DecodeSubagentToolAction(data []byte) (SubagentToolAction, error) {
 		err = transcriptStrictDecode(params, &v, true)
 		return SubagentToolActionSpawn(v.plain), err
 	case "list_agents":
-		return unit(SubagentToolActionListAgents{})
+		return unit(SubagentToolActionListAgents{}, "ListAgents")
 	case "send_input":
 		type plain SubagentToolActionSendInput
 		var v plain
@@ -793,9 +845,9 @@ func DecodeSubagentToolAction(data []byte) (SubagentToolAction, error) {
 		err = transcriptStrictDecode(params, &v, true)
 		return SubagentToolActionSendMessage(v), err
 	case "wait_agents":
-		return unit(SubagentToolActionLegacyWaitAgents{})
+		return unit(SubagentToolActionLegacyWaitAgents{}, "LegacyWaitAgents")
 	case "await_children":
-		return unit(SubagentToolActionLegacyAwaitChildren{})
+		return unit(SubagentToolActionLegacyAwaitChildren{}, "LegacyAwaitChildren")
 	case "interrupt_agent":
 		type plain SubagentToolActionLegacyInterruptAgent
 		var v plain
@@ -858,7 +910,41 @@ func (w *SubagentWaitInterruption) UnmarshalJSON(data []byte) error {
 // SubagentCompletionFrom projects a tool result, keeping the input-delivery
 // fields of a message's result.
 func SubagentCompletionFrom(result *SubagentToolResult) SubagentCompletion {
-	panic("unported: mj-core/src/subagent.rs SubagentCompletion::from")
+	completion := SubagentCompletion{
+		RequestID:     result.RequestID,
+		CompletedAtMs: result.CompletedAtMs,
+		IsError:       result.IsError,
+	}
+	value, err := jsonvalue.Parse([]byte(result.Message))
+	if err != nil {
+		return completion
+	}
+	_, hasChild := transcriptGetStr(value, "child_session_id")
+	_, hasCreated := transcriptGet(value, "created_at_ms")
+	_, hasStatus := transcriptGet(value, "status")
+	if !hasChild || !hasCreated || !hasStatus {
+		return completion
+	}
+	delivery := jsonvalue.Object{}
+	for _, key := range []string{
+		"child_session_id",
+		"created_at_ms",
+		"status",
+		"via",
+		"kind",
+		"turn_id",
+		"command_id",
+		"accepted_ordinal",
+		"error",
+	} {
+		if member, ok := transcriptGet(value, key); ok {
+			delivery.Set(key, member)
+		}
+	}
+	if encoded, err := jsonvalue.Marshal(delivery); err == nil {
+		completion.InputDelivery = encoded
+	}
+	return completion
 }
 
 // SubagentQueueChange is what a connection exchanges: only changed queue
@@ -1347,7 +1433,19 @@ const (
 // reminds a child to hand back its report, which is how ReportStateOf tells
 // it from the task it follows up.
 func IsHandbackReminder(commandID string) bool {
-	panic("unported: mj-core/src/subagent.rs is_handback_reminder")
+	_, ok := GeneratedPromptHandbackReminder.Suffix(CarriedCommand(commandID))
+	return ok
+}
+
+// subagentParseU64 is Rust's str::parse::<u64>: ASCII digits after an
+// optional "+", fitting a u64.
+func subagentParseU64(text string) (uint64, bool) {
+	digits := strings.TrimPrefix(text, "+")
+	if digits == "" || strings.HasPrefix(digits, "+") || strings.HasPrefix(digits, "-") {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(digits, 10, 64)
+	return value, err == nil
 }
 
 // HandbackReminderCommandID is the command id of the handback reminder for
@@ -1355,17 +1453,24 @@ func IsHandbackReminder(commandID string) bool {
 // reminder is sent at most once per turn, and RemindedTurnOrdinal reads it
 // back.
 func HandbackReminderCommandID(completedOrdinal uint64) string {
-	panic("unported: mj-core/src/subagent.rs handback_reminder_command_id")
+	return GeneratedPromptHandbackReminder.CommandID(completedOrdinal)
 }
 
 // RemindedTurnOrdinal is the ordinal at which the reminded turn finished,
 // when commandID names a handback reminder.
 func RemindedTurnOrdinal(commandID string) (uint64, bool) {
-	panic("unported: mj-core/src/subagent.rs reminded_turn_ordinal")
+	suffix, ok := GeneratedPromptHandbackReminder.Suffix(CarriedCommand(commandID))
+	if !ok {
+		return 0, false
+	}
+	return subagentParseU64(suffix)
 }
 
 func (k HoldFollowUpKind) prompt() GeneratedPrompt {
-	panic("unported: mj-core/src/subagent.rs HoldFollowUpKind::prompt")
+	if k == HoldFollowUpKindGiveUp {
+		return GeneratedPromptHoldGiveUp
+	}
+	return GeneratedPromptHoldWake
 }
 
 // HoldFollowUpCommandID is the deterministic command id of the follow-up of
@@ -1373,13 +1478,23 @@ func (k HoldFollowUpKind) prompt() GeneratedPrompt {
 // id makes a retry idempotent and lets a restarted daemon see what it
 // already sent.
 func HoldFollowUpCommandID(kind HoldFollowUpKind, reminderCompletedOrdinal uint64) string {
-	panic("unported: mj-core/src/subagent.rs hold_follow_up_command_id")
+	return kind.prompt().CommandID(reminderCompletedOrdinal)
 }
 
 // HoldFollowUpOf is the kind and reminder-turn ordinal a hold follow-up
 // command id names.
 func HoldFollowUpOf(commandID string) (HoldFollowUpKind, uint64, bool) {
-	panic("unported: mj-core/src/subagent.rs hold_follow_up_of")
+	carried := CarriedCommand(commandID)
+	for _, kind := range []HoldFollowUpKind{HoldFollowUpKindProcessesExited, HoldFollowUpKindGiveUp} {
+		suffix, ok := kind.prompt().Suffix(carried)
+		if !ok {
+			continue
+		}
+		if ordinal, ok := subagentParseU64(suffix); ok {
+			return kind, ordinal, true
+		}
+	}
+	return "", 0, false
 }
 
 // SubagentHandback is a report a child handed back during the turn
@@ -1406,7 +1521,7 @@ func (h *SubagentHandback) Answers(commandID string) bool {
 // answers the turn commandID names; a restart continuation is the turn it
 // carries out.
 func ReportAnswers(reportCommandID, commandID string) bool {
-	panic("unported: mj-core/src/subagent.rs report_answers")
+	return CarriedCommand(reportCommandID) == CarriedCommand(commandID)
 }
 
 // HandbackReminder is the reminder Mjolnir sent after the turn
@@ -1446,7 +1561,7 @@ type SubagentReport struct {
 // gap an idle child would otherwise read as finished with the previous
 // turn's report, or none.
 func AwaitingPrompt(awaitedOrdinal *uint64, lastTurn *MaterializedTurnOutcome) bool {
-	panic("unported: mj-core/src/subagent.rs awaiting_prompt")
+	return awaitedOrdinal != nil && (lastTurn == nil || !lastTurn.Answers(*awaitedOrdinal))
 }
 
 // FailedTurn is how a child's last finished turn failed, if it did:
@@ -1454,7 +1569,33 @@ func AwaitingPrompt(awaitedOrdinal *uint64, lastTurn *MaterializedTurnOutcome) b
 // a refusal or a quota stop, with the most specific reason recorded. A turn
 // that finished or stopped to ask for input did not fail.
 func FailedTurn(turn *MaterializedTurnOutcome, lastMessage *string) (state string, reason string, failed bool) {
-	panic("unported: mj-core/src/subagent.rs failed_turn")
+	var fallback string
+	switch outcome := turn.Outcome.(type) {
+	case TurnOutcomeKindCompleted:
+		switch ClassifyPromptCompletion(outcome.StopReason) {
+		case PromptCompletionFinished, PromptCompletionInputRequired:
+			return "", "", false
+		case PromptCompletionCancelled:
+			state, fallback = "interrupted", "the turn was cancelled"
+		default:
+			state, fallback = "failed", "the turn ended with stop reason "+debugString(outcome.StopReason)
+		}
+	case TurnOutcomeKindInterrupted:
+		state, fallback = "interrupted", outcome.Message
+	case TurnOutcomeKindRejected:
+		state, fallback = "failed", outcome.Message
+	default:
+		return "", "", false
+	}
+	switch {
+	case turn.Diagnostic != nil && strings.TrimSpace(turn.Diagnostic.Message) != "":
+		reason = turn.Diagnostic.Message
+	case lastMessage != nil && strings.TrimSpace(*lastMessage) != "":
+		reason = *lastMessage
+	default:
+		reason = fallback
+	}
+	return state, reason, true
 }
 
 // TurnFailedOnLogin reports whether a child's last finished turn reported
@@ -1465,7 +1606,11 @@ func FailedTurn(turn *MaterializedTurnOutcome, lastMessage *string) (state strin
 // Only the recorded failure is read, never the child's own messages: a
 // child may well be writing about authentication errors.
 func TurnFailedOnLogin(turn *MaterializedTurnOutcome) bool {
-	panic("unported: mj-core/src/subagent.rs turn_failed_on_login")
+	if turn.Diagnostic != nil && TurnDiagnosticReportsAuthFailure(turn.Diagnostic) {
+		return true
+	}
+	state, reason, failed := FailedTurn(turn, nil)
+	return failed && state == "failed" && TextReportsAuthFailure(reason)
 }
 
 // WakeFailureKind is the "kind" tag of a WakeFailure.
@@ -1598,7 +1743,24 @@ func (ReportStateFallback) isReportState()  {}
 // RunningProcessLines lists the processes a finished turn's work facts list
 // as running, one per line.
 func RunningProcessLines(facts *WorkFacts) []string {
-	panic("unported: mj-core/src/subagent.rs running_process_lines")
+	processes := facts.Processes.Known()
+	if processes == nil {
+		return []string{}
+	}
+	lines := make([]string, 0, len(processes.Shown)+1)
+	for i := range processes.Shown {
+		lines = append(lines, RenderProcess(&processes.Shown[i]))
+	}
+	if processes.Omitted > 0 {
+		lines = append(lines, fmt.Sprintf("and %d more", processes.Omitted))
+	}
+	return lines
+}
+
+// subagentTurnFinished reports a turn that completed normally.
+func subagentTurnFinished(turn *MaterializedTurnOutcome) bool {
+	completed, ok := turn.Outcome.(TurnOutcomeKindCompleted)
+	return ok && ClassifyPromptCompletion(completed.StopReason) == PromptCompletionFinished
 }
 
 // ReportStateOf is the rule for a child's report, shared by notifications,
@@ -1620,7 +1782,89 @@ func ReportStateOf(
 	inFlight []string,
 	nowMs int64,
 ) ReportState {
-	panic("unported: mj-core/src/subagent.rs report_state")
+	if !handbackTool || lastTurn == nil {
+		return ReportStateFallback{}
+	}
+	turn := lastTurn
+	if report.Handback != nil && report.Handback.Answers(turn.CommandID) {
+		return ReportStateDelivered{Message: report.Handback.Message}
+	}
+	finished := subagentTurnFinished(turn)
+	reminderFailed := report.ReminderFailedFor != nil && *report.ReminderFailedFor == turn.CommandID
+	// A follow-up the worker refused as stale ends the hold: the child's last
+	// message is reported.
+	if finished && IsHandbackReminder(turn.CommandID) && !reminderFailed {
+		for _, kind := range []HoldFollowUpKind{HoldFollowUpKindProcessesExited, HoldFollowUpKindGiveUp} {
+			if slices.Contains(inFlight, HoldFollowUpCommandID(kind, turn.CompletedOrdinal)) {
+				return ReportStatePending{Remind: false}
+			}
+		}
+		// Nobody can say whether the child still waits: not an ending.
+		if !liveness.Known {
+			return ReportStatePending{Remind: false}
+		}
+		known := liveness.Liveness
+		if known == nil || known.CompletedOrdinal != turn.CompletedOrdinal {
+			return ReportStateFallback{}
+		}
+		giveUpAtMs := subagentSaturatingAdd(turn.CompletedAtMs, HoldGiveUpMs)
+		var followUp *HoldFollowUpKind
+		switch {
+		case known.Alive == 0:
+			kind := HoldFollowUpKindProcessesExited
+			followUp = &kind
+		case nowMs >= giveUpAtMs:
+			kind := HoldFollowUpKindGiveUp
+			followUp = &kind
+		}
+		waitingOn := []string{}
+		if turn.WorkFacts != nil {
+			waitingOn = RunningProcessLines(turn.WorkFacts)
+		}
+		return ReportStateHeld{
+			SinceMs:    turn.CompletedAtMs,
+			GiveUpAtMs: giveUpAtMs,
+			WaitingOn:  waitingOn,
+			FollowUp:   followUp,
+		}
+	}
+	if kind, _, ok := HoldFollowUpOf(turn.CommandID); !finished || IsHandbackReminder(turn.CommandID) ||
+		(ok && kind == HoldFollowUpKindGiveUp) || reminderFailed {
+		return ReportStateFallback{}
+	}
+	reminder := report.Reminder
+	if reminder == nil || reminder.ForCommandID != turn.CommandID {
+		return ReportStatePending{Remind: true}
+	}
+	if slices.Contains(inFlight, reminder.CommandID) ||
+		subagentSaturatingSub(nowMs, reminder.SentAtMs) < HandbackReminderGraceMs {
+		return ReportStatePending{Remind: false}
+	}
+	return ReportStateFallback{}
+}
+
+// subagentSaturatingAdd is i64::saturating_add.
+func subagentSaturatingAdd(a, b int64) int64 {
+	sum := a + b
+	switch {
+	case b > 0 && sum < a:
+		return math.MaxInt64
+	case b < 0 && sum > a:
+		return math.MinInt64
+	}
+	return sum
+}
+
+// subagentSaturatingSub is i64::saturating_sub.
+func subagentSaturatingSub(a, b int64) int64 {
+	difference := a - b
+	switch {
+	case b < 0 && difference < a:
+		return math.MaxInt64
+	case b > 0 && difference > a:
+		return math.MinInt64
+	}
+	return difference
 }
 
 // StoppedSubagent is a sub-agent that Mjolnir stopped when its parent was
@@ -1687,14 +1931,29 @@ func (s InPlaceSubagentState) label() string { return string(s) }
 const InPlaceSubagentsTag = "mj-in-place-subagents"
 
 func safeSubagentName(name string) string {
-	panic("unported: mj-core/src/subagent.rs safe_subagent_name")
+	return strings.ReplaceAll(strings.ReplaceAll(BoundedOneLine(name, StoppedTaskChars), "<", "‹"), ">", "›")
 }
 
 // InPlaceSubagentsPromptContext is the hidden instructions for the first
 // prompt after an in-place swap. The new harness has no outstanding tool
 // call stack from the old harness process.
 func InPlaceSubagentsPromptContext(children []InPlaceSubagent) (string, bool) {
-	panic("unported: mj-core/src/subagent.rs in_place_subagents_prompt_context")
+	if len(children) == 0 {
+		return "", false
+	}
+	lines := []string{
+		"<" + InPlaceSubagentsTag + ">",
+		"These sub-agents remain attached to this session after its in-place harness swap:",
+	}
+	for _, child := range children {
+		lines = append(lines, fmt.Sprintf("- %s (child_session_id %s; %s)",
+			safeSubagentName(child.Name), child.ChildSessionID, child.State.label()))
+	}
+	lines = append(lines,
+		"Any wait that was in progress during the swap was interrupted; reissue wait without arguments to collect reports from these children.",
+		"Before resending a message, call list_agents and check pending_messages so you do not send it twice.",
+		"</"+InPlaceSubagentsTag+">")
+	return strings.Join(lines, "\n"), true
 }
 
 // InPlaceSubagentsNotice is the conversation line that tells the person the
@@ -1725,7 +1984,48 @@ const handbackNoteOpening = "You are a Mjolnir sub-agent. "
 // parent attached after them. reportDir is the directory that note names,
 // when one was recorded.
 func TaskSummary(initialPrompt string, reportDir *string) (string, bool) {
-	panic("unported: mj-core/src/subagent.rs task_summary")
+	task := initialPrompt
+	if reportDir != nil {
+		if rest, ok := strings.CutPrefix(task, ReportDirectoryNote(*reportDir)); ok {
+			if rest, ok := strings.CutPrefix(rest, "\n\n"); ok {
+				task = rest
+			}
+		}
+	}
+	stripped := false
+	if reportDir != nil {
+		if rest, ok := strings.CutPrefix(task, HandbackPromptNote(*reportDir)); ok {
+			if rest, ok := strings.CutPrefix(rest, "\n\n"); ok {
+				task = rest
+				stripped = true
+			}
+		}
+	}
+	if !stripped && strings.HasPrefix(task, handbackNoteOpening) {
+		if _, rest, ok := strings.Cut(task, "\n\n"); ok {
+			task = rest
+		}
+	}
+	if rest, ok := strings.CutPrefix(task, ReadOnlyTaskScope); ok {
+		if rest, ok := strings.CutPrefix(rest, "\n\n"); ok {
+			task = rest
+		}
+	}
+	for _, attachment := range []string{"\n\n<parent_context>", "\n\n--- source "} {
+		if instructions, _, ok := strings.Cut(task, attachment); ok {
+			task = instructions
+		}
+	}
+	line := strings.Join(strings.FieldsFunc(task, unicode.IsSpace), " ")
+	if line == "" {
+		return "", false
+	}
+	characters := []rune(line)
+	if len(characters) <= StoppedTaskChars {
+		return line, true
+	}
+	kept := string(characters[:StoppedTaskChars-1])
+	return strings.TrimRightFunc(kept, unicode.IsSpace) + "…", true
 }
 
 // StoppedSubagentsTag is the tag of the hidden block that tells a resumed
@@ -1739,7 +2039,71 @@ const StoppedSubagentsTag = "mj-stopped-subagents"
 // line per child, then what the model should do about them. False when
 // nothing was stopped.
 func StoppedSubagentsPromptContext(stopped []StoppedSubagent) (string, bool) {
-	panic("unported: mj-core/src/subagent.rs stopped_subagents_prompt_context")
+	if len(stopped) == 0 {
+		return "", false
+	}
+	oracleStopped, children := subagentSplitOracle(stopped)
+	if len(children) == 0 {
+		return "<" + StoppedSubagentsTag + ">\n" + StoppedOracleLine + "\n</" + StoppedSubagentsTag + ">", true
+	}
+	total := len(children)
+	notHandedBack := 0
+	for _, child := range children {
+		if !child.HandedBack {
+			notHandedBack++
+		}
+	}
+	lines := []string{
+		"<" + StoppedSubagentsTag + ">",
+		fmt.Sprintf("Mjolnir stopped %s when this session was suspended:", Counted(total, "sub-agent", "sub-agents")),
+	}
+	for _, child := range children {
+		task := ""
+		if child.Task != nil {
+			task = ", task: " + *child.Task
+		}
+		handedBack := "had not handed back"
+		if child.HandedBack {
+			handedBack = "had handed back"
+		}
+		lines = append(lines, fmt.Sprintf("- \"%s\" (child_session_id %s)%s; %s",
+			child.Title, child.ChildSessionID, task, handedBack))
+	}
+	var outcome string
+	switch {
+	case total == 1 && notHandedBack == 1:
+		outcome = "Its work was not handed back; spawn it again if you still need it."
+	case total == 1:
+		outcome = "It had handed back its report before it was stopped."
+	case notHandedBack == 0:
+		outcome = "Each had handed back its report before it was stopped."
+	case total == notHandedBack:
+		outcome = "Their work was not handed back; spawn them again if you still need it."
+	default:
+		outcome = "The work of those that had not handed back was lost; spawn them again if you still need it."
+	}
+	lines = append(lines, outcome,
+		"A stopped sub-agent no longer exists: wait, send_message and close cannot reach it.")
+	if oracleStopped {
+		lines = append(lines, StoppedOracleLine)
+	}
+	lines = append(lines, "</"+StoppedSubagentsTag+">")
+	return strings.Join(lines, "\n"), true
+}
+
+// subagentSplitOracle reports whether the stopped list holds the oracle and
+// returns the other entries.
+func subagentSplitOracle(stopped []StoppedSubagent) (bool, []StoppedSubagent) {
+	oracleStopped := false
+	children := []StoppedSubagent{}
+	for i := range stopped {
+		if stopped[i].IsOracle() {
+			oracleStopped = true
+		} else {
+			children = append(children, stopped[i])
+		}
+	}
+	return oracleStopped, children
 }
 
 // StoppedSubagentsNotice is the conversation line a person sees when a
@@ -1747,11 +2111,40 @@ func StoppedSubagentsPromptContext(stopped []StoppedSubagent) (string, bool) {
 // children that had not handed back, since those lost work; the idle ones
 // that had are counted. False when nothing was stopped.
 func StoppedSubagentsNotice(stopped []StoppedSubagent) (string, bool) {
-	panic("unported: mj-core/src/subagent.rs stopped_subagents_notice")
+	if len(stopped) == 0 {
+		return "", false
+	}
+	oracleStopped, children := subagentSplitOracle(stopped)
+	notice, ok := stoppedChildrenNotice(children)
+	if !oracleStopped {
+		return notice, ok
+	}
+	if ok {
+		return notice + " " + StoppedOracleLine, true
+	}
+	return StoppedOracleLine, true
 }
 
 func stoppedChildrenNotice(stopped []StoppedSubagent) (string, bool) {
-	panic("unported: mj-core/src/subagent.rs stopped_children_notice")
+	if len(stopped) == 0 {
+		return "", false
+	}
+	var working []string
+	for _, child := range stopped {
+		if !child.HandedBack {
+			working = append(working, "\""+child.Title+"\"")
+		}
+	}
+	idle := len(stopped) - len(working)
+	if len(working) == 0 {
+		return fmt.Sprintf("Suspend stopped %s.", Counted(idle, "idle sub-agent", "idle sub-agents")), true
+	}
+	notice := fmt.Sprintf("Suspend stopped %s: %s",
+		Counted(len(working), "working sub-agent", "working sub-agents"), strings.Join(working, ", "))
+	if idle > 0 {
+		notice += fmt.Sprintf("; %s stopped too", Counted(idle, "idle sub-agent was", "idle sub-agents were"))
+	}
+	return notice + ".", true
 }
 
 // SuspendWarning is what a person is told before a suspend stops
@@ -1826,5 +2219,17 @@ func HasHandedBack(
 	liveness *Liveness,
 	nowMs int64,
 ) bool {
-	panic("unported: mj-core/src/subagent.rs has_handed_back")
+	if lastTurn == nil {
+		return false
+	}
+	if working || AwaitingPrompt(report.AwaitedOrdinal, lastTurn) {
+		return false
+	}
+	switch ReportStateOf(handbackTool, report, lastTurn, liveness, nil, nowMs).(type) {
+	case ReportStateDelivered:
+		return true
+	case ReportStateFallback:
+		return subagentTurnFinished(lastTurn)
+	}
+	return false
 }

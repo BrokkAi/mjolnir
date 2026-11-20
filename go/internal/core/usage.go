@@ -42,7 +42,40 @@ func (u *TokenUsage) UnmarshalJSON(data []byte) error {
 // declare turn on the prompt response; an undeclared Muse report stays
 // unspecified.
 func TokenUsageFromACP(harness HarnessKind, usage acp.Usage) TokenUsage {
-	panic("unported: mj-core/src/usage.rs TokenUsage::from_acp")
+	var declared *string
+	if usage.Meta != nil {
+		if value, ok := usage.Meta.Get("mjolnir.dev/usage-scope"); ok {
+			if text, ok := value.(string); ok {
+				declared = &text
+			}
+		}
+	}
+	var scope UsageScope
+	switch {
+	case harness == HarnessKindCodex && declared != nil && *declared == "turn":
+		scope = UsageScopeTurn
+	case harness == HarnessKindCodex && declared != nil:
+		scope = UsageScopeUnspecified
+	case harness == HarnessKindCodex:
+		scope = UsageScopeLastRequest
+	case declared != nil && *declared == "turn":
+		scope = UsageScopeTurn
+	case declared != nil:
+		scope = UsageScopeUnspecified
+	case harness == HarnessKindClaude:
+		scope = UsageScopeTurn
+	default:
+		scope = UsageScopeUnspecified
+	}
+	return TokenUsage{
+		Scope:             scope,
+		TotalTokens:       usage.TotalTokens,
+		InputTokens:       usage.InputTokens,
+		OutputTokens:      usage.OutputTokens,
+		ThoughtTokens:     usage.ThoughtTokens,
+		CachedReadTokens:  usage.CachedReadTokens,
+		CachedWriteTokens: usage.CachedWriteTokens,
+	}
 }
 
 type ProviderCost struct {
