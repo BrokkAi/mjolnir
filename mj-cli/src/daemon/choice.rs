@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use mj_client::daemon::ssh::{self, DiscoveryIntent};
 use mj_controller::readline::{Line, LineReader};
-use mj_core::config::{DaemonConfig, DaemonRuntime, config_path, data_dir};
+use mj_core::config::{DaemonConfig, DaemonRuntime, config_path};
 
 pub(crate) enum PlacementChoice {
     /// A placement is settled; start the dashboard.
@@ -24,18 +24,16 @@ enum Remote {
 }
 
 /// Whether no daemon has ever run on this computer: no placement is
-/// configured, there is no store and no endpoint, and automatic setup never
-/// started. Any of those means a local daemon already ran, so a computer
-/// that stopped its daemon is not asked again. The configuration's other
-/// tables do not matter: a configuration copied to a new computer has not
-/// started a daemon there.
+/// configured, and there is neither a store nor an endpoint. Either means a
+/// local daemon already ran, so a computer that stopped its daemon is not
+/// asked again. Nothing else counts: a configuration copied to a new computer,
+/// or a standalone `mj setup`, has not started a daemon there.
 fn is_first_launch() -> Result<bool> {
     if !DaemonConfig::load_placement(&config_path())?.is_default() {
         return Ok(false);
     }
     Ok(!mj_controller::database::database_path().exists()
-        && !mj_client::daemon::metadata_path().exists()
-        && !data_dir().join("setup-state").exists())
+        && !mj_client::daemon::metadata_path().exists())
 }
 
 /// Ask where the daemon runs when this is the first launch, and save an SSH

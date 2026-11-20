@@ -39,7 +39,7 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
         println!("Daemon host: {host}");
         println!(
             "Daemon instance: {}",
-            instance.as_deref().unwrap_or("unnamed")
+            instance.as_deref().unwrap_or("the remote's own")
         );
         println!(
             "Client config: {}",

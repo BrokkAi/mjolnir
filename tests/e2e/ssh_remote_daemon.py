@@ -237,6 +237,8 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     PATH=f"{shim}:{os.environ['PATH']}",
                     TERM="xterm-256color",
                 )
+                # The runner's own instance must not reach the client under test.
+                env.pop("MJ_INSTANCE", None)
                 def launch(*arguments, environment=env):
                     return Terminal(
                         [binary, "--instance", options.instance, "--no-splash", *arguments],
@@ -261,7 +263,9 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     assert_no_local_daemon(fresh_data)
                     assert not (fresh_config / "config.toml").exists()
 
-                # A configuration copied from another computer is not a daemon.
+                # Neither is a configuration copied from another computer, nor a
+                # standalone `mj setup`, which writes its marker without one.
+                (fresh_data / "setup-state").write_text("complete\n")
                 copied_config = p / "copied-config"
                 copied_config.mkdir()
                 (copied_config / "config.toml").write_text(
@@ -317,7 +321,7 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     timeout=120,
                 )
                 assert result.returncode == 0, result.stderr
-                assert "Daemon instance: unnamed\n" in result.stdout, result.stdout
+                assert "Daemon instance: the remote's own\n" in result.stdout, result.stdout
                 sent = (p / "ssh-commands.log").read_text().splitlines()
                 assert sent and not any("--instance" in command for command in sent), sent
                 print("PASS: first launch asks, rejects a bad host, saves a working one")
