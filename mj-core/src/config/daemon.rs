@@ -75,6 +75,21 @@ impl DaemonConfig {
         Ok(placement.daemon)
     }
 
+    /// Whether the file has a `[daemon]` table at all. A placement written as
+    /// `runtime = "host"` equals the default once loaded, so only the file can
+    /// tell an explicit choice from none.
+    pub fn is_set_in(path: &std::path::Path) -> anyhow::Result<bool> {
+        use anyhow::Context;
+        match std::fs::read_to_string(path) {
+            Ok(contents) => Ok(contents
+                .parse::<toml::Table>()
+                .with_context(|| format!("parse placement {}", path.display()))?
+                .contains_key("daemon")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).with_context(|| format!("read placement {}", path.display())),
+        }
+    }
+
     /// Write this placement as the file's `[daemon]` table, provided the file
     /// still holds `expected`. The check and the write happen under one hold
     /// of the config lock, so two launches that each decided from the same
@@ -116,6 +131,12 @@ impl DaemonConfig {
         if keys.as_table().is_empty() {
             document.remove("daemon");
         } else {
+            // A file made here starts the way every file Mjolnir writes does.
+            // Without the line, switching `runtime` back to `host` by hand
+            // would leave a file the local daemon refuses to load.
+            if existing.trim().is_empty() {
+                document["version"] = toml_edit::value(i64::from(super::CONFIG_VERSION));
+            }
             document["daemon"] = toml_edit::Item::Table(keys.as_table().clone());
         }
         super::atomic_write(path, document.to_string().as_bytes())
@@ -217,6 +238,33 @@ ssh_args = ["-p", "2222"]
         );
         assert!(refusal.contains("`daemon.isntance`"), "{refusal}");
         assert!(!refusal.contains("a_later_section"), "{refusal}");
+    }
+
+    // Hard-won: 916f27ded: the first-launch save wrote a file with only
+    // `[daemon]`, which the local daemon refuses to load once `runtime` is
+    // switched back to `host`; and an explicit `runtime = "host"` looked unset.
+    #[test]
+    fn a_placement_file_made_here_loads_as_a_config_and_explicit_host_counts_as_set() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        assert!(!super::DaemonConfig::is_set_in(&path).unwrap());
+        let ssh = super::DaemonConfig {
+            runtime: super::DaemonRuntime::Ssh,
+            host: Some("test-box".into()),
+            ..super::DaemonConfig::default()
+        };
+        ssh.replace_placement(&path, &super::DaemonConfig::default())
+            .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with("version = "), "{written}");
+        crate::config::Config::load_from(&path).unwrap();
+        std::fs::write(&path, "version = 23\n[daemon]\nruntime = \"host\"\n").unwrap();
+        assert!(super::DaemonConfig::is_set_in(&path).unwrap());
+        assert!(
+            super::DaemonConfig::load_placement(&path)
+                .unwrap()
+                .is_default()
+        );
     }
 
     /// The placement is written into a file the daemon machine owns, so every

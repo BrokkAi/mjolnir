@@ -23,13 +23,14 @@ enum Remote {
     Cancelled,
 }
 
-/// Whether no daemon has ever run on this computer: no placement is
-/// configured, and there is neither a store nor an endpoint. Either means a
+/// Whether no daemon has ever run on this computer: no `[daemon]` table
+/// is set, and there is neither a store nor an endpoint. Either means a
 /// local daemon already ran, so a computer that stopped its daemon is not
 /// asked again. Nothing else counts: a configuration copied to a new computer,
 /// or a standalone `mj setup`, has not started a daemon there.
 fn is_first_launch() -> Result<bool> {
-    if !DaemonConfig::load_placement(&config_path())?.is_default() {
+    // An explicit `[daemon]` table is a choice, even `runtime = "host"`.
+    if DaemonConfig::is_set_in(&config_path())? {
         return Ok(false);
     }
     Ok(!mj_controller::database::database_path().exists()
