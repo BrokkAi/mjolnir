@@ -284,14 +284,14 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 pub(super) fn run(args: ProxyArgs) -> Result<i32> {
     let remote = remote(args.bucket, args.prefix, args.region, args.namespaces)?;
     runtime()?.block_on(async {
-        let store = S3::connect(&remote)
-            .await?
-            .context("no instance role attached")?;
+        // Readiness covers only the listener. Credentials are fetched on the
+        // first request, so an IMDS hiccup or a missing role never keeps the
+        // VM from starting; each request then fails with the reason instead.
         let listener = bind(&args.device, args.listen)?;
         let app = router(Proxy {
             remote,
             cache: args.cache_dir,
-            store,
+            store: tokio::sync::OnceCell::new(),
         });
         notify_ready()?;
         axum::serve(listener, app)
@@ -376,7 +376,8 @@ fn notify_ready() -> Result<()> {
 struct Proxy {
     remote: MbxRemote,
     cache: PathBuf,
-    store: S3,
+    /// Connected on first use; a failed connection is retried by the next request.
+    store: tokio::sync::OnceCell<S3>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -478,6 +479,17 @@ fn namespace<'a>(headers: &'a HeaderMap, remote: &MbxRemote) -> Option<&'a str> 
 }
 
 impl Proxy {
+    async fn store(&self) -> Result<&S3, ReadError> {
+        Ok(self
+            .store
+            .get_or_try_init(|| async {
+                S3::connect(&self.remote)
+                    .await?
+                    .context("no instance role attached")
+            })
+            .await?)
+    }
+
     fn entry(&self, namespace: &str, kind: Kind, digest: &Digest) -> PathBuf {
         // Lengths and segment boundaries are preserved, and the guest's
         // namespace and prefix never become filesystem path components.
@@ -524,7 +536,7 @@ impl Proxy {
             digest.hash,
             digest.size
         );
-        let Some(mut upstream) = self.store.get(namespace, &key).await? else {
+        let Some(mut upstream) = self.store().await?.get(namespace, &key).await? else {
             return Ok(None);
         };
         if kind == Kind::Blob {
@@ -535,7 +547,7 @@ impl Proxy {
                     // The partially consumed response cannot be rewound.
                     // The unit's private temp directory is writable and may
                     // be on a different filesystem from the cache.
-                    let Some(mut retry) = self.store.get(namespace, &key).await? else {
+                    let Some(mut retry) = self.store().await?.get(namespace, &key).await? else {
                         return Ok(None);
                     };
                     stage_blob(&mut retry, digest, &std::env::temp_dir())

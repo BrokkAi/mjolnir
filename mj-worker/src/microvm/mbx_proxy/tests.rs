@@ -128,7 +128,7 @@ fn test_proxy(endpoint: &str, prefix: &str, namespaces: &[&str], cache: &Path) -
     .unwrap();
     Proxy {
         remote,
-        store,
+        store: tokio::sync::OnceCell::new_with(Some(store)),
         cache: cache.to_owned(),
     }
 }
