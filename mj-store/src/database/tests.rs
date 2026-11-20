@@ -5079,6 +5079,116 @@ fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
     );
 }
 
+// Revision 144 moves a session's open review and findings record into lists.
+// A store an older build left with a restored review group, a findings record
+// and an interrupted marker must keep all three, with the marker still
+// cleared through its own path, and refuse that older build afterwards.
+#[test]
+fn review_state_migration_moves_the_open_review_and_findings_into_lists() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-group", "project-1")).unwrap();
+    save_session_to(&database, &session("session-interrupted", "project-1")).unwrap();
+    let seed = mj_core::review::driver::TurnReviewSeed {
+        task: "inspect the parser".into(),
+        user_messages: Vec::new(),
+        declined: Vec::new(),
+        brief: None,
+    };
+    let (driver, _) = mj_review::driver::TurnReviewDriver::start(
+        seed,
+        "group-1".into(),
+        std::num::NonZeroUsize::new(1).unwrap(),
+    );
+    let mut state = TurnReviewState {
+        active: Some("group-1".into()),
+        active_group: Some(mj_core::storage::ActiveReviewGroup {
+            brief_writer: None,
+            driver: driver.snapshot(),
+            reviewers: vec![Default::default()],
+            registrations: vec![mj_core::storage::ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "key-1".into(),
+                child_session_id: Some("child-1".into()),
+            }],
+        }),
+        push_findings: Some(mj_core::storage::PushFindingsRecord {
+            review_id: "earlier".into(),
+            trees: [(PathBuf::from("/workspace"), ("tree".into(), "head".into()))].into(),
+            synthesis: "a finding".into(),
+        }),
+        ..Default::default()
+    };
+    state.decline_findings(
+        [mj_core::subagent::ReviewOverride {
+            finding: "F".into(),
+            reason: "R".into(),
+        }],
+        vec![PathBuf::from("/workspace")],
+    );
+    save_turn_review_state_in(&database, "session-group", &state).unwrap();
+    let interrupted = TurnReviewState {
+        active: Some("review-preparing".into()),
+        ..Default::default()
+    };
+    save_turn_review_state_in(&database, "session-interrupted", &interrupted).unwrap();
+
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    schema::restore_pre144_review_columns(&connection);
+    connection
+        .execute_batch(
+            "DELETE FROM schema_migrations WHERE version >= 144;
+             UPDATE schema_compatibility SET minimum_compatible_version = 143 WHERE singleton = 1;
+             PRAGMA user_version = 143;",
+        )
+        .unwrap();
+    let (active, group, findings): (Option<String>, Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT active, active_group, push_findings FROM turn_review_state WHERE session_id='session-group'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(active.as_deref(), Some("group-1"));
+    assert!(
+        group.unwrap().starts_with('{'),
+        "an older build stored one group object"
+    );
+    assert!(
+        findings.unwrap().starts_with('{'),
+        "an older build stored one findings object"
+    );
+    drop(connection);
+    schema::forget_verified_schema(&database);
+
+    assert_eq!(
+        turn_review_state_in(&database, "session-group").unwrap(),
+        state
+    );
+    assert_eq!(
+        active_review_groups_in(&database).unwrap(),
+        vec![("session-group".into(), state.clone())]
+    );
+    assert_eq!(
+        clear_interrupted_turn_reviews_in(&database).unwrap(),
+        vec!["session-interrupted".to_owned()]
+    );
+    assert_eq!(
+        turn_review_state_in(&database, "session-interrupted").unwrap(),
+        TurnReviewState::default()
+    );
+    assert_eq!(
+        turn_review_state_in(&database, "session-group").unwrap(),
+        state
+    );
+    let schema = schema::read_schema_state(&open(&database).unwrap()).unwrap();
+    assert_eq!(
+        schema.minimum_compatible,
+        Some(schema::MINIMUM_COMPATIBLE_VERSION)
+    );
+    assert!(schema.ensure_supported_by(143).is_err());
+}
+
 #[test]
 fn active_review_group_survives_interrupted_sweep_with_registered_children() {
     let directory = tempfile::tempdir().unwrap();
@@ -8383,6 +8493,7 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
         save_session_to(&database, &session(id, "project-1")).unwrap();
     }
     let connection = open(&database).unwrap();
+    schema::restore_pre144_review_columns(&connection);
     for (id, group, forward) in [
         (
             "turn",
@@ -8414,7 +8525,10 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
     schema::forget_verified_schema(&database);
     let connection = open(&database).unwrap();
     let groups: Vec<(String, bool, bool, bool)> = connection.prepare(
-        "SELECT session_id, active_group IS NOT NULL, pending_forward IS NOT NULL, pending_followup FROM turn_review_state ORDER BY session_id"
+        "SELECT session_id,
+                EXISTS(SELECT 1 FROM json_each(open_reviews) WHERE json_extract(value, '$.group') IS NOT NULL),
+                pending_forward IS NOT NULL, pending_followup
+         FROM turn_review_state ORDER BY session_id"
     ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
     assert_eq!(
         groups,

@@ -22,7 +22,7 @@ To see it working: in a test instance, start a session in a workspace with two w
 - [x] (2026-11-20) Fourth review of the plan: the base generation counts every review close, because a failed review can have moved some bases.
 - [x] (2026-11-20) Third review of the plan: review-off joins root ownership, clean verdicts retire findings, pathless override selects by count, old override schemas stay at one outstanding verdict, legacy overrides bump the base generation; new action fields are deliberately not version-gated.
 - [x] (2026-11-20) Milestone 1: tool API and default scope, still one review per session. `paths` runs from the tool through the durable action (which still decodes an older worker's `path`), daemon dispatch and the review host as a `ReviewScope` (`WorkingDirectory`, `Paths`, or `Workspace` for a person's `/review`, `mj review start` and `POST /review`); `override_review(path)` was moved to Milestone 3 (see the Decision Log); `capture_scope` in `reviewer.rs` decides the scope once for preparation and the review-off path; the worker's refusal lists the workspace repositories; instructions and docs updated. No relay version is added (see the Decision Log).
-- [ ] Milestone 2: store one row per open review (breaking migration; shipping authorized by the user on 2026-11-20, tested only in isolated stores).
+- [ ] Milestone 2: open reviews and findings records as lists in the session's review row (breaking migration 144; shipping authorized by the user on 2026-11-20, tested only in isolated stores). Completed: migration 144 with a rerunnable conversion, the store reading and writing the lists, the rewind helper `restore_pre144_review_columns` for historical fixtures, and the migration test `review_state_migration_moves_the_open_review_and_findings_into_lists`. Remaining: push together with Milestone 3.
 - [ ] Milestone 3: review host keyed by review, with the overlap decision at the open step.
 - [ ] Milestone 4: surfaces show several reviews per session.
 - [ ] End-to-end check in an isolated instance.
@@ -79,6 +79,10 @@ To see it working: in a test instance, start a session in a workspace with two w
 
 - Decision: `override_review` and `set_baseline` reserve their roots in the actor before the worker changes any ref, and release them when the operation ends.
   Rationale: found by review of the plan. The worker's `SetReviewBase` and `RecordOverridden` actions move refs before they answer, so a check after the answer would come too late. An override selected through `a` also writes refs for every root of the selected verdict, for example `b` of a verdict for `a, b`, so it must reserve all of them, not just the root it was named by.
+  Date/Author: 2026-11-20.
+
+- Decision: Milestone 2 keeps one `turn_review_state` row per session and stores the open reviews and the findings records as JSON lists in it (`open_reviews`, and `push_findings` as an array), instead of new tables keyed by review.
+  Rationale: the review host's actor owns a session's review state and saves it through one ordered lane, so one row per session gives every save atomicity without a multi-row transaction, and the store's report bookkeeping (`record_review_reports`) can compare a save's reviews with the previous ones by review ID inside the same transaction. Until Milestone 3 changes the type, the store maps the lists to today's single-review `TurnReviewState` and refuses a list longer than one rather than truncating it.
   Date/Author: 2026-11-20.
 
 - Decision: Milestone 1 does not add `override_review(path)`; Milestone 3 adds it together with `ResolveRepositories`.
