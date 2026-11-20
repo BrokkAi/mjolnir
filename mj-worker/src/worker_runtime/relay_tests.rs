@@ -6700,7 +6700,7 @@ async fn a_worker_launch_applies_profile_overrides_only_to_managed_subagents() {
             } else {
                 std::fs::write(
                     &claude_settings,
-                    r#"{"promptSuggestionEnabled":true,"disableClaudeAiConnectors":false}"#,
+                    r#"{"promptSuggestionEnabled":true,"disableClaudeAiConnectors":false,"outputStyle":"Explanatory"}"#,
                 )
                 .unwrap();
             }
@@ -6747,10 +6747,21 @@ async fn a_worker_launch_applies_profile_overrides_only_to_managed_subagents() {
                     Some(managed)
                 );
                 assert_eq!(
+                    settings["outputStyle"].as_str(),
+                    Some(if managed { "Concise" } else { "Explanatory" })
+                );
+                assert_eq!(
                     spec.environment
                         .get("DISABLE_AUTOUPDATER")
                         .map(String::as_str),
                     managed.then_some("1"),
+                    "Claude bridge, managed={managed}",
+                );
+                assert_eq!(
+                    spec.environment
+                        .get("CLAUDE_CODE_SILENT_TURN_REMINDER")
+                        .map(String::as_str),
+                    managed.then_some("false"),
                     "Claude bridge, managed={managed}",
                 );
             }
