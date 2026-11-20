@@ -55,7 +55,6 @@ hmac.workspace = true
 # Use the workspace reqwest rustls backend and ring provider.
 mbx-cache-core = { version = "0.21", default-features = false }
 mbx-cache-protocol = "0.5"
-percent-encoding = "2"
 quick-xml = { version = "0.41", features = ["serialize"] }
 socket2 = { version = "0.6", features = ["all"] }
 url = "2"

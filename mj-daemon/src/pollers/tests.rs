@@ -2965,7 +2965,11 @@ destination = "app"
                     .iter()
                     .any(|(_, image, error)| image == failed_image && error.is_some())
             );
-            assert!(maintenance.is_empty(), "{commands:?}");
+            // The cache is still trimmed, but no image reference is touched.
+            let [(_, command)] = maintenance.as_slice() else {
+                panic!("expected one maintain command, got {commands:?}");
+            };
+            assert!(!command.contains("--keep-image"), "{command}");
         }
     }
 }

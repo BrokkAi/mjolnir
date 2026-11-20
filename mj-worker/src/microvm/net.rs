@@ -134,7 +134,7 @@ table ip {TABLE} {{
         type filter hook input priority filter; policy accept;
         iifname "{TAP_PREFIX}*" ct state established,related accept
         iifname "{TAP_PREFIX}*" icmp type echo-request accept
-        iifname "{TAP_PREFIX}*" tcp dport {mbx_port} accept
+        iifname "{TAP_PREFIX}*" ip daddr {block}/{BLOCK_PREFIX} tcp dport {mbx_port} accept
         iifname "{TAP_PREFIX}*" drop
     }}
     chain forward {{
@@ -148,7 +148,9 @@ table ip {TABLE} {{
     }}
 }}
 "#,
-        mbx_port = super::mbx_proxy::PORT
+        mbx_port = super::mbx_proxy::PORT,
+        // Only the TAP gateways, never the host's VPC or loopback addresses.
+        block = Ipv4Addr::from(BLOCK_BASE),
     )
 }
 

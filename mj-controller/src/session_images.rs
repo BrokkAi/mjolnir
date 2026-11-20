@@ -617,7 +617,9 @@ fn engine_error(
     .any(|message| lower.contains(message))
     {
         if nitro {
-            format!("{failure}\nRun `{login} -u <user> -p <token>`; Mjolnir pulls as root.")
+            format!(
+                "{failure}\nRun `{login} -u <user> --password-stdin` with the token on stdin; Mjolnir pulls as root."
+            )
         } else {
             format!("{failure}\nSign in on the engine host with: {login}")
         }

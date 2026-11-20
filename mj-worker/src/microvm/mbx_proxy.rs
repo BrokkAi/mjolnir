@@ -116,8 +116,9 @@ fn remote(
     ensure!(
         !prefix
             .split('/')
-            .any(|segment| matches!(segment, "." | "..")),
-        "S3 prefix cannot contain standalone '.' or '..' segments or an unescaped query or fragment"
+            .any(|segment| matches!(segment, "." | ".."))
+            && !prefix.contains('%'),
+        "S3 prefix cannot contain standalone '.' or '..' segments or percent escapes"
     );
     ensure!(
         !namespaces.is_empty(),

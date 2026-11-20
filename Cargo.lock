@@ -1299,7 +1299,6 @@ dependencies = [
  "mach2",
  "mbx-cache-core",
  "mbx-cache-protocol",
- "percent-encoding",
  "proptest",
  "quick-xml",
  "reqwest",

@@ -794,14 +794,16 @@ pub(super) fn refresh_host_images(
         .take_while(|_| !executor.cancellation_requested())
         .filter_map(|refresh| refresh_one_host(refresh, executor, report))
         .collect();
-    if matches!(host, ImageHost::SshNitro(_))
-        && results.len() == complete
-        && results.iter().all(|(_, _, failure)| failure.is_none())
-        && !executor.cancellation_requested()
-    {
+    if matches!(host, ImageHost::SshNitro(_)) && !executor.cancellation_requested() {
         let mut args = vec![host.engine().into(), "maintain".into()];
-        for image in plan.keep_images {
-            args.extend(["--keep-image".into(), image]);
+        // Image references are reconciled only after every pull succeeded, so
+        // a failed pull never shrinks the host's images below what it needs.
+        // The mbx cache is trimmed regardless, or a persistent registry error
+        // would stop enforcing the budget.
+        if results.len() == complete && results.iter().all(|(_, _, failure)| failure.is_none()) {
+            for image in plan.keep_images {
+                args.extend(["--keep-image".into(), image]);
+            }
         }
         if let Some(budget) = plan.mbx_cache_budget {
             args.push(format!("--mbx-cache-budget={budget}"));

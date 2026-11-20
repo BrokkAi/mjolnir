@@ -320,6 +320,11 @@ pub fn mbx_s3_location(remote: &str) -> Result<(&str, &str)> {
     {
         bail!("build cache remote {remote:?} contains an S3 prefix with a dot segment");
     }
+    // The IAM policy and the host proxy must read the prefix the same way;
+    // a percent escape would mean one literal key to IAM and another to S3.
+    if prefix.contains('%') {
+        bail!("build cache remote {remote:?} must spell its S3 prefix without percent escapes");
+    }
     Ok((bucket, prefix))
 }
 

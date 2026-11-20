@@ -109,7 +109,7 @@ Pushing and pulling use the engine's own registry login on that host. If the
 registry refuses, the error shows the login command to run there, for example
 `podman login ghcr.io` or `ssh host podman login ghcr.io`. Nitro pulls with
 crane as root on the host. For a private registry, run
-`ssh host sudo crane auth login ghcr.io -u <user> -p <token>`, replacing the
+`ssh host sudo crane auth login ghcr.io -u <user> --password-stdin`, replacing the
 host, registry, and credentials.
 
 `mj ec2 create` warms the base image and the bundle images assigned for the new

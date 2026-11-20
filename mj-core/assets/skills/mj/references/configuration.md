@@ -1264,7 +1264,7 @@ host reserved at boot.
 
 Build Nitro images for the host's architecture. The session runs as root in
 the guest. The host pulls with crane as root. For a private registry, sign in
-with `ssh host sudo crane auth login <registry> -u <user> -p <token>`, replacing
+with `ssh host sudo crane auth login <registry> -u <user> --password-stdin`, replacing
 the host, registry, and credentials.
 
 `mj ec2 create` warms the base image plus bundle images assigned for the

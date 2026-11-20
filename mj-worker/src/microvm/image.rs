@@ -150,7 +150,7 @@ fn pull_reserved(
     // configuration with another's files.
     let pinned = String::from_utf8(
         sys::run_checked(&crane, &["digest", "--full-ref", reference])
-            .with_context(|| format!("resolve {reference}; if this is a private registry, authorize crane on the host with `ssh <host> sudo crane auth login <registry>` and retry"))?
+            .with_context(|| format!("resolve {reference}; if this is a private registry, authorize crane on the host with `ssh <host> sudo crane auth login <registry> -u <user> --password-stdin` (token on stdin) and retry"))?
             .stdout,
     )
     .context("crane printed a digest that is not UTF-8")?

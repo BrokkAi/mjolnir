@@ -148,9 +148,8 @@ impl S3 {
             .build()?;
         Ok(Self {
             base,
-            prefix: percent_encoding::percent_decode_str(&remote.prefix)
-                .decode_utf8()?
-                .into_owned(),
+            // The literal prefix the IAM policy names; percent escapes are refused.
+            prefix: remote.prefix.clone(),
             region,
             client,
             provider,
