@@ -697,16 +697,18 @@ pub(crate) fn provider_pools(
 }
 
 /// Largest-remainder apportionment for the available quota and refill chunks.
-/// Positive availability gets at least one cell when the bar has room.
+/// Give every positive segment a cell when they all fit. On narrower bars,
+/// keep positive availability visible and let the caller list omitted refills.
 pub(super) fn refill_widths(
     available: f64,
     refills: impl Iterator<Item = f64>,
     total: f64,
     cells: usize,
 ) -> Vec<usize> {
+    let capacities: Vec<_> = std::iter::once(available).chain(refills).collect();
     let mut widths = Vec::new();
     let mut fractions = Vec::new();
-    for (index, capacity) in std::iter::once(available).chain(refills).enumerate() {
+    for (index, &capacity) in capacities.iter().enumerate() {
         let exact = cells as f64 * capacity / total;
         widths.push(exact.floor() as usize);
         fractions.push((index, exact.fract()));
@@ -716,13 +718,21 @@ pub(super) fn refill_widths(
     for (index, _) in fractions.into_iter().take(leftover) {
         widths[index] += 1;
     }
-    if cells > 0
-        && available > 0.0
-        && widths[0] == 0
-        && let Some(largest) = widths[1..].iter_mut().max()
-    {
-        *largest -= 1;
-        widths[0] = 1;
+    let all_fit = capacities
+        .iter()
+        .filter(|&&capacity| capacity > 0.0)
+        .count()
+        <= cells;
+    for (index, capacity) in capacities.into_iter().enumerate() {
+        if capacity > 0.0
+            && widths[index] == 0
+            && (all_fit || index == 0)
+            && let Some(donor) = widths.iter_mut().max()
+            && *donor > 0
+        {
+            *donor -= 1;
+            widths[index] = 1;
+        }
     }
     widths
 }

@@ -511,6 +511,19 @@ fn pool_bar(
     accent: Color,
     refreshing: &std::collections::BTreeSet<String>,
 ) -> (Vec<Span<'static>>, Vec<String>) {
+    let percentage = pool.percentage();
+    let suffix = format!(
+        " {:>padding$}",
+        percentage,
+        padding = 4 + usize::from(pool.missing > 0)
+    );
+    let suffix_width = suffix.len();
+    let suffix = || {
+        Span::styled(
+            suffix,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )
+    };
     let weight = pool.reported_weight();
     if weight == 0.0 {
         let overdue = pool
@@ -519,22 +532,50 @@ fn pool_bar(
             .filter(|member| member.awaiting_reading)
             .map(|member| overdue_entry(member, theme::ascii()))
             .collect();
-        return (vec![Span::raw(" ".repeat(width))], overdue);
+        return (
+            vec![
+                Span::raw(" ".repeat(width.saturating_sub(suffix_width))),
+                suffix(),
+            ],
+            overdue,
+        );
     }
     let refills: Vec<_> = pool
         .reported_members()
         .filter(|member| member.remaining < 100 || refreshing.contains(&member.id))
         .map(|member| (member, member.weight * f64::from(100 - member.remaining)))
         .collect();
-    let widths = refill_widths(
-        pool.available_capacity(),
-        refills.iter().map(|&(_, capacity)| capacity),
-        weight * 100.0,
-        width,
-    );
+    let available = pool.available_capacity();
+    let apportion = |width| {
+        refill_widths(
+            available,
+            refills.iter().map(|&(_, capacity)| capacity),
+            weight * 100.0,
+            width,
+        )
+    };
+    let label_width = |label: &str| Span::raw(label).width();
+    let percentage_width = label_width(&percentage);
+    let mut widths = apportion(width);
+    let has_refill = widths[1..].iter().any(|&cells| cells > 0);
+    let inline = percentage_width <= widths[0].saturating_sub(usize::from(has_refill));
+    if !inline {
+        widths = apportion(width.saturating_sub(suffix_width));
+    }
+    let last_segment = widths.iter().rposition(|&cells| cells > 0).unwrap_or(0);
     let ascii = theme::ascii();
+    let pane = theme::palette().surface;
     let use_glyphs =
         ascii || theme::current() == theme::UiTheme::Mono || !matches!(accent, Color::Rgb(..));
+    let refill = tint(accent, 0.24);
+    let divider = |colour| {
+        if ascii {
+            Span::styled("|", Style::default().fg(readable_on(colour)).bg(colour))
+        } else {
+            // The segment keeps this cell; its right eighth exposes the pane.
+            Span::styled("▉", Style::default().fg(colour).bg(pane))
+        }
+    };
     let fill_glyph = if ascii {
         "#"
     } else if use_glyphs {
@@ -551,36 +592,53 @@ fn pool_bar(
             .bg(accent)
             .add_modifier(Modifier::REVERSED)
     } else if use_glyphs {
-        let colour = if theme::current() == theme::UiTheme::Mono {
-            theme::palette().text
-        } else {
-            accent
-        };
-        Style::default().fg(colour).bg(theme::palette().background)
+        Style::default().fg(accent).bg(pane)
     } else {
         Style::default().fg(readable_on(accent)).bg(accent)
     };
-    let mut spans = vec![Span::styled(fill_glyph.repeat(widths[0]), fill_style)];
+    let mut spans = Vec::new();
+    if widths[0] > 0 {
+        let split = last_segment > 0;
+        let mut cells = widths[0] - usize::from(split);
+        if inline {
+            let label_style = if use_glyphs && !ascii {
+                Style::default()
+                    .fg(readable_on(pane))
+                    .bg(pane)
+                    .add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default().fg(readable_on(accent)).bg(accent)
+            };
+            spans.push(Span::styled(percentage, label_style));
+            cells -= percentage_width;
+        }
+        if cells > 0 {
+            spans.push(Span::styled(fill_glyph.repeat(cells), fill_style));
+        }
+        if split {
+            spans.push(divider(accent));
+        }
+    }
     let mut fallback = Vec::new();
-    let mut alternate = false;
-    for ((member, capacity), cells) in refills.into_iter().zip(widths.into_iter().skip(1)) {
+    for (index, ((member, capacity), cells)) in refills
+        .into_iter()
+        .zip(widths.into_iter().skip(1))
+        .enumerate()
+    {
         let is_refreshing = refreshing.contains(&member.id);
         let status = if is_refreshing {
             format!("refreshing{}", theme::glyphs().ellipsis)
         } else {
-            format!(
-                "{}{}",
-                theme::glyphs().resuming,
-                reset_label(member.reset, member.reset_text.as_deref(), now)
-            )
+            reset_label(member.reset, member.reset_text.as_deref(), now)
         };
         let banked = member
             .banked
             .filter(|&count| count > 0)
             .map(|count| format!("{}{count}", if ascii { "B" } else { "⟲" }));
-        // Leave a glyph visible where the tint alone cannot mark the boundary.
-        let label_budget = cells.saturating_sub(usize::from(use_glyphs));
-        let label_width = |label: &str| Span::raw(label).width();
+        let split = index + 1 < last_segment;
+        // Keep a divider cell at a boundary, and a refill glyph at the end
+        // of a glyph bar when text would otherwise cover the segment.
+        let label_budget = cells.saturating_sub(usize::from(split || use_glyphs));
         let short_status = std::iter::once(status.as_str())
             .chain(
                 is_refreshing
@@ -623,18 +681,20 @@ fn pool_bar(
         if cells == 0 {
             continue;
         }
-        let tint_strength = if alternate { 0.52 } else { 0.24 };
-        let glyph = if use_glyphs {
-            if alternate { "-" } else { "=" }
-        } else {
-            " "
-        };
-        let background = tint(accent, tint_strength);
-        spans.push(Span::styled(
-            format!("{}{label}", glyph.repeat(cells - label_width(&label))),
-            Style::default().fg(readable_on(background)).bg(background),
-        ));
-        alternate = !alternate;
+        let body = cells - usize::from(split);
+        if body > 0 {
+            let glyph = if use_glyphs { "=" } else { " " };
+            spans.push(Span::styled(
+                format!("{}{label}", glyph.repeat(body - label_width(&label))),
+                Style::default().fg(readable_on(refill)).bg(refill),
+            ));
+        }
+        if split {
+            spans.push(divider(refill));
+        }
+    }
+    if !inline {
+        spans.push(suffix());
     }
     // A profile whose reset passed without a new reading adds nothing to the
     // bar; name it so the pane says which profile is waiting.
@@ -904,13 +964,7 @@ fn quota_lines(
                     format!("{} ", pool.label)
                 }
             );
-            let percentage = format!(
-                " {:>padding$}",
-                pool.percentage(),
-                padding = 4 + usize::from(pool.missing > 0)
-            );
-            let bar_width =
-                width.saturating_sub(prefix.chars().count() + percentage.chars().count());
+            let bar_width = width.saturating_sub(prefix.chars().count());
             let mut spans = vec![Span::styled(
                 prefix,
                 if selected {
@@ -922,10 +976,6 @@ fn quota_lines(
             let (bar, refill_labels) =
                 pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing);
             spans.extend(bar);
-            spans.push(Span::styled(
-                percentage,
-                Style::default().fg(accent).add_modifier(Modifier::BOLD),
-            ));
             if pool.members.len() == 1 {
                 profile_rows.push((pool.members[0].id.clone(), lines.len()));
             }
@@ -1185,14 +1235,19 @@ mod tests {
                 pool.members.truncate(1);
                 pool.members[0].remaining = 50;
                 pool.members[0].awaiting_reading = false;
+                pool.remaining = 50;
                 let accent = theme::palette().muted;
                 assert!(!matches!(accent, Color::Rgb(..)));
-                let (spans, _) = pool_bar(&pool, 10, now, accent, &Default::default());
-                let style_at = |segment: usize| spans[segment].style;
-                assert_ne!(
-                    (style_at(0).bg, style_at(0).add_modifier),
-                    (style_at(1).bg, style_at(1).add_modifier)
-                );
+                let (spans, _) = pool_bar(&pool, 20, now, accent, &Default::default());
+                let available = spans
+                    .iter()
+                    .find(|span| span.content.contains('█'))
+                    .unwrap();
+                let refill = spans
+                    .iter()
+                    .find(|span| span.content.contains('='))
+                    .unwrap();
+                assert_ne!(available.style.bg, refill.style.bg);
             })
         });
     }
