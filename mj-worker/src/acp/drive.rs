@@ -15,13 +15,38 @@ pub(super) const RAPID_BRIDGE_RESTART_LIMIT: u32 = 3;
 
 pub(super) const RAPID_BRIDGE_WINDOW: Duration = Duration::from_secs(5);
 
-pub(super) async fn drive<T>(
+#[cfg(test)]
+pub(super) async fn drive<T: ConnectTo<Client>>(
     transport: T,
     spec: LaunchSpec,
     requests: &mut mpsc::Receiver<CommandRequest>,
     events: mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     replacing_previous_bridge: bool,
+) -> Result<Option<SessionRestart>> {
+    let replace_unused_codex_thread = should_replace_unused_codex_thread(&spec);
+    drive_bridge(
+        transport,
+        spec,
+        requests,
+        events,
+        opened,
+        BridgeSessionOpen {
+            replacing_previous_bridge,
+            replace_unused_codex_thread,
+            first_replaced_unused_native_session_id: &mut None,
+        },
+    )
+    .await
+}
+
+pub(super) async fn drive_bridge<T>(
+    transport: T,
+    spec: LaunchSpec,
+    requests: &mut mpsc::Receiver<CommandRequest>,
+    events: mpsc::Sender<RuntimeEvent>,
+    opened: Arc<Mutex<Option<OpenedSession>>>,
+    session_open: BridgeSessionOpen<'_>,
 ) -> Result<Option<SessionRestart>>
 where
     T: ConnectTo<Client>,
@@ -1012,7 +1037,7 @@ where
                 last_agent_message,
                 live_history_enabled,
                 native_session_used,
-                replacing_previous_bridge,
+                session_open,
                 grok_usage,
             )
             .await
@@ -1604,7 +1629,7 @@ pub(super) async fn drive_connection(
     last_agent_message: LastAgentMessage,
     live_history_enabled: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
-    replacing_previous_bridge: bool,
+    session_open: BridgeSessionOpen<'_>,
     grok_usage: grok_usage::Collector,
 ) -> Result<Option<SessionRestart>> {
     // Terminals belong to the connection. However the session ends — closed,
@@ -1623,7 +1648,7 @@ pub(super) async fn drive_connection(
         &last_agent_message,
         &live_history_enabled,
         native_session_used,
-        replacing_previous_bridge,
+        session_open,
         &grok_usage,
     )
     .await;

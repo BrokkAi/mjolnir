@@ -404,9 +404,19 @@ struct BridgeRestart {
     /// Carried into the next bridge's spec: what the dead bridge saw is the
     /// evidence for whether its thread may be replaced.
     native_session_used: bool,
-    unexpected: bool,
     session_age: Duration,
-    message: &'static str,
+    notice: BridgeRestartNotice,
+}
+
+enum BridgeRestartNotice {
+    Planned(&'static str),
+    Unexpected,
+}
+
+struct BridgeSessionOpen<'a> {
+    replacing_previous_bridge: bool,
+    replace_unused_codex_thread: bool,
+    first_replaced_unused_native_session_id: &'a mut Option<String>,
 }
 
 async fn run_inner(
@@ -418,10 +428,31 @@ async fn run_inner(
     spec.environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
     let mut rapid_deaths = 0_u32;
     let mut replacing_previous_bridge = false;
+    let mut restart_notice = None;
+    // A new worker starts from the relay journal's latest native session ID.
+    // Within this worker, restore readiness can first see any replacement.
+    let mut first_replaced_unused_native_session_id = None;
     let mut rollback = None;
     loop {
         if shutdown.is_cancelled() {
             return Ok(());
+        }
+        let replace_unused_codex_thread = should_replace_unused_codex_thread(&spec);
+        if let Some(notice) = restart_notice.take() {
+            let message = match notice {
+                BridgeRestartNotice::Planned(message) => message,
+                BridgeRestartNotice::Unexpected if replace_unused_codex_thread => {
+                    "The agent stopped before its first prompt; restarting with a new empty thread."
+                }
+                BridgeRestartNotice::Unexpected => ACP_BRIDGE_LOST_WARNING,
+            };
+            emit_runtime_event(
+                &events,
+                RuntimeEvent::HarnessRestarting {
+                    message: message.to_owned(),
+                },
+            )
+            .await?;
         }
         let opened = Arc::new(Mutex::new(None));
         let result = run_bridge(
@@ -429,7 +460,12 @@ async fn run_inner(
             &mut requests,
             &events,
             opened.clone(),
-            replacing_previous_bridge,
+            BridgeSessionOpen {
+                replacing_previous_bridge,
+                replace_unused_codex_thread,
+                first_replaced_unused_native_session_id:
+                    &mut first_replaced_unused_native_session_id,
+            },
             &shutdown,
         )
         .await;
@@ -487,7 +523,7 @@ async fn run_inner(
             replacing_previous_bridge = true;
             continue;
         }
-        if restart.unexpected {
+        if matches!(restart.notice, BridgeRestartNotice::Unexpected) {
             if restart.session_age < RAPID_BRIDGE_WINDOW {
                 rapid_deaths += 1;
                 ensure!(
@@ -498,13 +534,7 @@ async fn run_inner(
                 rapid_deaths = 0;
             }
         }
-        emit_runtime_event(
-            &events,
-            RuntimeEvent::HarnessRestarting {
-                message: restart.message.to_owned(),
-            },
-        )
-        .await?;
+        restart_notice = Some(restart.notice);
         spec.goal_recovery
             .lock()
             .expect("goal lock poisoned")
@@ -522,7 +552,7 @@ async fn run_bridge(
     requests: &mut mpsc::Receiver<CommandRequest>,
     events: &mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
-    replacing_previous_bridge: bool,
+    session_open: BridgeSessionOpen<'_>,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> Result<Option<BridgeRestart>> {
     // Before the process starts, not after: a selector the harness reads only
@@ -599,13 +629,13 @@ async fn run_bridge(
     let transport = ByteStreams::new(stdin.compat_write(), skip_stdout_preamble(stdout).compat());
 
     let (mut result, child_reaped) = {
-        let drive = drive(
+        let drive = drive_bridge(
             transport,
             spec.clone(),
             requests,
             events.clone(),
             opened.clone(),
-            replacing_previous_bridge,
+            session_open,
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -711,9 +741,8 @@ async fn run_bridge(
             native_session_used: opened_now
                 .as_ref()
                 .is_some_and(|opened| opened.native_session_used.load(Ordering::Acquire)),
-            unexpected: false,
             session_age: Duration::ZERO,
-            message: "Clearing context",
+            notice: BridgeRestartNotice::Planned("Clearing context"),
         })),
         Ok(Some(restart @ (SessionRestart::Resume(_) | SessionRestart::ReloadLogins(_)))) => {
             let (native_session_id, message) = match restart {
@@ -727,11 +756,10 @@ async fn run_bridge(
                 native_session_used: opened_now
                     .as_ref()
                     .is_some_and(|opened| opened.native_session_used.load(Ordering::Acquire)),
-                unexpected: false,
                 session_age: opened_now
                     .map(|opened| opened.started_at.elapsed())
                     .unwrap_or(Duration::ZERO),
-                message,
+                notice: BridgeRestartNotice::Planned(message),
             }))
         }
         Err(error) => match opened_now {
@@ -742,9 +770,8 @@ async fn run_bridge(
                 // session open decides whether to load or replace the thread.
                 resume_session: Some(opened.native_session_id),
                 native_session_used: opened.native_session_used.load(Ordering::Acquire),
-                unexpected: true,
                 session_age: opened.started_at.elapsed(),
-                message: "ACP bridge exited; restarting the agent",
+                notice: BridgeRestartNotice::Unexpected,
             })),
         },
     }
@@ -930,6 +957,7 @@ async fn read_stderr_tail(mut stderr: tokio::process::ChildStderr) -> Result<Str
     Ok(String::from_utf8_lossy(&tail).trim().to_owned())
 }
 
+const ACP_BRIDGE_LOST_WARNING: &str = "ACP bridge exited; reloading the native session";
 const ACP_BRIDGE_RESTART_WARNING: &str = "ACP bridge restarting; reloading the native session";
 const OPENCODE_LOGINS_RELOAD_MESSAGE: &str =
     "The profile's OpenCode logins changed; reloading the session to use them";

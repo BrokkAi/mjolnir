@@ -5927,6 +5927,7 @@ for line in sys.stdin:
     let mut opened = Vec::new();
     let mut prompt_sent = false;
     let mut replay = Vec::new();
+    let mut restart_messages = Vec::new();
     loop {
         let event = tokio::time::timeout(std::time::Duration::from_secs(10), event_rx.recv())
             .await
@@ -5934,6 +5935,7 @@ for line in sys.stdin:
             .expect("the runtime must survive the first bridge's death");
         match event {
             RuntimeEvent::NativeAgent { event } => replay.push(event),
+            RuntimeEvent::HarnessRestarting { message } => restart_messages.push(message),
             RuntimeEvent::SessionStarted {
                 native_session_id,
                 resumed,
@@ -5987,9 +5989,17 @@ for line in sys.stdin:
         } else {
             vec![
                 ("thread-1".into(), false, Some("unused".into())),
-                ("thread-2".into(), false, Some("thread-1".into())),
+                ("thread-2".into(), false, Some("unused".into())),
             ]
         }
+    );
+    assert_eq!(
+        restart_messages,
+        [if send_prompt {
+            "ACP bridge exited; reloading the native session"
+        } else {
+            "The agent stopped before its first prompt; restarting with a new empty thread."
+        }]
     );
     assert_eq!(
         replay,

@@ -135,7 +135,7 @@ pub(super) async fn serve_session(
     last_agent_message: &LastAgentMessage,
     live_history_enabled: &Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
-    replacing_previous_bridge: bool,
+    session_open: BridgeSessionOpen<'_>,
     grok_usage: &grok_usage::Collector,
 ) -> Result<Option<SessionRestart>> {
     let mut meta = serde_json::Map::new();
@@ -327,23 +327,11 @@ pub(super) async fn serve_session(
     // Kept on the wire for older workers; no harness can lose native
     // continuity this way any more.
     let native_continuity_lost = false;
-    // Set when the recorded native session is replaced because it was never
-    // used; `session_opened` carries it so a resume can accept the new one.
-    let mut replaced_unused_native_session_id = None;
     // The MCP servers the request that opened the session carried.
     let mut offered_mcp_servers = 0;
-    let codex_has_goal = spec.harness == HarnessKind::Codex
-        && spec
-            .goal_recovery
-            .lock()
-            .expect("goal lock poisoned")
-            .state
-            .snapshot
-            .is_some();
+    let has_goal = codex_has_goal(spec);
     let loaded_session = if let Some(existing) = &spec.resume_session
-        && spec.harness == HarnessKind::Codex
-        && spec.native_session_history == NativeSessionHistory::CreatedHereUnused
-        && !codex_has_goal
+        && session_open.replace_unused_codex_thread
     {
         // This bridge starts a new app-server. Codex keeps an unused thread
         // in the old process until its first turn writes a rollout. The
@@ -369,7 +357,6 @@ pub(super) async fn serve_session(
                 emit_runtime_event(events, RuntimeEvent::NativeAgent { event }).await?;
             }
         }
-        replaced_unused_native_session_id = Some(existing.clone());
         None
     } else if let Some(existing) = &spec.resume_session {
         let session_id = SessionId::from(existing.clone());
@@ -439,9 +426,7 @@ pub(super) async fn serve_session(
                     return Err(error);
                 }
                 let harness = spec.harness.display_name();
-                if spec.native_session_history == NativeSessionHistory::MayHaveHistory
-                    || codex_has_goal
-                {
+                if spec.native_session_history == NativeSessionHistory::MayHaveHistory || has_goal {
                     return Err(error.context(format!(
                         "{harness} has no native history for session {existing}; the existing \
                          conversation or goal cannot be resumed"
@@ -468,7 +453,6 @@ pub(super) async fn serve_session(
                     )
                     .await?;
                 }
-                replaced_unused_native_session_id = Some(existing.clone());
                 None
             }
         };
@@ -795,7 +779,7 @@ pub(super) async fn serve_session(
     // compaction are not gated on the session being configured, so a request
     // that arrives while the very first bridge is still handshaking is a live
     // request for this session, not a leftover.
-    if replacing_previous_bridge {
+    if session_open.replacing_previous_bridge {
         drain_requests_from_the_previous_bridge(requests);
     }
 
@@ -810,6 +794,18 @@ pub(super) async fn serve_session(
         )
         .await?;
     } else {
+        // A failed load or the Codex shortcut can replace a recorded thread.
+        // Each replacement reports the first ID so restore can match its archive.
+        let replaced_unused_native_session_id = spec
+            .resume_session
+            .as_ref()
+            .filter(|_| !resumed)
+            .map(|existing| {
+                session_open
+                    .first_replaced_unused_native_session_id
+                    .get_or_insert_with(|| existing.clone())
+                    .clone()
+            });
         emit_runtime_event(
             events,
             RuntimeEvent::SessionStarted {
@@ -1973,4 +1969,22 @@ pub(super) async fn serve_session(
         }
     }
     Ok(None)
+}
+
+pub(super) fn should_replace_unused_codex_thread(spec: &LaunchSpec) -> bool {
+    spec.harness == HarnessKind::Codex
+        && spec.resume_session.is_some()
+        && spec.native_session_history == NativeSessionHistory::CreatedHereUnused
+        && !codex_has_goal(spec)
+}
+
+fn codex_has_goal(spec: &LaunchSpec) -> bool {
+    spec.harness == HarnessKind::Codex
+        && spec
+            .goal_recovery
+            .lock()
+            .expect("goal lock poisoned")
+            .state
+            .snapshot
+            .is_some()
 }
