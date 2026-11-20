@@ -1211,7 +1211,8 @@ fn resume_open_updates_operational_state_without_adding_transcript_noise() {
     );
     let mutation = project_relay_event(&session, &resumed).unwrap().mutation;
     assert!(mutation.transcript.is_empty());
-    assert_eq!(mutation.pending_elicitations, Some(Vec::new()));
+    // Forms the new bridge issued before the open stay live (2a0aae9d8).
+    assert_eq!(mutation.pending_elicitations, None);
 
     let started = event(
         &session,

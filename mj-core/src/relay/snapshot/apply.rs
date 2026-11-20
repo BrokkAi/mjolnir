@@ -1463,12 +1463,22 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             } else {
                 RelayDispatchState::Interrupted
             };
-            let command = snapshot
+            let dispatch = snapshot
                 .dispatches
                 .get(command_id)
-                .ok_or_else(|| anyhow!("terminated unknown relay command {command_id}"))?
-                .command
-                .clone();
+                .ok_or_else(|| anyhow!("terminated unknown relay command {command_id}"))?;
+            let command = dispatch.command.clone();
+            // A prompt in flight when the worker restarted may have reached
+            // the harness before its use was recorded. The interruption itself
+            // records that evidence, so no separate snapshot write can be lost
+            // to a crash or grow a full snapshot before this event shrinks it.
+            let may_have_reached_agent = matches!(
+                &event.observation,
+                RelayObservation::CommandInterrupted {
+                    reason: Some(crate::event_outcome::OutcomeReason::WorkerRestarted),
+                    ..
+                }
+            ) && dispatch.prompt_may_have_reached_agent();
             if command.kind() != *observed_command {
                 bail!("terminated command {command_id} has the wrong command identity");
             }
@@ -1507,6 +1517,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .get_mut(command_id)
                 .expect("dispatch disappeared")
                 .state = state;
+            if may_have_reached_agent {
+                snapshot.native_session_used = true;
+                snapshot.record_native_use(NativeSessionUse::Used);
+            }
             snapshot
                 .handled_commands
                 .get_mut(command_id)

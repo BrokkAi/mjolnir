@@ -378,8 +378,7 @@ pub struct DurableRelay {
 
 impl DurableRelay {
     /// The connection owns this queue hold until its cut or disconnection.
-    #[cfg(any(unix, test))]
-    pub(crate) fn reserve_live_baseline(
+    pub fn reserve_live_baseline(
         &mut self,
     ) -> tokio::sync::oneshot::Receiver<
         std::result::Result<mj_core::relay::LiveSessionBaseline, String>,
@@ -1810,7 +1809,7 @@ impl DurableRelay {
             .snapshot
             .dispatches
             .values()
-            .any(native_history::prompt_may_have_reached_agent);
+            .any(RelayDispatchRecord::prompt_may_have_reached_agent);
         if let Some(evidence) = &self.snapshot.native_use_evidence {
             if evidence.version != 1
                 || Some(&evidence.native_session_id) != self.snapshot.native_session_id.as_ref()

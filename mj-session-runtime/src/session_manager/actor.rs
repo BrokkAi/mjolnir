@@ -241,11 +241,7 @@ pub async fn run_session_actor(
                 // The board lives as long as the process; a closed channel
                 // only means nothing will wake this wait again.
                 let still_full = target.worker_recovery.as_ref().is_some_and(|plan| {
-                    crate::target_storage::worker_root_problem(
-                        &plan.source_target,
-                        &target.session_id,
-                    )
-                    .is_some()
+                    restart_storage_problem(plan, &target.session_id).is_some()
                 });
                 if changed.is_err() || !still_full {
                     tracing::info!(
@@ -472,20 +468,15 @@ pub async fn run_session_actor(
                             && last_recovery_probe.is_none_or(|last: tokio::time::Instant| {
                                 last.elapsed() >= WORKER_RESTART_COOLDOWN
                             });
-                        // A restart writes to the worker root. While the storage
-                        // owner says that filesystem is full, recovery waits for
-                        // that to change instead of retrying into the same
-                        // failure.
+                        // A restart writes to the worker root, workspace and
+                        // profile home. While the storage owner says one of
+                        // those filesystems is full, recovery waits for that to
+                        // change instead of retrying into the same failure.
                         let storage_problem = target
                             .worker_recovery
                             .as_ref()
                             .filter(|_| !integrity && failures >= UNREACHABLE_FAILURE_THRESHOLD)
-                            .and_then(|plan| {
-                                crate::target_storage::worker_root_problem(
-                                    &plan.source_target,
-                                    &target.session_id,
-                                )
-                            });
+                            .and_then(|plan| restart_storage_problem(plan, &target.session_id));
                         let recovery_due = recovery_due && storage_problem.is_none();
                         if integrity || failures >= UNREACHABLE_FAILURE_THRESHOLD {
                             // Bind the clone first: borrowing inside the call
