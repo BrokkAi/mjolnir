@@ -356,9 +356,13 @@ type as a question: where does this value die?
   apart; `%w` collapses them and changes text users and tests see.
 - `error.downcast_ref::<T>()` is `anyhow.DowncastRef[T](err)`; `error.chain()`
   is `anyhow.Chain(err)`; `error.root_cause()` is `anyhow.RootCause(err)`.
-- An error enum is a Go enum (rule 3) whose variants implement `error` through
-  their `FmtDisplay`. Match on it with a type switch after
-  `anyhow.DowncastRef`.
+- An error enum is a Go enum (rule 3) whose variants implement `error`. Go
+  requires an `Error() string` method of anything returned as an error, which
+  Rust does not: the method returns the type's `Display` text, or its `Debug`
+  text when the Rust type has no `Display` (the declarations generator writes
+  it). Match on it with a type switch after `anyhow.DowncastRef`.
+- `u64::from(x)`, `usize::from(x)`, `i64::from(x)`, `f64::from(x)` on a number
+  are Go conversions (`uint64(x)`); on a `bool` they are `rs.FromBool[T](b)`.
 - Errors from the operating system must read as Rust prints them ("No such
   file or directory (os error 2)"), so file, process and socket calls go
   through `rsfs`, `rsio`, `rsprocess` and `rsnet`, never straight to `os` or

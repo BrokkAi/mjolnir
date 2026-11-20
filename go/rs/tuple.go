@@ -54,3 +54,12 @@ func Is[V any](value any) bool {
 	_, ok := value.(V)
 	return ok
 }
+
+// FromBool is `T::from(b)` for a bool: 1 for true and 0 for false, as
+// `usize::from(flag)` and `u64::from(flag)` give.
+func FromBool[T ~int | ~int8 | ~int16 | ~int32 | ~int64 | ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~float32 | ~float64](b bool) T {
+	if b {
+		return 1
+	}
+	return 0
+}

@@ -522,10 +522,19 @@ class Generator:
                     if name == "Item":
                         return f"[]{self.go_type(value, 'generic')}"
                 return self.note(node["text"])
-            if last in ("Read", "BufRead", "AsyncRead", "AsyncBufRead"):
+            if last in ("AsyncRead", "AsyncBufRead", "AsyncWrite", "AsyncSeek"):
+                names = {b["path"].split("::")[-1] for b in node.get("bounds", [])}
+                self.used.add("tokio")
+                if "AsyncRead" in names and "AsyncWrite" in names:
+                    return "tokio.IoAsyncReadWrite"
+                return "tokio.Io" + last
+            if last == "BufRead":
+                self.used.add("rsio")
+                return "rsio.BufRead"
+            if last == "Read":
                 self.used.add("io")
                 return "io.Reader"
-            if last in ("Write", "AsyncWrite"):
+            if last == "Write":
                 self.used.add("io")
                 return "io.Writer"
             if last in ("Serialize", "DeserializeOwned", "Deserialize"):
@@ -886,7 +895,7 @@ class Generator:
         self.generic_scope.pop()
         if item["derives"]:
             out.insert(len(self.docs(item["docs"])), f"// derive: {', '.join(item['derives'])}")
-        return out + [""]
+        return out + [""] + self.error_method(item, name, self.type_params(decl["generics"], declare=False))
 
     def variant_attrs(self, item, variant) -> list[str]:
         attrs = []
@@ -939,11 +948,13 @@ class Generator:
                 out.append("")
                 out.append(f"var _ = rs.RegisterDefault(func() {name} {{ return {name}_{default['name']} }})")
             self.generic_scope.pop()
-            return out + [""]
+            return out + [""] + self.error_method(item, name, "")
         marker = "is" + name[:1].upper() + name[1:].replace("_", "")
         methods = self.enum_methods(item)
         out.append(f"type {name}{params} interface {{")
         out.append(f"\t{marker}()")
+        if id(item) in self.error_types():
+            out.append("\terror")
         for signature in methods:
             out.append(f"\t{signature}")
         out.append("}")
@@ -971,7 +982,68 @@ class Generator:
             out.append("")
             out.append(f"var _ = rs.RegisterDefault(func() {name} {{ return &{name}_{default['name']}{{}} }})")
         self.generic_scope.pop()
-        return out + [""]
+        return out + [""] + self.error_method(item, name, use)
+
+    def error_types(self) -> dict:
+        """Items of this crate that functions return as the error of a `Result`,
+        or that implement `std::error::Error`: id(item) -> has a Display impl.
+
+        Go's `error` needs an `Error() string` method, which Rust does not ask
+        of a type used as `E`.
+        """
+        cache = self.crate.__dict__.setdefault("_error_types", None)
+        if cache is not None:
+            return cache
+        found = {}
+        display = set()
+        for file in self.crate.files:
+            if file["target"] not in ("lib", "bin"):
+                continue
+            other = self if file is self.file else Generator(self.ws, file["path"])
+            for item in file["items"]:
+                decl = item.get("decl") or {}
+                if item["kind"] == "impl" and decl.get("trait") and decl.get("self_ty", {}).get("k") == "path":
+                    trait = decl["trait"]["path"].split("::")[-1]
+                    if trait in ("Display", "Error"):
+                        hit = other.resolve(decl["self_ty"]["path"], file, self.crate)
+                        if hit and hit[0] == "item":
+                            if trait == "Display":
+                                display.add(id(hit[3]))
+                            else:
+                                found[id(hit[3])] = hit[3]
+                output = decl.get("output") if item["kind"] in ("fn", "method", "trait_fn") else None
+                if not output or output.get("k") != "path" or len(output.get("args", [])) < 2:
+                    continue
+                if output["path"].split("::")[-1] != "Result":
+                    continue
+                error = output["args"][1]
+                if error.get("k") == "path":
+                    hit = other.resolve(error["path"], file, self.crate)
+                    if hit and hit[0] == "item" and hit[1] is self.crate and hit[3]["kind"] in ("struct", "enum"):
+                        found[id(hit[3])] = hit[3]
+        cache = {key: (key in display) for key in found}
+        self.crate.__dict__["_error_types"] = cache
+        return cache
+
+    def error_method(self, item, name: str, use: str) -> list[str]:
+        """`Error() string` for a type used as an error."""
+        errors = self.error_types()
+        if id(item) not in errors:
+            return []
+        self.used.add("rs")
+        text = "rs.ToString" if errors[id(item)] else "rs.DebugString"
+        why = "its Display text" if errors[id(item)] else "its Debug text, as it has no Display"
+        shape = self.item_shape(item)
+        if shape == "enum":
+            lines = [f"// Error makes each variant of {name} a Go error: {why}."]
+            for variant in item["decl"]["variants"]:
+                lines.append(f"func (v *{name}_{variant['name']}{use}) Error() string {{ return {text}(v) }}")
+            return lines + [""]
+        receiver = "" if shape in ("copy", "cenum", "newtype") else "*"
+        return [
+            f"// Error makes {name} a Go error: {why}.",
+            f"func (e {receiver}{name}{use}) Error() string {{ return {text}(e) }}", "",
+        ]
 
     def impls_of(self, target_item):
         """Every impl block in the crate whose self type is target_item: (file, impl item, methods)."""
@@ -1424,7 +1496,8 @@ class Generator:
             if lit == "char":
                 return node["value"], True
             if lit == "bytes":
-                return "[]byte{" + ", ".join(str(b) for b in node["value"]) + "}", False
+                holder = want if want and re.fullmatch(r"\[\d*\](byte|uint8)", want) else "[]byte"
+                return holder + "{" + ", ".join(str(b) for b in node["value"]) + "}", False
             return None
         if kind == "paren":
             inner = self.go_expr(node["e"], want, depth + 1)
