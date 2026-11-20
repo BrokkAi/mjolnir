@@ -1037,7 +1037,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Directories the daemon container sees, beside your home, Mjolnir's data and settings, and /tmp. Add local projects kept elsewhere."
         }
         "jev" => {
-            "Turn text and quota recovery go to Jev, a hosted classifier; off stops both. Sessions follow on resume or restart."
+            "Sends turn text to a hosted classifier; quota recovery needs it. Off stops both; sessions follow on resume or restart."
         }
         "sessionwiki" => {
             "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees."
