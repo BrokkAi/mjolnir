@@ -158,6 +158,8 @@ Follow-ups: publish the unified projection as a versioned `/api/v1` stream inclu
 
 Milestone 4 publishes transition, dashboard membership, attention, action offers, and child counts on the same capture. A parked child whose relay actor retired reports idle. The `feeds-m4` run started the same managed child twice while its parent was idle. The browser and terminal each interrupted it once. The harness observed two cancellation requests for the child and none for the parent. The offer withdrew after both interruptions. The isolated daemon stopped and no test processes remained. A daemon regression also covers a parent whose only eligible work is a cancellable native child.
 
+Milestone 4 review follow-ups, accepted after the review cutoff: Interrupt All does not yet visit running managed children under a parent whose Move queue is held, though each child can still be interrupted on its own; the terminal lost its separate interrupt action for a standalone user shell, though the chat control still cancels it; the browser still shows its worker-issued interrupt control while Move holds the queue, and admission refuses the command; a completed import reads the daemon a second time when it could reuse its completion state; the single-session Interrupt offer for an untargetable autonomous goal is accepted over HTTP before the worker's refusal arrives, when it should not be offered; and lifecycle warnings count tool and shell work in children whose activity is Expecting or a dormant Goal, which can ask for an unneeded confirmation.
+
 ## Context and Orientation
 
 
