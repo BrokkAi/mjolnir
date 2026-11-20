@@ -1203,6 +1203,30 @@ func (v RuntimeEventCommandInterrupted) MarshalJSON() ([]byte, error) {
 	return agentTaggedJSON("type", "command_interrupted", body(v))
 }
 
+// UnmarshalJSON mirrors Rust's #[serde(default)] on reason: events written
+// before outcome reasons existed decode as LegacyUnclassified.
+func (v *RuntimeEventCommandRejected) UnmarshalJSON(data []byte) error {
+	type body RuntimeEventCommandRejected
+	b := body{Reason: OutcomeReasonLegacyUnclassified}
+	if err := json.Unmarshal(data, &b); err != nil {
+		return err
+	}
+	*v = RuntimeEventCommandRejected(b)
+	return nil
+}
+
+// UnmarshalJSON mirrors Rust's #[serde(default)] on reason: events written
+// before outcome reasons existed decode as LegacyUnclassified.
+func (v *RuntimeEventCommandInterrupted) UnmarshalJSON(data []byte) error {
+	type body RuntimeEventCommandInterrupted
+	b := body{Reason: OutcomeReasonLegacyUnclassified}
+	if err := json.Unmarshal(data, &b); err != nil {
+		return err
+	}
+	*v = RuntimeEventCommandInterrupted(b)
+	return nil
+}
+
 func (v RuntimeEventCancelApplied) MarshalJSON() ([]byte, error) {
 	type body RuntimeEventCancelApplied
 	return agentTaggedJSON("type", "cancel_applied", body(v))

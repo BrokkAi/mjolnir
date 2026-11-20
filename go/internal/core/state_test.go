@@ -274,33 +274,31 @@ func stateSampleSession() SessionRecord {
 }
 
 func stateSampleConfig() Config {
-	return Config{
-		Version: ConfigVersion,
-		Profiles: map[string]HarnessProfile{
-			"codex-1": NewHarnessProfile(HarnessKindCodex, "/home/test/.codex"),
-		},
-		Bundles: map[string]ProjectBundle{
-			"hel": {
-				PrimaryRepo: "hel",
-				Repositories: []ProjectRepository{{
-					ID:          "hel",
-					Github:      stateStr("BrokkAi/hel"),
-					Destination: "hel",
-				}},
-			},
-		},
-		Machines: map[string]Machine{},
-		Targets: map[string]TargetTemplate{
-			"podman": TargetTemplateLocalPodman{ContainerTemplate: ContainerTemplate{
-				Image:            "ubuntu:24.04",
-				PullPolicy:       ImagePullPolicyAuto,
-				Environment:      NewEnvironment(),
-				WorkspaceStorage: PodmanWorkspaceStoragePodmanVolume{},
+	// Rust's sample_config takes Default::default() for every section it
+	// does not name; DefaultConfig supplies those defaults here.
+	config := DefaultConfig()
+	config.Profiles = map[string]HarnessProfile{
+		"codex-1": NewHarnessProfile(HarnessKindCodex, "/home/test/.codex"),
+	}
+	config.Bundles = map[string]ProjectBundle{
+		"hel": {
+			PrimaryRepo: "hel",
+			Repositories: []ProjectRepository{{
+				ID:          "hel",
+				Github:      stateStr("BrokkAi/hel"),
+				Destination: "hel",
 			}},
 		},
-		DefaultTargets:  map[string]struct{}{},
-		DisabledTargets: map[string]struct{}{},
 	}
+	config.Targets = map[string]TargetTemplate{
+		"podman": TargetTemplateLocalPodman{ContainerTemplate: ContainerTemplate{
+			Image:            "ubuntu:24.04",
+			PullPolicy:       ImagePullPolicyAuto,
+			Environment:      NewEnvironment(),
+			WorkspaceStorage: PodmanWorkspaceStoragePodmanVolume{},
+		}},
+	}
+	return config
 }
 
 func TestContainerCapacityCountsOwnersAndProvisioningButNotBorrowedChildren(t *testing.T) {
