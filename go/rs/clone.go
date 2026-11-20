@@ -46,6 +46,8 @@ import (
 //     deeply. Any other pointer held in an interface is a trait object
 //     (Arc<dyn Trait>) and is shared. A value that is not a pointer (a
 //     string or a slice in an `any`) is cloned as its own type.
+//   - A comparer option in a field's tag (RegisterTagComparer, such as
+//     `path`) means nothing here: the strings are copied as they are.
 //   - A type with a method `Clone() T`, on the value or on the pointer, is
 //     copied by that method wherever it appears. A pointer type with a method
 //     `Clone() *T` is a handle and is cloned by it.
@@ -205,6 +207,42 @@ type shapeField struct {
 	// tagged says that the field carries an `rs` tag, which marks its struct
 	// as the port of a Rust struct.
 	tagged bool
+	// compared is set when the tag names a comparer option
+	// (RegisterTagComparer).
+	compared *taggedComparison
+}
+
+// taggedComparison is a struct field whose `rs` tag names a comparer option
+// (RegisterTagComparer): Eq and Cmp compare its strings with the functions
+// registered for the option. Clone ignores it.
+type taggedComparison struct {
+	// owner and field name the struct and the field, for the panics.
+	owner reflect.Type
+	field string
+	// option is the option the tag names; problem, when it is not empty,
+	// says why the tag cannot be used.
+	option  string
+	problem string
+}
+
+// taggedComparisonOf describes the comparer option among a field's tag
+// options, or returns nil when there is none. Every option but `arc`, which
+// Clone reads, names a comparer.
+func taggedComparisonOf(owner reflect.Type, field string, options []string) *taggedComparison {
+	var named []string
+	for _, option := range options {
+		if option = strings.TrimSpace(option); option != "" && option != "arc" {
+			named = append(named, option)
+		}
+	}
+	switch len(named) {
+	case 0:
+		return nil
+	case 1:
+		return &taggedComparison{owner: owner, field: field, option: named[0]}
+	}
+	return &taggedComparison{owner: owner, field: field,
+		problem: "names the comparer options " + strings.Join(named, ", ") + ", and a field takes one"}
 }
 
 // method is a hand-written trait method found on a type.
@@ -364,11 +402,12 @@ func (b *shapeBuilder) buildStruct(s *shape) {
 		_, options := FieldRustName(field)
 		_, tagged := field.Tag.Lookup("rs")
 		s.fields = append(s.fields, shapeField{
-			name:   field.Name,
-			offset: field.Offset,
-			shape:  b.build(field.Type),
-			arc:    slices.Contains(options, "arc"),
-			tagged: tagged,
+			name:     field.Name,
+			offset:   field.Offset,
+			shape:    b.build(field.Type),
+			arc:      slices.Contains(options, "arc"),
+			tagged:   tagged,
+			compared: taggedComparisonOf(t, field.Name, options),
 		})
 	}
 	if s.kind == kindOption {

@@ -2,10 +2,15 @@
 //
 // A Rust Duration reaches u64::MAX seconds and a Go one a little over 292
 // years. Where a Rust test uses a larger value, the port's test uses the
-// functions that work on whole seconds and nanoseconds (DurationDebugParts,
-// DurationTryFromSecsF64Parts, mulF64, divF64), which cover Rust's range, or
+// functions that work on whole seconds and nanoseconds
+// (DurationTryFromSecsF64Parts, mulF64, divF64), which cover Rust's range, or
 // uses DurationMax where the Rust test means "the largest duration". Each
 // such place says so.
+//
+// debug_formatting_extreme_values is not here: Duration's Debug output is
+// the formatter's (go/rs/fmt_time.go), and its port of that test
+// (TestFmtTime_debug_formatting_extreme_values) prints durations beyond what
+// a time.Duration holds, which this package cannot build.
 
 package rstime
 
@@ -251,20 +256,6 @@ func TestDuration_correct_sum(t *testing.T) {
 	}
 	sum := DurationSum(durations)
 	assertEq(t, sum, DurationNew(1+2+5+4, 1_000_000_000-5))
-}
-
-func TestDuration_debug_formatting_extreme_values(t *testing.T) {
-	assertEq(t, debug(u64Max, 123_456_789), "18446744073709551615.123456789s")
-	assertEq(t, debugPrecision(0, u64Max, 999_999_999), "18446744073709551616s")
-	assertEq(t, debugPrecision(0, u64Max, 500_000_000), "18446744073709551616s")
-	assertEq(t, debugPrecision(0, u64Max, 499_999_999), "18446744073709551615s")
-	assertEq(t, debugPrecision(3, u64Max, 999_500_000), "18446744073709551616.000s")
-	assertEq(t, debugPrecision(3, u64Max, 999_499_999), "18446744073709551615.999s")
-	assertEq(t, debugPrecision(8, u64Max, 999_999_995), "18446744073709551616.00000000s")
-	assertEq(t, debugPrecision(8, u64Max, 999_999_994), "18446744073709551615.99999999s")
-	assertEq(t, debugPadded(rs.None[rs.Alignment](), 21, 0, u64Max, 999_999_999), "18446744073709551616s")
-	assertEq(t, debugPadded(rs.None[rs.Alignment](), 22, 0, u64Max, 999_999_999), "18446744073709551616s ")
-	assertEq(t, debugPadded(rs.None[rs.Alignment](), 24, 0, u64Max, 999_999_999), "18446744073709551616s   ")
 }
 
 func TestDuration_debug_formatting_secs(t *testing.T) {

@@ -30,3 +30,20 @@ var _ = rs.RegisterEnum[ParserValueSource]("ValueSource",
 func (s ParserValueSource) isExplicit() bool {
 	return s != ParserValueSource_DefaultValue
 }
+
+// debugString is the derived Debug form: the variant's name.
+func (s ParserValueSource) debugString() string {
+	switch s {
+	case ParserValueSource_DefaultValue:
+		return "DefaultValue"
+	case ParserValueSource_EnvVariable:
+		return "EnvVariable"
+	case ParserValueSource_CommandLine:
+		return "CommandLine"
+	default:
+		panic(rs.Unreachable(s))
+	}
+}
+
+// FmtDebug is the derived `impl Debug for ValueSource`.
+func (s ParserValueSource) FmtDebug(f *rs.Formatter) error { return f.WriteStr(s.debugString()) }

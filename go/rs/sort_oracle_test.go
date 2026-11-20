@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
+	"os"
 	"strconv"
 	"testing"
 
@@ -356,7 +357,10 @@ func sortOracleGenerate(full bool) oracle.Generate {
 }
 
 func TestSortAgainstRust(t *testing.T) {
-	oracle.Check(t, "std_sort", "sort", sortOracleGenerate(false), func(raw json.RawMessage) any {
+	// The recorded corpus leaves out the longest all-equal inputs; a live run
+	// sends them too.
+	full := os.Getenv("MJ_ORACLE") == "live"
+	oracle.Check(t, "std_sort", "sort", sortOracleGenerate(full), func(raw json.RawMessage) any {
 		var request sortOracleRequest
 		if err := json.Unmarshal(raw, &request); err != nil {
 			t.Fatalf("bad request %s: %v", raw, err)

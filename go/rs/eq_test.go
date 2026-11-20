@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -568,4 +569,174 @@ func TestEqCellsAndReverse(t *testing.T) {
 	if !Eq(Reverse[int]{F0: 1}, Reverse[int]{F0: 1}) || Eq(Reverse[string]{F0: "a"}, Reverse[string]{F0: "b"}) {
 		t.Fatal("Reverse compares by its value")
 	}
+}
+
+// probeFoldOption is the comparer option the tests register, as
+// go/rs/rspath registers "path": strings that differ only in case are equal,
+// and ordered as their lower case, which no byte comparison does.
+const probeFoldOption = "rstest_fold"
+
+func init() {
+	RegisterTagComparer(probeFoldOption,
+		func(a, b string) int { return strings.Compare(strings.ToLower(a), strings.ToLower(b)) },
+		strings.EqualFold)
+}
+
+// probeFolded has the option on every shape it applies to.
+type probeFolded struct {
+	Name  string           `rs:"name,rstest_fold"`
+	Maybe Option[string]   `rs:"maybe,rstest_fold"`
+	List  []string         `rs:"list,rstest_fold"`
+	Lists Option[[]string] `rs:"lists,rstest_fold"`
+	Plain string           `rs:"plain"`
+}
+
+// probeFoldKey could key a Go map, but Go's == does not answer what Eq does.
+type probeFoldKey struct {
+	Path string `rs:"path,rstest_fold"`
+}
+
+type probeFoldedName string
+
+// probeFoldRoute is an enum whose variant holds tagged tuple fields, one of
+// them an Arc<[T]> as well.
+type probeFoldRoute interface{ isProbeFoldRoute() }
+
+type probeFoldRoute_Dir struct {
+	F0 probeFoldedName   `rs:",rstest_fold"`
+	F1 []probeFoldedName `rs:",arc,rstest_fold"`
+}
+
+func (*probeFoldRoute_Dir) isProbeFoldRoute() {}
+
+type probeUnregistered struct {
+	Where string `rs:"where,rstest_unregistered"`
+}
+
+type probeMisshapenPair struct {
+	Pair Tuple2[string, string] `rs:"pair,rstest_fold"`
+}
+
+type probeMisshapenMap struct {
+	Paths map[string]string `rs:"paths,rstest_fold"`
+}
+
+type probeMisshapenBox struct {
+	Path *string `rs:"path,rstest_fold"`
+}
+
+type probeTwoOptions struct {
+	Path string `rs:"path,rstest_fold,rstest_other"`
+}
+
+func TestEqAndCmpUseTheComparerATagNames(t *testing.T) {
+	folded := func(name string) probeFolded { return probeFolded{Name: name} }
+	if !Eq(folded("Src/Main"), folded("src/main")) || Eq(probeFolded{Plain: "A"}, probeFolded{Plain: "a"}) {
+		t.Fatal("a tagged string is compared by its comparer, an untagged one by its bytes")
+	}
+	// Bytes would put "B" before "a".
+	if Cmp(folded("B"), folded("a")) <= 0 || Cmp(folded("a"), folded("B")) >= 0 ||
+		PartialCmp(folded("A"), folded("a")) != Some(Ordering_Equal) {
+		t.Fatal("a tagged string is ordered by its comparer")
+	}
+	cases := []struct {
+		name  string
+		a, b  probeFolded
+		equal bool
+		order int
+	}{
+		{"None before Some", probeFolded{}, probeFolded{Maybe: Some("")}, false, -1},
+		{"Some by the comparer", probeFolded{Maybe: Some("X")}, probeFolded{Maybe: Some("x")}, true, 0},
+		{"Some ordered by the comparer", probeFolded{Maybe: Some("b")}, probeFolded{Maybe: Some("A")}, false, 1},
+		{"elements by the comparer", probeFolded{List: []string{"A", "b"}}, probeFolded{List: []string{"a", "B"}}, true, 0},
+		{"nil and empty", probeFolded{List: nil}, probeFolded{List: []string{}}, true, 0},
+		{"a prefix first", probeFolded{List: []string{"a"}}, probeFolded{List: []string{"A", "b"}}, false, -1},
+		{"the first difference", probeFolded{List: []string{"B"}}, probeFolded{List: []string{"a", "z"}}, false, 1},
+		{"None before Some of nothing", probeFolded{}, probeFolded{Lists: Some([]string(nil))}, false, -1},
+		{"Some of a slice by the comparer", probeFolded{Lists: Some([]string{"X"})}, probeFolded{Lists: Some([]string{"x"})}, true, 0},
+		{"an earlier tagged field first", probeFolded{Name: "a", Plain: "z"}, probeFolded{Name: "B", Plain: "a"}, false, -1},
+		{"a later untagged field by its bytes", probeFolded{Name: "a", Plain: "B"}, probeFolded{Name: "A", Plain: "a"}, false, -1},
+	}
+	for _, c := range cases {
+		if got := Eq(c.a, c.b); got != c.equal {
+			t.Errorf("%s: Eq = %v", c.name, got)
+		}
+		if got, swapped := Cmp(c.a, c.b), Cmp(c.b, c.a); got != c.order || swapped != -c.order {
+			t.Errorf("%s: Cmp = %d, swapped %d, want %d", c.name, got, swapped, c.order)
+		}
+	}
+
+	// In an enum variant, and beside `arc`, which is not a comparer option.
+	dir := &probeFoldRoute_Dir{F0: "Home", F1: []probeFoldedName{"X"}}
+	if !Eq[probeFoldRoute](dir, &probeFoldRoute_Dir{F0: "HOME", F1: []probeFoldedName{"x"}}) ||
+		Cmp[probeFoldRoute](dir, &probeFoldRoute_Dir{F0: "home", F1: []probeFoldedName{"y"}}) >= 0 {
+		t.Fatal("a tagged tuple field of an enum variant is compared by its comparer")
+	}
+	if cloned := Clone(probeFoldRoute(dir)).(*probeFoldRoute_Dir); cloned == dir || !Eq(*cloned, *dir) {
+		t.Fatal("a variant with tagged fields is cloned as any other")
+	}
+
+	// A key with a tagged field is found by its comparer, not by Go's ==.
+	var left, right probeHashMap[probeFoldKey, int]
+	left.Insert(probeFoldKey{Path: "A"}, 1)
+	right.Insert(probeFoldKey{Path: "a"}, 1)
+	var leftSet, rightSet probeHashSet[probeFoldKey]
+	leftSet.Insert(probeFoldKey{Path: "A"})
+	rightSet.Insert(probeFoldKey{Path: "a"})
+	if !Eq(left, right) || !Eq(leftSet, rightSet) {
+		t.Fatal("hash keys with a tagged field")
+	}
+	if EqIsGoEqual(reflect.TypeFor[probeFoldKey]()) || !EqIsGoEqual(reflect.TypeFor[struct{ Path string }]()) {
+		t.Fatal("EqIsGoEqual and a tagged field")
+	}
+
+	// Clone ignores the option, even one nobody registered.
+	original := probeFolded{Name: "N", List: []string{"a"}, Lists: Some([]string{"b"})}
+	copied := Clone(original)
+	copied.List[0] = "changed"
+	(*copied.Lists.AsRef())[0] = "changed"
+	if original.List[0] != "a" || original.Lists.Unwrap()[0] != "b" || copied.Name != "N" {
+		t.Fatal("Clone copies tagged fields as any other")
+	}
+	if Clone(probeUnregistered{Where: "x"}).Where != "x" {
+		t.Fatal("Clone of a field with an unregistered option")
+	}
+}
+
+func TestEqAndCmpPanicOnATagTheyCannotHonour(t *testing.T) {
+	expectPanic(t, `rs.Eq: the field Where of rs.probeUnregistered is tagged with the option "rstest_unregistered", `+
+		`which nothing registered with rs.RegisterTagComparer`, func() { Eq(probeUnregistered{}, probeUnregistered{}) })
+	expectPanic(t, `rs.Cmp: the field Where of rs.probeUnregistered`, func() { Cmp(probeUnregistered{}, probeUnregistered{}) })
+	expectPanic(t, `the field Where of rs.probeUnregistered`, func() {
+		Eq([]probeUnregistered{{Where: "a"}}, []probeUnregistered{{Where: "a"}})
+	})
+	for _, misshapen := range []struct {
+		want    string
+		compare func()
+	}{
+		{`rs.Eq: the field Pair of rs.probeMisshapenPair is tagged with the option "rstest_fold" but holds a rs.Tuple2`,
+			func() { Eq(probeMisshapenPair{}, probeMisshapenPair{}) }},
+		{`rs.Cmp: the field Paths of rs.probeMisshapenMap is tagged with the option "rstest_fold" but holds a map[string]string`,
+			func() { Cmp(probeMisshapenMap{}, probeMisshapenMap{}) }},
+		{`the field Path of rs.probeMisshapenBox is tagged with the option "rstest_fold" but holds a *string`,
+			func() { Eq(probeMisshapenBox{}, probeMisshapenBox{}) }},
+		{`the field Path of rs.probeTwoOptions names the comparer options rstest_fold, rstest_other`,
+			func() { Eq(probeTwoOptions{}, probeTwoOptions{}) }},
+	} {
+		expectPanic(t, misshapen.want, misshapen.compare)
+	}
+	expectPanic(t, "compare this field by hand", func() { PartialCmp(probeMisshapenPair{}, probeMisshapenPair{}) })
+
+	exact := func(a, b string) bool { return a == b }
+	expectPanic(t, "a comparer is already registered for the tag option rstest_fold", func() {
+		RegisterTagComparer(probeFoldOption, strings.Compare, exact)
+	})
+	expectPanic(t, `"arc" cannot be the tag option of a comparer`, func() { RegisterTagComparer("arc", strings.Compare, exact) })
+	expectPanic(t, `"" cannot be the tag option of a comparer`, func() { RegisterTagComparer("", strings.Compare, exact) })
+	expectPanic(t, "needs both functions", func() { RegisterTagComparer("rstest_half", nil, exact) })
+	// The refused registration left the option unregistered.
+	type half struct {
+		Path string `rs:"path,rstest_half"`
+	}
+	expectPanic(t, `option "rstest_half", which nothing registered`, func() { Eq(half{}, half{}) })
 }

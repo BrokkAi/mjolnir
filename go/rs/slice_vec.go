@@ -116,13 +116,24 @@ func SplitOff[T any](v *[]T, at int) []T {
 	return other
 }
 
-// Drain is `v.drain(start..end).collect()`: the elements in the range,
-// removed and returned in order. Other ranges: `..` is (0, len(v)), `a..`
-// is (a, len(v)), `..=b` is (0, b+1). It panics as Rust does when the range
-// does not fit.
-func Drain[T any](v *[]T, start, end int) []T {
+// Drain is `v.drain(range).collect()` for a half-open range: the elements in
+// it, removed and returned in order. `a..b` is rs.Range[int]{Start: a, End:
+// b}, `..` is {0, len(v)}, `a..` is {a, len(v)} and `..b` is {0, b}. It
+// panics as Rust does when the range does not fit.
+func Drain[T any](v *[]T, r Range[int]) []T {
+	sliceRange(1, r.Start, r.End, len(*v))
+	return sliceDrain(v, r.Start, r.End)
+}
+
+// DrainInclusive is `v.drain(a..=b).collect()`, and `..=b` with a of 0. It
+// panics as Rust does, naming the inclusive end.
+func DrainInclusive[T any](v *[]T, r RangeInclusive[int]) []T {
+	end := sliceRangeInclusive(1, r.Start, r.End, len(*v))
+	return sliceDrain(v, r.Start, end)
+}
+
+func sliceDrain[T any](v *[]T, start, end int) []T {
 	s := *v
-	sliceRange(1, start, end, len(s))
 	drained := make([]T, end-start)
 	copy(drained, s[start:end])
 	n := copy(s[start:], s[end:])

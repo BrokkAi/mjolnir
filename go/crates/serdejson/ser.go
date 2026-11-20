@@ -57,8 +57,13 @@ func ioErr(err error) error {
 }
 
 // serialize hands value to serde with s as the serializer, taking an
-// error that comes back as this format's.
+// error that comes back as this format's. An untyped nil is a Value that is
+// null (a typed nil pointer is still a porting error).
 func (s *Serializer) serialize(value any) error {
+	if value == nil {
+		_, err := s.SerializeUnit()
+		return err
+	}
 	_, err := serde.Serialize(value, s)
 	if err != nil {
 		return toError(err)

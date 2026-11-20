@@ -573,7 +573,7 @@ func TestVec_test_swap_remove_empty(t *testing.T) {
 
 func TestVec_test_drain_empty_vec(t *testing.T) {
 	vec, vec2 := []int32{}, []int32{}
-	for _, i := range rs.Drain(&vec, 0, len(vec)) {
+	for _, i := range rs.Drain(&vec, rs.Range[int]{Start: 0, End: len(vec)}) {
 		vec2 = append(vec2, i)
 	}
 	sliceTestTrue(t, len(vec) == 0, "vec.is_empty()")
@@ -582,7 +582,7 @@ func TestVec_test_drain_empty_vec(t *testing.T) {
 
 func TestVec_test_drain_items(t *testing.T) {
 	vec, vec2 := []int32{1, 2, 3}, []int32{}
-	for _, i := range rs.Drain(&vec, 0, len(vec)) {
+	for _, i := range rs.Drain(&vec, rs.Range[int]{Start: 0, End: len(vec)}) {
 		vec2 = append(vec2, i)
 	}
 	sliceTestEq(t, vec, []int32{})
@@ -591,31 +591,31 @@ func TestVec_test_drain_items(t *testing.T) {
 
 func TestVec_test_drain_out_of_bounds(t *testing.T) {
 	v := []int32{1, 2, 3, 4, 5}
-	sliceTestPanics(t, "range end index 6 out of range for slice of length 5", func() { rs.Drain(&v, 5, 6) })
+	sliceTestPanics(t, "range end index 6 out of range for slice of length 5", func() { rs.Drain(&v, rs.Range[int]{Start: 5, End: 6}) })
 }
 
 func TestVec_test_drain_range(t *testing.T) {
 	v := []int32{1, 2, 3, 4, 5}
-	rs.Drain(&v, 4, len(v))
+	rs.Drain(&v, rs.Range[int]{Start: 4, End: len(v)})
 	sliceTestEq(t, v, []int32{1, 2, 3, 4})
 
 	strs := func() []string { return rs.Map([]int{1, 2, 3, 4, 5}, strconv.Itoa) }
 	s := strs()
-	rs.Drain(&s, 1, 4)
+	rs.Drain(&s, rs.Range[int]{Start: 1, End: 4})
 	sliceTestEq(t, s, []string{"1", "5"})
 
 	s = strs()
-	rs.Rev(rs.Drain(&s, 1, 4))
+	rs.Rev(rs.Drain(&s, rs.Range[int]{Start: 1, End: 4}))
 	sliceTestEq(t, s, []string{"1", "5"})
 
 	u := make([]struct{}, 5)
-	rs.Drain(&u, 1, 4)
+	rs.Drain(&u, rs.Range[int]{Start: 1, End: 4})
 	sliceTestEq(t, u, []struct{}{{}, {}})
 }
 
 func TestVec_test_drain_inclusive_range(t *testing.T) {
 	v := []rune{'a', 'b', 'c', 'd', 'e'}
-	rs.Drain(&v, 1, 3+1)
+	rs.DrainInclusive(&v, rs.RangeInclusiveNew(1, 3))
 	sliceTestEq(t, v, []rune{'a', 'e'})
 
 	strs := func(n int) []string {
@@ -626,26 +626,27 @@ func TestVec_test_drain_inclusive_range(t *testing.T) {
 		return out
 	}
 	s := strs(5)
-	rs.Drain(&s, 1, 5+1)
+	rs.DrainInclusive(&s, rs.RangeInclusiveNew(1, 5))
 	sliceTestEq(t, s, []string{"0"})
 
 	s = strs(5)
-	rs.Drain(&s, 0, 5+1)
+	rs.DrainInclusive(&s, rs.RangeInclusiveNew(0, 5))
 	sliceTestEq(t, s, []string{})
 
 	s = strs(5)
-	rs.Drain(&s, 0, 3+1)
+	rs.DrainInclusive(&s, rs.RangeInclusiveNew(0, 3))
 	sliceTestEq(t, s, []string{"4", "5"})
 
 	s = strs(1)
-	rs.Drain(&s, 0, 0+1)
+	rs.DrainInclusive(&s, rs.RangeInclusiveNew(0, 0))
 	sliceTestEq(t, s, []string{"1"})
 }
 
-// `v.drain(5..=5)` is the range (5, 6).
 func TestVec_test_drain_inclusive_out_of_bounds(t *testing.T) {
 	v := []int32{1, 2, 3, 4, 5}
-	sliceTestPanics(t, "range end index 6 out of range for slice of length 5", func() { rs.Drain(&v, 5, 5+1) })
+	sliceTestPanics(t, "range end index 5 out of range for slice of length 5", func() {
+		rs.DrainInclusive(&v, rs.RangeInclusiveNew(5, 5))
+	})
 }
 
 func TestVec_test_append(t *testing.T) {

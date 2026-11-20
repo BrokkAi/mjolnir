@@ -26,59 +26,93 @@ type ScopedJoinHandle[T any] struct {
 // scopeData is ScopeData.
 type scopeData struct {
 	mu sync.Mutex
-	// numRunningThreads counts the threads whose function has not ended.
+	// numRunningThreads is Rust's num_running_threads: the packets of the
+	// scope's threads that have not been dropped, which is when both the
+	// thread has ended and its handle has been joined or dropped.
 	numRunningThreads int
-	// done is closed when numRunningThreads drops to zero while the scope
-	// is waiting for it.
-	done chan struct{}
-	// packets are the scope's threads, to find a panic nobody joined.
-	packets []interface{ unhandledPanic() bool }
+	// aThreadPanicked is set when a packet is dropped with a panic nobody
+	// took.
+	aThreadPanicked bool
+	// threadsRunning counts the threads that have not let go of their
+	// packet yet, and changed is closed when it drops to zero while the
+	// scope is waiting for that.
+	threadsRunning int
+	changed        chan struct{}
+	// handles are the packets whose handle may not have been released yet.
+	handles []interface{ releaseHandle() bool }
 	// mainThread is the thread that called Scope.
 	mainThread Thread
 }
 
-func (s *scopeData) incrementNumRunningThreads(p interface{ unhandledPanic() bool }) {
+func (s *scopeData) incrementNumRunningThreads(p interface{ releaseHandle() bool }) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.numRunningThreads++
-	s.packets = append(s.packets, p)
+	s.threadsRunning++
+	s.handles = append(s.handles, p)
 }
 
-func (s *scopeData) decrementNumRunningThreads() {
+func (s *scopeData) decrementNumRunningThreads(panic bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if panic {
+		s.aThreadPanicked = true
+	}
 	s.numRunningThreads--
-	if s.numRunningThreads == 0 && s.done != nil {
-		close(s.done)
-		s.done = nil
+}
+
+// threadEnded is called by a scoped thread once it has let go of its
+// packet.
+func (s *scopeData) threadEnded() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.threadsRunning--
+	if s.threadsRunning == 0 && s.changed != nil {
+		close(s.changed)
+		s.changed = nil
 	}
 }
 
-// wait blocks until every thread of the scope has ended.
-func (s *scopeData) wait() {
+// waitThreads blocks until no thread of the scope is running.
+func (s *scopeData) waitThreads() {
 	s.mu.Lock()
-	if s.numRunningThreads == 0 {
+	if s.threadsRunning == 0 {
 		s.mu.Unlock()
 		return
 	}
-	done := make(chan struct{})
-	s.done = done
+	changed := make(chan struct{})
+	s.changed = changed
 	s.mu.Unlock()
-	<-done
+	<-changed
 }
 
-// aThreadPanicked is a_thread_panicked, once every thread has ended: Rust
-// sets it as each thread's packet is dropped with a panic in it, which is a
-// panic its handle never took with join.
-func (s *scopeData) aThreadPanicked() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, p := range s.packets {
-		if p.unhandledPanic() {
-			return true
+// waitAll is the end of the scope: Rust's wait until num_running_threads is
+// zero.
+//
+// Rust drops every ScopedJoinHandle before that, because none can outlive
+// the scope's function or the scoped thread that holds it. Go cannot see a
+// handle go away, so once the function has returned and every thread has
+// ended (no code is left that could join a handle), the scope releases the
+// handles nobody joined or dropped, as Rust would already have. That drops
+// their results, whose destructors may spawn more scoped threads, so it
+// repeats until nothing is left.
+func (s *scopeData) waitAll() {
+	for {
+		s.waitThreads()
+		s.mu.Lock()
+		pending := s.handles
+		s.handles = nil
+		s.mu.Unlock()
+		for _, handle := range pending {
+			handle.releaseHandle()
+		}
+		s.mu.Lock()
+		done := s.threadsRunning == 0 && len(s.handles) == 0
+		s.mu.Unlock()
+		if done {
+			return
 		}
 	}
-	return false
 }
 
 // Scope is std::thread::scope: it calls f with a ScopeHandle to spawn
@@ -104,19 +138,23 @@ func Scope[T any](f func(scope *ScopeHandle) T) (result T) {
 			caught := rs.PanicInfoOf(recovered)
 			rs.RunPanicHook(caught, scope.data.mainThread.hookName())
 			// Wait until all the threads are finished.
-			scope.data.wait()
+			scope.data.waitAll()
 			// Throw any panic from `f`.
 			rs.ResumeUnwind(caught)
 		}
-		scope.data.wait()
+		scope.data.waitAll()
 	}()
 	result = f(scope)
 	completed = true
 
 	// Wait until all the threads are finished.
-	scope.data.wait()
+	scope.data.waitAll()
 
-	if scope.data.aThreadPanicked() {
+	s := scope.data
+	s.mu.Lock()
+	panicked := s.aThreadPanicked
+	s.mu.Unlock()
+	if panicked {
 		rs.PanicAt(1, "a scoped thread panicked")
 	}
 	return result
@@ -163,21 +201,18 @@ func (h ScopedJoinHandle[T]) JoinExpect(message string) T {
 // IsFinished is ScopedJoinHandle::is_finished.
 func (h ScopedJoinHandle[T]) IsFinished() bool { return h.inner.isFinished() }
 
-// Drop is dropping the handle without joining. The scope still waits for
-// the thread, and panics if it panicked.
-func (h ScopedJoinHandle[T]) Drop() {}
+// Drop is dropping the handle without joining: the thread's result is
+// dropped when it ends, and a panic in it makes the scope panic. It is
+// idempotent, and does nothing after Join. A handle that is never dropped is
+// released when the scope ends.
+func (h ScopedJoinHandle[T]) Drop() { h.inner.packet.releaseHandle() }
 
 // FmtDebug is the Debug impl:
 // `Scope { num_running_threads: 0, a_thread_panicked: false, main_thread: Thread { .. }, .. }`.
 func (s *ScopeHandle) FmtDebug(f *rs.Formatter) error {
 	s.data.mu.Lock()
 	running := s.data.numRunningThreads
-	panicked := false
-	for _, p := range s.data.packets {
-		if p.unhandledPanic() {
-			panicked = true
-		}
-	}
+	panicked := s.data.aThreadPanicked
 	s.data.mu.Unlock()
 	return f.DebugStruct("Scope").
 		Field("num_running_threads", running).

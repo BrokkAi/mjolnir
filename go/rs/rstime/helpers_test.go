@@ -76,22 +76,29 @@ func none() rs.Option[time.Duration] { return rs.None[time.Duration]() }
 
 // debug is `format!("{:?}", Duration::new(secs, nanos))`.
 func debug(secs uint64, nanos uint32) string {
-	return DurationDebugParts(secs, nanos, DurationDebugSpec{})
+	return rs.Format("{:?}", DurationNew(secs, nanos))
 }
 
 // debugPrecision is `format!("{:.N?}", Duration::new(secs, nanos))`.
 func debugPrecision(precision int, secs uint64, nanos uint32) string {
-	return DurationDebugParts(secs, nanos, DurationDebugSpec{Precision: rs.Some(precision)})
+	return rs.Format("{:.p$?}", DurationNew(secs, nanos), rs.Arg("p", precision))
 }
 
 // debugPadded is `format!("{:<W.P?}", ..)` and its relatives: precision is
 // negative for none.
 func debugPadded(align rs.Option[rs.Alignment], width int, precision int, secs uint64, nanos uint32) string {
-	spec := DurationDebugSpec{Width: rs.Some(width), Align: align}
-	if precision >= 0 {
-		spec.Precision = rs.Some(precision)
+	spec := "{:"
+	if alignment, ok := align.Get(); ok {
+		spec += map[rs.Alignment]string{rs.Alignment_Left: "<", rs.Alignment_Right: ">", rs.Alignment_Center: "^"}[alignment]
 	}
-	return DurationDebugParts(secs, nanos, spec)
+	spec += "w$"
+	args := []any{DurationNew(secs, nanos), rs.Arg("w", width)}
+	if precision >= 0 {
+		spec += ".p$"
+		args = append(args, rs.Arg("p", precision))
+	}
+	spec += "?}"
+	return rs.Format(spec, args...)
 }
 
 // recording reports whether this run rewrites the oracle corpora.

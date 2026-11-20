@@ -3,43 +3,110 @@
 package rsthread
 
 import (
+	"sync"
 	"sync/atomic"
 
 	"github.com/BrokkAi/mjolnir/go/rs"
 )
 
+// The states of the handle side of a packet.
+const (
+	handleLive uint32 = iota
+	handleJoined
+	handleDropped
+)
+
 // packet is lifecycle's Packet: how the thread hands its result to whoever
 // joins it.
+//
+// Rust shares the packet through an Arc between the thread and its handle,
+// and its destructor runs when the second of them lets go: it drops a result
+// nobody took and, for a scoped thread, tells the scope. The port counts the
+// same two references: the thread releases its own when its function has
+// ended, and the handle releases its own by Join or Drop (or, for a scoped
+// thread, when the scope ends; see scopeData.waitAll).
 type packet[T any] struct {
 	// scope is the scope the thread was spawned in, if any.
 	scope *scopeData
-	// result and caught are the thread's return value or its panic. They
-	// are written once, before finished is set, and read by join after the
-	// thread has ended.
+
+	mu sync.Mutex
+	// refs counts the thread's reference and the handle's.
+	refs int
+	// result and caught are the thread's return value or its panic.
 	result T
 	caught *rs.PanicInfo
+	// taken is set when join consumed the result.
+	taken bool
+
 	// finished is set when the result is stored: is_finished.
 	finished atomic.Bool
-	// taken is set by join, which consumes the result.
-	taken atomic.Bool
+	// handle is handleLive until the handle joins or is dropped.
+	handle atomic.Uint32
 }
 
 // store is the end of the thread's main function: the result goes into the
-// packet, and a scope learns that one of its threads is done.
+// packet.
 func (p *packet[T]) store(result T, caught *rs.PanicInfo) {
+	p.mu.Lock()
 	p.result = result
 	p.caught = caught
+	p.mu.Unlock()
 	p.finished.Store(true)
-	if p.scope != nil {
-		p.scope.decrementNumRunningThreads()
+}
+
+// release gives up one reference, and runs the packet's destructor when it
+// was the last.
+func (p *packet[T]) release() {
+	p.mu.Lock()
+	p.refs--
+	last := p.refs == 0
+	p.mu.Unlock()
+	if last {
+		p.drop()
 	}
 }
 
-// unhandledPanic reports whether the thread has ended with a panic that
-// nobody took with join, which makes its scope panic.
-func (p *packet[T]) unhandledPanic() bool {
-	// finished is set after caught is written.
-	return p.finished.Load() && p.caught != nil && !p.taken.Load()
+// drop is Packet's destructor.
+func (p *packet[T]) drop() {
+	p.mu.Lock()
+	// If this packet was for a thread that ran in a scope, the thread
+	// panicked, and nobody consumed the panic payload, we make sure
+	// the scope function will panic.
+	unhandledPanic := p.caught != nil && !p.taken
+	// Drop the result. This is only relevant for threads that aren't
+	// join()ed, as join() takes the result, such that there is nothing left
+	// to drop here.
+	result, caught, taken := p.result, p.caught, p.taken
+	var zero T
+	p.result = zero
+	p.caught = nil
+	p.mu.Unlock()
+	if !taken {
+		if caught == nil {
+			dropValue(&result)
+		} else {
+			dropValue(&caught.Payload)
+		}
+	}
+
+	// Book-keeping so the scope knows when it's done.
+	if p.scope != nil {
+		// Now that there will be no more user code running on this thread
+		// that can use 'scope, mark the thread as 'finished'.
+		// It's important we only do this after the `result` has been dropped,
+		// since dropping it might still use things it borrowed from 'scope.
+		p.scope.decrementNumRunningThreads(unhandledPanic)
+	}
+}
+
+// releaseHandle is dropping the handle without joining. It reports whether
+// the handle was still live; a second release does nothing.
+func (p *packet[T]) releaseHandle() bool {
+	if !p.handle.CompareAndSwap(handleLive, handleDropped) {
+		return false
+	}
+	p.release()
+	return true
 }
 
 // joinInner is lifecycle's JoinInner: what a JoinHandle or a
@@ -58,7 +125,7 @@ func spawnUnchecked[T any](name rs.Option[string], scope *scopeData, f func() T)
 	id := threadIdNew()
 	thread := threadNew(id, name)
 
-	myPacket := &packet[T]{scope: scope}
+	myPacket := &packet[T]{scope: scope, refs: 2}
 	if scope != nil {
 		scope.incrementNumRunningThreads(myPacket)
 	}
@@ -74,31 +141,37 @@ func spawnUnchecked[T any](name rs.Option[string], scope *scopeData, f func() T)
 func threadMain[T any](inner *joinInner[T], f func() T) {
 	thread := inner.thread
 	setCurrent(thread.inner)
-	// These run last to first once the result is stored: the
-	// thread-locals are dropped, the goroutine leaves the table, and join
-	// may return.
+	// These run last to first once the thread has let go of its packet:
+	// the thread-locals are dropped, the goroutine leaves the table, and
+	// join may return.
 	defer close(inner.exited)
 	defer dropCurrent()
 	defer thread.inner.locals.destroy()
 
 	returned := false
 	defer func() {
-		if returned {
-			return
+		if !returned {
+			var zero T
+			var caught *rs.PanicInfo
+			if recovered := recover(); recovered != nil {
+				caught = rs.PanicInfoOf(recovered)
+			} else {
+				// Not a panic: the goroutine is ending through
+				// runtime.Goexit, which Rust code cannot do. Report it as
+				// a panic so that join does not wait for a result that
+				// never comes.
+				caught = &rs.PanicInfo{Message: "rsthread: the thread ended through runtime.Goexit"}
+			}
+			rs.RunPanicHook(caught, thread.hookName())
+			inner.packet.store(zero, caught)
 		}
-		var zero T
-		var caught *rs.PanicInfo
-		if recovered := recover(); recovered != nil {
-			caught = rs.PanicInfoOf(recovered)
-		} else {
-			// Not a panic: the goroutine is ending through
-			// runtime.Goexit, which Rust code cannot do. Report it as a
-			// panic so that join does not wait for a result that never
-			// comes.
-			caught = &rs.PanicInfo{Message: "rsthread: the thread ended through runtime.Goexit"}
+		// Here `their_packet` gets dropped, and if this is the last `Arc`
+		// for that packet that will call `decrement_num_running_threads` and
+		// therefore signal that this thread is done.
+		inner.packet.release()
+		if scope := inner.packet.scope; scope != nil {
+			scope.threadEnded()
 		}
-		rs.RunPanicHook(caught, thread.hookName())
-		inner.packet.store(zero, caught)
 	}()
 	result := f()
 	returned = true
@@ -108,16 +181,21 @@ func threadMain[T any](inner *joinInner[T], f func() T) {
 // isFinished is JoinInner::is_finished.
 func (j *joinInner[T]) isFinished() bool { return j.packet.finished.Load() }
 
-// join is JoinInner::join: it waits for the thread to end and takes its
-// result.
+// join is JoinInner::join: it waits for the thread to end, takes its result
+// and lets go of the packet.
 func (j *joinInner[T]) join(skip int) (T, *rs.PanicInfo) {
-	<-j.exited
-	if !j.packet.taken.CompareAndSwap(false, true) {
-		rs.PanicAt(skip+1, "rsthread: a thread was joined twice (Rust's join consumes the handle)")
+	if !j.packet.handle.CompareAndSwap(handleLive, handleJoined) {
+		rs.PanicAt(skip+1, "rsthread: a thread handle was used after Join or Drop (Rust's join consumes the handle)")
 	}
-	result, caught := j.packet.result, j.packet.caught
+	<-j.exited
+	p := j.packet
+	p.mu.Lock()
+	p.taken = true
+	result, caught := p.result, p.caught
 	var zero T
-	j.packet.result = zero
+	p.result = zero
+	p.mu.Unlock()
+	p.release()
 	return result, caught
 }
 

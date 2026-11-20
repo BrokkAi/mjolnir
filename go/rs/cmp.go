@@ -28,6 +28,9 @@ import (
 //     RegisterEnum call; two values of the same variant by their fields.
 //   - Ordered collections (BTreeMap, BTreeSet, VecDeque) compare entry by
 //     entry in iteration order, as slices do.
+//   - The strings of a struct field whose `rs` tag names a comparer option
+//     (RegisterTagComparer, such as `path`) are ordered by the function
+//     registered for it.
 //   - A type with a method `Compare(other T) int` or `Compare(other *T) int`
 //     is ordered by it wherever it appears, except a collection, which is
 //     ordered through ReflectMap or ReflectSeq.
@@ -272,6 +275,12 @@ func (s *shape) compareAt(a, b unsafe.Pointer) (int, bool) {
 				// Reverse: `other.0.partial_cmp(&self.0)`.
 				left, right = right, left
 			}
+			if field.compared != nil {
+				if order := field.compared.compare(field.shape, left, right); order != 0 {
+					return order, true
+				}
+				continue
+			}
 			if order, ok := field.shape.compareAt(left, right); !ok || order != 0 {
 				return order, ok
 			}
@@ -304,6 +313,30 @@ func (s *shape) compareAt(a, b unsafe.Pointer) (int, bool) {
 		return s.elem.comparePointees(s.arcPointee(a), s.arcPointee(b))
 	}
 	panic("rs.Cmp: unhandled kind of " + s.typ.String())
+}
+
+// compare is Cmp of the values at a and b of the field, whose shape is s:
+// the registered comparer orders any two strings.
+func (c *taggedComparison) compare(s *shape, a, b unsafe.Pointer) int {
+	comparer, form := c.comparer("rs.Cmp", s)
+	if form == taggedOption || form == taggedOptionSlice {
+		some, value := s.fields[1].offset, s.fields[0].offset
+		left, right := *(*bool)(unsafe.Add(a, some)), *(*bool)(unsafe.Add(b, some))
+		if !left || !right {
+			return compareBool(left, right)
+		}
+		a, b = unsafe.Add(a, value), unsafe.Add(b, value)
+	}
+	if form == taggedString || form == taggedOption {
+		return sign(int64(comparer.cmp(*(*string)(a), *(*string)(b))))
+	}
+	left, right := *(*[]string)(a), *(*[]string)(b)
+	for i := range min(len(left), len(right)) {
+		if order := sign(int64(comparer.cmp(left[i], right[i]))); order != 0 {
+			return order
+		}
+	}
+	return cmp.Compare(len(left), len(right))
 }
 
 // callCompare runs the type's hand-written Compare on the values at a and b.

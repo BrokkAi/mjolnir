@@ -123,34 +123,16 @@ func hashMapKeyingFor[K any]() hashMapKeying {
 }
 
 // hashKeyIsPlain reports whether Go's == on a value of the type is Rust's
-// derived Eq: no pointer, interface, slice or map anywhere inside it, and no
-// hand-written Equal or Compare that rs.Eq and rs.Cmp would ask instead.
+// derived Eq, so that the key can index a Go map. rs.EqIsGoEqual decides it,
+// since it is rs.Eq's own answer: no pointer, interface, slice or map inside
+// the type, no hand-written Equal, and no field whose tag names a comparer
+// (a path field compares by component, which == does not). A type with a
+// hand-written Compare is kept ordered as well, since rs.Cmp asks it.
 func hashKeyIsPlain(keyType reflect.Type) bool {
-	if _, found := reflect.PointerTo(keyType).MethodByName("Equal"); found {
-		return false
-	}
 	if _, found := reflect.PointerTo(keyType).MethodByName("Compare"); found {
 		return false
 	}
-	switch keyType.Kind() {
-	case reflect.Bool, reflect.String,
-		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
-		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128,
-		reflect.UnsafePointer, reflect.Chan:
-		return true
-	case reflect.Array:
-		return hashKeyIsPlain(keyType.Elem())
-	case reflect.Struct:
-		for index := range keyType.NumField() {
-			if !hashKeyIsPlain(keyType.Field(index).Type) {
-				return false
-			}
-		}
-		return true
-	default:
-		return false
-	}
+	return rs.EqIsGoEqual(keyType)
 }
 
 // hashKeyOf returns the HashKey of a key of a type keyed that way.

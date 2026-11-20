@@ -51,6 +51,19 @@ func sliceRange(skip int, start, end, n int) {
 	}
 }
 
+// sliceRangeInclusive is core::slice::range for `start..=end`: it returns
+// the exclusive end, and panics as Rust does when the range does not fit.
+func sliceRangeInclusive(skip int, start, end, n int) int {
+	if end >= n {
+		sliceIndexFail(skip+1, 0, end, n)
+	}
+	exclusive := end + 1
+	if start > exclusive {
+		sliceIndexFail(skip+1, start, exclusive, n)
+	}
+	return exclusive
+}
+
 // sliceIndexCheck panics as Rust's indexing `v[index]` does.
 func sliceIndexCheck(skip int, index, n int) {
 	if index < 0 || index >= n {
@@ -146,11 +159,11 @@ func GetMut[T any](v []T, index int) (*T, bool) {
 
 // GetRange is `v.get(start..end)`: the sub-slice, or None when the range
 // does not fit.
-func GetRange[T any](v []T, start, end int) Option[[]T] {
-	if start < 0 || start > end || end > len(v) {
+func GetRange[T any](v []T, r Range[int]) Option[[]T] {
+	if r.Start < 0 || r.Start > r.End || r.End > len(v) {
 		return None[[]T]()
 	}
-	return Some(v[start:end])
+	return Some(v[r.Start:r.End])
 }
 
 // SplitFirst is `v.split_first()`: the first element and the rest.

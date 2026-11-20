@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,50 +66,39 @@ type debugRequest struct {
 	Prec  int    `json:"prec"`
 }
 
-// debugSpec is the format spec the oracle's `fmt` names.
-func debugSpec(t *testing.T, request debugRequest) DurationDebugSpec {
+// debugFormats maps the oracle's `fmt` names to the format strings the
+// oracle formats with, width and precision being the named arguments w and
+// p.
+var debugFormatStrings = map[string]string{
+	"plain": "{:?}", "alt": "{:#?}", "prec": "{:.p$?}", "width": "{:w$?}", "width_prec": "{:w$.p$?}",
+	"left": "{:<w$?}", "right": "{:>w$?}", "center": "{:^w$?}", "left_prec": "{:<w$.p$?}",
+	"right_prec": "{:>w$.p$?}", "center_prec": "{:^w$.p$?}", "fill_left": "{:*<w$?}",
+	"fill_right": "{:*>w$.p$?}", "fill_center": "{:é^w$.p$?}", "plus": "{:+?}", "plus_prec": "{:+.p$?}",
+	"plus_width": "{:+w$?}", "plus_right": "{:>+w$.p$?}", "zero": "{:0w$?}", "zero_prec": "{:0w$.p$?}",
+}
+
+// debugText formats the request's duration as the oracle does, through the
+// formatter, which is where Duration's Debug lives.
+func debugText(t *testing.T, request debugRequest) string {
 	t.Helper()
-	width, prec := rs.Some(request.Width), rs.Some(request.Prec)
-	switch request.Fmt {
-	case "plain", "alt":
-		return DurationDebugSpec{}
-	case "prec":
-		return DurationDebugSpec{Precision: prec}
-	case "width", "zero":
-		// The `0` flag pads numbers; Duration's Debug does not consult it.
-		return DurationDebugSpec{Width: width}
-	case "width_prec", "zero_prec":
-		return DurationDebugSpec{Width: width, Precision: prec}
-	case "left":
-		return DurationDebugSpec{Width: width, Align: rs.Some(rs.Alignment_Left)}
-	case "right":
-		return DurationDebugSpec{Width: width, Align: rs.Some(rs.Alignment_Right)}
-	case "center":
-		return DurationDebugSpec{Width: width, Align: rs.Some(rs.Alignment_Center)}
-	case "left_prec":
-		return DurationDebugSpec{Width: width, Precision: prec, Align: rs.Some(rs.Alignment_Left)}
-	case "right_prec":
-		return DurationDebugSpec{Width: width, Precision: prec, Align: rs.Some(rs.Alignment_Right)}
-	case "center_prec":
-		return DurationDebugSpec{Width: width, Precision: prec, Align: rs.Some(rs.Alignment_Center)}
-	case "fill_left":
-		return DurationDebugSpec{Width: width, Fill: '*', Align: rs.Some(rs.Alignment_Left)}
-	case "fill_right":
-		return DurationDebugSpec{Width: width, Precision: prec, Fill: '*', Align: rs.Some(rs.Alignment_Right)}
-	case "fill_center":
-		return DurationDebugSpec{Width: width, Precision: prec, Fill: 'é', Align: rs.Some(rs.Alignment_Center)}
-	case "plus":
-		return DurationDebugSpec{SignPlus: true}
-	case "plus_prec":
-		return DurationDebugSpec{Precision: prec, SignPlus: true}
-	case "plus_width":
-		return DurationDebugSpec{Width: width, SignPlus: true}
-	case "plus_right":
-		return DurationDebugSpec{Width: width, Precision: prec, Align: rs.Some(rs.Alignment_Right), SignPlus: true}
-	default:
+	format, ok := debugFormatStrings[request.Fmt]
+	if !ok {
 		t.Fatalf("unknown format %q", request.Fmt)
-		return DurationDebugSpec{}
 	}
+	args := []any{DurationNew(request.Secs, request.Nanos)}
+	if strings.Contains(format, "w$") {
+		args = append(args, rs.Arg("w", request.Width))
+	}
+	if strings.Contains(format, "p$") {
+		args = append(args, rs.Arg("p", request.Prec))
+	}
+	return rs.Format(format, args...)
+}
+
+// inGoRange reports whether a time.Duration holds secs seconds and nanos
+// nanoseconds. Durations beyond that are the formatter's to test (go/rs).
+func inGoRange(secs uint64, nanos uint32) bool {
+	return secs < maxSecs || (secs == maxSecs && nanos <= maxSecsNanos)
 }
 
 // randomNanos builds nanosecond counts whose digits exercise rounding:
@@ -153,7 +143,12 @@ func randomSecs(random *rand.Rand) uint64 {
 }
 
 func TestDiffDurationDebug(t *testing.T) {
-	oracle.Check(t, oracleModule, "duration_debug", func(yield func(any)) {
+	oracle.Check(t, oracleModule, "duration_debug", func(yieldAny func(any)) {
+		yield := func(request debugRequest) {
+			if inGoRange(request.Secs, request.Nanos) {
+				yieldAny(request)
+			}
+		}
 		precisions := []int{0, 1, 2, 3, 5, 8, 9, 10, 12}
 		widths := []int{0, 1, 5, 9, 12, 20, 21, 22, 24, 30}
 		// Every edge value, unformatted and at each precision in turn.
@@ -189,7 +184,7 @@ func TestDiffDurationDebug(t *testing.T) {
 		}
 	}, func(raw json.RawMessage) any {
 		request := decodeRequest[debugRequest](t, raw)
-		return map[string]string{"text": DurationDebugParts(request.Secs, request.Nanos, debugSpec(t, request))}
+		return map[string]string{"text": debugText(t, request)}
 	})
 }
 

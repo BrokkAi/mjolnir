@@ -43,12 +43,40 @@
 //     SystemTime overflows (None, or Rust's panic), as Duration::MAX does in
 //     Rust.
 //
+// Where Mjolnir's Rust code meets the end of Go's range (surveyed against
+// the Rust sources of mj-* and voice-worker, 2026-11-20):
+//
+//   - mj-worker/src/work_facts.rs passes Duration::MAX as "no timeout" to
+//     mj_core::subprocess::run_bounded_observed, which hands it to
+//     tokio::time::timeout. Tokio takes Instant::checked_add's None as "the
+//     far future"; the port's DurationMax gives the same None from
+//     Instant.CheckedAdd, so go/crates/tokio must follow that path too.
+//   - Durations built from numbers other programs send saturate at
+//     DurationMax where Rust holds them exactly, so the addition that follows
+//     panics (or, checked, gives None) in Go where Rust's succeeds, for any
+//     value of 2^63 nanoseconds (about 292 years) or more:
+//     mj-accounts/src/muse_usage.rs (a Retry-After in seconds, added to
+//     SystemTime::now()); mj-accounts/src/profile_health.rs (a provider's
+//     reset time, UNIX_EPOCH + Duration::from_secs or from_millis);
+//     mj-targets/src/aws_assume_role.rs (an AWS expiration in milliseconds);
+//     mj-import/src/import/codex.rs (a session's updated_at from Codex's
+//     index); mj-session-runtime/src/github_app.rs (a token expiry, through
+//     checked_add, so an error instead of a panic); mj-cli/src/api_client.rs
+//     (`--timeout-secs` plus WAIT_SLACK, which Rust sends on and the server
+//     refuses). Each is a time after 2262-04-11, or a delay of 292 years.
+//   - The other conversions of outside numbers (mj-core/src/retry_after.rs,
+//     clamped to six hours by mj_accounts::quota::rate_limit_hold;
+//     mj-daemon/src/pollers/quota.rs and mj-tui/src/notify.rs, which only
+//     sleep, and sleep "for ever" in both; boot times read from /proc/stat)
+//     behave alike in both.
+//
 // Rust durations are never negative. A negative time.Duration reaching this
 // package is a porting error (it comes from Go's own subtraction), and the
 // functions panic on it rather than return a wrong value.
 //
-// The functions ending in Parts ([DurationDebugParts], [DurationTryFromSecsF64Parts])
-// work on whole seconds and nanoseconds and cover Rust's full range.
+// The functions ending in Parts ([DurationTryFromSecsF64Parts],
+// [DurationTryFromSecsF32Parts]) work on whole seconds and nanoseconds and
+// cover Rust's full range.
 //
 // # SystemTime
 //
@@ -69,11 +97,15 @@
 //
 // # Formatting
 //
-// Duration's Debug output is produced by [DurationDebug] and, with a width,
-// precision, fill, alignment or sign, by [DurationDebugWith]. SystemTime's is
-// [SystemTimeDebug]. The formatter in package rs cannot import this package
-// (this package imports rs), so it needs its own copy of these two
-// algorithms; [DurationDebugParts] is written to be moved there unchanged.
+// The Debug output of a Duration ("1.5s", "250ms") and of a SystemTime
+// (`SystemTime { tv_sec: .., tv_nsec: .. }`) is the formatter's: rs.Format
+// prints a time.Duration as a Rust Duration and a time.Time as a Rust
+// SystemTime wherever it meets one, under any width, precision, fill,
+// alignment or sign (`rs.Format("{:>9.2?}", d)`), with Rust's algorithms
+// (go/rs/fmt_time.go).
+// [DurationDebug], [DurationFmtDebug], [SystemTimeDebug] and
+// [SystemTimeFmtDebug] are those, under Rust's names; there is no second
+// implementation here.
 //
 // # Not covered
 //

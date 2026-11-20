@@ -4,7 +4,6 @@ package rstime
 
 import (
 	"math"
-	"strconv"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/rs"
@@ -232,30 +231,17 @@ func SystemTimeCmp(t, other time.Time) int {
 	return systemTimeOf(t).cmp(systemTimeOf(other))
 }
 
-// windowsIntervals is a time as Windows holds it: 100ns intervals since
-// 1601-01-01.
-func windowsIntervals(st systemTime) int64 {
-	return (st.secs+windowsEpochSecs)*intervalsPerSec + int64(st.nanos/intervalNanos)
-}
-
 // SystemTimeDebug is `format!("{t:?}")` for a SystemTime, which prints the
 // platform's representation: `SystemTime { tv_sec: 5, tv_nsec: 6 }` on Unix
-// and `SystemTime { intervals: 116444736050000000 }` on Windows.
+// and `SystemTime { intervals: 116444736050000000 }` on Windows. The
+// formatter (go/rs/fmt_time.go) holds that algorithm and prints every
+// time.Time this way.
 func SystemTimeDebug(t time.Time) string {
-	st := systemTimeOf(t)
-	if rs.CfgWindows {
-		return "SystemTime { intervals: " + strconv.FormatInt(windowsIntervals(st), 10) + " }"
-	}
-	return "SystemTime { tv_sec: " + strconv.FormatInt(st.secs, 10) +
-		", tv_nsec: " + strconv.FormatUint(uint64(st.nanos), 10) + " }"
+	return rs.DebugString(SystemTimeCanonical(t))
 }
 
 // SystemTimeFmtDebug is `fmt::Debug::fmt(&t, f)` for a SystemTime, which
 // follows f's flags (the `#` of `{:#?}` among them).
 func SystemTimeFmtDebug(t time.Time, f *rs.Formatter) error {
-	st := systemTimeOf(t)
-	if rs.CfgWindows {
-		return f.DebugStruct("SystemTime").Field("intervals", windowsIntervals(st)).Finish()
-	}
-	return f.DebugStruct("SystemTime").Field("tv_sec", st.secs).Field("tv_nsec", st.nanos).Finish()
+	return rs.DebugFmt(SystemTimeCanonical(t), f)
 }

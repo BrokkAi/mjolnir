@@ -6,6 +6,9 @@ package rs
 import (
 	"bytes"
 	"reflect"
+	"strconv"
+	"strings"
+	"sync"
 	"unsafe"
 )
 
@@ -34,6 +37,9 @@ import (
 //   - A type with a method `Equal(other T) bool` or `Equal(other *T) bool` is
 //     compared by it wherever it appears, except a collection, which is
 //     compared through ReflectMap or ReflectSeq.
+//   - The strings of a struct field whose `rs` tag names a comparer option
+//     (RegisterTagComparer, such as `path`) are compared with the functions
+//     registered for it.
 //   - Funcs and channels are equal when they are the same func value or
 //     channel. So are two pointers to a type that Clone never copies (a lock,
 //     a NoReflectClone type): Rust cannot compare those at all.
@@ -119,7 +125,14 @@ func (s *shape) equalAt(a, b unsafe.Pointer) bool {
 		return s.equalGoMap(a, b)
 	case kindStruct:
 		for _, field := range s.fields {
-			if !field.shape.equalAt(unsafe.Add(a, field.offset), unsafe.Add(b, field.offset)) {
+			left, right := unsafe.Add(a, field.offset), unsafe.Add(b, field.offset)
+			if field.compared != nil {
+				if !field.compared.equal(field.shape, left, right) {
+					return false
+				}
+				continue
+			}
+			if !field.shape.equalAt(left, right) {
 				return false
 			}
 		}
@@ -444,7 +457,7 @@ func (s *shape) goComparable() bool {
 		return s.elem.goComparable()
 	case kindStruct:
 		for _, field := range s.fields {
-			if !field.shape.goComparable() {
+			if field.compared != nil || !field.shape.goComparable() {
 				return false
 			}
 		}
@@ -452,6 +465,116 @@ func (s *shape) goComparable() bool {
 		return true
 	}
 	return false
+}
+
+// EqIsGoEqual reports whether Go's == on two values of type t answers what
+// Eq answers, so that such values can key a Go map: integers, bools,
+// strings and data-free enums, and arrays and structs of those, with no
+// hand-written Equal and no field whose tag names a comparer option
+// (RegisterTagComparer). A collection that keys by Go's == asks it first.
+func EqIsGoEqual(t reflect.Type) bool {
+	return shapeOf(t).goComparable()
+}
+
+// RegisterTagComparer makes Eq, Cmp and PartialCmp compare the strings of a
+// struct field whose `rs` tag names option (`rs:"workspace,path"`) with cmp
+// and eq instead of byte by byte: the field itself when it is a string, the
+// value of an Option[string], and the elements of a []string and of an
+// Option[[]string]. go/rs/rspath registers "path", so that paths are equal
+// and ordered by component, as Rust's are. Clone ignores the option.
+//
+// cmp answers negative, zero or positive, and eq is true exactly when cmp
+// answers zero. An option is registered once, from an init function, and
+// cannot be "arc", which Clone reads.
+//
+// Comparing a field of any other shape under the option panics, naming the
+// struct and the field: such a field is compared by hand. So does comparing
+// a field whose option nothing registered: the package that registers it is
+// not linked into the program.
+func RegisterTagComparer(option string, cmp func(a, b string) int, eq func(a, b string) bool) {
+	switch {
+	case option == "" || option == "arc" || option != strings.TrimSpace(option) || strings.Contains(option, ","):
+		panic("rs: " + strconv.Quote(option) + " cannot be the tag option of a comparer")
+	case cmp == nil || eq == nil:
+		panic("rs: the comparer of the tag option " + option + " needs both functions")
+	}
+	if _, loaded := tagComparers.LoadOrStore(option, &tagComparer{cmp: cmp, eq: eq}); loaded {
+		panic("rs: a comparer is already registered for the tag option " + option)
+	}
+}
+
+// tagComparer is what RegisterTagComparer registered for one option.
+type tagComparer struct {
+	cmp func(a, b string) int
+	eq  func(a, b string) bool
+}
+
+// tagComparers maps a tag option to its *tagComparer.
+var tagComparers sync.Map
+
+// taggedForm is the shape of a field that a comparer option applies to.
+type taggedForm uint8
+
+const (
+	taggedString      taggedForm = iota + 1
+	taggedOption                 // Option[string]
+	taggedSlice                  // []string
+	taggedOptionSlice            // Option[[]string]
+)
+
+// comparer returns the comparer registered for the field's option and the
+// form of the field, whose shape is s, or panics: op names the operation that
+// asked. A string may be of any string type: its layout is that of a string.
+func (c *taggedComparison) comparer(op string, s *shape) (*tagComparer, taggedForm) {
+	where := op + ": the field " + c.field + " of " + c.owner.String()
+	if c.problem != "" {
+		panic(where + " " + c.problem)
+	}
+	registered, ok := tagComparers.Load(c.option)
+	if !ok {
+		panic(where + " is tagged with the option " + strconv.Quote(c.option) +
+			", which nothing registered with rs.RegisterTagComparer: the package that registers it" +
+			" (go/rs/rspath registers \"path\") is not linked into this program")
+	}
+	switch {
+	case s.kind == kindString:
+		return registered.(*tagComparer), taggedString
+	case s.kind == kindSlice && s.elem.kind == kindString:
+		return registered.(*tagComparer), taggedSlice
+	case s.kind == kindOption && s.elem.kind == kindString:
+		return registered.(*tagComparer), taggedOption
+	case s.kind == kindOption && s.elem.kind == kindSlice && s.elem.elem.kind == kindString:
+		return registered.(*tagComparer), taggedOptionSlice
+	}
+	panic(where + " is tagged with the option " + strconv.Quote(c.option) + " but holds a " + s.typ.String() +
+		": the option applies to a string, an rs.Option[string], a []string or an rs.Option[[]string]," +
+		" so compare this field by hand")
+}
+
+// equal is Eq of the values at a and b of the field, whose shape is s.
+func (c *taggedComparison) equal(s *shape, a, b unsafe.Pointer) bool {
+	comparer, form := c.comparer("rs.Eq", s)
+	if form == taggedOption || form == taggedOptionSlice {
+		some, value := s.fields[1].offset, s.fields[0].offset
+		left, right := *(*bool)(unsafe.Add(a, some)), *(*bool)(unsafe.Add(b, some))
+		if !left || !right {
+			return left == right
+		}
+		a, b = unsafe.Add(a, value), unsafe.Add(b, value)
+	}
+	if form == taggedString || form == taggedOption {
+		return comparer.eq(*(*string)(a), *(*string)(b))
+	}
+	left, right := *(*[]string)(a), *(*[]string)(b)
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !comparer.eq(left[i], right[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // isReflexive reports whether x == x holds for every value of the type, which

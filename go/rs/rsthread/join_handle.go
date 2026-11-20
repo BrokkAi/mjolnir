@@ -9,8 +9,8 @@ import (
 // JoinHandle is std::thread::JoinHandle<T>: permission to join a thread,
 // that is to wait for it to end and take its result.
 //
-// Rust detaches a thread whose handle is dropped; the goroutine runs on
-// either way, so Drop does nothing.
+// Dropping the handle detaches the thread, which runs on; the thread's
+// result is then dropped (its Drop runs) when the thread ends, as in Rust.
 type JoinHandle[T any] struct {
 	inner *joinInner[T]
 }
@@ -52,9 +52,9 @@ func (h *JoinHandle[T]) JoinExpect(message string) T {
 // thread-locals are dropped.
 func (h *JoinHandle[T]) IsFinished() bool { return h.inner.isFinished() }
 
-// Drop is dropping the handle, which detaches the thread. There is nothing
-// to do for a goroutine.
-func (h *JoinHandle[T]) Drop() {}
+// Drop is dropping the handle without joining, which detaches the thread.
+// It is idempotent, and does nothing after Join.
+func (h *JoinHandle[T]) Drop() { h.inner.packet.releaseHandle() }
 
 // FmtDebug is the Debug impl: `JoinHandle { .. }`.
 func (h *JoinHandle[T]) FmtDebug(f *rs.Formatter) error {

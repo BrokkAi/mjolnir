@@ -18,10 +18,12 @@
 // generate, done by reflection (Clone, ClonePtr, Eq, Cmp, PartialCmp, OrdCmp,
 // Min, Max, Default, RegisterDefault), Ordering and Reverse, Arc and Weak
 // with Rust's counting (Rc and rc::Weak too), Cell, RefCell, Take, Replace,
-// Swap, Forget and Discriminant. Each file's comments give its rules, and the
-// tests compare them with Rust through the oracle module std_cmp. Not
-// covered: RefCell's borrow tracking (a second mutable borrow succeeds),
-// UnsafeCell, Arc::new_cyclic, into_raw and from_raw, cmp::min_by, max_by,
-// min_by_key, max_by_key and minmax, which Mjolnir does not use. Cmp also
-// orders what Rust cannot (a HashMap, a func), so as to be total.
+// Swap, Forget and Discriminant. RegisterTagComparer lets a package change
+// how the strings of tagged fields compare: go/rs/rspath registers `path`,
+// so that path fields compare by component. Each file's comments give its
+// rules, and the tests compare them with Rust through the oracle module
+// std_cmp. Not covered: RefCell's borrow tracking (a second mutable borrow
+// succeeds), UnsafeCell, Arc::new_cyclic, into_raw and from_raw, cmp::min_by,
+// max_by, min_by_key, max_by_key and minmax, which Mjolnir does not use. Cmp
+// also orders what Rust cannot (a HashMap, a func), so as to be total.
 package rs

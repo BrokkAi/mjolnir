@@ -145,6 +145,19 @@ func levelEnabled(level Level) bool {
 	return LevelFilterCurrent().Enables(level)
 }
 
+// CallsiteEnabled is the check every macro makes before it builds an event
+// or a span from its callsite: level_enabled!, the callsite's interest
+// (Callsite::interest) and __macro_support::__is_enabled. It is for code that
+// makes its own Metadata and then calls EventDispatch, EventChildOf, SpanNew
+// or SpanChildOf, as an event or span with an explicit parent needs.
+func CallsiteEnabled(meta *Metadata) bool {
+	if !levelEnabled(meta.Level()) {
+		return false
+	}
+	interest := callsiteInterest(meta)
+	return !interest.IsNever() && isEnabled(meta, interest)
+}
+
 // isEnabled is __macro_support::__is_enabled.
 func isEnabled(meta *Metadata, interest SubscriberInterest) bool {
 	return interest.IsAlways() || DispatcherGetDefault(func(current *Dispatch) bool {
