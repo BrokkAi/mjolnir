@@ -72,14 +72,9 @@ fn dead_worker_startup_failure(
                 .unwrap_or_else(|| chrono::Utc::now().timestamp().max(0) as u64),
         );
     }
-    // A harness that failed to open for lack of space is a disk-full exit:
-    // the storage owner restarts it once space returns, and the same record
-    // still holds the marker then, so it must not end recovery. Judge that by
-    // the failure's own cause. The reason above also carries the bridge's
-    // stderr, which can mention an earlier, unrelated full disk.
-    Ok(record
-        .harness_startup_failure
-        .filter(|failure| !mj_core::targets::storage::reports_no_space(&failure.message)))
+    // A harness that failed to open for lack of space must not end recovery:
+    // the storage owner restarts it once space returns.
+    Ok(record.harness_failed_to_open().cloned())
 }
 
 fn storage_forbids_restart(
@@ -298,6 +293,10 @@ pub fn recover_worker_admitted(
                         )?;
                         let owner = crate::worker_lifecycle::require(id)?;
                         owner.settle_dead_restart(&plan.source_target)?;
+                        // Only a live record fails here. A `Closing` record
+                        // belongs to its close, which finishes from a worker
+                        // started without its harness
+                        // (`recover_interrupted_close_managed`, #1619).
                         if crate::database::fail_unready_session(
                             id,
                             &failure.message,
