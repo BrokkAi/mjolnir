@@ -1421,6 +1421,33 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&preparation)?);
         return Ok(());
     }
+    if let Some(preview) = preparation.container_upgrade.clone() {
+        anyhow::ensure!(
+            args.queue.is_none(),
+            "Container settings replacement waits for accepted work. Omit --queue or clear the queue before confirming."
+        );
+        if args.yes {
+            eprintln!("{}", preview.warning);
+        } else if !prompt_move_confirmation(&preparation, None).await? {
+            bail!("container settings replacement cancelled");
+        }
+        daemon
+            .upgrade_container(mj_core::state::ContainerUpgradeRequest {
+                selection: *preview,
+                acknowledge_writable_layer_loss: true,
+            })
+            .await?;
+        if args.json {
+            let mut outcome = move_error_outcome(&preparation, String::new());
+            outcome.outcome = "container-upgrade-pending".into();
+            outcome.error = None;
+            outcome.recovery = None;
+            print_move_json(&outcome)?;
+        } else {
+            eprintln!("Container settings replacement pending; accepted work will finish first.");
+        }
+        return Ok(());
+    }
     if !args.json
         && preparation.destination_checks == mj_core::state::DestinationChecks::AfterProvisioning
     {
@@ -1739,6 +1766,10 @@ async fn prompt_move_confirmation(
     preparation: &mj_core::state::MovePreparation,
     queue: Option<ResumeQueueDisposition>,
 ) -> Result<bool> {
+    let settings_warning = preparation
+        .container_upgrade
+        .as_ref()
+        .map(|preview| preview.warning.clone());
     let active = preparation.active;
     let source_profile = preparation.source_profile_id.clone();
     let source_target = preparation.source_target_template_id.clone();
@@ -1758,6 +1789,10 @@ async fn prompt_move_confirmation(
     let queued_commands = preparation.queued_commands.clone();
     let session_id = preparation.selection.session_id.clone();
     mj_core::runtime::spawn_blocking(move || {
+        if let Some(warning) = settings_warning {
+            eprintln!("Apply container settings and restart?\n{warning}");
+            return confirm_move_prompt();
+        }
         eprintln!(
             "Move session {} from {source_profile}/{source_target} to {profile}/{target}.",
             session_id
@@ -1818,15 +1853,19 @@ async fn prompt_move_confirmation(
                 }
             );
         }
-        eprint!("Continue? [y/N] ");
-        io::stderr().flush()?;
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        Ok::<_, io::Error>(line.trim().eq_ignore_ascii_case("y"))
+        confirm_move_prompt()
     })
     .await
     .context("move confirmation prompt task failed")?
     .map_err(Into::into)
+}
+
+fn confirm_move_prompt() -> io::Result<bool> {
+    eprint!("Continue? [y/N] ");
+    io::stderr().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    Ok(line.trim().eq_ignore_ascii_case("y"))
 }
 
 fn move_error_outcome(

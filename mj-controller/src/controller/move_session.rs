@@ -1213,8 +1213,10 @@ impl Controller {
         ensure!(
             selection.profile_id.is_some()
                 || selection.target_template_id.is_some()
-                || selection.resource_allocation.is_some(),
-            "move requires a target, a profile, or a container size"
+                || selection.resource_allocation.is_some()
+                || selection.additional_mounts.is_some()
+                || selection.clear_resource_allocation,
+            "move requires a target, a profile, or container settings"
         );
         ensure!(
             previous
@@ -1411,7 +1413,24 @@ impl Controller {
             "attached resources are unsupported for this target; select compatible resources explicitly"
         );
         crate::targets::validate_additional_mounts(mounts)?;
-        let planned_conversion = if in_place {
+        let mut container_upgrade = None;
+        if !retry && target_id == source.target_template_id && !in_place {
+            let settings = mj_core::state::ContainerSettingsChange {
+                resource_allocation: move_requested_allocation(source, &selection).cloned(),
+                mounts: mounts.to_vec(),
+                mount_history: None,
+            };
+            if let Some(plan) = self
+                .plan_container_settings_replacement(&source.id, "preview", &settings, executor)?
+            {
+                ensure!(move_keeps_profile_and_policy(source, &selection), mj_core::refusal::Refusal::precondition(
+                    "Apply the container size and mounts first, then Move to change the profile or policy."
+                ).with_code("container-settings-with-profile-move"));
+                container_upgrade = Some(Box::new(plan.settings_preview(&source.id, settings)));
+            }
+        }
+        let keeps_workspace = in_place || container_upgrade.is_some();
+        let planned_conversion = if keeps_workspace {
             None
         } else {
             for mount in mounts {
@@ -1435,7 +1454,7 @@ impl Controller {
         )?;
         // A compatible in-place Move already has its worker, mounts and
         // runtime. Only reconstruction needs provisioning prerequisites.
-        if !in_place || cross_harness || retry {
+        if !keeps_workspace || cross_harness || retry {
             let worker_target = super::backend::session_target(
                 &self.config,
                 &source_record.bundle_id,
@@ -1493,12 +1512,13 @@ impl Controller {
         {
             bail!("{error}; close or finish those children before moving to this harness");
         }
-        let workspace = if in_place {
+        let workspace = if keeps_workspace {
             None
         } else {
             Some(self.assess_move_workspace(&selection, executor)?)
         };
         Ok(MovePreparation {
+            container_upgrade,
             destination_checks: DestinationChecks::Checked,
             workspace,
             source_unavailable: false,
@@ -1610,6 +1630,10 @@ impl Controller {
             }
             checked
         };
+        ensure!(
+            checked.container_upgrade.is_none(),
+            mj_core::refusal::Refusal::precondition("Prepare Move again and confirm the container settings replacement.")
+        );
         ensure!(
             checked.fingerprint == prepared.fingerprint,
             "session, pending work, or destination configuration changed; prepare and confirm Move again"
@@ -2948,8 +2972,15 @@ fn move_subagent_policy(
 /// the restart a Move performs.
 fn move_changes_nothing(source: &mj_core::state::SessionRecord, selection: &MoveSelection) -> bool {
     source.state == SessionState::Running
-        && selection.profile_id.as_deref() == Some(source.last_profile.as_str())
         && move_environment_change(source, selection, false).is_none()
+        && move_keeps_profile_and_policy(source, selection)
+}
+
+fn move_keeps_profile_and_policy(
+    source: &mj_core::state::SessionRecord,
+    selection: &MoveSelection,
+) -> bool {
+    selection.profile_id.as_deref() == Some(source.last_profile.as_str())
         && move_subagent_policy(source, selection) == source.subagents.clone().unwrap_or_default()
         && selection
             .oracle
