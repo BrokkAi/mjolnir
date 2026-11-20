@@ -52,7 +52,8 @@ def audit_reviewer(transcript_path, own_workspace):
 
 def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None):
     hits, calls = [], 0
-    scripts = {}
+    scripts, written = {}, set()
+    observed_cwds = set()
     for page in pages:
         execution = page.get("execution")
         execution = execution if isinstance(execution, dict) else {}
@@ -70,8 +71,13 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
             if allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query") and call.get("kind") != "execute":
                 continue
             if commits is not None:
-                for name, snippet in dict(pilot_hits(call, own_workspace, commits, single_commit, scripts=scripts,
-                                                    cwd=page_cwd, home=page_home)).items():
+                raw = call.get("rawInput")
+                if isinstance(raw, dict) and isinstance(directory := raw.get("cwd") or raw.get("workdir"), str):
+                    if posixpath.isabs(directory):
+                        observed_cwds.add(directory)
+                list_cwd = page_cwd or one_or_many(frozenset(observed_cwds)) or None
+                for name, snippet in dict(pilot_hits(call, own_workspace, commits, single_commit, scripts=scripts, written=written,
+                                                    cwd=page_cwd, home=page_home, list_cwd=list_cwd)).items():
                     hits.append({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet})
                 continue
             inp, out = call_parts(item)
@@ -107,7 +113,7 @@ SEARCH_VALUES = {
     "--max-columns", "--threads", "--glob", "--iglob", "--type", "--type-not", "--encoding",
     "--include", "--exclude", "--exclude-dir", "--exclude-from", "--ignore-file",
     "--label", "--directories", "--devices", "--color", "--colour", "--colors",
-    "--max-filesize", "--sort", "--sortr",
+    "--max-filesize", "--sort", "--sortr", "--type-add",
 }
 SEARCH_FLAGS = set("""
     basic-regexp extended-regexp fixed-strings perl-regexp ignore-case smart-case case-sensitive
@@ -174,6 +180,79 @@ SHELL_ASSIGNMENT = re.compile(r"([a-zA-Z_][a-zA-Z_0-9]*)=")
 SHELL_EXPANSION = re.compile(r"""\\[\\$`"]|\$\{([a-zA-Z_]\w*)\}|\$([a-zA-Z_]\w*)|[$`]""")
 
 
+# Bound the Cartesian product per input word so a transcript cannot make the
+# audit allocate an unbounded argument list. Real file lists are much smaller.
+BRACE_WORD_LIMIT = 1024
+BRACE_RANGE = re.compile(r"(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?")
+
+
+def brace_span(word):
+    # Hide quoted, escaped and ordinary parameter-expansion braces from the
+    # brace scanner. Keep the original offsets for copying shell words.
+    mask = list(word)
+    for part in SHELL_PART.finditer(word):
+        if part[0].startswith(("'", '"', "\\")):
+            mask[part.start():part.end()] = " " * len(part[0])
+    masked = "".join(mask)
+    for parameter in re.finditer(r"\$\{[^{}]*\}", masked):
+        mask[parameter.start():parameter.end()] = " " * len(parameter[0])
+    stack, candidates = [], []
+    for index, char in enumerate(mask):
+        if char == "{":
+            stack.append((index, []))
+        elif char == "," and stack:
+            stack[-1][1].append(index)
+        elif char == "}":
+            if not stack:
+                raise InspectionRequired("unmatched shell brace")
+            start, commas = stack.pop()
+            body = "".join(mask[start + 1:index])
+            if commas or ".." in body and "{" not in body:
+                candidates.append((start, index, commas, body))
+    if stack:
+        raise InspectionRequired("unmatched shell brace")
+    return min(candidates, default=None)
+
+
+def brace_options(word, start, end, commas, body):
+    if commas:
+        return [word[left + 1:right] for left, right in zip([start, *commas], [*commas, end])]
+    match = BRACE_RANGE.fullmatch(body)
+    if not match or match[1].isalpha() != match[2].isalpha():
+        raise InspectionRequired("malformed shell brace range")
+    first, last, stride = match.groups()
+    numeric = not first.isalpha()
+    begin, finish = (int(first), int(last)) if numeric else (ord(first), ord(last))
+    step = abs(int(stride)) if stride else 1
+    if not step or abs(finish - begin) // step >= BRACE_WORD_LIMIT:
+        raise InspectionRequired("shell brace range exceeds the expansion limit or has a zero step")
+    numbers = range(begin, finish + 1, step) if begin <= finish else range(begin, finish - 1, -step)
+    if not numeric:
+        # These characters are emitted as word data, not shell syntax.
+        return [shlex.quote(chr(value)) for value in numbers]
+    padded = any(len(part.lstrip("-")) > 1 and part.lstrip("-").startswith("0") for part in (first, last))
+    width = max(len(first), len(last)) if padded else 0
+    return [f"{value:0{width}d}" for value in numbers]
+
+
+def brace_words(word):
+    if "{" not in word and "}" not in word:
+        return [word]
+    pending, expanded = [word], []
+    while pending:
+        candidate = pending.pop()
+        span = brace_span(candidate)
+        if span is None:
+            expanded.append(candidate)
+            continue
+        start, end, commas, body = span
+        options = brace_options(candidate, start, end, commas, body)
+        if len(options) + len(pending) + len(expanded) > BRACE_WORD_LIMIT:
+            raise InspectionRequired(f"shell brace expansion exceeds {BRACE_WORD_LIMIT} words")
+        pending.extend(candidate[:start] + option + candidate[end + 1:] for option in reversed(options))
+    return expanded
+
+
 def shell_word(raw, variables, *, assignment=False):
     def replace(match):
         if match[0].startswith("\\"):
@@ -197,8 +276,6 @@ def shell_word(raw, variables, *, assignment=False):
             pieces.append(part[1:])
         else:
             quoted = part.startswith('"')
-            if not quoted and re.search(r"\{[^{}]*(?:,|\.\.)[^{}]*\}", part):
-                raise InspectionRequired("unsupported shell brace expansion")
             pieces.append(SHELL_EXPANSION.sub(replace, part[1:-1] if quoted else part))
     return "".join(pieces)
 
@@ -224,11 +301,12 @@ def shell_commands(command, cwd, home):
     words, paths, pending = [], [], []
     redirect = delimiter = None
     variables = {}
-    if cwd:
+    if isinstance(cwd, str) and cwd:
         variables["PWD"] = cwd
     if home:
         variables["HOME"] = home
     preceding = None
+    alternate_cwds = frozenset()
     offset = 0
     while True:
         if offset >= len(command):
@@ -275,7 +353,12 @@ def shell_commands(command, cwd, home):
         has_command = bool(words or paths or delimiter)
         if has_command:
             bound = [SHELL_ASSIGNMENT.match(word) for word in words]
-            targets = [(mode, shell_word(raw, variables)) for mode, raw in paths]
+            targets = []
+            for mode, raw in paths:
+                choices = brace_words(raw)
+                if len(choices) != 1:
+                    raise InspectionRequired("ambiguous shell brace redirection")
+                targets.append((mode, shell_word(choices[0], variables)))
             if words and all(bound):
                 for raw, binding in zip(words, bound):
                     name = binding[1]
@@ -289,23 +372,39 @@ def shell_commands(command, cwd, home):
                         variables.pop(name, None)
                 argv = []
             else:
-                argv = [shell_word(raw, variables) for raw in words]
+                argv = [shell_word(choice, variables) for raw in words for choice in brace_words(raw)]
             if delimiter and any(mode == "<" for mode, _ in paths):
                 raise InspectionRequired("heredoc combined with another stdin redirection")
             if pending or delimiter:
                 pending.append((argv, targets, delimiter, cwd))
             else:
                 yield argv, targets, None, cwd
-            if argv[:1] == ["cd"]:
-                target = argv[1] if len(argv) == 2 and not argv[1].startswith("-") else None
-                # The right side of && only runs after a successful cd.
-                if (target and token == "&&" and preceding not in {"&&", "||", "|"}
-                        and (cwd or target.startswith("/"))):
-                    cwd = resolve_path(target, cwd)
-                    variables["PWD"] = cwd
+            skipped = frozenset()
+            if token != preceding and preceding in {"&&", "||"}:
+                # A different connector can rejoin an earlier skipped branch.
+                skipped = alternate_cwds
+                cwd = merge_cwds(cwd, skipped)
+                alternate_cwds = frozenset()
+            if argv[:1] == ["cd"] and token != "|" and preceding != "|":
+                target = argv[1] if len(argv) == 2 and not argv[1].startswith(("-", "~")) else None
+                if target and (posixpath.isabs(target) or cwd not in ("", None)):
+                    if re.search(r"[*?\[]", target):
+                        changed = None
+                    else:
+                        changed = one_or_many(resolve_paths(target, cwd))
                 else:
-                    cwd = None
-                    variables.pop("PWD", None)
+                    changed = None
+                if token == "&&":
+                    alternate_cwds = merge_cwds(alternate_cwds, cwd)
+                    cwd = merge_cwds(changed, skipped)
+                elif token == "||":
+                    alternate_cwds = merge_cwds(alternate_cwds, changed)
+                else:
+                    cwd = merge_cwds(cwd, changed)
+            if isinstance(cwd, str) and cwd:
+                variables["PWD"] = cwd
+            else:
+                variables.pop("PWD", None)
         words, paths, delimiter = [], [], None
         # A blank line does not erase a continuation after &&, ||, or |.
         if has_command or token != "\n":
@@ -328,6 +427,8 @@ NETWORK = set("ssh scp sftp rsync nc ncat netcat socat telnet ftp".split())
 READ_COMMANDS = set("""
     cat cd cut diff du file head ls nl paste pwd readlink realpath sort stat tail tee uniq wc
     which whoami basename dirname cmp column fold fmt tree mkdir chmod cp mv rm
+    date mktemp true false seq tr test [ expr printf echo sleep rev tac comm join
+    od xxd hexdump strings sha256sum sha1sum md5sum touch ln jq
 """.split())
 GIT_HISTORY = set("fetch pull clone remote ls-remote bundle fsck reflog for-each-ref show-ref".split())
 GIT_REVISIONS = set("diff log show blame rev-list rev-parse cat-file checkout switch grep".split())
@@ -349,20 +450,45 @@ GIT_VALUE_OPTIONS = set("""
 """.split())
 
 
-def resolve_path(path, cwd):
-    # An empty directory is the session's unnamed initial directory. None
-    # means a cd may have changed it to an unknown location.
-    if cwd is None and not posixpath.isabs(path):
+def resolve_paths(path, cwd):
+    """Resolve a file name against every possible recorded directory."""
+    if posixpath.isabs(path):
+        bases = ("",)
+    elif cwd is None:
         return None
-    resolved = posixpath.normpath(posixpath.join(cwd or "", path))
-    return "/" + resolved.lstrip("/") if resolved.startswith("/") else resolved
+    else:
+        bases = (cwd,) if isinstance(cwd, str) else cwd
+    paths = (posixpath.normpath(posixpath.join(base, path)) for base in bases)
+    return frozenset("/" + name.lstrip("/") if name.startswith("/") else name for name in paths)
+
+
+def one_or_many(paths):
+    if paths is not None and len(paths) == 1:
+        return next(iter(paths))
+    return paths
+
+
+def merge_cwds(left, right):
+    if left is None or right is None:
+        return None
+    left = {left} if isinstance(left, str) else left
+    right = {right} if isinstance(right, str) else right
+    return one_or_many(frozenset(left | right))
+
+
+def recorded_path(path, cwd):
+    candidates = one_or_many(resolve_paths(path, cwd))
+    return candidates if isinstance(candidates, str) else None
 
 
 def path_hits(path, own_workspace, cwd=""):
     # Keep the spelling too: a protected path can appear before a lexical '..'.
-    for name in dict.fromkeys((path, resolve_path(path, cwd))):
-        if name is None:
-            continue
+    if path == "-":
+        return  # Standard input or output.
+    paths = resolve_paths(path, cwd)
+    if paths is None:
+        yield "needs-inspection", f"relative operand with unknown working directory: {path}"
+    for name in dict.fromkeys((path, *sorted(paths or ()))):
         if re.match(r"(?i)^https?://", name):
             yield "github-or-web", path
         if re.match(r"^/dev/(?:tcp|udp)/", name):
@@ -385,7 +511,7 @@ def path_hits(path, own_workspace, cwd=""):
 def git_hits(args, own_workspace, commits, single_commit, cwd=""):
     while args[:1] == ["-C"] and len(args) > 1:
         yield from path_hits(args[1], own_workspace, cwd)
-        cwd = resolve_path(args[1], cwd)
+        cwd = one_or_many(resolve_paths(args[1], cwd))
         args = args[2:]
     if not args:
         raise InspectionRequired("missing git subcommand")
@@ -849,16 +975,16 @@ def python_name(expr, imports):
     return ""
 
 
-def subprocess_hits(value, own_workspace, commits, single_commit, cwd=""):
+def subprocess_hits(value, own_workspace, commits, single_commit, cwd="", written=None):
     if isinstance(value, str):
-        yield from shell_hits(value, own_workspace, commits, single_commit, cwd=cwd)
+        yield from shell_hits(value, own_workspace, commits, single_commit, cwd=cwd, written=written)
     elif isinstance(value, (tuple, list)) and value and all(isinstance(word, str) for word in value):
-        yield from command_hits(list(value), own_workspace, commits, single_commit, cwd=cwd)
+        yield from command_hits(list(value), own_workspace, commits, single_commit, cwd=cwd, written=written)
     else:
         yield "needs-inspection", "subprocess argv is not visible in interpreter source"
 
 
-def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd=""):
+def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd="", written=None):
     # This screen sees source literals, not runtime values. A protected path
     # built dynamically (e.g. expanduser('~') plus computed pieces) can pass.
     if program in PYTHON:
@@ -894,7 +1020,7 @@ def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd
                     argv = ast.literal_eval(node.args[0]) if node.args else None
                 except (ValueError, TypeError, SyntaxError):
                     argv = None
-                yield from subprocess_hits(argv, own_workspace, commits, single_commit, cwd)
+                yield from subprocess_hits(argv, own_workspace, commits, single_commit, cwd, written)
     else:
         # Inspect literal strings and recognizable calls in inline non-Python
         # source. Interpolated code remains subject to the literal-only limit.
@@ -911,7 +1037,7 @@ def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd
             }:
                 literal = re.match(rf"\s*({QUOTED_SOURCE.rstrip()})", source[match.end():])
                 if literal and name.rsplit(".", 1)[-1] in {"exec", "execSync", "system"}:
-                    yield from subprocess_hits(literal[1][1:-1], own_workspace, commits, single_commit, cwd)
+                    yield from subprocess_hits(literal[1][1:-1], own_workspace, commits, single_commit, cwd, written)
                 else:
                     yield "needs-inspection", "subprocess argv is not visible in interpreter source"
     yield "interpreter-screened", program
@@ -936,11 +1062,81 @@ def find_paths(args):
             raise InspectionRequired(f"unsupported find predicate {word}")
 
 
-def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, cwd="", home=None,
+SYSTEM_PROGRAM_DIRS = {"/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin"}
+SYSTEM_PROGRAM_NAMES = READ_COMMANDS | AWK | SEARCH | NETWORK | MEMORY_TOOLS | INLINE_OPTIONS.keys() | {
+    "bash", "sh", "sed", "find", "env", "timeout", "nice", "nohup", "git", "gh", "curl", "wget", "mj",
+    "sqlite", "sqlite3", "pytest", "cargo", "npm", "go", "make", "expect", "xargs",
+}
+
+
+def system_program(executable, written):
+    if "/" not in executable:
+        if executable in written:
+            raise InspectionRequired(f"session wrote executable name {executable}")
+        return executable
+    directory, name = posixpath.split(executable)
+    if directory in SYSTEM_PROGRAM_DIRS:
+        return name
+    raise InspectionRequired(f"untrusted executable {executable}")
+
+
+def wrapped_command(program, args):
+    if program == "env":
+        args = args[1:] if args[:1] == ["--"] else args
+        if args and re.match(r"[A-Za-z_]\w*=", args[0]):
+            raise InspectionRequired("env changes the visible command environment")
+    elif program == "timeout":
+        if not args or not re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", args[0]):
+            raise InspectionRequired("unsupported timeout duration or options")
+        args = args[1:]
+    elif program == "nice" and args[:1] == ["-n"]:
+        if len(args) < 2 or not re.fullmatch(r"[+-]?\d+", args[1]):
+            raise InspectionRequired("unsupported nice adjustment")
+        args = args[2:]
+    if not args or args[0].startswith("-"):
+        raise InspectionRequired(f"missing visible {program} command")
+    return args
+
+
+def jq_paths(args):
+    program = None
+    words = iter(args)
+    for word in words:
+        if word in {"--arg", "--argjson", "--rawfile", "--slurpfile", "--argfile"}:
+            name, value = next(words, None), next(words, None)
+            if name is None or value is None:
+                raise InspectionRequired(f"missing arguments to jq {word}")
+            if word in {"--rawfile", "--slurpfile", "--argfile"}:
+                yield value
+        elif word in {"-f", "--from-file", "-L"}:
+            if path := next(words, None):
+                yield path
+            raise InspectionRequired(f"jq option {word} loads external code")
+        elif word == "--":
+            for path in words:
+                if program is None:
+                    program = path
+                else:
+                    yield path
+        elif word.startswith("-") and word != "-":
+            if not (word in {"--slurp", "--raw-input", "--null-input", "--compact-output", "--raw-output",
+                             "--join-output", "--ascii-output", "--sort-keys", "--exit-status", "--tab"}
+                    or re.fullmatch(r"-[sRncrajSeCM]+", word)):
+                raise InspectionRequired(f"unsupported jq option {word}")
+        elif program is None:
+            program = word
+        else:
+            yield word
+    if program is None or re.search(r"\b(?:include|import|modulemeta)\b", program):
+        raise InspectionRequired("jq program is missing or can load external code")
+
+
+def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, written=None, cwd="", home=None,
                  running_scripts=frozenset()):
-    program, *args = words
-    yield from path_hits(program, own_workspace, cwd)
-    program = posixpath.basename(program)
+    executable, *args = words
+    if "/" in executable:
+        yield from path_hits(executable, own_workspace, cwd)
+    program = system_program(executable, written or ())
     inline = interpreter_arguments(program, args)
     if program in NETWORK:
         yield "network-command", program
@@ -961,15 +1157,20 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
           or program in {"python", "python3", "bash", "sh", "expect"}
           and args and re.match(r"(?:\./)?(?:tests?|e2e|scripts)/", args[0])):
         yield "build-or-test", shlex.join(words)
+    elif program in {"env", "timeout", "nice", "nohup"}:
+        if program == "nohup":
+            yield from path_hits("nohup.out", own_workspace, cwd)
+        yield from command_hits(wrapped_command(program, args), own_workspace, commits, single_commit,
+                                scripts=scripts, written=written, cwd=cwd, home=home, running_scripts=running_scripts)
     elif program in {"bash", "sh"} and len(args) == 2 and args[0] in {"-c", "-lc"}:
-        yield from shell_hits(args[1], own_workspace, commits, single_commit, scripts=scripts, cwd=cwd, home=home,
+        yield from shell_hits(args[1], own_workspace, commits, single_commit, scripts=scripts, written=written, cwd=cwd, home=home,
                               running_scripts=running_scripts)
     elif program in AWK | {"sed", "perl"}:
         yield from text_filter_hits(program, args, own_workspace, commits, single_commit, cwd)
     elif program in INLINE_OPTIONS and len(inline) >= 2 and inline[0] == INLINE_OPTIONS[program]:
         for arg in inline[2:]:
             yield from source_literal_hits(arg, own_workspace, cwd)
-        yield from interpreter_hits(program, inline[1], own_workspace, commits, single_commit, cwd)
+        yield from interpreter_hits(program, inline[1], own_workspace, commits, single_commit, cwd, written)
         if scripts is not None:
             scripts.clear()  # A program can modify files through computed paths.
     elif program in SEARCH:
@@ -979,6 +1180,9 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
     elif program == "find":
         for path in find_paths(args):
             yield from path_hits(path, own_workspace, cwd)
+    elif program == "jq":
+        for path in jq_paths(args):
+            yield from path_hits(path, own_workspace, cwd)
     elif program in {"echo", "printf", "true", "false", "tr"}:
         if program == "printf" and args and args[0].startswith("-v"):
             raise InspectionRequired("printf may assign a shell variable")
@@ -987,6 +1191,8 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
         if program == "sort" and any(arg.startswith("--compress") for arg in args):
             raise InspectionRequired("sort may start an external program")
         for arg in args:
+            if arg.startswith("-") and "=" not in arg and "/" not in arg:
+                continue
             yield from path_hits(arg.split("=", 1)[-1] if arg.startswith("-") else arg, own_workspace, cwd)
     else:
         raise InspectionRequired(f"unsupported command {program}")
@@ -1000,11 +1206,14 @@ def interpreter_arguments(program, args):
 
 
 def forget_script(scripts, path, cwd):
-    key = resolve_path(path, cwd)
-    scripts.pop(key, None)
-    if key is None:
+    paths = resolve_paths(path, cwd)
+    if paths is None:
         scripts.clear()
-    elif not cwd and not posixpath.isabs(path):
+        return
+    for key in paths:
+        scripts.pop(key, None)
+    if not cwd and not posixpath.isabs(path):
+        key = next(iter(paths))
         # The transcript may omit the directory for one of two equivalent paths.
         for previous in list(scripts):
             if previous.endswith("/" + key):
@@ -1023,16 +1232,21 @@ def literal_printf(args):
     return None
 
 
-def record_script_write(scripts, words, redirections, source, cwd):
+def record_script_write(scripts, written, words, redirections, source, cwd):
     def record(path, text):
-        if (key := resolve_path(path, cwd)) is not None:
+        if (key := recorded_path(path, cwd)) is not None:
             scripts[key] = text
 
     program = posixpath.basename(words[0]) if words else ""
     for mode, path in redirections:
         if mode != "<":
+            written.add(posixpath.basename(path))
             forget_script(scripts, path, cwd)
-    if program in {"cp", "mv", "rm"} or program == "git" and words[1:2] in (["checkout"], ["switch"]):
+    if program in {"cp", "mv", "ln"} and len(words) >= 2:
+        written.add(posixpath.basename(words[-1]))
+    if program == "touch":
+        written.update(posixpath.basename(path) for path in words[1:] if not path.startswith("-"))
+    if program in {"cp", "mv", "rm", "ln"} or program == "git" and words[1:2] in (["checkout"], ["switch"]):
         scripts.clear()  # A destination can name a directory or be a symlink.
     elif program == "sed" or program == "sort":
         # Known in-place options, and any options whose destination form is opaque.
@@ -1042,6 +1256,7 @@ def record_script_write(scripts, words, redirections, source, cwd):
     elif program == "tee":
         for path in words[1:]:
             if not path.startswith("-"):
+                written.add(posixpath.basename(path))
                 forget_script(scripts, path, cwd)
     stdout = [(mode, path) for mode, path in redirections if mode in {">", ">>"}]
     target = stdout[0][1] if len(stdout) == 1 and stdout[0][0] == ">" else None
@@ -1056,29 +1271,32 @@ def record_script_write(scripts, words, redirections, source, cwd):
             record(target, text)
 
 
-def recorded_script(words, scripts, cwd):
+def recorded_script(words, scripts, written, cwd):
     if not words:
         return None
     path, *args = words
     program = posixpath.basename(path)
     args = interpreter_arguments(program, args)
     if program in INLINE_OPTIONS or program in {"sh", "bash"}:
+        program = system_program(path, written)
         if not args or args[0].startswith("-"):
             return None
         path, *args = args
-    elif path.startswith(("./", "/", "../")) and (source := scripts.get(resolve_path(path, cwd))) is not None:
+    elif path.startswith(("./", "/", "../")) and (source := scripts.get(recorded_path(path, cwd))) is not None:
+        if program in SYSTEM_PROGRAM_NAMES:
+            system_program(path, written)
         shebang = source.splitlines()[0][2:] if source.startswith("#!") else "/bin/sh"
         argv = shlex.split(shebang)
         if argv[:1] == ["/usr/bin/env"]:
             argv = argv[1:]
-        program = posixpath.basename(argv[0]) if argv else ""
+        program = system_program(argv[0], written) if argv else ""
         if program not in INLINE_OPTIONS and program not in {"sh", "bash"}:
             raise InspectionRequired("unrecognized recorded script interpreter")
         if interpreter_arguments(program, argv[1:]):
             raise InspectionRequired("unsupported recorded script interpreter options")
     else:
         return None
-    source = scripts.get(resolve_path(path, cwd))
+    source = scripts.get(recorded_path(path, cwd))
     if source is None:
         return None
     if re.match(r"(?:\./)?(?:tests?|e2e|scripts)/", path):
@@ -1086,24 +1304,26 @@ def recorded_script(words, scripts, cwd):
     return program, path, args, source
 
 
-def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, cwd="", home=None,
+def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, written=None, cwd="", home=None,
                running_scripts=frozenset()):
     if scripts is None:
         scripts = {}
+    if written is None:
+        written = set()
     try:
         for words, redirections, source, start_dir in shell_commands(command, cwd, home):
             for _, path in redirections:
                 yield from path_hits(path, own_workspace, start_dir)
             if not words and source is None:
-                record_script_write(scripts, words, redirections, source, start_dir)
+                record_script_write(scripts, written, words, redirections, source, start_dir)
                 continue
             try:
                 if source is None:
-                    script = recorded_script(words, scripts, start_dir)
-                    record_script_write(scripts, words, redirections, source, start_dir)
+                    script = recorded_script(words, scripts, written, start_dir)
+                    record_script_write(scripts, written, words, redirections, source, start_dir)
                     if script is None:
                         yield from command_hits(words, own_workspace, commits, single_commit,
-                                                scripts=scripts, cwd=start_dir, home=home,
+                                                scripts=scripts, written=written, cwd=start_dir, home=home,
                                                 running_scripts=running_scripts)
                     else:
                         program, path, arguments, script_source = script
@@ -1111,31 +1331,32 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                         for arg in arguments:
                             yield from source_literal_hits(arg, own_workspace, start_dir)
                         if program in {"sh", "bash"}:
-                            key = resolve_path(path, start_dir)
+                            key = recorded_path(path, start_dir)
                             if key in running_scripts:
                                 raise InspectionRequired("recursive recorded script")
                             yield from shell_hits(script_source, own_workspace, commits, single_commit,
-                                                  scripts=scripts, cwd=start_dir, home=home,
+                                                  scripts=scripts, written=written, cwd=start_dir, home=home,
                                                   running_scripts=running_scripts | {key})
                             yield "interpreter-screened", program
                         else:
-                            yield from interpreter_hits(program, script_source, own_workspace, commits, single_commit, start_dir)
+                            yield from interpreter_hits(program, script_source, own_workspace, commits, single_commit, start_dir, written)
                             scripts.clear()
                 else:
-                    record_script_write(scripts, words, redirections, source, start_dir)
+                    record_script_write(scripts, written, words, redirections, source, start_dir)
                     if words == ["cat"]:
+                        system_program(words[0], written)
                         continue  # Here the body is literal data.
                     if words and posixpath.basename(words[0]) == "tee":
-                        yield from command_hits(words, own_workspace, commits, single_commit, cwd=start_dir)
+                        yield from command_hits(words, own_workspace, commits, single_commit, written=written, cwd=start_dir)
                         continue
-                    program = posixpath.basename(words[0]) if words else ""
+                    program = system_program(words[0], written) if words else ""
                     arguments = interpreter_arguments(program, words[1:])
                     if program not in INLINE_OPTIONS or arguments and arguments[0] != "-":
                         raise InspectionRequired("unsupported command receiving a heredoc")
                     yield from path_hits(words[0], own_workspace, start_dir)
                     for arg in arguments[1:]:
                         yield from source_literal_hits(arg, own_workspace, start_dir)
-                    yield from interpreter_hits(program, source, own_workspace, commits, single_commit, start_dir)
+                    yield from interpreter_hits(program, source, own_workspace, commits, single_commit, start_dir, written)
                     scripts.clear()
             except InspectionRequired as error:
                 scripts.clear()
@@ -1148,7 +1369,7 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
 PATH_KEYS = {"cwd", "path", "paths", "file_path", "filePath", "directory", "workdir", "target_file"}
 
 
-def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, cwd, home):
+def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written, cwd, home, list_cwd):
     title = call.get("title") or ""
     kind = call.get("kind")
     raw = call.get("rawInput")
@@ -1162,7 +1383,7 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, cwd, hom
 
     base = cwd or ""
     if isinstance(raw, dict) and (directory := raw.get("cwd") or raw.get("workdir")):
-        cwd = resolve_path(directory, base)
+        cwd = one_or_many(resolve_paths(directory, base))
     edit_paths = False
     for fields in [raw, *(call.get("locations") or [])]:
         if isinstance(fields, dict):
@@ -1173,6 +1394,7 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, cwd, hom
                         yield from path_hits(path, own_workspace, base if key in {"cwd", "workdir"} else cwd or "")
                         if kind in {"edit", "delete", "move"} and key not in {"cwd", "workdir"}:
                             edit_paths = True
+                            written.add(posixpath.basename(path))
                             forget_script(scripts, path, cwd or "")
     if kind in {"edit", "delete", "move"} and not edit_paths:
         scripts.clear()
@@ -1180,6 +1402,8 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, cwd, hom
     if kind == "read" and not raw and not call.get("locations"):
         if match := re.fullmatch(r"Read file ['\"](.*)['\"]", title):
             yield from path_hits(match[1], own_workspace, cwd or "")
+        elif title == "List files" and call.get("name") == "exec_command" and list_cwd:
+            yield from path_hits(".", own_workspace, list_cwd)
         else:
             yield "needs-inspection", f"missing read path: {title[:400]}"
 
@@ -1190,6 +1414,7 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, cwd, hom
             if paths:
                 for path in paths:
                     yield from path_hits(path, own_workspace, cwd or "")
+                    written.add(posixpath.basename(path))
                     forget_script(scripts, path, cwd or "")
                 return
         scripts.clear()
@@ -1204,11 +1429,19 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, cwd, hom
             try:
                 command = json.loads(title)
             except ValueError:
-                pass
+                if call.get("name") == "exec_command":
+                    # Earlier exec_command titles shell-quoted the entire
+                    # source, sometimes using adjacent fragments around '!'.
+                    try:
+                        parts = shlex.split(title)
+                    except ValueError:
+                        parts = []
+                    if len(parts) == 1:
+                        command = parts[0]
     if isinstance(command, list) and command and all(isinstance(word, str) for word in command):
         command = shlex.join(command)
     if isinstance(command, str) and command.strip() and kind in {None, "execute", "other"}:
-        yield from shell_hits(command, own_workspace, commits, single_commit, scripts=scripts, cwd=cwd or "", home=home)
+        yield from shell_hits(command, own_workspace, commits, single_commit, scripts=scripts, written=written, cwd=cwd or "", home=home)
     elif kind == "execute" or title in {"rql_query", "mcp__rql__rql_query"}:
         yield "needs-inspection", f"missing or unsupported command input: {title[:400]}"
 

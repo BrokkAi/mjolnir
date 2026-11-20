@@ -305,3 +305,75 @@ def test_sed_write_still_flags_protected_path(tmp_path):
     report = audit_call(tmp_path, shell(command))
     assert not report["passed"]
     assert {hit["kind"] for hit in report["hits"]} == {"git-history-escape", "needs-inspection"}
+
+
+# Hard-won: 3c1a690: scratch executables were screened as system binaries
+@pytest.mark.parametrize(("executable", "passed"), [
+    ("./awk", False), ("/tmp/x/awk", False), ("$PWD/bin/awk", False),
+    ("awk", True), ("/usr/bin/awk", True),
+])
+def test_audit_verifies_the_system_tool_path(tmp_path, executable, passed):
+    report = audit_calls(tmp_path, [shell(f"{executable} 'NR < 2' input")], cwd=f"/workspace/{OWN}/repo")
+    assert report["passed"] is passed
+    if not passed:
+        assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+def test_bare_name_previously_written_in_the_session_needs_inspection(tmp_path):
+    report = audit_calls(tmp_path, [
+        shell("printf '%s\\n' '#!/bin/sh' 'cat README.md' > awk"),
+        shell("awk 'NR < 2' input"),
+    ])
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+# Hard-won: 3c1a690: relative reads after cd missed one side of the workspace boundary
+@pytest.mark.parametrize("separator", [";", "\n"])
+def test_relative_paths_are_checked_at_both_cd_outcomes(tmp_path, separator):
+    report = audit_calls(
+        tmp_path, [shell(f"cd src{separator} awk 'NR < 2' ../../{FOREIGN}/x")], cwd=f"/workspace/{OWN}/repo",
+    )
+    assert not report["passed"]
+    assert "other-workspace" in {hit["kind"] for hit in report["hits"]}
+
+
+def test_unknown_cd_requires_auditable_absolute_operands(tmp_path):
+    report = audit_calls(tmp_path, [shell("cd -; cat relative.txt")], cwd=f"/workspace/{OWN}/repo")
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+@pytest.mark.parametrize("command", [
+    "mktemp", "date", "env sh -c 'cat README.md'",
+    "rg -n -i -g '*.rs' -t rust --type-add 'my:*.rs' --max-depth 2 -uu needle src",
+    "rg -n 'ref' src/{left,{right,center}}.rs",
+    "nl -ba src/{01..05..2}.rs | sed -n '1,40p'",
+    "cat src/{a..e..2}.rs",
+    "rg -n '{.mj,other}' src",
+])
+def test_visible_reads_and_wrappers_pass(tmp_path, command):
+    report = audit_call(tmp_path, shell(command))
+    assert report["passed"], report["hits"]
+
+
+@pytest.mark.parametrize(("command", "kind"), [
+    ("env sh -c 'cat /run/hel/git-cache/config'", "git-history-escape"),
+    ("cat {.mj,src}/store.txt", "memory-or-sessions"),
+    ("cat src/{1..1025}.rs", "needs-inspection"),
+    ("cat src/{a,other.rs", "needs-inspection"),
+    ("ln -s /run/hel/git-cache/config local", "git-history-escape"),
+    ("jq '.id' .mj/results.json", "memory-or-sessions"),
+])
+def test_expansion_and_wrappers_keep_protected_access_visible(tmp_path, command, kind):
+    report = audit_call(tmp_path, shell(command))
+    assert not report["passed"]
+    assert kind in {hit["kind"] for hit in report["hits"]}
+
+
+def test_title_only_list_uses_recorded_working_directory(tmp_path):
+    list_call = {"name": "exec_command", "kind": "read", "title": "List files"}
+    prior = shell("pwd")
+    prior["rawInput"]["cwd"] = f"/workspace/{OWN}/repo"
+    report = audit_calls(tmp_path, [prior, list_call])
+    assert report["passed"], report["hits"]
