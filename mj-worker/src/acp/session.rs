@@ -840,16 +840,16 @@ pub(super) async fn serve_session(
         .await?;
         if let Some(request) = session_config_recovery_request(&dropped_selectors, &config_options)
         {
+            let request = pending_elicitations.register_command_loop(request);
             emit_runtime_event(
                 events,
                 RuntimeEvent::ElicitationRequested {
-                    request: request.clone(),
+                    request: (*request).clone(),
                 },
             )
             .await?;
-            // Deliberately not in `pending_elicitations`: that map is for
-            // requests an ACP responder is waiting on. This one is Hel's own,
-            // and the command loop below answers it.
+            // Its local wrapper registers liveness with the shared owner;
+            // the command loop below still owns the recovery answer path.
             config_recovery = Some(request);
         }
     }
@@ -860,6 +860,7 @@ pub(super) async fn serve_session(
         &session_id,
         spec,
         events,
+        pending_elicitations,
         config_recovery.is_some(),
     )
     .await?;

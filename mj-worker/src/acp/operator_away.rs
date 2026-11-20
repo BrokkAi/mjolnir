@@ -30,14 +30,24 @@ impl Default for OperatorAwayState {
 
 impl OperatorAwayState {
     fn answer_away(&mut self, entry: PendingElicitation) {
-        let question =
-            (entry.identity.1 == AwayRequest::Question).then(|| question_evidence(&entry.question));
-        if entry.answer.send(PendingAnswer::OperatorAway).is_ok() {
-            let history = self.refused.entry(entry.identity).or_default();
-            if let Some(question) = question {
-                history.push(question);
-                self.changed.send_replace(());
+        match entry {
+            PendingElicitation {
+                question,
+                responder: PendingResponder::Acp { identity, answer },
+                ..
+            } => {
+                let evidence =
+                    (identity.1 == AwayRequest::Question).then(|| question_evidence(&question));
+                if answer.send(PendingAnswer::OperatorAway).is_ok() {
+                    let history = self.refused.entry(identity).or_default();
+                    if let Some(evidence) = evidence {
+                        history.push(evidence);
+                        self.changed.send_replace(());
+                    }
+                }
             }
+            // Command-loop recovery choices are never answered by AFK policy.
+            entry => self.pending.push(entry),
         }
     }
 }
@@ -89,7 +99,7 @@ impl OperatorAway {
         state
             .pending
             .iter()
-            .filter(|entry| state.bridges.contains(&entry.bridge) && !entry.answer.is_closed())
+            .filter(|entry| state.bridges.contains(&entry.bridge) && entry.responder.is_alive())
             .map(|entry| (entry.question.id.clone(), entry.question.clone()))
             .collect()
     }
@@ -106,7 +116,11 @@ impl OperatorAway {
                 // Vec order is registration order, including across bridge scopes.
                 let pending = std::mem::take(&mut state.pending);
                 for entry in pending {
-                    if !state.refused.contains_key(&entry.identity) {
+                    if entry
+                        .responder
+                        .acp_identity()
+                        .is_some_and(|identity| !state.refused.contains_key(identity))
+                    {
                         state.answer_away(entry);
                     } else {
                         state.pending.push(entry);
@@ -179,6 +193,29 @@ impl PendingElicitations {
         PendingBridgeLifetime(self.clone())
     }
 
+    pub(super) fn register_command_loop(&self, request: ElicitationRequest) -> CommandLoopQuestion {
+        let lifetime = Arc::new(());
+        let mut state = self
+            .0
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned");
+        if state.bridges.contains(&self.0.id) {
+            state.pending.push(PendingElicitation {
+                bridge: self.0.id,
+                question: request.clone(),
+                responder: PendingResponder::CommandLoop(Arc::downgrade(&lifetime)),
+            });
+        }
+        CommandLoopQuestion {
+            request,
+            owner: self.0.owner.clone(),
+            bridge: self.0.id,
+            lifetime,
+        }
+    }
+
     /// Both immediate and later AFK decisions reach the same responder task.
     /// It publishes Requested before receiving this answer, so AFK cannot
     /// resolve a form before the relay has observed the question.
@@ -203,15 +240,13 @@ impl PendingElicitations {
             state.answer_away(PendingElicitation {
                 bridge: self.0.id,
                 question,
-                identity,
-                answer,
+                responder: PendingResponder::Acp { identity, answer },
             });
         } else {
             state.pending.push(PendingElicitation {
                 bridge: self.0.id,
                 question,
-                identity,
-                answer,
+                responder: PendingResponder::Acp { identity, answer },
             });
         }
         received
@@ -245,19 +280,18 @@ impl PendingElicitations {
                 else {
                     return;
                 };
-                if entry.identity.1 != AwayRequest::Question {
+                let Some(identity) = entry.responder.acp_identity() else {
+                    return;
+                };
+                if identity.1 != AwayRequest::Question {
                     return;
                 }
                 state.presence.away.then(|| {
                     (
                         state.presence.revision,
-                        entry.identity.0.clone(),
+                        identity.0.clone(),
                         question_evidence(&entry.question),
-                        state
-                            .refused
-                            .get(&entry.identity)
-                            .cloned()
-                            .unwrap_or_default(),
+                        state.refused.get(identity).cloned().unwrap_or_default(),
                     )
                 })
             };
@@ -304,7 +338,9 @@ impl PendingElicitations {
                                 .get(&(agent, AwayRequest::Question))
                                 .is_some_and(|current| *current == history)
                             && let Some(index) = state.pending.iter().position(|entry| {
-                                entry.bridge == self.0.id && entry.question.id == id
+                                entry.bridge == self.0.id
+                                    && entry.question.id == id
+                                    && entry.responder.acp_identity().is_some()
                             })
                         {
                             let entry = state.pending.remove(index);
@@ -335,10 +371,11 @@ impl PendingElicitations {
             .0
             .lock()
             .expect("operator-away state lock poisoned");
-        let index = state
-            .pending
-            .iter()
-            .position(|entry| entry.bridge == self.0.id && entry.question.id == id)?;
+        let index = state.pending.iter().position(|entry| {
+            entry.bridge == self.0.id
+                && entry.question.id == id
+                && entry.responder.acp_identity().is_some()
+        })?;
         let entry = state.pending.remove(index);
         Some(entry)
     }
@@ -363,7 +400,10 @@ impl PendingElicitations {
             .0
             .lock()
             .expect("operator-away state lock poisoned");
-        !state.pending.iter().any(|entry| entry.bridge == self.0.id)
+        !state
+            .pending
+            .iter()
+            .any(|entry| entry.bridge == self.0.id && entry.responder.acp_identity().is_some())
     }
 
     pub(super) fn close(&self) {
@@ -384,9 +424,11 @@ impl PendingElicitations {
             .0
             .lock()
             .expect("operator-away state lock poisoned");
-        state
-            .pending
-            .retain(|entry| entry.bridge != self.0.id || keep(&entry.question.id));
+        state.pending.retain(|entry| {
+            entry.bridge != self.0.id
+                || entry.responder.acp_identity().is_none()
+                || keep(&entry.question.id)
+        });
     }
 
     pub(super) fn resolve(
@@ -403,14 +445,22 @@ impl PendingElicitations {
         let index = state
             .pending
             .iter()
-            .position(|entry| entry.bridge == self.0.id && entry.question.id == id)
+            .position(|entry| {
+                entry.bridge == self.0.id
+                    && entry.question.id == id
+                    && entry.responder.acp_identity().is_some()
+            })
             .ok_or_else(|| format!("elicitation {id:?} is no longer pending"))?;
         let response = state.pending[index].question.harness_response(response)?;
         let entry = state.pending.remove(index);
-        entry
-            .answer
-            .send(PendingAnswer::Human(response))
-            .map_err(|_| format!("elicitation {id:?} was cancelled before it was answered"))
+        match entry.responder {
+            PendingResponder::Acp { answer, .. } => answer
+                .send(PendingAnswer::Human(response))
+                .map_err(|_| format!("elicitation {id:?} was cancelled before it was answered")),
+            PendingResponder::CommandLoop(_) => {
+                Err(format!("elicitation {id:?} belongs to the command loop"))
+            }
+        }
     }
 }
 
@@ -425,8 +475,64 @@ impl Default for PendingElicitations {
 pub(super) struct PendingElicitation {
     bridge: u64,
     question: ElicitationRequest,
-    identity: (String, AwayRequest),
-    answer: oneshot::Sender<PendingAnswer>,
+    responder: PendingResponder,
+}
+
+#[derive(Debug)]
+enum PendingResponder {
+    Acp {
+        identity: (String, AwayRequest),
+        answer: oneshot::Sender<PendingAnswer>,
+    },
+    CommandLoop(std::sync::Weak<()>),
+}
+
+impl PendingResponder {
+    fn acp_identity(&self) -> Option<&(String, AwayRequest)> {
+        match self {
+            Self::Acp { identity, .. } => Some(identity),
+            Self::CommandLoop(_) => None,
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        match self {
+            Self::Acp { answer, .. } => !answer.is_closed(),
+            Self::CommandLoop(lifetime) => lifetime.upgrade().is_some(),
+        }
+    }
+}
+
+/// A recovery choice is answered by the command loop, not ACP or AFK policy.
+/// Its actual local owner keeps this wrapper until resolution or cancellation.
+pub(super) struct CommandLoopQuestion {
+    request: ElicitationRequest,
+    owner: OperatorAway,
+    bridge: u64,
+    lifetime: Arc<()>,
+}
+
+impl std::ops::Deref for CommandLoopQuestion {
+    type Target = ElicitationRequest;
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+impl Drop for CommandLoopQuestion {
+    fn drop(&mut self) {
+        let lifetime = Arc::downgrade(&self.lifetime);
+        let mut state = self
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned");
+        state.pending.retain(|entry| {
+            entry.bridge != self.bridge
+                || !matches!(&entry.responder,
+                PendingResponder::CommandLoop(token) if token.ptr_eq(&lifetime))
+        });
+    }
 }
 
 #[derive(Debug)]

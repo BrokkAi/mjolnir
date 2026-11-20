@@ -299,7 +299,7 @@ pub(super) async fn prepare_control(
 }
 
 pub(super) struct Question {
-    request: ElicitationRequest,
+    request: CommandLoopQuestion,
     goal: GoalSnapshot,
     intent: Option<String>,
 }
@@ -343,6 +343,7 @@ pub(super) async fn recover(
     session: &SessionId,
     spec: &LaunchSpec,
     events: &mpsc::Sender<RuntimeEvent>,
+    pending_elicitations: &PendingElicitations,
     model_question: bool,
 ) -> Result<Option<Question>> {
     let context = spec
@@ -465,10 +466,11 @@ pub(super) async fn recover(
         }],
         tool_permission: None,
     };
+    let request = pending_elicitations.register_command_loop(request);
     emit_runtime_event(
         events,
         RuntimeEvent::ElicitationRequested {
-            request: request.clone(),
+            request: (*request).clone(),
         },
     )
     .await?;
@@ -552,6 +554,8 @@ mod tests {
             (false, true, None, 0, "active", false, false, None),
             (true, false, Some(true), 1, "active", false, false, None),
             (true, false, Some(false), 0, "active", false, false, None),
+            // Hard-won: ba25f84: an unanswered command-loop goal form must survive adoption until bridge exit.
+            (true, false, None, 0, "active", false, false, None),
             (false, false, None, 0, "paused", false, false, None),
             (false, false, None, 0, "blocked", false, false, None),
             (false, false, None, 0, "limited", false, false, None),
@@ -622,7 +626,7 @@ for line in sys.stdin:
             durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::CodexAdapter);
             let relay = Arc::new(crate::relay::RelayCell::new(durable));
             let spec = LaunchSpec {
-                operator_away: Default::default(),
+                operator_away: relay.observe().unwrap().operator_away.clone(),
                 imported_logins: None,
                 login_identity: Default::default(),
                 bridge_spec_path: None,
@@ -778,7 +782,7 @@ for line in sys.stdin:
                 }
             }
             let mut bytes = 0;
-            if let Some(accept) = answer {
+            if answer.is_some() || (asking && status == "active") {
                 loop {
                     let event = tokio::time::timeout(Duration::from_secs(10), receive.recv())
                         .await
@@ -787,6 +791,31 @@ for line in sys.stdin:
                     if let RuntimeEvent::ElicitationRequested { request } = event {
                         assert_eq!(request.id, RECOVERY_ID);
                         assert!(!root.path().join("resumes").exists());
+                        {
+                            let mut state = relay.lock().unwrap();
+                            state.operator_away.set(mj_core::state::OperatorPresence {
+                                away: true,
+                                revision: 1,
+                            });
+                            state
+                                .record_observation(
+                                    mj_core::relay::RelayObservation::ElicitationRequested {
+                                        request: request.clone(),
+                                    },
+                                )
+                                .unwrap();
+                            let cut = state.live_session_baseline().unwrap();
+                            assert_eq!(cut.questions, vec![request.clone()]);
+                            let adopted =
+                                mj_transcript::projection::materialized_session_from_live_baseline(
+                                    &cut,
+                                )
+                                .unwrap();
+                            assert_eq!(adopted.pending_elicitations, vec![request.clone()]);
+                        }
+                        let Some(accept) = answer else {
+                            break;
+                        };
                         let response = if accept {
                             ElicitationResponse::Accept {
                                 content: BTreeMap::from([(
@@ -811,6 +840,14 @@ for line in sys.stdin:
                         loop {
                             tokio::select! { _ = &mut ack => break, event = receive.recv() => { assert!(event.is_some()); } }
                         }
+                        assert!(
+                            relay
+                                .observe()
+                                .unwrap()
+                                .operator_away
+                                .live_questions()
+                                .is_empty()
+                        );
                         assert_eq!(
                             context.lock().unwrap().state.answered_resume.as_deref(),
                             Some("explicit-1")
@@ -849,6 +886,14 @@ for line in sys.stdin:
                 .unwrap()
                 .unwrap()
                 .unwrap();
+            assert!(
+                relay
+                    .observe()
+                    .unwrap()
+                    .operator_away
+                    .live_questions()
+                    .is_empty()
+            );
             let count = std::fs::read_to_string(root.path().join("resumes"))
                 .unwrap_or_default()
                 .lines()
