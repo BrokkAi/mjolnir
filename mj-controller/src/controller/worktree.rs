@@ -1390,7 +1390,7 @@ enum ExecutorGitLocation<'a> {
 }
 
 impl<'a, E> ExecutorGit<'a, E> {
-    fn local(executor: &'a E) -> Self {
+    pub(super) fn local(executor: &'a E) -> Self {
         Self {
             executor,
             location: ExecutorGitLocation::Local,
@@ -1416,8 +1416,9 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
         command: &mj_checkpoint::archive::GitCommand,
     ) -> Result<mj_checkpoint::archive::GitOutput> {
         ensure!(
-            command.stdin.is_empty() && command.env.is_empty(),
-            "an executor Git command takes no standard input or extra environment"
+            matches!(self.location, ExecutorGitLocation::Local)
+                || (command.stdin.is_empty() && command.env.is_empty()),
+            "a target Git command takes no standard input or extra environment"
         );
         let mut environment: Vec<_> = mj_checkpoint::archive::NON_INTERACTIVE_GIT_ENV
             .into_iter()
@@ -1454,10 +1455,24 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
         );
         let command = match self.location {
             ExecutorGitLocation::Local => {
-                let mut command =
-                    CommandSpec::new("git", args.into_iter().skip(1)).purpose("inspect submodules");
-                command.env.extend(environment);
-                command
+                let mut spec = CommandSpec::new("git", args.into_iter().skip(1))
+                    .purpose("inspect local Git checkout");
+                spec.env.extend(environment);
+                for (name, value) in &command.env {
+                    spec.env.insert(
+                        name.to_str()
+                            .context("Git environment name is not UTF-8")?
+                            .to_owned(),
+                        value
+                            .to_str()
+                            .context("Git environment value is not UTF-8")?
+                            .to_owned(),
+                    );
+                }
+                if !command.stdin.is_empty() {
+                    spec = spec.with_sensitive_stdin(command.stdin.clone());
+                }
+                spec
             }
             ExecutorGitLocation::Session {
                 backend: backend @ crate::targets::TargetLocator::LocalBare { .. },

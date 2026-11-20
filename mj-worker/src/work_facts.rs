@@ -228,7 +228,7 @@ fn command_text(raw: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-mod linux;
+pub(crate) mod linux;
 // Compiled for tests everywhere so its parsing is tested here; it is run, and
 // built outside tests, on macOS only.
 #[cfg(any(target_os = "macos", test))]

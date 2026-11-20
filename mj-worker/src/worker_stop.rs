@@ -51,6 +51,9 @@ use crate::worker_runtime::{WORKER_STARTUP_FILE, WorkerRootOwner};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod process_table;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod suspension;
+
 /// How often a stop looks at the lock and the processes it is waiting for.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// The graceful stop's TERM grace, which the former stop script gave the worker.

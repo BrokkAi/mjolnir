@@ -1464,11 +1464,11 @@ fn stream_command_with_stdin(
     if is_cancelled() {
         bail!("operation cancelled");
     }
-    let mut child = process
+    process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = crate::subprocess::spawn_child(&mut process)
         .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
     let group =
         (!command.detaches).then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
@@ -2219,11 +2219,11 @@ impl CancellableProcessExecutor {
         }
         let started = Instant::now();
         self.check_cancelled(&command.purpose)?;
-        let mut child = process
+        process
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+        let mut child = crate::subprocess::spawn_child(&mut process)
             .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
         let group = (!command.detaches && !command.preserve_children_on_cancel)
             .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));

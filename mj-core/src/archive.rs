@@ -198,14 +198,20 @@ pub struct WorkspaceSnapshotMetadata {
 
 pub fn archive_path_text(path: &std::path::Path) -> Result<String> {
     use std::path::Component;
-    ensure!(!path.as_os_str().is_empty(), "empty snapshot path");
+    ensure!(!path.as_os_str().is_empty(), "archive path is empty");
+    ensure!(
+        !path.is_absolute(),
+        "archive path '{}' is absolute",
+        path.display()
+    );
     let parts = path
         .components()
         .map(|component| {
             let Component::Normal(part) = component else {
-                bail!("unsafe snapshot path {}", path.display());
+                bail!("unsafe archive path '{}'", path.display());
             };
-            part.to_str().context("snapshot path is not UTF-8")
+            part.to_str()
+                .with_context(|| format!("archive path '{}' is not UTF-8", path.display()))
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(parts.join("/"))

@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Suspend and resume an independent clone using real mj, daemon and worker."""
+"""Suspend and resume an independent clone using real mj, daemon and worker.
+
+Build mj with test-hooks for the post-preflight timing cases. Build the worker
+separately from the same checkout using its normal features.
+"""
 import argparse
 import json
 from pathlib import Path
 import subprocess
+import sys
 import time
 import zipfile
 
@@ -27,7 +32,7 @@ def main():
     parser.add_argument("--mj", required=True, type=Path)
     parser.add_argument("--worker", required=True, type=Path)
     parser.add_argument("--instance", required=True)
-    parser.add_argument("--case", choices=["round-trip", "untracked"], required=True)
+    parser.add_argument("--case", choices=["round-trip", "untracked", "detached", "late-file", "git-error"], required=True)
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named instance")
@@ -35,10 +40,15 @@ def main():
     lab = reliability_lab.Lab(args.mj, "origin-delta-suspend", 0)
     git_server = None
     session = None
+    writer = None
+    checkpoint_hook = None
     try:
         lab.prepare()
         with (lab.config / "config.toml").open("a") as config:
             config.write("\n[jev]\nenabled = false\n[github.watch]\nenabled = false\n")
+        if args.case in {"late-file", "git-error"}:
+            lab.hook_name = "origin_delta_after_preflight"
+            checkpoint_hook = lab.hooks / f"{lab.hook_name}.continue"
         env = dict(lab.environment(), MJ_INSTANCE=args.instance,
                    MJ_WORKER_BINARY=str(args.worker.resolve()))
 
@@ -61,7 +71,9 @@ def main():
             return result
 
         def record():
-            return lab.daemon_request({"action": "session_record", "arguments": {"session_id": session}})
+            reply = lab.daemon_request({"action": "session_record", "arguments": {"session_id": session}})
+            assert reply["value"] is not None, reply
+            return reply["value"]
 
         repos = lab.runtime_root / "origins"
         repos.mkdir()
@@ -84,6 +96,9 @@ def main():
                              check=False).returncode == 0, "fixture Git origin")
         git(lab.project, "submodule", "add", f"{base}/module.git", "vendor/module")
         git(lab.project, "commit", "-m", "register module")
+        (module_src / "module.txt").write_text("later published submodule checkout\n")
+        git(module_src, "commit", "-am", "publish later module state")
+        git(module_src, "push", repos / "module.git", "main")
         git(lab.project, "clone", "--bare", ".", repos / "project.git")
         git(lab.project, "remote", "add", "origin", f"{base}/project.git")
         git(lab.project, "fetch", "origin")
@@ -108,9 +123,94 @@ def main():
             assert record()["state"] == "running", record()
             assert pid_path.read_text() == worker_before
             assert untracked.read_text() == "keep me\n"
+            untracked.unlink()
+            git_directory = checkout / ".git"
+            with (git_directory / "info/exclude").open("a") as excludes:
+                excludes.write("\n.mj/keep/\n")
+            keep = checkout / ".mj/keep"
+            keep.mkdir(parents=True, exist_ok=True)
+            saved = keep / "ignored.txt"
+            saved.write_text("preserve ignored keep data\n")
+            git(checkout, "check-ignore", saved.relative_to(checkout))
+            result = run("suspend", "--session", session, check=False)
+            assert result.returncode != 0 and "ignored.txt" in result.stderr, result
+            assert record()["state"] == "running", record()
+            assert pid_path.read_text() == worker_before
+            assert saved.read_text() == "preserve ignored keep data\n"
+            return
+
+        if args.case in {"detached", "late-file", "git-error"}:
+            original_index = None
+            if args.case in {"detached", "late-file"}:
+                started = lab.runtime_root / "writer-started"
+                release = lab.runtime_root / "writer-release"
+                wrote = lab.runtime_root / "writer-wrote"
+                writer = subprocess.Popen(
+                    [sys.executable, "-c", """
+import os
+from pathlib import Path
+import sys
+import time
+
+started, release, wrote, target = map(Path, sys.argv[1:])
+started.write_text(str(os.getpid()))
+while not release.exists():
+    time.sleep(0.01)
+target.write_text("written after preflight\\n")
+wrote.touch()
+while True:
+    if target.name == "README.md":
+        target.write_text("written after preflight\\n")
+    time.sleep(0.02)
+""", str(started), str(release), str(wrote),
+                     "README.md" if args.case == "detached" else "late.txt"],
+                    cwd=checkout, env=dict(env, MJ_SESSION_ID=session), start_new_session=True,
+                )
+                wait_for(started.exists, "detached writer to start")
+                if args.case == "detached":
+                    release.touch()
+                    wait_for(wrote.exists, "detached writer to write tracked data")
+
+            run("suspend", "--session", session)
+            if checkpoint_hook is not None:
+                wait_for((lab.hooks / f"{lab.hook_name}.reached").exists, "completed suspend preflight")
+                if args.case == "late-file":
+                    release.touch()
+                    wait_for(wrote.exists, "background write after preflight")
+                else:
+                    index = checkout / ".git/index"
+                    original_index = index.read_bytes()
+                    index.write_bytes(b"injected corrupt Git index")
+                checkpoint_hook.touch()
+
+            if args.case == "detached":
+                wait_for(lambda: record()["state"] == "stopped", "suspend after writer stop")
+                assert writer.wait(timeout=WAIT) < 0, "detached writer was not terminated"
+                assert not checkout.exists(), str(checkout)
+            else:
+                after = wait_for(
+                    lambda: row if (row := record())["state"] == "running"
+                    and pid_path.exists() and pid_path.read_text() != worker_before else None,
+                    "agent restarted inside the source checkout",
+                )
+                assert checkout.is_dir(), after
+                assert after.get("last_checkpoint_error"), after
+                if args.case == "late-file":
+                    assert "late.txt" in after["last_checkpoint_error"], after
+                    assert writer.wait(timeout=WAIT) < 0
+                    assert (checkout / "late.txt").read_text() == "written after preflight\n"
+                else:
+                    assert "index" in after["last_checkpoint_error"].lower(), after
+                    assert index.read_bytes() == b"injected corrupt Git index"
+                    index.write_bytes(original_index)
+                    git(checkout, "status", "--porcelain")
             return
 
         git(checkout, "submodule", "update", "--init")
+        git(checkout / "vendor/module", "switch", "--detach", "origin/main")
+        assert git(checkout / "vendor/module", "rev-parse", "HEAD").stdout != git(
+            checkout, "rev-parse", ":vendor/module"
+        ).stdout
         (checkout / "local.txt").write_text("unpushed commit\n")
         git(checkout, "add", "local.txt")
         git(checkout, "commit", "-m", "unpushed")
@@ -151,6 +251,11 @@ def main():
         assert actual == expected, (actual, expected)
         assert git(checkout, "config", "--get", "mj.fixtureOnly", check=False).returncode == 1
     finally:
+        if checkpoint_hook is not None and checkpoint_hook.parent.exists():
+            checkpoint_hook.touch(exist_ok=True)
+        if writer is not None and writer.poll() is None:
+            writer.terminate()
+            writer.wait(timeout=WAIT)
         if git_server is not None:
             git_server.terminate()
             git_server.wait(timeout=WAIT)

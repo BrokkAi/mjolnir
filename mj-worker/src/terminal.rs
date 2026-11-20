@@ -435,8 +435,7 @@ fn spawn_shell(line: &str, spawn: &TerminalSpawn) -> Result<tokio::process::Chil
     command.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
     // Own the group so a kill reaches descendants holding the pipes open.
     command.process_group(0);
-    command
-        .spawn()
+    mj_core::subprocess::spawn_async_child(&mut command)
         .with_context(|| format!("spawn client terminal: {line}"))
 }
 

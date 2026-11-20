@@ -19,7 +19,9 @@ use super::checkpoint::{
 use super::worker_restart::WorkerRestartLeftNoWorker;
 use super::{Controller, now, persist_session_record_transition_or_restore};
 
+mod origin_delta;
 mod subagent;
+use origin_delta::OriginDeltaSuspend;
 
 /// Trusted public guidance attached at the failing lifecycle boundary. Never
 /// derive it from an error chain, which can contain credentials and host paths.
@@ -103,13 +105,10 @@ impl Controller {
         ignore_nested_repositories: bool,
     ) -> Result<CheckpointExportPolicy> {
         let checkout = self.state.checkout(session_id)?;
-        if checkout.managed_worktree().is_some_and(|worktree| {
-            worktree.kind == ManagedCheckoutKind::Clone
-                && matches!(
-                    worktree.target,
-                    mj_core::state::ManagedWorktreeTarget::Local
-                )
-        }) {
+        if checkout
+            .managed_worktree()
+            .is_some_and(mj_core::state::ManagedWorktree::uses_origin_delta_suspend)
+        {
             Ok(CheckpointExportPolicy::OriginDelta)
         } else if ignore_nested_repositories {
             Ok(CheckpointExportPolicy::IgnoreNestedRepositories)
@@ -118,7 +117,11 @@ impl Controller {
         }
     }
 
-    pub async fn preflight_origin_delta_suspension(&self, session_id: &str) -> Result<()> {
+    pub fn preflight_origin_delta_suspension(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
         if self.explicit_suspend_export_policy(session_id, false)?
             != CheckpointExportPolicy::OriginDelta
         {
@@ -133,21 +136,31 @@ impl Controller {
             &worktree.worktree_root,
             PathBuf::new(),
         );
-        mj_core::runtime::spawn_blocking(move || {
+        mj_core::runtime::off_async_worker(|| {
             use mj_checkpoint::snapshot::{
                 SnapshotRefused, require_managed_snapshot_without_consent,
             };
-            require_managed_snapshot_without_consent(&mj_checkpoint::archive::SystemGit, &input)
-                .map_err(|error| {
-                    if let Some(reason) = error.downcast_ref::<SnapshotRefused>() {
-                        mj_core::refusal::Refusal::precondition(reason.to_string()).into()
-                    } else {
-                        error
-                    }
-                })
+            require_managed_snapshot_without_consent(
+                &super::worktree::ExecutorGit::local(executor),
+                &input,
+            )
+            .map_err(|error| {
+                if let Some(reason) = error.downcast_ref::<SnapshotRefused>() {
+                    mj_core::refusal::Refusal::precondition(reason.to_string()).into()
+                } else {
+                    error
+                }
+            })
         })
-        .await
-        .context("join managed clone suspend inventory")?
+    }
+
+    pub fn record_origin_delta_suspend_acceptance(&self, session_id: &str) -> Result<()> {
+        if self.explicit_suspend_export_policy(session_id, false)?
+            == CheckpointExportPolicy::OriginDelta
+        {
+            OriginDeltaSuspend::load(self, session_id)?.accept()?;
+        }
+        Ok(())
     }
 
     /// Checkpoint, ask the harness to close, and only then tear down the exact
@@ -341,7 +354,7 @@ impl Controller {
         checkpoint_export_policy: CheckpointExportPolicy,
         acknowledge_unpublished_work: bool,
         before_close: Option<BeforeClose>,
-        held_relay: Option<super::checkpoint::ControllerRelayLease>,
+        mut held_relay: Option<super::checkpoint::ControllerRelayLease>,
         exclusivity: LatchExclusivity,
     ) -> Result<bool> {
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
@@ -352,8 +365,12 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        if checkpoint_export_policy == CheckpointExportPolicy::OriginDelta
-            && let Err(error) = self.preflight_origin_delta_suspension(session_id).await
+        let mut origin_delta = (checkpoint_export_policy == CheckpointExportPolicy::OriginDelta)
+            .then(|| OriginDeltaSuspend::load(self, session_id))
+            .transpose()?;
+        if before_close.is_none()
+            && origin_delta.as_ref().is_some_and(|attempt| !attempt.request_recorded())
+            && let Err(error) = self.preflight_origin_delta_suspension(session_id, executor)
         {
             if previous.state == SessionState::Closing {
                 let record = self.state.sessions.get_mut(session_id).unwrap();
@@ -361,6 +378,11 @@ impl Controller {
                 return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
             }
             return Err(error);
+        }
+        if let Some(attempt) = origin_delta.as_mut()
+            && !attempt.accepted()
+        {
+            attempt.accept()?;
         }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         // Persist the close intent before beginning its checkpoint. A process
@@ -373,9 +395,76 @@ impl Controller {
             "persist closing state before checkpointing the session",
         )?;
 
+        if let Some(attempt) = origin_delta.as_mut() {
+            #[cfg(feature = "test-hooks")]
+            mj_core::runtime::off_async_worker(|| mj_core::test_hooks::reach_test_hook("origin_delta_after_preflight"))?;
+            // An accepted suspend owns this Closing record. The worker's
+            // receipt carries the stop across a controller handoff.
+            if let Some(reason) = attempt.restart_reason()? {
+                if attempt.request_recorded() {
+                    attempt.wait_for_stop(executor).await?;
+                }
+                return Err(self.restart_after_refused_origin_delta(
+                    admission, session_id, executor, manager, attempt, &previous, anyhow::anyhow!(reason),
+                ).await);
+            }
+            if before_close.is_some() {
+                executor.begin_resumable_work()?;
+                let children = executor.before_move_source_stop().await;
+                executor.end_resumable_work("start managed clone quiescence")?;
+                if let Err(error) = children {
+                    let record = self.state.sessions.get_mut(session_id).unwrap();
+                    apply_close_checkpoint_failure(record, &previous, &error, now());
+                    return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
+                }
+            }
+            if !attempt.request_recorded() && let Some(manager) = manager {
+                let handle = manager.wait_for_session(session_id, Duration::from_secs(5)).await?;
+                let mut lease = handle.lease_connection(admission).await?;
+                if lease.connection_mut().sync().await?.operational.execution == RelayExecutionState::Running {
+                    lease.connection_mut().submit(new_command_id("suspend-interrupt")?, RelayCommand::CancelTurn).await?;
+                }
+            }
+            if let Err(error) = attempt.request_stop(executor) {
+                // If delivery was lost after the durable request was written,
+                // recovery will ask its owner for the stop receipt.
+                if !OriginDeltaSuspend::load(self, session_id)?.request_recorded() {
+                    let record = self.state.sessions.get_mut(session_id).unwrap();
+                    apply_close_checkpoint_failure(record, &previous, &error, now());
+                    return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
+                }
+                tracing::warn!(session_id, %error, "waiting for the worker's durable suspend request");
+            }
+            let receipt = attempt.wait_for_stop(executor).await?;
+            if let Some(reason) = attempt.restart_reason()? {
+                return Err(self.restart_after_refused_origin_delta(
+                    admission, session_id, executor, manager, attempt, &previous, anyhow::anyhow!(reason),
+                ).await);
+            }
+            if let Some(reason) = receipt.error {
+                return Err(self.restart_after_refused_origin_delta(
+                    admission, session_id, executor, manager, attempt, &previous,
+                    mj_core::refusal::Refusal::precondition(reason).into(),
+                ).await);
+            }
+            held_relay = Some(match attempt.start_worker(
+                self, admission, session_id, executor, manager,
+                mj_core::worker_launch::WorkerRunMode::CheckpointOnly,
+            ).await {
+                Ok(relay) => relay,
+                Err(error) if executor.shutdown_interrupted() => return Err(error),
+                Err(error) => {
+                    return Err(self.restart_after_refused_origin_delta(
+                        admission, session_id, executor, manager, attempt, &previous, error,
+                    ).await);
+                }
+            });
+            executor.begin_resumable_work()?;
+        }
+
         // Close seals the relay at the exact latched cursor, so this checkpoint
         // keeps its exclusive connection until the relay reports Closed.
-        let mut latched = match self
+        let checkpoint = self
             .checkpoint_session_latched_for_operation(admission,
                 session_id,
                 executor,
@@ -385,10 +474,18 @@ impl Controller {
                 move_intent.as_ref().map(|(operation, _)| operation.operation_id.as_str()),
                 held_relay,
             )
-            .await
-        {
+            .await;
+        if origin_delta.is_some() {
+            executor.end_resumable_work("record managed clone capture outcome")?;
+        }
+        let mut latched = match checkpoint {
             Ok(latched) => latched,
             Err(error) => {
+                if let Some(attempt) = origin_delta.as_ref() {
+                    return Err(self.restart_after_refused_origin_delta(
+                        admission, session_id, executor, manager, attempt, &previous, error,
+                    ).await);
+                }
                 let record = self.state.sessions.get_mut(session_id).unwrap();
                 if exclusivity.close_purpose().is_some()
                     && super::checkpoint::checkpoint_was_deferred(&error)
@@ -553,6 +650,12 @@ impl Controller {
                     "could not release the checkpoint barrier of a close that did not proceed"
                 );
             }
+            if let Some(attempt) = origin_delta.as_ref() {
+                latched.relay.release();
+                return Err(self.restart_after_refused_origin_delta(
+                    admission, session_id, executor, manager, attempt, &previous, error,
+                ).await);
+            }
             let record = self.state.sessions.get_mut(session_id).unwrap();
             record.state = state_after_unsealed_close(&previous);
             // An automatic close that stands down did not fail.
@@ -674,6 +777,70 @@ impl Controller {
         }).await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn restart_after_refused_origin_delta(
+        &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: Option<&SessionManagerControl>,
+        attempt: &OriginDeltaSuspend,
+        previous: &SessionRecord,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        let recovered = async {
+            attempt.record_restart(&error)?;
+            executor.notify_notice("Restarting the agent in the retained checkout");
+            if executor.cancellation_requested() && !executor.shutdown_interrupted() {
+                // Cancellation ends the suspend. The retained checkout still
+                // needs its agent back after quiescence finished.
+                executor.begin_resumable_work()?;
+                let restarted = attempt
+                    .start_worker(
+                        self,
+                        admission,
+                        session_id,
+                        &ProcessExecutor,
+                        manager,
+                        mj_core::worker_launch::WorkerRunMode::Harness,
+                    )
+                    .await;
+                executor.end_resumable_work("record restart after cancelled suspend")?;
+                restarted?.release();
+            } else {
+                attempt
+                    .start_worker(
+                        self,
+                        admission,
+                        session_id,
+                        executor,
+                        manager,
+                        mj_core::worker_launch::WorkerRunMode::Harness,
+                    )
+                    .await?
+                    .release();
+            }
+            let record = self
+                .state
+                .sessions
+                .get_mut(session_id)
+                .context("session disappeared during suspend")?;
+            record.state = state_after_unsealed_close(previous);
+            record.last_checkpoint_error = Some(format!("{error:#}"));
+            record.updated_at = now();
+            self.persist_session_state(session_id)?;
+            if let Err(cleanup) = attempt.clear_after_restart() {
+                tracing::warn!(session_id, %cleanup, "could not clear worker suspend records");
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        match recovered {
+            Ok(()) => error,
+            Err(restart) => error.context(format!("restart the retained session: {restart:#}")),
+        }
+    }
+
     /// Resume the durable closing state after a controller restart. If the
     /// relay had accepted Close, wait for it and destroy through the exact
     /// installed checkpoint gate. If it had not, take a fresh checkpoint;
@@ -742,8 +909,25 @@ impl Controller {
             anyhow::Ok((lease, execution))
         }
         .await;
+        let origin_delta = if before_close.is_some()
+            && self.explicit_suspend_export_policy(session_id, ignore_nested_repositories)?
+                == CheckpointExportPolicy::OriginDelta
+        {
+            Some(OriginDeltaSuspend::load(self, session_id)?)
+        } else {
+            None
+        };
+        let accepted_origin_delta = origin_delta.as_ref().is_some_and(OriginDeltaSuspend::accepted);
+        let resumable_origin_delta = origin_delta.as_ref().is_some_and(OriginDeltaSuspend::request_recorded);
         let (mut lease, execution) = match connection {
             Ok(connected) => connected,
+            Err(_) if resumable_origin_delta => {
+                return Box::pin(self.suspend_session_controlled_with_manager(
+                    admission, session_id, executor, Some(manager), None,
+                    SourceTargetDisposition::Destroy, CheckpointExportPolicy::OriginDelta,
+                    acknowledge_unpublished_work, before_close, None, LatchExclusivity::HoldThroughClose,
+                )).await;
+            }
             Err(error) => {
                 tracing::warn!(
                     session_id,
@@ -771,8 +955,8 @@ impl Controller {
             }
             RelayExecutionState::Idle | RelayExecutionState::Running => {
                 lease.release();
-                let export_policy = if before_close.is_some() {
-                    self.explicit_suspend_export_policy(session_id, ignore_nested_repositories)?
+                let export_policy = if accepted_origin_delta {
+                    CheckpointExportPolicy::OriginDelta
                 } else if ignore_nested_repositories {
                     CheckpointExportPolicy::IgnoreNestedRepositories
                 } else {

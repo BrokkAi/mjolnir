@@ -859,6 +859,9 @@ pub fn export_checkpoint_with_native_state(
     }
     let native_ms = native_started.elapsed().as_millis() as u64;
     let repositories_started = std::time::Instant::now();
+    if protocol_version == CHECKPOINT_ORIGIN_DELTA_EXPORT_PROTOCOL_VERSION {
+        verify_origin_delta_quiescence(&relay_root, &workspace_root, &spec.repositories, git)?;
+    }
     let repositories = collect_checkpoint_repositories_with_policy(
         &workspace_root,
         &spec.repositories,
@@ -912,6 +915,41 @@ pub(super) fn collect_checkpoint_repositories(
         None,
         crate::archive::UntrackedFiles::Include,
     )
+}
+
+fn verify_origin_delta_quiescence(
+    relay_root: &Path,
+    workspace_root: &Path,
+    repositories: &[CheckpointRepositorySpec],
+    git: &dyn GitCommandRunner,
+) -> Result<()> {
+    use mj_core::worker_launch::{WorkerLaunchConfig, WorkerRunMode};
+    use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest};
+
+    let [repository] = repositories else {
+        bail!("managed clone suspend requires exactly one repository");
+    };
+    let request: SuspendRequest = wire::read(relay_root, wire::REQUEST)?
+        .context("managed clone capture has no quiescence request")?;
+    let receipt: SuspendReceipt = wire::read(relay_root, wire::RECEIPT)?
+        .context("managed clone capture has no quiescence receipt")?;
+    ensure!(
+        receipt.operation == request.operation
+            && receipt.error.is_none()
+            && !request.worker.is_alive()?
+            && WorkerLaunchConfig::read(&relay_root.join("launch.json"))?.run_mode
+                == WorkerRunMode::CheckpointOnly,
+        "managed clone capture requires a quiesced worker"
+    );
+    let location = crate::archive::git::locate_checkout(
+        git,
+        &workspace_root.join(&repository.relative_destination),
+    )?;
+    ensure!(
+        location.top_level.canonicalize()? == request.checkout.canonicalize()?,
+        "quiescence receipt belongs to a different checkout"
+    );
+    Ok(())
 }
 
 pub fn managed_clone_snapshot_input(

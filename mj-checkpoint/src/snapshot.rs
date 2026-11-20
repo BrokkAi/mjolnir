@@ -48,7 +48,6 @@ pub use mj_core::archive::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSnapshot {
-    #[serde(flatten)]
     pub metadata: WorkspaceSnapshotMetadata,
     /// Non-thin Git pack, if origin does not supply every object.
     pub pack: Option<PathBuf>,
@@ -374,49 +373,7 @@ impl GitCommandRunner for CaptureGit<'_> {
         ];
         arguments.extend(command.arguments);
         command.arguments = arguments;
-        // SystemGit's noninteractive SSH default must not hide the source's
-        // identity/proxy command. Resolve it through the same runner so target
-        // and worktree configuration, including includes, retain precedence.
-        if std::env::var_os("GIT_SSH_COMMAND").is_none()
-            && !command
-                .env
-                .iter()
-                .any(|(name, _)| name == "GIT_SSH_COMMAND")
-        {
-            let configured = self.inner.run(
-                repository,
-                &GitCommand {
-                    arguments: [
-                        "-c",
-                        "gc.auto=0",
-                        "-c",
-                        "maintenance.auto=false",
-                        "config",
-                        "--get",
-                        "core.sshCommand",
-                    ]
-                    .map(OsString::from)
-                    .to_vec(),
-                    env: command.env.clone(),
-                    ..Default::default()
-                },
-            )?;
-            ensure!(
-                configured.status == 0 || configured.status == 1,
-                "{}",
-                git_failure("read source SSH command", &configured)
-            );
-            if configured.status == 0 {
-                let value = configured
-                    .stdout
-                    .strip_suffix(b"\n")
-                    .unwrap_or(&configured.stdout);
-                command.env.push((
-                    "GIT_SSH_COMMAND".into(),
-                    mj_core::path_input::from_git_bytes(value)?.into_os_string(),
-                ));
-            }
-        }
+        honor_repository_ssh(self.inner, repository, &mut command)?;
         // Snapshot packs must hydrate promised objects they carry. The -c
         // maintenance settings above also reach Git's lazy-fetch children.
         command.env.push(("GIT_NO_LAZY_FETCH".into(), "0".into()));
@@ -424,6 +381,47 @@ impl GitCommandRunner for CaptureGit<'_> {
         command.env.push(("GIT_OPTIONAL_LOCKS".into(), "0".into()));
         self.inner.run(repository, &command)
     }
+}
+// Preserve a user-selected identity or proxy before the runner supplies its
+// default SSH command. The explicit process environment still wins.
+fn honor_repository_ssh(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    command: &mut GitCommand,
+) -> Result<()> {
+    if std::env::var_os("GIT_SSH_COMMAND").is_none()
+        && !command
+            .env
+            .iter()
+            .any(|(name, _)| name == "GIT_SSH_COMMAND")
+    {
+        let configured = runner.run(
+            repository,
+            &GitCommand {
+                arguments: ["config", "--get", "core.sshCommand"]
+                    .map(OsString::from)
+                    .to_vec(),
+                env: command.env.clone(),
+                ..Default::default()
+            },
+        )?;
+        ensure!(
+            configured.status == 0 || configured.status == 1,
+            "{}",
+            git_failure("read source SSH command", &configured)
+        );
+        if configured.status == 0 {
+            let value = configured
+                .stdout
+                .strip_suffix(b"\n")
+                .unwrap_or(&configured.stdout);
+            command.env.push((
+                "GIT_SSH_COMMAND".into(),
+                mj_core::path_input::from_git_bytes(value)?.into_os_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 pub(crate) fn git_path(
     runner: &dyn GitCommandRunner,
@@ -2587,6 +2585,56 @@ fn tracked_keep_paths(
     paths.dedup();
     Ok(paths)
 }
+
+fn include_ignored_keep_paths(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    inventory: &mut WorkspaceInventory,
+    keep: &Path,
+) -> Result<()> {
+    let local_keep = match keep.strip_prefix(&inventory.checkout.checkout_path) {
+        Ok(path) if !path.as_os_str().is_empty() => path,
+        _ if inventory.checkout.checkout_path.starts_with(keep) => Path::new("."),
+        _ => return Ok(()),
+    };
+    let paths = git_bytes(
+        runner,
+        checkout,
+        [
+            "--literal-pathspecs",
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+            local_keep.to_str().context("keep path is not UTF-8")?,
+        ],
+        &[],
+        "inspect ignored keep files",
+    )?;
+    for path in paths
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path = mj_core::path_input::from_git_bytes(path)?;
+        let full_path = checkout.join(&path);
+        let metadata = fs::symlink_metadata(&full_path)?;
+        let (bytes, identity) = if metadata.is_dir() {
+            nested_repository_inventory(&full_path)?
+        } else {
+            (metadata.len(), file_identity(&metadata)?)
+        };
+        inventory.untracked.push(UntrackedPath {
+            checkout: inventory.checkout.clone(),
+            path,
+            bytes,
+            identity,
+        });
+    }
+    Ok(())
+}
+
 fn repository_inventory(
     runner: &dyn GitCommandRunner,
     repository: &RepositoryInput,
@@ -2605,6 +2653,7 @@ fn repository_inventory(
         && let Some(keep) = keep_relative(repository)?
     {
         inventory.keep_dir = repository.keep_dir.clone();
+        include_ignored_keep_paths(runner, &repository.checkout, &mut inventory, &keep)?;
         inventory.tracked_keep_files = tracked_keep_paths(
             runner,
             &repository.checkout,
@@ -2624,17 +2673,14 @@ fn repository_inventory(
             .sort_by(|left, right| left.value.cmp(&right.value));
         inventory.tracked_keep_files.dedup();
         for (path, nested) in &mut inventory.worktrees {
+            let directory = repository.checkout.join(path.as_path());
             nested.keep_dir = repository.keep_dir.clone();
-            nested.tracked_keep_files = tracked_keep_paths(
-                runner,
-                &repository.checkout.join(path.as_path()),
-                &nested.checkout,
-                &keep,
-                None,
-            )?;
+            include_ignored_keep_paths(runner, &directory, nested, &keep)?;
+            nested.tracked_keep_files =
+                tracked_keep_paths(runner, &directory, &nested.checkout, &keep, None)?;
             nested.tracked_keep_files.extend(tracked_keep_paths(
                 runner,
-                &repository.checkout.join(path.as_path()),
+                &directory,
                 &nested.checkout,
                 &keep,
                 Some("HEAD"),
@@ -3488,22 +3534,42 @@ fn restore_submodules(
             .max_by_key(|parent| parent.path.components().count())
             .map(|parent| parent.path.as_path())
             .unwrap_or_else(|| Path::new(""));
-        let output = runner.run(
-            &checkout.join(parent),
-            &GitCommand {
-                arguments: vec![
-                    "--literal-pathspecs".into(),
-                    "submodule".into(),
-                    "update".into(),
-                    "--init".into(),
-                    "--".into(),
-                    module.path.strip_prefix(parent)?.as_os_str().to_owned(),
-                ],
-                ..Default::default()
-            },
-        );
+        let relative = module.path.strip_prefix(parent)?;
+        let parent = checkout.join(parent);
+        let mut command = GitCommand {
+            arguments: vec![
+                "--literal-pathspecs".into(),
+                "submodule".into(),
+                "update".into(),
+                "--init".into(),
+                "--".into(),
+                relative.as_os_str().to_owned(),
+            ],
+            ..Default::default()
+        };
+        honor_repository_ssh(runner, &parent, &mut command)?;
+        let output = runner.run(&parent, &command);
         match output {
-            Ok(output) if output.status == 0 => {}
+            Ok(output) if output.status == 0 => {
+                let directory = checkout.join(&module.path);
+                let restored =
+                    fetch_prerequisites(runner, &directory, std::slice::from_ref(&module.commit))
+                        .and_then(|()| {
+                            git_text(
+                                runner,
+                                &directory,
+                                ["switch", "--detach", "--", &module.commit],
+                            )
+                            .map(drop)
+                        });
+                if let Err(error) = restored {
+                    notices.push(format!(
+                        "submodule {} was not restored at {}: {error:#}",
+                        module.path.display(),
+                        module.commit
+                    ));
+                }
+            }
             Ok(output) => notices.push(format!(
                 "submodule {} was not initialized: {}",
                 module.path.display(),
@@ -3525,26 +3591,25 @@ fn fetch_prerequisites(
     let missing = missing_tips(runner, checkout, prerequisites)?;
     let mut failure = String::new();
     if !missing.is_empty() {
-        let output = runner.run(
-            checkout,
-            &GitCommand {
-                arguments: [
-                    "fetch",
-                    "--no-write-fetch-head",
-                    "--no-tags",
-                    "--no-prune",
-                    "--no-prune-tags",
-                    "--refmap=",
-                    "--no-recurse-submodules",
-                    "--stdin",
-                    "origin",
-                ]
-                .map(Into::into)
-                .to_vec(),
-                stdin: format!("{}\n", missing.join("\n")).into_bytes(),
-                ..Default::default()
-            },
-        )?;
+        let mut command = GitCommand {
+            arguments: [
+                "fetch",
+                "--no-write-fetch-head",
+                "--no-tags",
+                "--no-prune",
+                "--no-prune-tags",
+                "--refmap=",
+                "--no-recurse-submodules",
+                "--stdin",
+                "origin",
+            ]
+            .map(Into::into)
+            .to_vec(),
+            stdin: format!("{}\n", missing.join("\n")).into_bytes(),
+            ..Default::default()
+        };
+        honor_repository_ssh(runner, checkout, &mut command)?;
+        let output = runner.run(checkout, &command)?;
         if output.status != 0 {
             failure = git_failure("fetch snapshot prerequisites", &output).to_string();
         }
@@ -4906,22 +4971,27 @@ mod tests {
     // Hard-won: 227e874ea: retained source/configuration regression.
     #[cfg(unix)]
     #[test]
-    fn integration_review_capture_honors_source_ssh_command() {
+    fn integration_snapshot_fetch_honors_repository_ssh_command() {
         let root = Repo::new();
+        let staging = root.provision("staging");
+        root.commit("published after the seed was cloned\n");
+        git(&root.checkout, &["push", "origin", "main"]);
         let ssh = root.temp.path().join("ssh.sh");
         fs::write(
             &ssh,
             format!("exec git-upload-pack '{}'\n", root.origin.display()),
         )
         .unwrap();
-        git(
-            &root.checkout,
-            &[
-                "config",
-                "core.sshCommand",
-                &format!("sh '{}'", ssh.display()),
-            ],
-        );
+        for checkout in [&root.checkout, &staging] {
+            git(
+                checkout,
+                &[
+                    "config",
+                    "core.sshCommand",
+                    &format!("sh '{}'", ssh.display()),
+                ],
+            );
+        }
         git(
             &root.checkout,
             &["remote", "set-url", "origin", "ssh://snapshot.invalid/repo"],
@@ -4929,6 +4999,12 @@ mod tests {
         let snapshot = root.capture(&CheckoutOwnership::Managed);
         assert!(!snapshot.remote_refs_stale);
         assert!(snapshot.pack.is_none());
+        let notices = restore_workspace_snapshot(&FileGit, &snapshot, &staging).unwrap();
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(
+            git(&staging, &["rev-parse", "HEAD"]),
+            git(&root.checkout, &["rev-parse", "HEAD"])
+        );
     }
 
     // Hard-won: 227e874ea: retained source/configuration regression.
@@ -5343,7 +5419,7 @@ mod tests {
             fs::remove_dir_all(&r.checkout).unwrap();
             let restored = r.restore(&snapshot, None);
             assert_eq!(read_head(&FileGit, &restored).unwrap(), head);
-            for (name, oid) in snapshot.refs {
+            for (name, oid) in snapshot.metadata.refs {
                 assert_eq!(refs[&name], oid);
             }
             assert!(git(&restored, &["status", "--porcelain"]).is_empty());
