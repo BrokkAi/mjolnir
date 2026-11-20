@@ -699,7 +699,12 @@ fn plan_monthly_price(plan: &str) -> Option<u32> {
         // ChatGPT Go includes a Codex allowance at a US list price of $8:
         // https://openai.com/index/introducing-chatgpt-go/
         "go" => Some(8),
-        "plus" => Some(20),
+        // The weight stands for the plan's allowance. Standard Business
+        // (reported as `team` or `self_serve_business_usage_based`) has the
+        // same five-hour Codex estimates as Plus:
+        // https://learn.chatgpt.com/docs/pricing#included-usage
+        // Enterprise, Edu and Business Premium have no documented equivalent.
+        "plus" | "team" | "self_serve_business_usage_based" => Some(20),
         "prolite" => Some(100),
         "pro" => Some(200),
         "promax" => Some(500),
