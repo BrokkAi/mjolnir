@@ -29,8 +29,13 @@ MISSING_KINDS = ("value_flow", "field_writes", "call_arguments", "guarded_path",
                  "keyed_matching", "contract", "other")
 # Default profile, model and quota scope per labeller. --profile pins a profile. Replication has
 # no default: each batch runs on the --profiles entry (the coordinator's Claude allotment) with
-# the most Opus week left.
-ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": (None, "opus", "opus")}
+# the most of its week left. The user chose Sonnet/high on a 10% sample for replication
+# (2026-11-20), as a trial before deciding on more.
+ROLES = {"primary": ("codex", "gpt-6.1-sol", "gpt"), "replication": (None, "sonnet", "sonnet")}
+# The replication sample: within each split and repo, the items ranked first by a salted hash of
+# their id, round(10%) of them and at least one. Fixed before any replication label exists.
+REPLICATION_SHARE = 0.10
+REPLICATION_SALT = "rql-census-replication-sample-v1"
 
 
 # The plan reserves codex4 for other sessions (PLAN-rql-census.md, Cost and quota).
@@ -735,13 +740,38 @@ def checkout_revision(repo, pins):
     return pins[repo]
 
 
-def checkout(args, repo, revision, unit):
+def replication_sample(rows):
+    by_repo = defaultdict(list)
+    for row in rows:
+        by_repo[row["repo"]].append(row)
+    chosen = set()
+    for repo, members in by_repo.items():
+        ranked = sorted(members, key=lambda row: hashlib.sha256(
+            f"{REPLICATION_SALT}\0{repo}\0{row['id']}".encode()).hexdigest())
+        count = max(1, int(len(members) * REPLICATION_SHARE + 0.5))
+        chosen.update(row["id"] for row in ranked[:count])
+    return [row for row in rows if row["id"] in chosen]
+
+
+def source_clone(args, repo):
     if repo == "mjolnir":
-        source = args.mjolnir_clone
-    elif repo == "bifrost-dev":
-        source = args.bifrost_clone
-    else:
-        source = args.check_clones / repo.replace("/", "_")
+        return args.mjolnir_clone
+    if repo == "bifrost-dev":
+        return args.bifrost_clone
+    return args.check_clones / repo.replace("/", "_")
+
+
+def census_bundle(repo):
+    """The mj bundle a container session of this repo starts from: one local repository, the
+    clone source_clone names, with destination and primary repo the repo's short name. mj has no
+    command that creates a bundle, so these entries are written to config.toml with the user's
+    approval. The session gets only the pinned history (--at, --no-later-history)."""
+    name = repo.rsplit("/", 1)[-1]
+    return f"rql-census-{repo.replace('/', '-')}", name
+
+
+def checkout(args, repo, revision, unit):
+    source = source_clone(args, repo)
     if git(source, "rev-parse", "--is-shallow-repository").strip() != b"false":
         raise ValueError(f"{source}: full Git history is required")
 
@@ -889,8 +919,14 @@ def run_batch(args, split, role, repo, batch, revision, allowed, documents):
         log(args.labels_dir, "launching", title=title, role=role, split=split, repo=repo,
             ids=ids, unit=str(unit), profile=profile, model=model, effort=LABELLER_EFFORT)
         launch_requested = True
-        sid = driver.mj("new", "--workspace", args.workspace, "--target", "localhost",
-                        "--project-directory", work,
+        if args.target == "localhost":
+            project = ("--project-directory", work)
+        else:
+            # A container target takes a bundle. --no-later-history gives the session the
+            # history up to the pin and nothing later: no later commits, branches, tags or origin.
+            project = ("--bundle", census_bundle(repo)[0], "--at", revision,
+                       "--no-later-history", "--base", revision)
+        sid = driver.mj("new", "--workspace", args.workspace, "--target", args.target, *project,
                         "--profile", profile, "--effort", "high",
                         "--review", "off", "--no-project-memory", "--no-github-events",
                         "--no-github-credentials", "--subagents", "none", "--title", title,
@@ -996,6 +1032,8 @@ def main():
     parser.add_argument("--profile", help="pin this labeller to a profile of the same model family")
     parser.add_argument("--profiles", default="claude3,claude5,claude6",
                         help="replication profiles eligible for quota-based selection")
+    parser.add_argument("--target", default="localhost",
+                        help="mj target; a container target starts each session from the repo's census bundle")
     parser.add_argument("--repo", help="run only this repo, e.g. 1jehuang/jcode")
     parser.add_argument("--limit", type=int, help="take only the first N selected items, before applying resume")
     parser.add_argument("--batch-size", type=int, default=5)
@@ -1048,7 +1086,10 @@ def main():
         log(args.labels_dir, "cohort", **summary)
         if args.check_quota:
             return 0 if quota(args, args.labeller) else 1
-        selected = [labeller_item(row, args.split) for row in items[args.split]
+        rows = items[args.split]
+        if args.labeller == "replication":
+            rows = replication_sample(rows)
+        selected = [labeller_item(row, args.split) for row in rows
                     if args.repo is None or args.repo == row["repo"]][:args.limit]
         if not selected:
             parser.error("no items match this selection")
