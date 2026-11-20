@@ -58,7 +58,7 @@ impl ClaudeProbe {
             initial_model: None,
             harness: HarnessKind::Claude,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            claude_permission_mode: Default::default(),
+            approval_choices: Default::default(),
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
