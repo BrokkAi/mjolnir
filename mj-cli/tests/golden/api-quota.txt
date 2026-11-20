@@ -1,4 +1,5 @@
 === mj quota text ===
+agy (Antigravity, subscription): Week (Ge) 73% left, resets 6d 0h · 5H (Ge) 100% left, resets 5h 0m · Week (Cl) 100% left · 5H (Cl) 100% left · Week (Ar) 40% left, resets 6d 23h · checked 1m ago
 claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 used, resets 3d 4h · checked 4m ago
 codex (Codex, usage): API · credits $43.2 left · checked 1m ago
 grok (Grok Build, unknown): error: login expired · checked 10m ago
@@ -11,6 +12,68 @@ claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 u
 {
   "cycles": 7,
   "profiles": [
+    {
+      "profile": "agy",
+      "harness": "antigravity",
+      "billing": "subscription",
+      "enabled": true,
+      "probing": false,
+      "report": {
+        "profile_id": "agy",
+        "harness": "antigravity",
+        "windows": [
+          {
+            "label": "Week",
+            "remaining_percent": 73,
+            "model_scope": "gemini,!argon",
+            "used": null,
+            "limit": null,
+            "resets": null,
+            "resets_at_epoch_seconds": 1800518400
+          },
+          {
+            "label": "5H",
+            "remaining_percent": 100,
+            "model_scope": "gemini,!argon",
+            "used": null,
+            "limit": null,
+            "resets": null,
+            "resets_at_epoch_seconds": 1800018000
+          },
+          {
+            "label": "Week",
+            "remaining_percent": 100,
+            "model_scope": "claude,gpt",
+            "used": null,
+            "limit": null,
+            "resets": null,
+            "resets_at_epoch_seconds": null
+          },
+          {
+            "label": "5H",
+            "remaining_percent": 100,
+            "model_scope": "claude,gpt",
+            "used": null,
+            "limit": null,
+            "resets": null,
+            "resets_at_epoch_seconds": null
+          },
+          {
+            "label": "Week",
+            "remaining_percent": 40,
+            "model_scope": "argon,g1-pro",
+            "used": null,
+            "limit": null,
+            "resets": null,
+            "resets_at_epoch_seconds": 1800601200
+          }
+        ],
+        "extra": null,
+        "error": null,
+        "refreshed_at_epoch_seconds": 1799999910
+      },
+      "detail": "Week (Ge) 73% left, resets 6d 0h · 5H (Ge) 100% left, resets 5h 0m · Week (Cl) 100% left · 5H (Cl) 100% left · Week (Ar) 40% left, resets 6d 23h"
+    },
     {
       "profile": "claude",
       "harness": "claude",
@@ -118,6 +181,7 @@ claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 u
   ]
 }
 === mj quota --with-disabled ===
+agy (Antigravity, subscription): Week (Ge) 73% left, resets 6d 0h · 5H (Ge) 100% left, resets 5h 0m · Week (Cl) 100% left · 5H (Cl) 100% left · Week (Ar) 40% left, resets 6d 23h · checked 1m ago
 claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 used, resets 3d 4h · checked 4m ago
 codex (Codex, usage): API · credits $43.2 left · checked 1m ago
 dsh (DSH, usage, disabled): no quota report yet

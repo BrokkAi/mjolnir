@@ -1222,7 +1222,7 @@ mod tests {
             ..report.clone()
         };
         // An Antigravity profile with its third-party pool turned off: the
-        // stored report keeps both pools, people see only Gemini.
+        // stored report keeps every pool, people see only Gemini and Argon.
         let pool_window =
             |pool: mj_core::config::AntigravityQuotaPool| mj_controller::quota::QuotaWindow {
                 label: "Week".into(),
@@ -1292,11 +1292,14 @@ mod tests {
                 .unwrap()
                 .windows
                 .len(),
-            2
+            3
         );
         assert_eq!(
             snapshot.reports["gemini"].windows,
-            [pool_window(mj_core::config::AntigravityQuotaPool::Gemini)]
+            [
+                pool_window(mj_core::config::AntigravityQuotaPool::Gemini),
+                pool_window(mj_core::config::AntigravityQuotaPool::Argon)
+            ]
         );
     }
 }

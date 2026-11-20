@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::thread::JoinHandle;
 
 use mj_client::quota::{ProfileQuota, QuotaWindow};
-use mj_core::config::{Config, HarnessKind, HarnessProfile, QuotaProvider};
+use mj_core::config::{AntigravityQuotaPool, Config, HarnessKind, HarnessProfile, QuotaProvider};
 
 use super::quota_remaining_percent;
 
@@ -500,11 +500,11 @@ pub(crate) fn provider_pools(
                     .unwrap_or_else(|| {
                         group.pools.push(QuotaPool {
                             key,
-                            label: match scope.as_deref() {
-                                Some("gemini") => "Gemini".into(),
-                                Some("claude,gpt") => "Claude & GPT".into(),
-                                _ => String::new(),
-                            },
+                            label: scope
+                                .as_deref()
+                                .and_then(AntigravityQuotaPool::of_scope)
+                                .map(|pool| pool.name().to_owned())
+                                .unwrap_or_default(),
                             members: Vec::new(),
                             remaining: 0,
                             unweighted: false,
@@ -697,16 +697,19 @@ pub(crate) fn provider_pools(
 }
 
 /// Largest-remainder apportionment for the available quota and refill chunks.
-/// Positive availability gets at least one cell when the bar has room.
+/// Give every positive segment a cell when they all fit, taking cells only
+/// from other refills. On narrower bars, keep positive availability visible
+/// and let the caller list omitted refills.
 pub(super) fn refill_widths(
     available: f64,
     refills: impl Iterator<Item = f64>,
     total: f64,
     cells: usize,
 ) -> Vec<usize> {
+    let capacities: Vec<_> = std::iter::once(available).chain(refills).collect();
     let mut widths = Vec::new();
     let mut fractions = Vec::new();
-    for (index, capacity) in std::iter::once(available).chain(refills).enumerate() {
+    for (index, &capacity) in capacities.iter().enumerate() {
         let exact = cells as f64 * capacity / total;
         widths.push(exact.floor() as usize);
         fractions.push((index, exact.fract()));
@@ -716,13 +719,28 @@ pub(super) fn refill_widths(
     for (index, _) in fractions.into_iter().take(leftover) {
         widths[index] += 1;
     }
-    if cells > 0
-        && available > 0.0
-        && widths[0] == 0
-        && let Some(largest) = widths[1..].iter_mut().max()
-    {
-        *largest -= 1;
-        widths[0] = 1;
+    let all_fit = capacities
+        .iter()
+        .filter(|&&capacity| capacity > 0.0)
+        .count()
+        <= cells;
+    // Minimum cells come only from refill chunks, never from the available
+    // fill, so the fill stays proportional to the percentage printed in it.
+    // A refill that cannot get a cell is listed under the bar instead.
+    for (index, capacity) in capacities.into_iter().enumerate() {
+        if capacity > 0.0 && widths[index] == 0 && (all_fit || index == 0) {
+            // A refill only takes a cell from a refill that keeps one.
+            let spare = if index == 0 { 0 } else { 1 };
+            if let Some(donor) = widths
+                .iter_mut()
+                .skip(1)
+                .filter(|width| **width > spare)
+                .max_by_key(|width| **width)
+            {
+                *donor -= 1;
+                widths[index] = 1;
+            }
+        }
     }
     widths
 }

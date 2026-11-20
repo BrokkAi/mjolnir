@@ -20,9 +20,10 @@ pub const NOT_REPORTED_LABEL: &str = "n/a";
 pub const IDLE_LABEL: &str = "idle";
 
 pub fn antigravity_pool_of_window(window: &QuotaWindow) -> Option<AntigravityQuotaPool> {
-    AntigravityQuotaPool::ALL
-        .into_iter()
-        .find(|pool| window.model_scope.as_deref() == Some(pool.model_scope()))
+    window
+        .model_scope
+        .as_deref()
+        .and_then(AntigravityQuotaPool::of_scope)
 }
 
 /// A quota window reported by a harness.
@@ -33,7 +34,8 @@ pub struct QuotaWindow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// Model-name fragments sharing this allowance, separated by commas.
+    /// Model-name fragments sharing this allowance, separated by commas. A
+    /// fragment written with a leading `!` leaves out models containing it.
     pub model_scope: Option<String>,
     pub used: Option<i64>,
     pub limit: Option<i64>,
@@ -153,11 +155,22 @@ impl ProfileQuota {
         let mut report = self.clone();
         report
             .windows
-            .retain(|window| window.model_scope.as_deref() == Some(pool.model_scope()));
+            .retain(|window| antigravity_pool_of_window(window) == Some(pool));
         for window in &mut report.windows {
             window.model_scope = None;
         }
         report
+    }
+
+    /// A window's name in text that lists a whole report: an Antigravity
+    /// window also names its pool, as in `Week (Ge)`.
+    pub fn window_label(&self, window: &QuotaWindow) -> String {
+        match antigravity_pool_of_window(window) {
+            Some(pool) if self.harness == HarnessKind::Antigravity => {
+                format!("{} ({})", window.label, pool.label())
+            }
+            _ => window.label.clone(),
+        }
     }
 
     /// Billing mode inferred from the daemon's cached report.
@@ -314,13 +327,7 @@ impl ProfileQuota {
                     (_, Some(used), Some(limit)) => format!("{used}/{limit}"),
                     _ => "available".to_string(),
                 };
-                let label = if self.harness == HarnessKind::Antigravity {
-                    antigravity_pool_of_window(window)
-                        .map(|pool| format!("{} ({})", window.label, pool.label()))
-                        .unwrap_or_else(|| window.label.clone())
-                } else {
-                    window.label.clone()
-                };
+                let label = self.window_label(window);
                 match window
                     .resets
                     .as_ref()
@@ -545,14 +552,18 @@ pub fn five_hour_quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) ->
     }
 }
 
-/// Fill only missing reset data; fresh usage values always win.
+/// Fill only missing reset data; fresh usage values always win. An
+/// Antigravity pool is the same allowance whichever of its scopes a reading
+/// carries, so a cached reading never returns beside a fresh one.
 pub fn merge_reset_windows(windows: &mut Vec<QuotaWindow>, cached: &[QuotaWindow]) -> bool {
     let mut restored = false;
     for old in cached {
-        if let Some(window) = windows
-            .iter_mut()
-            .find(|w| w.label.eq_ignore_ascii_case(&old.label) && w.model_scope == old.model_scope)
-        {
+        let old_pool = antigravity_pool_of_window(old);
+        if let Some(window) = windows.iter_mut().find(|w| {
+            w.label.eq_ignore_ascii_case(&old.label)
+                && (w.model_scope == old.model_scope
+                    || old_pool.is_some() && antigravity_pool_of_window(w) == old_pool)
+        }) {
             if window.resets_at_epoch_seconds.is_none() && old.resets_at_epoch_seconds.is_some() {
                 window.resets_at_epoch_seconds = old.resets_at_epoch_seconds;
                 window.resets = old.resets.clone();
