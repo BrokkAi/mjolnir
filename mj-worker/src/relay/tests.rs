@@ -7214,8 +7214,8 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     let recovered = evidence(&relay);
     assert_eq!(recovered.user_prompt_tail, "NEXT REQUEST WITHOUT A REPLY");
     assert!(recovered.assistant_text_tail.is_empty());
-    // Generated work deliberately has no human prompt/reply tails. Neither
-    // retained delivery replay nor a fully pruned restart may revive old text.
+    // Generated work continues under the latest human instructions, whether
+    // or not its own delivery remains in the journal.
     let mut relay = relay;
     let through = relay.latest_ordinal();
     acknowledge_relay(&mut relay, "collect-before-generated", through);
@@ -7228,16 +7228,36 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     drop(relay);
     let mut relay =
         DurableRelay::open(temp.path(), SESSION, "generated-with-retained-delivery").unwrap();
-    assert!(evidence(&relay).user_prompt_tail.is_empty());
+    assert_eq!(
+        evidence(&relay).user_prompt_tail,
+        "NEXT REQUEST WITHOUT A REPLY"
+    );
     assert!(evidence(&relay).assistant_text_tail.is_empty());
     let through = relay.latest_ordinal();
     acknowledge_relay(&mut relay, "collect-generated-delivery", through);
     drop(relay);
-    let relay = DurableRelay::open(temp.path(), SESSION, "generated-with-pruned-delivery").unwrap();
-    assert!(evidence(&relay).user_prompt_tail.is_empty());
+    let mut relay =
+        DurableRelay::open(temp.path(), SESSION, "generated-with-pruned-delivery").unwrap();
+    assert_eq!(
+        evidence(&relay).user_prompt_tail,
+        "NEXT REQUEST WITHOUT A REPLY"
+    );
+    assert!(evidence(&relay).assistant_text_tail.is_empty());
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let recovery = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(recovery.len(), 1);
+    assert_eq!(
+        evidence(&relay).user_prompt_tail,
+        "NEXT REQUEST WITHOUT A REPLY"
+    );
     assert!(evidence(&relay).assistant_text_tail.is_empty());
 }
 
+// Hard-won: 31d6d4489: ACK and a second running restart lost the confirmed correction.
 #[test]
 fn restart_continuation_preserves_confirmed_steering_context() {
     use mj_core::activity::{ActivityFacts, verdict::TurnPhase};
@@ -7301,6 +7321,62 @@ fn restart_continuation_preserves_confirmed_steering_context() {
     assert!(
         matches!(&blocks[0], ContentBlock::Text(note) if note.text.contains("take precedence"))
     );
+
+    assert_eq!(evidence(&relay).user_prompt_tail, "DELIVERED CORRECTION");
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"Work under the correction"}
+    })).unwrap()).unwrap();
+    // Every new recovery is already running before its delivery is collected.
+    // The latest user entry governs it, regardless of its executing command ID.
+    for generation in 0..3 {
+        if generation == 0 {
+            for index in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+                submit_relay(
+                    &mut relay,
+                    &format!("post-correction-control-{index}"),
+                    RelayCommand::RecordNotice {
+                        text: "later control".into(),
+                    },
+                );
+            }
+        }
+        let through = relay.latest_ordinal();
+        acknowledge_relay(
+            &mut relay,
+            &format!("collect-recovery-{generation}"),
+            through,
+        );
+        assert_eq!(relay.snapshot.retained_through(), through);
+        assert!(
+            !relay
+                .snapshot
+                .handled_commands
+                .contains_key("queued-prompt"),
+            "the delivered correction must outlive its retry receipt"
+        );
+        drop(relay);
+        relay = DurableRelay::open(temp.path(), SESSION, "repeated-after-ack").unwrap();
+        assert_eq!(evidence(&relay).user_prompt_tail, "DELIVERED CORRECTION");
+        assert_eq!(
+            evidence(&relay).assistant_text_tail,
+            "Work under the correction"
+        );
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        let recovery = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(recovery.len(), 1);
+        assert!(mj_core::continuation::is_restart_continuation(
+            &recovery[0].command_id
+        ));
+        assert_eq!(evidence(&relay).user_prompt_tail, "DELIVERED CORRECTION");
+        assert_eq!(
+            evidence(&relay).assistant_text_tail,
+            "Work under the correction"
+        );
+    }
 }
 
 /// I1-11: a finished turn leaves its compact receipt in the ledger until the

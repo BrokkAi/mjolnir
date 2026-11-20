@@ -1089,85 +1089,12 @@ impl DurableRelay {
                     .turn_context
                     .observe_relay(&event.observation, prompt.as_deref());
             }
-            let authorization = relay.snapshot.authorization_context();
-            let prompt_receipt = |receipt: &mj_core::relay::HandledRelayCommand| {
-                receipt.terminal_ordinal.is_some()
-                    && (receipt
-                        .terminal_identity
-                        .as_ref()
-                        .is_some_and(|identity| identity.prompt)
-                        || receipt
-                            .command
-                            .as_ref()
-                            .is_some_and(|command| command.kind() == RelayCommandKind::Prompt))
-            };
-            let terminal_prompt = relay
-                .snapshot
-                .handled_commands
-                .iter()
-                .filter(|(id, receipt)| {
-                    prompt_receipt(receipt)
-                        // Removed/rejected queue entries were never delivered.
-                        // A failed turn may still have durable delivery proof in
-                        // the worker's authorization history.
-                        && (receipt.failure.is_none()
-                            // Generated work intentionally has no human history;
-                            // keep its identity so old human tails cannot revive.
-                            || mj_core::continuation::is_generated_prompt(id)
-                            || authorization.as_ref().is_some_and(|history| {
-                                history.messages.iter().any(|message| message.role == "user" && message.id == format!("user:{id}"))
-                            }))
-                })
-                .max_by_key(|(_, receipt)| receipt.accepted_ordinal);
-            let prompt_owner = relay
-                .snapshot
-                .active_prompt
-                .as_ref()
-                .map(|prompt| prompt.command_id.as_str())
-                .or_else(|| terminal_prompt.map(|(id, _)| id.as_str()));
-            let delivered = prompt_owner.and_then(|owner| {
-                match relay
-                    .snapshot
-                    .steering
-                    .as_ref()
-                    .filter(|steering| steering.active_prompt_id == owner)
-                {
-                    Some(steering)
-                        if steering.status == mj_core::relay::SteeringStatus::Applied =>
-                    {
-                        Some(steering.queued_prompt_id.as_str())
-                    }
-                    Some(_) => None, // Delivery is ambiguous; do not resurrect an older reply.
-                    None => Some(owner),
-                }
-            });
-            let last_prompt_terminal =
-                terminal_prompt.and_then(|(_, receipt)| receipt.terminal_ordinal);
-            let later_autonomous_turn = relay.snapshot.autonomous_harness_turn().is_some()
-                || relay.snapshot.active_prompt.is_none()
-                    && relay
-                        .snapshot
-                        .last_harness_turn_started_ordinal
-                        .is_some_and(|started| {
-                            last_prompt_terminal.is_none_or(|terminal| started > terminal)
-                        });
-            if earlier_history_omitted
-                && !later_autonomous_turn
-                && let Some(history) = relay.snapshot.authorization_context()
-                && delivered.is_some_and(|id| {
-                    history
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|message| message.role == "user")
-                        .is_some_and(|message| message.id == format!("user:{id}"))
-                })
-            {
-                // ACK collection can remove the turn's original observations.
-                // Reuse persisted prompt/reply text; the historical tool-transcript
-                // summary is not reconstructed for this judgment aid.
-                relay.turn_context.restore_text_tails(&history);
-            }
+            // The latest persisted human instructions govern every turn,
+            // including mailbox wakes and restart continuations. Use what
+            // remains in that history, without matching an executing request ID.
+            relay
+                .turn_context
+                .restore_text_tails(&relay.snapshot.authorization_context().unwrap_or_default());
         }
         relay
             .turn_context
