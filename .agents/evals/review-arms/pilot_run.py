@@ -179,8 +179,10 @@ def require_fidelity(root, raw, manifest, groups):
         return
     try:
         report = read_json(path)
-        if report["prescience_pooled"]["pass"] is not True:
-            raise ValueError("pooled prescience failed and blocks the pilot")
+        pooled = report["prescience_pooled"]
+        if pooled["pass"] is not True:
+            detail = pooled.get("reason", "recall gap exceeds the registered bar")
+            raise ValueError(f"pooled prescience failed and blocks the pilot: {detail}")
         if not uses_rql:
             return
         steps = manifest.get("served_steps")
@@ -230,13 +232,16 @@ def served_menu(semantics, served_steps):
 def prompt_set(reference, steps, served_steps=()):
     base = (driver.SCRIPTS / "brief/WRITER.md").read_text()
     grep = base + "\n" + (PILOT / "writer-grep.md").read_text()
-    prompts = {"G": grep}
+    if served_steps and steps is None:
+        raise ValueError("the writer reference requires the frozen served-step semantics")
+    menu = served_menu(steps, served_steps)
+    reference_block = f"\n\n### Documented RQL reference\n\n{reference}\n\n### Additional menu steps\n\n{menu}"
+    prompts = {"G": grep + "\nYou have no query tool." + reference_block}
     if steps is not None:
         # Put the tool exception inside the existing rule too, so the directions agree.
         with_tool = grep.replace("use the\n  network", "use the\n  network except through the `rql_query` tool")
-        tool = (PILOT / "writer-rql.md").read_text().format(reference=reference,
-                                                        menu_steps=served_menu(steps, served_steps))
-        prompts.update(dict.fromkeys(TOOL_ARMS, with_tool + "\n" + tool))
+        tool = (PILOT / "writer-rql.md").read_text()
+        prompts.update(dict.fromkeys(TOOL_ARMS, with_tool + "\n" + tool.rstrip() + reference_block))
     return prompts
 
 
@@ -376,6 +381,8 @@ class Pilot:
         if params is None:
             raise RuntimeError(f"{job['job']} requires an accepted brief")
         path = params["path"]
+        launch = path / "launch.json"
+        failure = path / "failed.json"
 
         def revoke_assignment(sid):
             assignment = path / "tool-assignment.json"
@@ -388,7 +395,10 @@ class Pilot:
                 subprocess.run([str(self.args.rql_hook), "--revoke", str(assignment)],
                                check=True, stdout=subprocess.PIPE)
 
-        failure = path / "failed.json"
+        if failure.exists() and job["kind"] == "writer" and launch.exists():
+            # A retained attempt made by an earlier build may lack the status.
+            if read_json(failure).get("status") != "quota_hold":
+                brief_driver.interrupt_on_rql_quota(params, read_json(launch)["session_id"])
         if failure.exists() and read_json(failure).get("status") == "quota_hold":
             from rql_mock.engine import load_engine
             try:
@@ -400,9 +410,9 @@ class Pilot:
             except (OSError, ValueError, KeyError, TypeError) as error:
                 return f"needs-recovery: cannot check the interrupted writer's engine quota ({error})"
         if (path / "done.json").exists() or failure.exists():
-            if (path / "launch.json").exists():
+            if launch.exists():
                 try:
-                    revoke_assignment(read_json(path / "launch.json")["session_id"])
+                    revoke_assignment(read_json(launch)["session_id"])
                 except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
                     return f"needs-recovery: could not revoke the superseded RQL assignment ({error})"
             archive(path)
@@ -419,30 +429,28 @@ class Pilot:
         params["publish_tool_assignment"] = lambda sid: publish_tool_assignment(
             path, self.args, job, self.diffs[job["diff"]], sid, engine_identity=self.engine_identity)
         params["revoke_tool_assignment"] = revoke_assignment
+        needs_input = False
         try:
             if job["kind"] == "writer":
                 params["model"] = self.writer_model
-                if tool_arm(job) != "none":
-                    def writer_interruption(directory, sid):
-                        with (directory / f"queries-{sid}.jsonl").open() as log:
-                            for line in log:
-                                delivery = json.loads(line)
-                                if (delivery.get("session") == sid and delivery.get("delivered") is True
-                                        and delivery.get("status") == "quota_hold"):
-                                    return "RQL engine quota held a writer query"
-
-                    params["writer_interruption"] = writer_interruption
                 state = brief_driver.run(params["bug"]["id"], self.gate, pilot=params)
             else:
                 params["model"] = self.reviewer_model
                 state = pilot_review.run(params)
+        except brief_driver.WriterNeedsInput as error:
+            driver.retain_pilot_session(path, read_json(launch)["session_id"], str(error),
+                                        status="input_required", pending_elicitations=error.questions)
+            state = f"interrupted: {error}"
+            needs_input = True
         except (brief_driver.PromptUncertain, TimeoutError, subprocess.TimeoutExpired) as error:
             return f"interrupted: {error}"
         except (OSError, KeyError, TypeError, ValueError, RuntimeError, AssertionError, subprocess.SubprocessError) as error:
-            launch = path / "launch.json"
             if not launch.exists():
                 return f"needs-recovery: launch has no recorded session ID ({error})"
             state = driver.retain_pilot_session(path, read_json(launch)["session_id"], str(error) or type(error).__name__)
+        if job["kind"] == "writer" and launch.exists() and (state == "retained-failure" or needs_input):
+            if interruption := brief_driver.interrupt_on_rql_quota(params, read_json(launch)["session_id"]):
+                state = interruption
         if params["attest_cache"] and (path / "cache-attestation.json").exists():
             self.attested.add(job["kind"])
         return state

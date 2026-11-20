@@ -8,7 +8,7 @@ import re
 from statistics import mean, median
 
 from pilot_judge import (DEFAULT_MANIFEST, DEFAULT_ROOT, HAND_PATH, INPUT_PATH, JUDGMENT_FIELDS, KEY_PATH, artifact,
-                         group_jobs, load, load_snapshot, records, save, sha)
+                         brief_binding, group_jobs, load, load_snapshot, records, run_artifact, save, sha)
 
 ARMS = ("N", "G", "R", "R-loc")
 CONTRASTS = (("R", "G"), ("R-loc", "R"))
@@ -240,15 +240,15 @@ def effect(deltas):
     return {"mean": average(deltas.values()), "by_diff": deltas}
 
 
-def readout(manifest, judgments, deliveries, snapshot, *, isolation=None):
+def readout(manifest, judgments, deliveries, snapshot, *, isolation=None, stale_diffs=()):
     """Compute from the manifest, keyed judgments, delivery events, and frozen labels."""
     key, judged, checked = (judgments[field] for field in ("key", "judge", "hand_check"))
     if manifest != key["manifest"]:
         raise ValueError("manifest differs from the stored judgment key")
     entries = key["outputs"]
     facts = {diff: [fact for group in groups for fact in group] for diff, groups in snapshot.items()}
-    judge_complete = complete_diffs(key, judged)
-    hand_complete = complete_diffs(key, checked)
+    judge_complete = {diff: ids for diff, ids in complete_diffs(key, judged).items() if diff not in stale_diffs}
+    hand_complete = {diff: ids for diff, ids in complete_diffs(key, checked).items() if diff not in stale_diffs}
     complete = {diff: ids for diff, ids in judge_complete.items() if diff in hand_complete}
     ids = [oid for diff in complete.values() for oid in diff]
 
@@ -277,7 +277,9 @@ def readout(manifest, judgments, deliveries, snapshot, *, isolation=None):
 
     return {
         "complete_diffs": list(complete),
-        "unfinished_diffs": [d["key"] for d in key["manifest"]["diffs"] if d["key"] not in complete],
+        "unfinished_diffs": [d["key"] for d in manifest["diffs"]
+                             if d["key"] not in complete and d["key"] not in stale_diffs],
+        "stale_diffs": [d["key"] for d in manifest["diffs"] if d["key"] in stale_diffs],
         "judge_complete_diffs": list(judge_complete),
         "hand_check_complete_diffs": list(hand_complete),
         "as_judged": judged_summary,
@@ -308,10 +310,34 @@ def readout(manifest, judgments, deliveries, snapshot, *, isolation=None):
     }
 
 
-def load_deliveries(runs, key):
+def stale_judged_diffs(runs, key):
+    entries = key["outputs"].values()
+    current = {}
+    for frozen in entries:
+        try:
+            result = run_artifact(runs, frozen)
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        if result is not None:
+            current[frozen["job"]] = result[0]
+
+    stale = set()
+    for frozen in entries:
+        entry = current.get(frozen["job"])
+        if entry is None or any(entry.get(field) != frozen.get(field)
+                                for field in ("artifact", "text_sha256", "session_id", "query_sha256", "brief")):
+            stale.add(frozen["diff"])
+        elif "brief" in frozen:
+            writer = current.get(frozen["job"].rsplit("/", 1)[0] + "/writer")
+            if writer is None or brief_binding(writer) != frozen["brief"]:
+                stale.add(frozen["diff"])
+    return stale
+
+
+def load_deliveries(runs, key, *, stale_diffs=()):
     deliveries = {}
     for entry in key["outputs"].values():
-        if entry["kind"] != "writer" or entry["arm"] not in {"R", "R-loc"}:
+        if entry["diff"] in stale_diffs or entry["kind"] != "writer" or entry["arm"] not in {"R", "R-loc"}:
             continue
         path = runs / artifact(entry).relative_to("runs").parent / f"queries-{entry['session_id']}.jsonl"
         data = path.read_bytes()
@@ -392,7 +418,9 @@ def main():
     egress = ([json.loads(line) for line in egress_path.read_bytes().splitlines() if line.strip()]
               if args.egress_log is not None or egress_path.is_file() else ())
     isolation = isolation_report(egress, isolation_evidence(args.root, runs))
-    result = readout(manifest, judgments, load_deliveries(runs, key), snapshot, isolation=isolation)
+    stale = stale_judged_diffs(runs, key)
+    result = readout(manifest, judgments, load_deliveries(runs, key, stale_diffs=stale), snapshot,
+                     isolation=isolation, stale_diffs=stale)
     if args.output:
         save(args.output, result)
     else:

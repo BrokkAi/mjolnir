@@ -269,6 +269,76 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(sent, ["writer-command"])
         self.assertFalse(list(path.parent.glob(f"{path.name}.superseded-*")))
 
+    # Hard-won: dfb55808: a rejected brief lost its delivered engine quota hold.
+    def test_invalid_brief_preserves_quota_hold_before_scheduler_retry(self):
+        for outcome in ("missing", "lint"):
+            with self.subTest(outcome=outcome), TemporaryDirectory() as directory:
+                root = Path(directory)
+                runner = pilot.Pilot.__new__(pilot.Pilot)
+                runner.args = SimpleNamespace(run_root=root)
+                runner.writer_model, runner.gate, runner.attested = ("sol", "high"), None, set()
+                job = {"job": "mjolnir/first/R/r1/writer", "diff": "mjolnir/first",
+                       "arm": "R", "replicate": 1, "kind": "writer"}
+                runner.diffs, runner.engine_identity = {job["diff"]: {}}, None
+                path = pilot.job_path(root, job)
+                for name, data in (("launch", {"session_id": "fixture"}), ("launch-intent", {"profile": "fixture"}),
+                                   ("settings", {}), ("inventory-check", {"problems": []})):
+                    pilot.driver.save(path / f"{name}.json", data)
+                runner.render = lambda job: {"path": path, "bug": {"id": "first"}, "profile": "fixture",
+                                            "prompt": "Write the brief.", "inputs": {"rql_tools": ["rql_query"]}}
+                writes = []
+
+                def write(*args, **kwargs):
+                    writes.append(outcome)
+                    (path / "queries-fixture.jsonl").write_text(
+                        '{"session":"fixture","status":"quota_hold","delivered":true}\n')
+                    if outcome == "missing":
+                        raise brief_driver.WriterBriefMissing("no brief.md")
+                    return "Rejected brief.", ["missing source anchor"], brief_driver.FIX_ROUNDS
+
+                with (unittest.mock.patch.object(pilot, "publish_tool_assignment", lambda *a, **k: None),
+                      unittest.mock.patch.object(brief_driver, "check_pilot_tool", lambda *a: True),
+                      unittest.mock.patch.object(brief_driver, "write_brief", write),
+                      unittest.mock.patch.object(brief_driver, "pilot_audit", lambda *a: {"passed": True}),
+                      unittest.mock.patch.object(brief_driver.driver, "transcript", lambda *a: []),
+                      unittest.mock.patch.object(brief_driver, "mj", lambda *a: {}),
+                      unittest.mock.patch.object(brief_driver, "session", lambda *a: {"profile_id": "fixture"}),
+                      redirect_stdout(StringIO()) as status):
+                    self.assertEqual(pilot.run_matrix(root, {job["diff"]: [job]}, "fixture",
+                                                      lambda job: None, runner.execute, FakeQuota("90")), 1)
+                self.assertEqual(writes, [outcome])
+                self.assertIn("interrupted: RQL engine quota", status.getvalue())
+                failure = pilot.read_json(path / "failed.json")
+                self.assertEqual(failure["status"], "quota_hold")
+                self.assertIn("brief.md" if outcome == "missing" else "lint", failure["terminal_reason"])
+
+    # Hard-won: dfb55808: a requested permission kept the unbounded writer wait open.
+    def test_pending_writer_input_ends_the_unbounded_wait_and_retains_the_question(self):
+        runner = pilot.Pilot.__new__(pilot.Pilot)
+        runner.args = SimpleNamespace(run_root=self.root)
+        runner.writer_model, runner.gate, runner.attested = ("sol", "high"), None, set()
+        job = {"job": "mjolnir/first/G/r1/writer", "diff": "mjolnir/first",
+               "arm": "G", "replicate": 1, "kind": "writer"}
+        path = pilot.job_path(self.root, job)
+        runner.render = lambda job: {"path": path, "bug": {"id": "first"}, "inputs": {"rql_tools": []}}
+        question = {"id": "tool-permission-1", "message": "May I read the source file?", "fields": []}
+
+        def write(bug_id, gate, *, pilot):
+            brief_driver.save(path / "launch.json", {"session_id": "original"})
+            brief_driver.send(path, "original", "prompt", "writer-command", "Write the brief.", limit=None)
+
+        with (unittest.mock.patch.object(brief_driver, "run", write),
+              unittest.mock.patch.object(brief_driver, "mj", lambda *a: {
+                  "session_id": "original", "via": "turn", "turn_id": 1}),
+              unittest.mock.patch.object(brief_driver, "session", lambda sid: {
+                  "lifecycle": "live", "is_idle": False, "pending_elicitations": [question]}),
+              unittest.mock.patch.object(brief_driver.time, "sleep", side_effect=AssertionError("wait slept"))):
+            self.assertIn("writer needs input. May I read the source file?", runner.execute(job))
+        failure = pilot.read_json(path / "failed.json")
+        self.assertEqual(failure["retained_session"], "original")
+        self.assertEqual(failure["pending_elicitations"], [question])
+        self.assertFalse((path / "done.json").exists())
+
     # Hard-won: 49e16b8: startup refusal retained a session and charged a replacement.
     def test_config_startup_refusal_retries_same_session(self):
         calls, waits = [], []
@@ -553,6 +623,20 @@ class PilotTest(unittest.TestCase):
         self.assertIn("(guarded-paths ", prompts["R"])
         self.assertNotIn("value-transfers", prompts["R"])
         self.assertNotIn("rql_query", prompts["G"])
+
+    # Hard-won: dfb55808: G received a shorter reference than the tool arms.
+    def test_g_and_r_writers_receive_the_identical_reference_block(self):
+        refdir = pilot.driver.SCRIPTS / "brief/rql-census"
+        catalogue = (refdir / "rql-documented-steps.md").read_text()
+        semantics = (refdir / "menu-steps.md").read_text()
+        prompts = pilot.prompt_set(catalogue, semantics, ["value-transfers"])
+        heading = "### Documented RQL reference"
+        self.assertEqual(prompts["G"].split(heading, 1)[1], prompts["R"].split(heading, 1)[1])
+        self.assertEqual(prompts["R"], prompts["R-loc"])
+        self.assertIn(catalogue, prompts["G"])
+        self.assertIn("You have no query tool.", prompts["G"])
+        self.assertNotIn("rql_query", prompts["G"])
+        self.assertIn("rql_query(query, page=1)", prompts["R"])
 
     def test_single_profile_rejects_duplicate_codex_homes_even_when_alias_disabled(self):
         (self.root / "study.config.toml").write_text('[mcp_servers.rql]\ncommand = "test"\n')

@@ -151,8 +151,13 @@ class Arithmetic(unittest.TestCase):
         self.assertTrue(tolerated["pass"])
         miss_decisive = {**GOOD, "engine": ["o"], "fresh": ["o"]}
         self.assertTrue(pooled_prescience([miss_decisive] * 10, 2)["pass"])
-        self.assertEqual(pooled_prescience([], 2), {"gap": None, "interval": None,
-                                                  "decisive_n": 0, "pass": True})
+        no_other = {**GOOD, "engine": ["d"], "enumerated": ["d"]}
+        unavailable = pooled_prescience([no_other], 2)
+        self.assertEqual((unavailable["gap"], unavailable["decisive_n"], unavailable["pass"]), (None, 1, False))
+        self.assertIn("no comparable", unavailable["reason"])
+        self.assertFalse(pooled_prescience([], 2)["pass"])
+        unused = pooled_prescience([], 2, applicable=False)
+        self.assertEqual((unused["gap"], unused["status"], unused["pass"]), (None, "inapplicable", True))
 
     def test_estimable_per_step_gap_is_descriptive(self):
         decisive = [f"d{i}" for i in range(10)]

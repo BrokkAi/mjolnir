@@ -127,40 +127,50 @@ def write_task(path, payload):
     )
 
 
+def run_artifact(runs, job, manifest_sha256=None):
+    path = artifact(job)
+    source = runs / path.relative_to("runs")
+    directory = source.parent
+    if not all(p.is_file() for p in (source, directory / "done.json", directory / "usage.json")):
+        return None
+    done = load(directory / "done.json")
+    data = source.read_bytes()
+    kind = job["kind"]
+    digest_field = "brief_sha256" if kind == "writer" else "output_sha256"
+    if done[digest_field] != sha(data) or not done["session_id"]:
+        raise ValueError(f"{job['job']}: published artifact lacks a matching receipt")
+    if manifest_sha256 is not None and done["inputs"]["manifest_sha256"] != manifest_sha256:
+        raise ValueError(f"{job['job']}: published artifact uses a different manifest")
+    entry = {**job, "artifact": str(path), "text_sha256": done[digest_field],
+             "session_id": done["session_id"]}
+    if kind == "writer" and job["arm"] in {"R", "R-loc"}:
+        log = directory / f"queries-{entry['session_id']}.jsonl"
+        if not log.is_file():
+            return None
+        entry["query_sha256"] = sha(log.read_bytes())
+    if kind == "reviewer" and job["arm"] != "N":
+        supplied = done.get("inputs", {})
+        entry["brief"] = {"session_id": supplied.get("writer_session_id"), "sha256": supplied.get("brief_sha256")}
+    return entry, data
+
+
+def brief_binding(writer):
+    return {"session_id": writer["session_id"], "sha256": writer["text_sha256"]}
+
+
 def run_artifacts(root, jobs, manifest_sha256):
     """Return only current completed job artifacts and their checked receipts."""
     current = {}
     for job in jobs:
-        path = artifact(job)
-        directory = root / path.parent
-        if not all(p.is_file() for p in (root / path, directory / "done.json", directory / "usage.json")):
-            continue
-        done = load(directory / "done.json")
-        data = (root / path).read_bytes()
-        kind = job["kind"]
-        digest_field = "brief_sha256" if kind == "writer" else "output_sha256"
-        if done[digest_field] != sha(data) or not done["session_id"]:
-            raise ValueError(f"{job['job']}: published artifact lacks a matching receipt")
-        if manifest_sha256 is not None and done["inputs"]["manifest_sha256"] != manifest_sha256:
-            raise ValueError(f"{job['job']}: published artifact uses a different manifest")
-        entry = {**job, "artifact": str(path), "text_sha256": done[digest_field],
-                 "session_id": done["session_id"]}
-        if kind == "writer" and job["arm"] in {"R", "R-loc"}:
-            log = directory / f"queries-{entry['session_id']}.jsonl"
-            if not log.is_file():
-                continue
-            entry["query_sha256"] = sha(log.read_bytes())
-        if kind == "reviewer" and job["arm"] != "N":
-            supplied = done.get("inputs", {})
-            entry["brief"] = {"session_id": supplied.get("writer_session_id"), "sha256": supplied.get("brief_sha256")}
-        current[job["job"]] = entry, data
+        if result := run_artifact(root / "runs", job, manifest_sha256):
+            current[job["job"]] = result
 
     for job, (entry, _) in list(current.items()):
         if "brief" not in entry:
             continue
         writer_job = job.rsplit("/", 1)[0] + "/writer"
         writer = current.get(writer_job)
-        if writer and entry["brief"] == {"session_id": writer[0]["session_id"], "sha256": writer[0]["text_sha256"]}:
+        if writer and entry["brief"] == brief_binding(writer[0]):
             continue
         print(json.dumps({"job": job, "state": "stale-review", "reviewed_brief": entry["brief"],
                           "current_writer": writer[0]["session_id"] if writer else None}), file=sys.stderr)

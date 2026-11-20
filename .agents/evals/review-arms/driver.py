@@ -134,9 +134,19 @@ def mj_invocation(*args):
 
 def mj(*args, timeout=300):
     result = subprocess.run(mj_invocation(*args, "--json"), capture_output=True, timeout=timeout)
+    try:
+        value = json.loads(result.stdout)
+    except ValueError:
+        if not result.returncode:
+            raise
+        value = None
+    # Both commands print the wait result before setting their exit status.
+    outcome = value.get("outcome") if isinstance(value, dict) else None
+    if args[0] in {"wait", "prompt"} and isinstance(outcome, str) and outcome:
+        return value
     if result.returncode:
-        raise RuntimeError(f"mj {' '.join(map(str, args[:2]))}: {result.stderr.decode()[-1500:]}")
-    return json.loads(result.stdout)
+        raise RuntimeError(f"mj {' '.join(map(str, args[:2]))}: {result.stderr.decode(errors='replace')[-1500:]}")
+    return value
 
 
 def session(sid):

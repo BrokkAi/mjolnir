@@ -19,6 +19,7 @@ with a session is resumed, never started twice.
 """
 import argparse
 import concurrent.futures
+import fcntl
 import hashlib
 import json
 import re
@@ -105,6 +106,14 @@ class PromptUncertain(RuntimeError):
     """Keep the recorded session and reconcile this command before sending another."""
 
 
+class WriterNeedsInput(RuntimeError):
+    def __init__(self, questions):
+        self.questions = questions
+        summary = "\n".join(question.get("message") or question.get("title") or question["id"]
+                            for question in questions)
+        super().__init__(f"writer needs input. {summary}")
+
+
 def wait_command(sid, command, limit=1800, *, awaiting_receipt=False):
     """limit=None waits for the session's own outcome, with no observer deadline."""
     end = None if limit is None else time.monotonic() + limit
@@ -117,6 +126,8 @@ def wait_command(sid, command, limit=1800, *, awaiting_receipt=False):
             if outcome["outcome"]["kind"] != "completed":
                 raise WriterTurnFailed(f"writer turn did not complete: {json.dumps(outcome)[:600]}")
             return outcome
+        if questions := s.get("pending_elicitations"):
+            raise WriterNeedsInput(questions)
         if s.get("lifecycle") == "failed":
             raise WriterTurnFailed(f"session {sid} failed: {json.dumps(s)[:600]}")
         if awaiting_receipt and s.get("is_idle") and s.get("lifecycle") == "live":
@@ -170,7 +181,7 @@ def send(d, sid, name, command, text, limit=1800):
                     raise PromptUncertain(f"{sid}: missing acceptance receipt for {command}")
                 save(request, receipt)
         save(completion, wait_command(sid, command, limit, awaiting_receipt=not request.exists()))
-    except (WriterTurnFailed, PromptUncertain):
+    except (WriterTurnFailed, WriterNeedsInput, PromptUncertain):
         raise
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         raise PromptUncertain(f"{sid}: could not confirm {command}: {error}") from error
@@ -432,6 +443,31 @@ def write_brief(d, sid, tag, prompt, bug, limit=1800):
         send(d, sid, f"fix-{repair}", f"brief-fix{repair}-" + tag[:28], fix, limit)
 
 
+def interrupt_on_rql_quota(pilot, sid):
+    """Classify a terminal writer's attempt from the exact session's delivery log."""
+    if not pilot["inputs"].get("rql_tools"):
+        return None
+    d = pilot["path"]
+    try:
+        log = (d / f"queries-{sid}.jsonl").open()
+    except FileNotFoundError:
+        return None
+    with log:
+        fcntl.flock(log, fcntl.LOCK_SH)
+        held = any(delivery.get("session") == sid and delivery.get("delivered") is True
+                   and delivery.get("status") == "quota_hold"
+                   for delivery in map(json.loads, log))
+    if held:
+        reason = "RQL engine quota held a writer query"
+        path = d / "failed.json"
+        failure = json.loads(path.read_text()) if path.exists() else {}
+        if "reason" in failure and failure["reason"] != reason:
+            failure["terminal_reason"] = failure["reason"]
+        save(path, {**failure, "session_id": sid, "status": "quota_hold", "reason": reason})
+        return f"interrupted: {reason}"
+    return None
+
+
 def finish_pilot_writer(pilot, sid, bug_id, profile):
     d, inputs = pilot["path"], pilot["inputs"]
     accepted = json.loads((d / "accepted.json").read_text())
@@ -450,12 +486,8 @@ def finish_pilot_writer(pilot, sid, bug_id, profile):
     revoke = pilot.get("revoke_tool_assignment")
     if callable(revoke):
         revoke(sid)
-    interruption = pilot.get("writer_interruption")
-    if callable(interruption):
-        reason = interruption(d, sid)
-        if reason:
-            save(d / "failed.json", {"session_id": sid, "status": "quota_hold", "reason": reason})
-            return f"interrupted: {reason}"
+    if interruption := interrupt_on_rql_quota(pilot, sid):
+        return interruption
     save(d / "done.json", dict(accepted, bug=bug_id, session_id=sid,
                                profile=profile, inputs=inputs, finished_ns=time.time_ns(),
                                mcp_reconnect_sha256=hashlib.sha256((d / "mcp-reconnect-result.json").read_bytes()).hexdigest()))

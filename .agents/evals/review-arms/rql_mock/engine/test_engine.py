@@ -582,6 +582,37 @@ class FakeAcpRunner(SealedRunner):
 
 
 class ContextTests(unittest.TestCase):
+    # Hard-won: dfb55808: the wait exit code hid the structured quota refusal.
+    def test_nonzero_wait_with_provider_quota_outcome_is_a_quota_hold(self):
+        runner = FakeAcpRunner()
+        with TemporaryDirectory() as directory:
+            engine = Engine(Path(directory), (CATALOGUE, MENU),
+                            lambda commit: (SOURCE.get, {"tree": "frozen", "orphan": COMMIT}),
+                            lambda: runner, VERSION)
+            self.assertEqual(engine.answer(COMMIT, QUERY)["status"], "ok")
+            fake_mj = runner.mj
+
+            def failed_wait(argv, **kwargs):
+                self.assertEqual(argv[-1], "--json")
+                turn = int(argv[argv.index("--turn") + 1])
+                response = {"turn_id": turn, "outcome": "quota_limit", "stop_reason": "QuotaLimit"}
+                return subprocess.CompletedProcess(argv, 1, json.dumps(response).encode(), b"turn ended as quota_limit")
+
+            def observed_mj(operation, *args, **kwargs):
+                if operation == "wait":
+                    return driver.mj(operation, *args, **kwargs)
+                return fake_mj(operation, *args, **kwargs)
+
+            runner.mj = observed_mj
+            original_run = driver.subprocess.run
+            try:
+                driver.subprocess.run = failed_wait
+                answer = engine.answer(COMMIT, '(function :name "other")')
+            finally:
+                driver.subprocess.run = original_run
+            self.assertEqual(answer["status"], "quota_hold")
+            self.assertEqual(answer["provenance"]["turns"][-1]["stop_reason"], "QuotaLimit")
+
     def test_probe_is_once_and_every_query_and_repair_waits_for_its_own_boundary(self):
         runner = FakeAcpRunner()
         with TemporaryDirectory() as directory:

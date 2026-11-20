@@ -106,10 +106,10 @@ for inspection and triggers a fresh attempt if quota permits.
 
 ## Fidelity gate
 
-G uses `writer-grep.md`, appended to the existing `brief/WRITER.md` prompt.
-R and R-loc get that same checklist plus `writer-rql.md`, the pinned
-catalogue and only the frozen semantics for the manifest's `served_steps`.
-Those writers require `fidelity/gate-report.json` in the run root to match
+G, R and R-loc all get `writer-grep.md`, the pinned catalogue and the frozen
+semantics for the manifest's `served_steps` alongside `brief/WRITER.md`. G has
+no query tool. R and R-loc also get the tool instructions in `writer-rql.md`.
+The tool arms require `fidelity/gate-report.json` in the run root to match
 the manifest and pass each served added step. N and G can run independently
 before that report exists. A failed pooled prescience verdict stops all pilot
 launches, including G, and a re-freeze cannot clear it. The private gold cases and pilot bug IDs are

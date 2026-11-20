@@ -298,24 +298,27 @@ def prescience_metrics(records):
             "shared_blind_spots": shared_blind_spots}
 
 
-def pooled_prescience(records, seed):
+def pooled_prescience(records, seed, *, applicable=True):
     counts = [prescience_counts(record) for record in records]
     gap = prescience_gap(map(sum, zip(*counts))) if counts else None
+    if gap is None:
+        return {"gap": None, "interval": None, "decisive_n": len(records), "pass": not applicable,
+                "status": "not_estimable" if applicable else "inapplicable",
+                "reason": ("no comparable decisive and other rows in the pooled sample" if applicable
+                           else "no added steps are served")}
     interval = None
-    if gap is not None:
-        rng = Random(seed)
-        estimates = []
-        for _ in range(BOOTSTRAPS):
-            replicate = prescience_gap(map(sum, zip(*rng.choices(counts, k=len(counts)))))
-            if replicate is not None:
-                estimates.append(float(replicate))
-        # A resample may omit all evidence for one row class. Its gap is undefined.
-        if estimates:
-            estimates.sort()
-            low = int(0.025 * len(estimates))
-            interval = [estimates[low], estimates[len(estimates) - low - 1]]
-    return {"gap": float(gap) if gap is not None else None, "interval": interval,
-            "decisive_n": len(records), "pass": gap is None or gap <= Fraction(1, 10)}
+    rng = Random(seed)
+    estimates = []
+    for _ in range(BOOTSTRAPS):
+        replicate = prescience_gap(map(sum, zip(*rng.choices(counts, k=len(counts)))))
+        if replicate is not None:
+            estimates.append(float(replicate))
+    # A resample may omit all evidence for one row class. Its gap is undefined.
+    if estimates:
+        estimates.sort()
+        low = int(0.025 * len(estimates))
+        interval = [estimates[low], estimates[len(estimates) - low - 1]]
+    return {"gap": float(gap), "interval": interval, "decisive_n": len(records), "pass": gap <= Fraction(1, 10)}
 
 
 BARS = {"precision": 0.95, "recall": 0.90, "precision_lower95": 0.90,
@@ -407,7 +410,8 @@ def gate_report(manifest_hash, served, queries, records, seed):
         step = query.text.split()[0][1:]
         by_step.setdefault(step, []).append(record)
     decisive = {step: groups.get((step, "decisive"), []) for step in served}
-    pooled = pooled_prescience([row for step in served for row in decisive[step]], f"{seed}/prescience")
+    pooled = pooled_prescience([row for step in served for row in decisive[step]], f"{seed}/prescience",
+                               applicable=bool(served))
     steps = {step: step_result(groups[step, "random"], decisive[step], f"{seed}/{step}")
              for step in served}
     return {"manifest_sha256": manifest_hash, "served_steps": served,

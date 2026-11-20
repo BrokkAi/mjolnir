@@ -248,8 +248,6 @@ class PilotFixture(unittest.TestCase):
         del judged[unused]
         checked = copy.deepcopy({oid: v for oid, v in judged.items() if key["outputs"][oid]["diff"] != "repo/d2"})
         caught(key, checked, "repo/d1", "G", slots=(1,))
-        for entry in key["outputs"].values():
-            (self.root / entry["artifact"]).unlink()
         for directory, values in (("judge", judged), ("hand-check", checked)):
             for oid, value in values.items():
                 j.save(self.root / directory / f"{oid}.json", value)
@@ -298,6 +296,23 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(agreement["reviewer"]["catch"]["agreements"], 19)
         self.assertEqual(agreement["reviewer"]["recovered_facts"]["rate"], 39 / 40)
         self.assertEqual(agreement["writer"]["whole_record"]["rate"], 1)
+        self.assertEqual(result["stale_diffs"], [])
+
+        # Supersede one G writer without changing the bytes. Its old reviews
+        # still refer to the old session. Also change one N review's text.
+        g = next(e for e in key["outputs"].values()
+                 if e["diff"] == "repo/d0" and e["arm"] == "G" and e["kind"] == "writer")
+        done_path = (self.root / g["artifact"]).parent / "done.json"
+        j.save(done_path, {**j.load(done_path), "session_id": "replacement"})
+        n = next(e for e in key["outputs"].values() if e["diff"] == "repo/d1" and e["arm"] == "N")
+        (self.root / n["artifact"]).write_text("changed N review")
+        with patch.object(sys, "argv", args):
+            r.main()
+        stale = j.load(readout_path)
+        self.assertEqual(stale["stale_diffs"], ["repo/d0", "repo/d1"])
+        self.assertEqual(stale["complete_diffs"], [])
+        self.assertEqual(stale["unfinished_diffs"], ["repo/d2"])
+        self.assertEqual(stale["paired_contrasts"]["R - G"]["catch"]["hand_checked"]["by_diff"], {})
 
     def test_missing_hand_check_keeps_a_diff_out_of_both_contrasts(self):
         key = setup(self.root, *fixture(2))
