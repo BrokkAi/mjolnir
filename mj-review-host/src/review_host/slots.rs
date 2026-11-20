@@ -1,6 +1,17 @@
 use super::*;
 
 impl ReviewSlot {
+    /// The roots the review owns until it is dropped. They come from the
+    /// capture, which outlives the stored group, so closing a review does not
+    /// release its roots before the host counts the close.
+    pub fn roots(&self) -> Vec<std::path::PathBuf> {
+        self.driver
+            .deltas()
+            .iter()
+            .map(|delta| delta.root.clone())
+            .collect()
+    }
+
     pub fn sync_group(&mut self) {
         if let Some(group) = self.open.active_group.as_mut() {
             group.driver = self.driver.snapshot();

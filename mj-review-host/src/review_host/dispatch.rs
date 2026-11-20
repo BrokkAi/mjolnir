@@ -78,7 +78,8 @@ impl HostState {
             HostEvent::View {
                 session_id,
                 snapshot,
-            } => self.observe(session_id, snapshot).await,
+                protocol,
+            } => self.observe(session_id, snapshot, protocol).await,
             HostEvent::Retain { live } => self.retain_sessions(&live),
             HostEvent::StartPush {
                 session_id,
@@ -342,6 +343,7 @@ impl HostState {
             ReviewStep::PushDelivered(result) => match result {
                 Ok(verdict) => {
                     if let Some(slot) = self.reviews.get_mut(&key) {
+                        slot.delivery_undo = None;
                         if let ReviewVerdict::Failed { reason } = verdict {
                             slot.driver.request_failed(reason);
                         }

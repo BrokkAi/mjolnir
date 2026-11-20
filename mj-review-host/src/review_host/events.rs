@@ -5,6 +5,8 @@ pub enum HostEvent {
     View {
         session_id: String,
         snapshot: Option<Box<MaterializedSession>>,
+        /// The relay protocol of the session's worker, as its view reports.
+        protocol: Option<u32>,
     },
     /// Drop the retained last-view (with its full transcript) for every session
     /// no longer in the live set. Without this, `sessions` keeps a
@@ -405,6 +407,10 @@ pub struct ReviewSlot {
     /// The host queued a save that takes this review out of the stored row,
     /// so later saves leave it out too.
     pub leaving_row: bool,
+    /// The outstanding findings verdicts a queued delivery replaced, for a
+    /// delivery that does not finish: its verdict was never delivered, so it
+    /// must not stay recorded.
+    pub delivery_undo: Option<Vec<PushFindingsRecord>>,
     pub delivery: Arc<super::resolve::Delivery>,
     pub retry_delay: std::time::Duration,
     pub start_reply: Option<OpenReply>,
@@ -546,6 +552,8 @@ pub enum ReservedRoots {
 
 pub struct SessionWatch {
     pub materialized: Option<Box<MaterializedSession>>,
+    /// The worker's protocol as of the latest view.
+    pub protocol: Option<u32>,
 }
 
 pub async fn host_loop(mut state: HostState, mut events: mpsc::UnboundedReceiver<HostEvent>) {
@@ -670,17 +678,17 @@ pub async fn persistence_loop(
                 delivery_owners.insert(task.id(), owner);
             }
             PersistenceRequest::Deliver(commit) => {
-                let environment = environment.clone();
-                let owner = (commit.session_id.clone(), commit.epoch);
-                let task = deliveries.spawn(async move {
-                    let session_id = commit.session_id.clone();
-                    let epoch = commit.epoch;
-                    let step = ReviewStep::PushDelivered(
-                        super::resolve::commit_delivery(environment, *commit).await,
-                    );
-                    (session_id, epoch, step)
+                // Local persistence, like every save: it finishes before the
+                // lane takes another request, so the rows the host composed
+                // reach the store in the order it composed them.
+                let session_id = commit.session_id.clone();
+                let epoch = commit.epoch;
+                let result = super::resolve::commit_delivery(environment.clone(), *commit).await;
+                let _ = events.send(HostEvent::Step {
+                    session_id,
+                    epoch,
+                    step: ReviewStep::PushDelivered(result),
                 });
-                delivery_owners.insert(task.id(), owner);
             }
             PersistenceRequest::SweepInterrupted => {
                 let sweep = environment.clone();

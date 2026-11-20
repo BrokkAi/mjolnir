@@ -688,7 +688,7 @@ impl HostState {
         }
         slot.pending_outcome = Some(PendingOutcome { prior, ended });
         let epoch = slot.epoch;
-        let state = match self.compose(&session_id) {
+        let state = match self.compose_for(&session_id, Some(&key)) {
             Ok(state) => state,
             Err(error) => {
                 let _ = reply.send(Err(error));

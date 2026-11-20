@@ -112,6 +112,10 @@ impl TurnReviewHost {
         // Retain the latest reviewer questions without blocking the daemon's
         // update loop.
         let _ = self.events.send(HostEvent::View {
+            protocol: view
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.operational.relay_protocol_version),
             session_id: session_id.to_owned(),
             snapshot: view
                 .snapshot
@@ -324,15 +328,21 @@ impl TurnReviewHost {
             .clone()
     }
 
-    /// Every open review, for a snapshot a surface renders.
+    /// One review per session, for a snapshot a surface renders: the session's
+    /// first, so a placeholder never hides a real review. A surface that shows
+    /// every review reads [`Self::views_of`].
     #[must_use]
     pub fn views(&self) -> Vec<RuntimeReviewView> {
-        self.shared
+        let views = self
+            .shared
             .views
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .cloned()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sessions = BTreeSet::new();
+        views
+            .iter()
+            .filter(|((session, _), _)| sessions.insert(session.clone()))
+            .map(|(_, view)| view.clone())
             .collect()
     }
 

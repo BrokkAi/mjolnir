@@ -6,6 +6,7 @@ impl HostState {
         &mut self,
         session_id: String,
         snapshot: Option<Box<MaterializedSession>>,
+        protocol: Option<u32>,
     ) {
         if snapshot.as_ref().is_some_and(|snapshot| {
             matches!(
@@ -22,6 +23,7 @@ impl HostState {
             session_id.clone(),
             SessionWatch {
                 materialized: snapshot,
+                protocol,
             },
         );
         let parents: BTreeSet<_> = self

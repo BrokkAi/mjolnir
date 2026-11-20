@@ -49,14 +49,20 @@ async fn run_set_base(
     } else {
         None
     };
-    link.ask(OperationRequest::ReserveBase { protocol, root })
-        .await?;
+    link.ask(OperationRequest::ReserveBase {
+        protocol,
+        root: root.clone(),
+    })
+    .await?;
 
+    // The move names the root that was reserved, not the path the caller
+    // gave: a path can resolve to another worktree between the two requests.
+    let target = root.or_else(|| path.map(std::path::PathBuf::from));
     let outcome = resolve::push_action(
         &control,
         &session_id,
         ReviewerAction::SetReviewBase {
-            path: path.map(std::path::PathBuf::from),
+            path: target,
             commit,
         },
     )

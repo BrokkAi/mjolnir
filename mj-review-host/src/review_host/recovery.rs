@@ -86,11 +86,12 @@ impl HostState {
                 reviewers,
                 open: review,
                 // The worker has not reconnected, so its protocol is not
-                // known. Restoring assumes the current one.
+                // known; delivery reads the latest view's.
                 protocol: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 _background: None,
                 finishing: false,
                 leaving_row: false,
+                delivery_undo: None,
                 delivery: Arc::new(super::resolve::Delivery::default()),
                 retry_delay: std::time::Duration::from_secs(1),
                 start_reply: None,

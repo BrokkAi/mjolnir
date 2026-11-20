@@ -329,11 +329,15 @@ impl TurnReviewState {
         self.push_findings.push(record);
     }
 
-    /// Drops every outstanding findings record that covers one of `roots`.
+    /// Stops covering `roots` with outstanding findings. A record that also
+    /// covers other roots keeps them, so the author can still answer it for
+    /// those; a record left with none is dropped.
     pub fn retire_findings<'a>(&mut self, roots: impl IntoIterator<Item = &'a std::path::PathBuf>) {
         let roots: Vec<_> = roots.into_iter().collect();
-        self.push_findings
-            .retain(|record| !roots.iter().any(|root| record.covers(root)));
+        self.push_findings.retain_mut(|record| {
+            record.trees.retain(|root, _| !roots.contains(&root));
+            !record.trees.is_empty()
+        });
     }
 
     /// Stop covering the repositories whose review base moved, dropping entries

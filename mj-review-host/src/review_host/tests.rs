@@ -2401,6 +2401,7 @@ fn observe_question(host: &TurnReviewHost, child: &str, message: &str) {
         });
     host.events
         .send(HostEvent::View {
+            protocol: None,
             session_id: child.into(),
             snapshot: Some(Box::new(snapshot)),
         })
@@ -6552,5 +6553,38 @@ async fn override_review_selects_the_verdict_by_path_and_keeps_the_others() {
     let state = environment.state();
     assert_eq!(state.push_findings.len(), 1);
     assert_eq!(state.push_findings[0].review_id, "review-2");
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_verdict_for_one_root_leaves_the_findings_of_the_other_roots_of_an_older_record() {
+    let session = session_id("shrink-findings");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment.state.lock().unwrap().push_findings = vec![mj_core::storage::PushFindingsRecord {
+        review_id: "older".into(),
+        trees: ["/workspace/a", "/workspace/b"]
+            .map(|root| (PathBuf::from(root), ("tree".into(), "head".into())))
+            .into(),
+        synthesis: "older findings".into(),
+    }];
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    publish_running(&manager).await;
+    open_scoped_review(&mut manager, &host, &session, "/workspace/a", "tree-a").await;
+    let children = children_by_root(&environment, 1).await;
+    settle_review(
+        &mut manager,
+        &host,
+        &environment,
+        &session,
+        &children[&PathBuf::from("/workspace/a")],
+        "No findings.",
+    )
+    .await;
+    let state = environment.state();
+    assert_eq!(state.push_findings.len(), 1);
+    assert!(!state.push_findings[0].covers(std::path::Path::new("/workspace/a")));
+    assert!(state.push_findings[0].covers(std::path::Path::new("/workspace/b")));
     host.shutdown().await.unwrap();
 }

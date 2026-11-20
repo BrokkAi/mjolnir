@@ -163,7 +163,14 @@ impl HostState {
         let Approval { verdict, recorded } = approval;
         let deltas = slot.driver.deltas().to_vec();
         let epoch = slot.epoch;
-        let protocol = slot.protocol;
+        // The worker's protocol as the latest view reports it: a restored
+        // review has none of its own, and a worker can be replaced while a
+        // review runs.
+        let protocol = self
+            .sessions
+            .get(&key.session_id)
+            .and_then(|watch| watch.protocol)
+            .unwrap_or(slot.protocol);
         let delivery = slot.delivery.clone();
         let roots: Vec<_> = deltas.iter().map(|delta| delta.root.clone()).collect();
         let Some(owner) = self.review_state.get_mut(&key.session_id) else {
@@ -172,6 +179,15 @@ impl HostState {
         };
         // The latest verdict for a root replaces the outstanding one. A
         // session whose worker cannot choose between verdicts keeps one.
+        let undo: Vec<_> = owner
+            .part
+            .push_findings
+            .iter()
+            .filter(|record| {
+                !concurrent_reviews(protocol) || roots.iter().any(|root| record.covers(root))
+            })
+            .cloned()
+            .collect();
         if concurrent_reviews(protocol) {
             owner.part.retire_findings(roots.iter());
         } else {
@@ -208,6 +224,7 @@ impl HostState {
         };
         if let Some(slot) = self.reviews.get_mut(key) {
             slot.leaving_row = true;
+            slot.delivery_undo = Some(undo);
         }
         let queued = self.compose(&key.session_id).and_then(|state| {
             self.persistence
@@ -238,10 +255,31 @@ impl HostState {
     /// A delivery step did not finish. The review stays open with its group
     /// stored, and delivery tries again, unless the requester is gone.
     pub fn delivery_failed(&mut self, key: &ReviewKey, error: String) {
+        let mut undo = None;
         let epoch = self.reviews.get_mut(key).map(|slot| {
             slot.leaving_row = false;
+            undo = slot.delivery_undo.take();
             slot.epoch
         });
+        // The verdict was not delivered, so its findings are not recorded: a
+        // save made before the retry must not carry them.
+        if let (Some(undo), Some(owner)) = (undo, self.review_state.get_mut(&key.session_id)) {
+            owner
+                .part
+                .push_findings
+                .retain(|record| record.review_id != key.review_id);
+            for original in undo {
+                match owner
+                    .part
+                    .push_findings
+                    .iter_mut()
+                    .find(|record| record.review_id == original.review_id)
+                {
+                    Some(existing) => existing.trees.extend(original.trees),
+                    None => owner.part.push_findings.push(original),
+                }
+            }
+        }
         self.close_reviewer_child(key);
         if let Some(epoch) = epoch {
             self.drop_review_if_owner_gone(

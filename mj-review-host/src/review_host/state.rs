@@ -126,6 +126,18 @@ impl HostState {
     /// list, in the order they opened. A review whose removal was queued is
     /// left out, and one being opened is in, so a save never undoes another.
     pub fn compose(&self, session_id: &str) -> Result<TurnReviewState, String> {
+        self.compose_for(session_id, None)
+    }
+
+    /// [`Self::compose`] for the save of `own`'s outcome. Any other save
+    /// lists a review whose outcome is still being saved as it last was
+    /// durable, so a settled role is never stored without the text it was
+    /// settled from.
+    pub fn compose_for(
+        &self,
+        session_id: &str,
+        own: Option<&ReviewKey>,
+    ) -> Result<TurnReviewState, String> {
         let owner = self
             .review_state
             .get(session_id)
@@ -133,10 +145,17 @@ impl HostState {
         let mut open: Vec<(u64, OpenReview)> = self
             .reviews
             .iter()
-            .filter(|(key, slot)| {
-                key.session_id == session_id && !slot.leaving_row && slot.open.is_stored()
+            .map(|(key, slot)| {
+                let open = match &slot.pending_outcome {
+                    Some(pending) if own != Some(key) => &pending.prior,
+                    _ => &slot.open,
+                };
+                (key, slot, open)
             })
-            .map(|(_, slot)| (slot.epoch, slot.open.clone()))
+            .filter(|(key, slot, open)| {
+                key.session_id == session_id && !slot.leaving_row && open.is_stored()
+            })
+            .map(|(_, slot, open)| (slot.epoch, open.clone()))
             .chain(
                 self.pending_open
                     .iter()
@@ -301,12 +320,19 @@ impl HostState {
                 .reviews
                 .iter()
                 .filter(|(key, _)| key.session_id == session_id)
-                .map(|(_, slot)| slot.open.roots())
+                .map(|(_, slot)| slot.roots())
                 .chain(
                     self.pending_open
                         .iter()
                         .filter(|(key, _)| key.session_id == session_id)
-                        .map(|(_, pending)| pending.open.roots()),
+                        .map(|(_, pending)| {
+                            pending
+                                .driver
+                                .deltas()
+                                .iter()
+                                .map(|delta| delta.root.clone())
+                                .collect::<Vec<_>>()
+                        }),
                 );
             for review_roots in reviews {
                 if review_roots.contains(root) {
