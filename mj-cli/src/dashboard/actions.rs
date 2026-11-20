@@ -662,7 +662,7 @@ pub(crate) async fn apply_dashboard_action(
             Err(error) => context.dashboard.setup_login_finished(
                 generation,
                 &profile_id,
-                Err(format!("{error:#}")),
+                mj_tui::SetupLoginOutcome::Failed(format!("{error:#}")),
             ),
         },
         // One key refreshes both panes, so it runs both requests rather than
