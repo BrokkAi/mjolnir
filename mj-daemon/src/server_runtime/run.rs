@@ -374,6 +374,7 @@ pub(crate) async fn run_server(
             // wait on an unrelated runtime or quota update.
             if publish_startup_capture {
                 publish_startup_capture = false;
+                revision = daemon_runtime.allocate_revision();
                 publish_snapshot!('control, revision);
             }
             tokio::select! {
