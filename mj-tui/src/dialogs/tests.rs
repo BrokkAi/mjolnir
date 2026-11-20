@@ -1087,6 +1087,7 @@ fn golden_dashboard_dialogs() {
             },
         );
     }
+    crate::test_support::publish_fixture_verdicts(&mut cpu);
     cpu.set_session_cpu(session_cpu);
     open_palette(&mut cpu);
     for character in "CPU by session".chars() {

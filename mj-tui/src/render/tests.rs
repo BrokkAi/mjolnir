@@ -1163,6 +1163,7 @@ fn minimized_sessions_dashboard(projects: usize, per_project: usize) -> Dashboar
         },
         BTreeMap::new(),
     );
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     // One turn of the dial reaches the minimized list.
     minimize_all_panes(&mut dashboard);
     dashboard
@@ -4617,6 +4618,7 @@ fn golden_operator_away_dialog() {
                 },
             );
         }
+        crate::test_support::publish_fixture_verdicts(&mut dashboard);
         dashboard.set_operator_presence(mj_core::state::OperatorPresence {
             away: true,
             revision: 1,

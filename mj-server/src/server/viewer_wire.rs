@@ -1,5 +1,5 @@
 //! Compact browser-only projection of the complete in-process viewer snapshot.
-use super::{ViewerLifecycleCategory, ViewerSession, ViewerSessions, ViewerSnapshot};
+use super::{ViewerSession, ViewerSessions, ViewerSnapshot};
 use anyhow::{Context, Result};
 use mj_client::runtime_feed::RuntimeCursor;
 use serde::Serialize;
@@ -87,6 +87,7 @@ const SUMMARY_FIELDS: &[&str] = &[
     "display_location",
     "lifecycle",
     "transitioning",
+    "verdict",
     "last_activity_at_ms",
     "last_message_at_ms",
     "capacity_retry",
@@ -293,17 +294,7 @@ pub(super) fn interned_keys_from_sessions(
 }
 
 pub(super) fn is_summary(session: &ViewerSession) -> bool {
-    // Match viewer.js isDashboardSession: operation-owned transitions remain
-    // detail rows, except a plain checkpoint, which leaves the conversation
-    // visible. Starting and suspending lifecycle categories are never settled.
-    let transitioning = session.transitioning
-        || session
-            .operation
-            .as_ref()
-            .is_some_and(|operation| operation.kind != super::ViewerOperationKind::Checkpoint);
-    session.lifecycle == ViewerLifecycleCategory::Suspended
-        && !transitioning
-        && !session.capabilities.open
+    !session.verdict.live_dashboard && !session.capabilities.open
 }
 
 fn is_empty_default(value: &Value) -> bool {

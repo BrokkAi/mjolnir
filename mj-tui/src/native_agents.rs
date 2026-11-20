@@ -30,35 +30,7 @@ impl DashboardState {
     }
 
     pub fn working_subagent_count_for(&self, parent: &str) -> usize {
-        let managed = self
-            .managed_active_child_ids(parent)
-            .into_iter()
-            .filter(|id| {
-                self.state.subagents.get(id).is_some_and(|relation| {
-                    relation.kind == mj_core::subagent::SubagentKind::Worker
-                })
-            })
-            .filter(|id| {
-                #[cfg(test)]
-                self.reconciliation_visits
-                    .set(self.reconciliation_visits.get() + 1);
-                self.session_is_working(id)
-            })
-            .count();
-        let native: BTreeSet<_> = self
-            .native_running_by_parent
-            .get(parent)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.native_agents.get(id))
-            .inspect(|_| {
-                #[cfg(test)]
-                self.reconciliation_visits
-                    .set(self.reconciliation_visits.get() + 1);
-            })
-            .map(|p| p.agent.stable_id.as_ref().unwrap_or(&p.agent.session_id))
-            .collect();
-        managed + native.len()
+        self.verdict(parent).working_children
     }
 
     pub fn subagent_count_for(&self, parent: &str) -> usize {

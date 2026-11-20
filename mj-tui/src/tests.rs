@@ -2266,6 +2266,7 @@ fn dashboard_with_attention_mix() -> DashboardState {
         .get_mut("done")
         .unwrap()
         .unread_agent_messages = 1;
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     dashboard.set_unread_frontiers([("done".into(), 4)].into_iter().collect());
     dashboard
 }

@@ -11,6 +11,7 @@ mod record_index;
 mod restart;
 mod session_lifecycle;
 mod session_move;
+pub(crate) mod verdicts;
 pub use mj_client::daemon::*;
 use mj_controller::controller::move_session::{
     MoveMutationGuard, MoveOutcome, MovePreparation, MoveSelection, MoveSessionRequest,

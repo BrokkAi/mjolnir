@@ -467,16 +467,7 @@ pub(super) async fn apply_phone_action(
             Ok(())
         }
         ControllerAction::InterruptTurn { session_id } => {
-            services
-                .sessions
-                .session(&session_id)
-                .await?
-                .submit(
-                    new_command_id("phone-cancel-turn")?,
-                    RelayCommand::CancelTurn,
-                )
-                .await?;
-            Ok(())
+            services.daemon_runtime.interrupt_turn(&session_id).await
         }
         ControllerAction::SetConfig {
             session_id,
@@ -559,42 +550,8 @@ pub(super) async fn apply_phone_action(
                 .map(|_| ())
         }
         ControllerAction::InterruptAll { session_id } => {
-            // The same tree the interrupt_all capability measured: this
-            // session and the sub-agents directly under it. Children are
-            // never nested.
-            let mut ids = vec![session_id.clone()];
-            ids.extend(
-                controller
-                    .state
-                    .subagents
-                    .values()
-                    .filter(|child| child.parent_session_id == session_id)
-                    .map(|child| child.child_session_id.clone()),
-            );
-            let mut failed = 0_usize;
-            for id in ids {
-                // A session the manager no longer holds has no turn to stop.
-                let Ok(handle) = services.sessions.session(&id).await else {
-                    continue;
-                };
-                let turn_running = handle.view().snapshot.is_some_and(|snapshot| {
-                    snapshot.operational.active_prompt.is_some()
-                        || snapshot.operational.harness_turn.is_some()
-                });
-                if !turn_running {
-                    continue;
-                }
-                if handle
-                    .submit(
-                        new_command_id("phone-interrupt-all")?,
-                        RelayCommand::CancelTurn,
-                    )
-                    .await
-                    .is_err()
-                {
-                    failed += 1;
-                }
-            }
+            let result = services.daemon_runtime.interrupt_all(&session_id).await?;
+            let failed = result.failures.len();
             // The successes are not rolled back, so one failure reads as a
             // count of what could not be interrupted, not a named session.
             anyhow::ensure!(

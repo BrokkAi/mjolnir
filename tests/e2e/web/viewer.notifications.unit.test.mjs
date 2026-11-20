@@ -127,6 +127,7 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
 
 const row = (id, attention, at, extra = {}) => ({
   id, title: id.toUpperCase(), attention, last_message_at_ms: at, project_label: 'proj', capabilities: { open: true },
+  verdict: { needs_person: ['needs_input', 'important', 'failed', 'unreachable'].includes(attention) },
   notification_dismissal: attention === 'needs_input' ? { question: { turn_id: id } } : { read_through: at },
   ...extra,
 });

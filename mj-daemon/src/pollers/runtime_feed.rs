@@ -44,6 +44,7 @@ impl From<&RuntimeMetadata> for RuntimeLaunchConfig {
 /// Records and lifecycle ownership must reach the surface in the same frame.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RuntimeStateUpdate {
+    pub verdicts: SnapshotMap<String, mj_client::runtime_feed::SessionVerdict>,
     pub subagent_parents: std::collections::BTreeSet<String>,
     pub operator_presence: mj_core::state::OperatorPresence,
     pub session_cpu: SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,

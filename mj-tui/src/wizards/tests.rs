@@ -2275,11 +2275,7 @@ fn move_review_counts_only_working_subagents() {
     let review_with = |working: bool, stops_subagents: bool| {
         let (mut dashboard, _) = dashboard_with_one_subagent();
         if working {
-            dashboard
-                .session_details
-                .get_mut("child-session")
-                .unwrap()
-                .current_turn_started_at = Some(1);
+            crate::test_support::set_working(&mut dashboard, "child-session");
         }
         let request_id = open_move_review(&mut dashboard);
         let mut preparation = move_preparation();

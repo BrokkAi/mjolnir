@@ -62,6 +62,12 @@ impl ViewerPublication {
                 .symmetric_difference(&next.metadata.failed_launch_retries)
                 .cloned(),
         );
+        self.dirty.extend(
+            self.runtime
+                .verdicts
+                .changes(&next.verdicts)
+                .map(|(id, _)| id.clone()),
+        );
         for (id, _) in self.runtime.sessions.changes(&next.sessions) {
             self.dirty.insert(id.clone());
         }
@@ -247,7 +253,7 @@ impl ViewerPublication {
                 children: &self.children,
                 failed_launch_retries: Some(&self.runtime.metadata.failed_launch_retries),
             },
-            &self.runtime.metadata,
+            &self.runtime,
         );
         for id in &self.dirty {
             match snapshot.sessions.0.get(id) {

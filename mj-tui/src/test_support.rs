@@ -605,6 +605,7 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
         },
         BTreeMap::new(),
     );
+    publish_fixture_verdicts(&mut dashboard);
     dashboard.quota_providers.settle();
     // This fixture represents a conversation already opened by the host.
     serve_attention(
@@ -618,8 +619,98 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
     dashboard
 }
 
+pub(crate) fn publish_fixture_verdicts(dashboard: &mut DashboardState) {
+    use mj_client::runtime_feed::{SessionOffer, SessionVerdict};
+    let verdicts = dashboard
+        .state
+        .sessions
+        .iter()
+        .map(|(id, record)| {
+            let active = record.state.is_active();
+            let transition = record.state.transition_kind();
+            let transition_failure = transition.filter(|kind| {
+                record.last_error.is_some()
+                    && matches!(
+                        kind,
+                        mj_core::state::SessionTransitionKind::Suspending
+                            | mj_core::state::SessionTransitionKind::Destroying
+                    )
+            });
+            (
+                id.clone(),
+                SessionVerdict {
+                    live_dashboard: active,
+                    transition: transition.filter(|_| record.last_error.is_none()),
+                    transition_failure,
+                    needs_person: dashboard.verdict(id).needs_person
+                        || dashboard.served_attention.get(id).is_some_and(|attention| {
+                            matches!(
+                                attention,
+                                mj_core::attention::SessionAttention::NeedsInput
+                                    | mj_core::attention::SessionAttention::Important
+                                    | mj_core::attention::SessionAttention::Unread
+                                    | mj_core::attention::SessionAttention::Failed
+                                    | mj_core::attention::SessionAttention::Unreachable
+                            )
+                        }),
+                    stop: if active {
+                        SessionOffer::Ready
+                    } else {
+                        SessionOffer::Hidden
+                    },
+                    restart: SessionOffer::Ready,
+                    move_session: if active {
+                        SessionOffer::Ready
+                    } else {
+                        SessionOffer::Hidden
+                    },
+                    change_workspace: if dashboard.workspace_ids().len() > 1 {
+                        SessionOffer::Ready
+                    } else {
+                        SessionOffer::NoOtherWorkspace
+                    },
+                    container_settings: if dashboard
+                        .config
+                        .targets
+                        .get(&record.target_template_id)
+                        .is_some_and(mj_core::config::is_container_target)
+                    {
+                        SessionOffer::Ready
+                    } else {
+                        SessionOffer::Hidden
+                    },
+                    resume: if active {
+                        SessionOffer::Active
+                    } else {
+                        SessionOffer::Ready
+                    },
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    dashboard.set_session_verdicts(verdicts);
+}
+
 /// Marks a session's turn as running, so it reads as working.
 pub(crate) fn set_working(dashboard: &mut DashboardState, session_id: &str) {
+    let mut verdict = dashboard.verdict(session_id);
+    verdict.interrupt = true;
+    verdict.interrupt_all = true;
+    verdict.interrupt_count += 1;
+    verdict.unfinished = true;
+    verdict.working = true;
+    dashboard
+        .session_verdicts
+        .insert(session_id.to_owned(), verdict);
+    if let Some(parent) = dashboard.subagent_parent_for(session_id) {
+        let mut verdict = dashboard.verdict(&parent);
+        verdict.interrupt_all = true;
+        verdict.interrupt_count += 1;
+        verdict.working_children += 1;
+        verdict.unfinished_children += 1;
+        dashboard.session_verdicts.insert(parent, verdict);
+    }
     serve_attention(
         dashboard,
         &[session_id],
@@ -648,6 +739,18 @@ pub(crate) fn serve_attention(
     attention: mj_core::attention::SessionAttention,
 ) {
     for id in ids {
+        let mut verdict = dashboard.verdict(id);
+        verdict.needs_person = matches!(
+            attention,
+            mj_core::attention::SessionAttention::NeedsInput
+                | mj_core::attention::SessionAttention::Important
+                | mj_core::attention::SessionAttention::Unread
+                | mj_core::attention::SessionAttention::Failed
+                | mj_core::attention::SessionAttention::Unreachable
+        );
+        dashboard
+            .session_verdicts
+            .insert((*id).to_string(), verdict);
         dashboard
             .served_attention
             .insert((*id).to_owned(), attention);
@@ -680,6 +783,7 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation);
     dashboard.set_state(state);
+    publish_fixture_verdicts(&mut dashboard);
     (dashboard, parent.id)
 }
 

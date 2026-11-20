@@ -1178,15 +1178,14 @@ impl DashboardState {
         } else {
             history_rows
         };
-        self.resume_rows = rows;
-        self.resume_hit_counts = hits;
-        self.resume_rows.retain(|row| {
-            row.session_id().is_none_or(|id| {
-                self.session_operations
-                    .get(id)
-                    .is_none_or(|operation| operation.kind.transition_kind().is_none())
+        self.resume_rows = rows
+            .into_iter()
+            .filter(|row| {
+                row.session_id()
+                    .is_none_or(|id| self.transition_kind(id).is_none())
             })
-        });
+            .collect();
+        self.resume_hit_counts = hits;
         for row in &mut self.resume_rows {
             // Recovery is the settled record's offer; Enter on a running session
             // goes to it, so a mark inviting a recovery here would not act.
@@ -1372,7 +1371,7 @@ impl DashboardState {
     pub fn apply_resume_record(
         &mut self,
         session_id: &str,
-        record: Result<Option<SessionRecord>, String>,
+        record: Result<Option<mj_client::daemon::SessionRecordWithVerdict>, String>,
     ) -> DashboardAction {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return DashboardAction::None;
@@ -1383,7 +1382,8 @@ impl DashboardState {
         dialog.opening = None;
         match record {
             Ok(Some(record)) => {
-                self.remember_stopped_record(record);
+                self.set_session_verdict(session_id, record.verdict);
+                self.remember_stopped_record(record.record);
                 self.cancel_modal();
                 self.begin_resume_for(session_id)
             }

@@ -34,24 +34,6 @@ impl AttentionLevel {
     }
 }
 
-/// The turns Interrupt all ends: Mjolnir sessions by id, and harness-native
-/// sub-agents by owner session and child id.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct InterruptAllTargets {
-    pub sessions: Vec<String>,
-    pub native: Vec<(String, String)>,
-}
-
-impl InterruptAllTargets {
-    pub fn is_empty(&self) -> bool {
-        self.sessions.is_empty() && self.native.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.sessions.len() + self.native.len()
-    }
-}
-
 /// One session the attention queue would take a person to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttentionEntry {
@@ -587,9 +569,10 @@ impl DashboardState {
     ) -> bool {
         session.workspace_id == workspace_id
             && !self.state.is_subagent_session(&session.id)
-            && (session.state.is_active()
+            && (self.verdict(&session.id).live_dashboard
                 || self.transition_kind(&session.id).is_some()
-                || self.attention_level(&session.id).needs_person())
+                || (self.verdict(&session.id).needs_person
+                    && self.attention_level(&session.id).needs_person()))
     }
 
     fn ordered_sessions_unfiltered(&self) -> Vec<&SessionRecord> {
@@ -758,7 +741,14 @@ impl DashboardState {
         let mut children = self
             .managed_active_child_ids(parent_id)
             .into_iter()
-            .filter(|id| self.has_unfinished_turn(id))
+            .chain(
+                self.native_by_parent
+                    .get(parent_id)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            )
+            .filter(|id| self.verdict(id).unfinished)
             .filter_map(|id| self.state.sessions.get(&id))
             .collect::<Vec<_>>();
         children.sort_by(|left, right| {
@@ -771,84 +761,16 @@ impl DashboardState {
             .collect()
     }
 
-    /// Whether the session itself holds an open question: the daemon's question
-    /// identity, or for a worker before relay protocol 64 (which may report a
-    /// question the daemon cannot target for dismissal) the latest-turn rule.
-    /// Remove the legacy half when relay protocols below 64 are retired.
-    fn owns_open_question(&self, session_id: &str) -> bool {
-        matches!(
-            self.notification_dismissals.get(session_id),
-            Some(mj_core::attention::NotificationDismissal::Question(_))
-        ) || self
-            .session_details
-            .get(session_id)
-            .is_some_and(|detail| !detail.supports_open_request && detail.legacy_awaiting_input)
-    }
-
-    /// Whether the session's own turn is still going: working, or holding a
-    /// question the agent asked in that turn.
-    fn has_unfinished_turn(&self, session_id: &str) -> bool {
-        self.own_turn_is_running(session_id)
-            || self.owns_open_question(session_id)
-            || self
-                .session_details
-                .get(session_id)
-                .is_some_and(|detail| !detail.pending_elicitations.is_empty())
-    }
-
-    /// What Interrupt all stops for `root`: every session in its Mjolnir
-    /// sub-agent tree whose turn is unfinished, and every running
-    /// harness-native sub-agent under any of them that can be stopped.
-    pub(crate) fn interrupt_all_targets(&self, root: &str) -> InterruptAllTargets {
-        let mut targets = InterruptAllTargets::default();
-        let mut visited = BTreeSet::new();
-        let mut pending = vec![root.to_owned()];
-        while let Some(id) = pending.pop() {
-            if !visited.insert(id.clone()) {
-                continue;
-            }
-            if let Some(pane) = self.native_agents.get(&id) {
-                if pane.agent.capabilities.cancel && !pane.stopping {
-                    targets.native.push((
-                        pane.agent.owner_session_id.clone(),
-                        pane.agent.session_id.clone(),
-                    ));
-                }
-            } else if self.has_unfinished_turn(&id) {
-                targets.sessions.push(id.clone());
-            }
-            pending.extend(self.managed_active_child_ids(&id));
-            pending.extend(
-                self.native_running_by_parent
-                    .get(&id)
-                    .into_iter()
-                    .flatten()
-                    .cloned(),
-            );
-        }
-        targets
-    }
-
-    /// Reports how Interrupt all went, and lets a native sub-agent whose stop
-    /// failed be stopped again.
-    pub fn interrupt_all_finished(
-        &mut self,
-        targets: &InterruptAllTargets,
-        failures: Vec<(String, String)>,
-    ) {
-        for (owner, child) in &targets.native {
-            let view_id = mj_core::native_agent::view_id(owner, child);
-            if failures.iter().any(|(id, _)| *id == view_id)
-                && let Some(pane) = self.native_agents.get_mut(&view_id)
-            {
-                pane.stopping = false;
-            }
-        }
+    pub fn interrupt_all_finished(&mut self, requested: usize, failures: Vec<(String, String)>) {
         let Some((id, error)) = failures.first() else {
-            self.set_notice(format!(
-                "Sent an interrupt to {}.",
-                crate::widgets::counted(targets.len(), "turn", "turns")
-            ));
+            self.set_notice(if requested == 0 {
+                "Nothing is running any more.".to_owned()
+            } else {
+                format!(
+                    "Sent an interrupt to {}.",
+                    crate::widgets::counted(requested, "turn", "turns")
+                )
+            });
             return;
         };
         let name = self
@@ -859,7 +781,7 @@ impl DashboardState {
         self.set_notice(format!(
             "Could not interrupt {} of {}; {name}: {error}",
             failures.len(),
-            crate::widgets::counted(targets.len(), "turn", "turns"),
+            crate::widgets::counted(requested, "turn", "turns"),
         ));
     }
 
@@ -888,27 +810,14 @@ impl DashboardState {
     /// not [`Self::attention_level`], which reads as waiting while a child
     /// waits on a person even though the parent's turn still runs.
     pub(crate) fn own_turn_is_running(&self, session_id: &str) -> bool {
-        self.session_details.get(session_id).is_some_and(|detail| {
-            detail.pending_elicitations.is_empty()
-                && !detail.activity.is_idle(detail.current_turn_started_at)
-        })
+        self.verdict(session_id).interrupt
     }
 
     /// Whether a live, reachable session is computing right now: the fact the
     /// Sessions row's spinner, a parent's sub-agent count and the Sub-agents
     /// view's ordering all read, so they cannot disagree.
     pub(crate) fn session_is_working(&self, session_id: &str) -> bool {
-        self.state
-            .sessions
-            .get(session_id)
-            .is_some_and(|session| session.state == SessionState::Running)
-            && !self.unreachable_sessions.contains(session_id)
-            && self.session_details.get(session_id).is_some_and(|detail| {
-                detail.activity.is_working(
-                    detail.current_turn_started_at,
-                    !detail.pending_elicitations.is_empty(),
-                )
-            })
+        self.verdict(session_id).working
     }
 
     /// The most recent activity the dashboard knows for a session, for
@@ -1416,18 +1325,8 @@ impl DashboardState {
 
     /// The selected session, if its target template creates a container.
     pub(crate) fn selected_container_session(&self) -> Option<&SessionRecord> {
-        let session = self.command_session()?;
-        matches!(
-            self.config.targets.get(&session.target_template_id)?,
-            HelTargetTemplate::LocalPodman { .. }
-                | HelTargetTemplate::LocalDocker { .. }
-                | HelTargetTemplate::AppleContainer { .. }
-                | HelTargetTemplate::SshPodman { .. }
-                | HelTargetTemplate::SshDocker { .. }
-                | HelTargetTemplate::SshAppleContainer { .. }
-                | HelTargetTemplate::SshNitro { .. }
-        )
-        .then_some(session)
+        self.command_session()
+            .filter(|session| self.verdict(&session.id).container_settings.offered())
     }
 
     pub(crate) fn config_is_empty(&self) -> bool {

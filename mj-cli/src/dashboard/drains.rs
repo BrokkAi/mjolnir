@@ -480,6 +480,7 @@ impl DashboardContext {
         self.dashboard
             .set_container_capacities(update.container_capacities);
         self.select_workspace(next_workspace);
+        self.dashboard.set_session_verdicts(update.verdicts);
         self.apply_runtime_records(
             update.records,
             update.sessions,

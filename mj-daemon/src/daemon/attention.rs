@@ -64,6 +64,12 @@ pub(super) fn update(
                     .changes(&next.native_agents)
                     .map(|(id, _)| id.clone()),
             )
+            .chain(
+                previous
+                    .moves
+                    .changes(&next.moves)
+                    .map(|(id, _)| id.clone()),
+            )
             .collect()
     };
     if ids.is_empty() {
@@ -249,7 +255,7 @@ fn unread_frontier(runtime: &RuntimeProjection, id: &str) -> Option<u64> {
 
 /// The request owner is the worker. Pre-64 workers retain the latest-turn rule;
 /// remove that compatibility branch when relay protocols below 64 are retired.
-fn semantic_question(
+pub(super) fn semantic_question(
     runtime: &RuntimeProjection,
     id: &str,
 ) -> Option<mj_core::assessment::InferredQuestion> {
@@ -398,11 +404,11 @@ fn project_states(
     for review in &runtime.metadata.reviews {
         reviews.entry(review.session_id.as_str()).or_insert(review);
     }
-    let lifecycles: BTreeSet<_> = runtime
+    let lifecycles: BTreeMap<_, _> = runtime
         .metadata
         .lifecycles
         .iter()
-        .map(|operation| operation.session_id.as_str())
+        .map(|operation| (operation.session_id.as_str(), operation.kind))
         .collect();
     let mut questions = BTreeSet::new();
     let mut native_forms = BTreeMap::new();
@@ -504,8 +510,12 @@ fn project_states(
             let view = runtime.sessions.get(id);
             let live = view.and_then(|view| view.operational.as_deref());
             let review = reviews.get(id.as_str()).copied();
-            let transitioning =
-                record.state.transition_kind().is_some() || lifecycles.contains(id.as_str());
+            let transitioning = super::verdicts::transition_kind(
+                record,
+                lifecycles.get(id.as_str()).copied(),
+                runtime.moves.get(id),
+            )
+            .is_some();
             let failure = mj_core::attention::FailureIdentity::of(record);
             let dismissed = failure
                 .as_ref()

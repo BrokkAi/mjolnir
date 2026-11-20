@@ -818,9 +818,17 @@ pub(super) async fn handle_action(
         DaemonAction::ResumeCandidates => Ok(DaemonReply::ResumeCandidates(Box::new(
             state.resume_candidates(),
         ))),
-        DaemonAction::SessionRecord { session_id } => Ok(DaemonReply::SessionRecord(
-            state.session_record(&session_id).map(Box::new),
-        )),
+        DaemonAction::SessionRecord { session_id } => {
+            let capture = state.runtime_publication()?;
+            Ok(DaemonReply::SessionRecord(
+                capture.records.get(&session_id).map(|record| {
+                    Box::new(SessionRecordWithVerdict {
+                        record: record.clone(),
+                        verdict: capture.verdicts[&session_id],
+                    })
+                }),
+            ))
+        }
         DaemonAction::GoStartupSession {
             workspace_id,
             last_session_id,
@@ -892,6 +900,13 @@ pub(super) async fn handle_action(
             })
             .await?;
             install_renamed_controller(state, controller);
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::InterruptAll { session_id } => Ok(DaemonReply::InterruptedAll(
+            state.interrupt_all(&session_id).await?,
+        )),
+        DaemonAction::InterruptTurn { session_id } => {
+            state.interrupt_turn(&session_id).await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::SubmitSessionCommand {
@@ -1308,6 +1323,12 @@ pub(super) async fn handle_action(
 pub(super) fn upgrade_request_activity(
     action: &DaemonAction,
 ) -> Result<Option<mj_controller::upgrade::Work>> {
+    if matches!(
+        action,
+        DaemonAction::InterruptAll { .. } | DaemonAction::InterruptTurn { .. }
+    ) {
+        return mj_controller::upgrade::activity("interrupt session work").map(Some);
+    }
     if matches!(action, DaemonAction::WikiSyncRequest) {
         return mj_controller::upgrade::activity_unless_draining("wiki sync request").map(Some);
     }

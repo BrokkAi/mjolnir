@@ -659,10 +659,26 @@ pub(crate) async fn run_dashboard_for_workspace(
         // chooses the session to start in.
         let startup = match context.dashboard.active_workspace_id().map(str::to_owned) {
             Some(workspace_id) => {
-                crate::daemon::connect_or_start()
-                    .await?
+                let mut client = crate::daemon::connect_or_start().await?;
+                let startup = client
                     .go_startup_session(workspace_id, mode.last_session_id.clone())
-                    .await?
+                    .await?;
+                if let Some(record) = startup
+                    .as_ref()
+                    .filter(|record| record.state == mj_core::state::SessionState::Stopped)
+                {
+                    let current = client
+                        .session_record_with_verdict(record.id.clone())
+                        .await?;
+                    current.map(|current| {
+                        context
+                            .dashboard
+                            .set_session_verdict(&record.id, current.verdict);
+                        current.record
+                    })
+                } else {
+                    startup
+                }
             }
             None => None,
         };
@@ -1923,6 +1939,7 @@ impl DashboardContext {
         // Apply bootstrap lifecycle and resource views even when the first
         // delta contains no changes and therefore causes no watch wakeup.
         runtime_state_rx.mark_changed();
+        dashboard.set_session_verdicts(runtime_state_rx.borrow().verdicts.clone());
         dashboard.set_move_snapshot(runtime_state_rx.borrow().moves.clone());
         dashboard.set_recent_launch(runtime_state_rx.borrow().recent_launch.clone());
         dashboard.set_container_capacities(runtime_state_rx.borrow().container_capacities.clone());
