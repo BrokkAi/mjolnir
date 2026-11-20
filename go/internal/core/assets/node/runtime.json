@@ -1,0 +1,9 @@
+{
+  "version": "24.22.1",
+  "platforms": {
+    "linux-x86_64": {"target":"linux-x64","interpreter":"/lib64/ld-linux-x86-64.so.2","sha256":"eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c"},
+    "linux-aarch64": {"target":"linux-arm64","interpreter":"/lib/ld-linux-aarch64.so.1","sha256":"33c37be234ba8bee041961047b19160f4d7d0f164e8e246f78bdd10feff148b3"},
+    "macos-x86_64": {"target":"darwin-x64","sha256":"d132557e7ee2b85af08b0c8c34338e65c6430f2238d01f727728ef42dc83b035"},
+    "macos-aarch64": {"target":"darwin-arm64","sha256":"89c682593d76cd44233fa53b1563264e7de9cbb189cad169135c5b4fadfbc0a7"}
+  }
+}
