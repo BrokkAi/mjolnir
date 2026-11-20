@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Stop relay recovery after a replacement worker's ACP session/load fails, and
-finish an interrupted Suspend without the harness that failed."""
+"""Stop relay recovery after a replacement worker's harness fails to start
+(its ACP session/load or its preparation fails), and finish an interrupted
+Suspend without the harness that failed."""
 
 import argparse
 import json
@@ -233,6 +234,59 @@ def run(lab, args):
         lab.record_action("resume-replayed-prompt-and-mail")
         finished = json.loads(cli("wait", "--session", session, "--json"))
         assert finished["outcome"] == "finished", finished
+
+        # Hard-won: #1617: a worker whose harness could not be prepared kept serving a relay with no harness
+        # A replacement worker whose harness cannot even be prepared exits
+        # with the same typed marker, so recovery stops at Error instead of
+        # attaching to a session that can never run a turn.
+        cli("daemon", "stop")
+        subprocess.run(
+            [str(args.worker.resolve()), "worker", "stop", "--root", str(root)],
+            env=worker_env, check=True, timeout=reliability_lab.TIMEOUT,
+        )
+        # A launch that names no harness home cannot locate the harness's
+        # credentials, which fails preparation after the relay is served.
+        unpreparable_launch = lab.root / "unpreparable-launch.json"
+        unpreparable = json.loads(launch.read_text())
+        unpreparable["harness_home"] = ""
+        for environment in ("environment", "target_environment"):
+            unpreparable.get(environment, {}).pop("CODEX_HOME", None)
+        unpreparable_launch.write_text(json.dumps(unpreparable))
+        with (lab.root / "unpreparable-worker.log").open("w") as log:
+            unprepared_worker = subprocess.Popen(
+                [str(root / "hel"), "worker", "run", "--root", str(root),
+                 "--config", str(unpreparable_launch)],
+                env=worker_env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+        assert unprepared_worker.wait(timeout=reliability_lab.TIMEOUT) != 0
+        exit_bytes = exit_path.read_bytes()
+        marker = json.loads(exit_bytes)["harness_startup_failure"]["message"]
+        assert marker.startswith("harness preparation failed at command-permissions: "), marker
+        assert not (root / "control.sock").exists(), "the unprepared worker left its socket"
+        boot = startup_path.stat()
+        cli("workspaces", "list")
+        authenticate()
+        lab.wait_snapshot(
+            lambda snapshot: (lab.session(snapshot, session) or {}).get("state") == "error",
+            "relay recovery to publish Error from the unprepared worker",
+        )
+        assert marker in record()["last_error"], record()
+        deadline = time.monotonic() + RECOVERY_OBSERVATION_SECONDS
+        while time.monotonic() < deadline:
+            assert exit_path.read_bytes() == exit_bytes, "a subsequent boot replaced the exit record"
+            current_boot = startup_path.stat()
+            assert (current_boot.st_ino, current_boot.st_mtime_ns) == (boot.st_ino, boot.st_mtime_ns)
+            time.sleep(0.25)
+        assert record()["state"] == "error"
+        lab.record_action("unpreparable-harness-ended-worker", cause=record()["last_error"])
+        cli("resume", "--session", session, "--queue", "start")
+        lab.wait_snapshot(
+            lambda snapshot: (row := lab.session(snapshot, session) or {}).get("state") == "running"
+            and not row.get("operation"),
+            "Resume to restart the harness after the preparation failure",
+        )
+        assert json.loads(exit_path.read_bytes()) is None, "Resume left a stale failure marker"
+        lab.record_action("resume-after-preparation-failure")
 
         # Hard-won: #1619: an interrupted Suspend whose restarted harness failed to open ended in Error without a checkpoint
         # A close that cannot save the session without its harness, here

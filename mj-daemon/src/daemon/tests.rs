@@ -7182,6 +7182,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             models: Default::default(),
             legacy_subagents: None,

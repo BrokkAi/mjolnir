@@ -3814,6 +3814,7 @@ mod profile_homes {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
         };
@@ -3896,6 +3897,7 @@ mod profile_homes {
             legacy_muse_auto_review: None,
             load_balancing_may_consume_credits: false,
             claude_permission_mode: None,
+            mjolnir_guardian: true,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
         };
