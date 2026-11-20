@@ -833,9 +833,13 @@ impl Controller {
         cause: &str,
         observed_updated_at: &str,
     ) -> Result<bool> {
-        let Some(record) =
-            crate::database::fail_unready_session(session_id, cause, observed_updated_at)
-                .context("persist a session whose harness never became usable")?
+        let Some(record) = crate::database::fail_unready_session(
+            session_id,
+            cause,
+            SessionState::Running,
+            observed_updated_at,
+        )
+        .context("persist a session whose harness never became usable")?
         else {
             return Ok(false);
         };

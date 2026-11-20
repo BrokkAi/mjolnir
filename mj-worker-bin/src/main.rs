@@ -539,11 +539,17 @@ fn main() -> Result<()> {
         );
         if let Some(root) = &exit_root {
             let refusal = mj_core::refusal::Refusal::of(error);
+            let startup_failure =
+                error.downcast_ref::<mj_core::relay::WorkerHarnessStartupFailure>();
+            let reason = startup_failure.map_or_else(
+                || mj_worker::acp::worker_exit_reason(error),
+                |failure| failure.message.clone(),
+            );
             write_worker_exit_record_details(
                 root,
-                &mj_worker::acp::worker_exit_reason(error),
+                &reason,
                 refusal.as_ref().map(mj_core::refusal::Refusal::message),
-                error.downcast_ref(),
+                startup_failure,
             );
         }
     }

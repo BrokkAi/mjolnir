@@ -28,6 +28,8 @@ def run(lab, args):
             open({str(entered)!r}, "w").close()
             while not os.path.exists({str(release)!r}):
                 time.sleep(0.02)
+            for _ in range(80):
+                print("fixture bridge diagnostic " + "x" * 1024, file=sys.stderr)
             send({{"jsonrpc": "2.0", "id": ident, "error": {{
                 "code": -32603, "message": {CAUSE!r}
             }}}})
@@ -128,7 +130,9 @@ def run(lab, args):
         startup_path = root / "worker-startup.json"
         exit_bytes = exit_path.read_bytes()
         boot = startup_path.stat()
-        assert CAUSE in json.loads(exit_bytes)["harness_startup_failure"]["message"]
+        exit_record = json.loads(exit_bytes)
+        assert CAUSE in exit_record["harness_startup_failure"]["message"]
+        assert CAUSE in exit_record["reason"].splitlines()[0], exit_record["reason"]
         cli("workspaces", "list")
         authenticate()
         snapshot = lab.wait_snapshot(

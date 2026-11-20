@@ -844,10 +844,11 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
 }
 
 /// Apply either a live preparation failure or a dead worker's startup failure
-/// only to the running lifecycle revision that the caller observed.
+/// only to the lifecycle state and revision that the caller observed.
 pub fn fail_unready_session(
     session_id: &str,
     cause: &str,
+    observed_state: SessionState,
     observed_updated_at: &str,
 ) -> Result<Option<SessionRecord>> {
     let session_id = session_id.to_owned();
@@ -858,7 +859,12 @@ pub fn fail_unready_session(
         let Some(mut record) = load_session_with(&tx, &session_id)? else {
             return Ok(None);
         };
-        if record.state != SessionState::Running || record.updated_at != observed_updated_at {
+        if !matches!(
+            observed_state,
+            SessionState::Running | SessionState::Disconnected
+        ) || record.state != observed_state
+            || record.updated_at != observed_updated_at
+        {
             return Ok(None);
         }
         record.state = SessionState::Error;

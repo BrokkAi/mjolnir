@@ -655,6 +655,7 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
 }
 
 #[cfg(unix)]
+// Hard-won: 58e37a647: A disconnected session with a marked exit kept polling.
 #[test]
 fn recovery_stops_at_a_marked_harness_startup_failure() {
     const CHILD: &str = "MJ_STARTUP_FAILURE_RECOVERY_CHILD";
@@ -669,16 +670,33 @@ fn recovery_stops_at_a_marked_harness_startup_failure() {
         .unwrap()
         .unwrap();
     record.target = Some(Box::new(recovery_source_target()));
-    crate::database::save_session(&record).unwrap();
 
     let directory = tempfile::tempdir().unwrap();
+    let worker_root = directory.path().join("worker root");
+    let exit_path = worker_root.join(mj_core::relay::WORKER_EXIT_FILE);
+    let worker_root_text = worker_root.to_str().unwrap();
+    let backend = mj_core::targets::TargetLocator::LocalBare {
+        worker_root: worker_root_text.to_owned(),
+    };
+    let exit_record =
+        mj_worker_staging::worker_binary::worker_exit_record_command(&backend, worker_root_text);
+    let executor = crate::targets::ProcessExecutor;
+    let absent = executor.execute(&exit_record).unwrap();
+    assert_eq!(absent.status, 0);
+    assert!(
+        mj_worker_staging::worker_binary::read_worker_exit_record(&absent.stdout)
+            .unwrap()
+            .is_none()
+    );
+    std::fs::create_dir(&worker_root).unwrap();
+
     let restarted = directory.path().join("worker-restarted");
     let cause = "ACP runtime failed: fixture transient load failure";
-    let plan = |exit_record: &str| WorkerRecoveryPlan {
+    let plan = WorkerRecoveryPlan {
         source_target: recovery_source_target(),
         target: None,
         workspace: None,
-        exit_record: Some(CommandSpec::new("printf", ["%s", exit_record])),
+        exit_record: Some(exit_record),
         liveness_probe: CommandSpec::new("printf", ["dead"]).into(),
         binary_refresh: None,
         launch_refresh: None,
@@ -691,41 +709,46 @@ fn recovery_stops_at_a_marked_harness_startup_failure() {
         }
         .into(),
     };
-    let recover = |exit_record: serde_json::Value| {
-        recover_worker_controlled(
-            plan(&exit_record.to_string()),
-            false,
-            Some(id),
-            &crate::targets::ProcessExecutor,
-        )
-        .unwrap()
-    };
-    // The legacy record carries the very same cause, but no typed marker.
-    assert_eq!(
-        recover(serde_json::json!({"reason": cause})),
-        WorkerRecoveryOutcome::RestartedDead
-    );
-    assert!(crate::database::load_worker_restart(id).unwrap().is_some());
-    std::fs::remove_file(&restarted).unwrap();
+    let recover = || recover_worker_controlled(plan.clone(), false, Some(id), &executor);
+    use mj_core::state::SessionState;
+    for state in [SessionState::Running, SessionState::Disconnected] {
+        record.state = state;
+        crate::database::save_session(&record).unwrap();
 
-    let marked = serde_json::json!({
-        "reason": "worker exited",
-        "harness_startup_failure": {"message": cause},
-    });
-    assert_eq!(
-        recover(marked.clone()),
-        WorkerRecoveryOutcome::HarnessStartupFailed
-    );
-    assert!(!restarted.exists());
-    let failed = crate::database::read_durable_session_record(id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(failed.state, mj_core::state::SessionState::Error);
-    assert_eq!(failed.last_error.as_deref(), Some(cause));
-    assert!(!session_target_is_pollable(&failed));
-    assert!(crate::database::load_worker_restart(id).unwrap().is_none());
-    assert_eq!(recover(marked), WorkerRecoveryOutcome::Suppressed);
-    assert!(!restarted.exists());
+        std::fs::create_dir(&exit_path).unwrap();
+        assert!(recover().is_err(), "a failed read must defer recovery");
+        std::fs::remove_dir(&exit_path).unwrap();
+        std::fs::write(&exit_path, "malformed record").unwrap();
+        assert!(recover().is_err(), "a malformed record must defer recovery");
+        assert!(!restarted.exists());
+
+        // The legacy record carries the very same cause, but no typed marker.
+        std::fs::write(&exit_path, serde_json::json!({"reason": cause}).to_string()).unwrap();
+        assert_eq!(recover().unwrap(), WorkerRecoveryOutcome::RestartedDead);
+        assert!(crate::database::load_worker_restart(id).unwrap().is_some());
+        std::fs::remove_file(&restarted).unwrap();
+
+        let marked = serde_json::json!({
+            "reason": "worker exited",
+            "harness_startup_failure": {"message": cause},
+        });
+        std::fs::write(&exit_path, marked.to_string()).unwrap();
+        assert_eq!(
+            recover().unwrap(),
+            WorkerRecoveryOutcome::HarnessStartupFailed
+        );
+        assert!(!restarted.exists());
+        let failed = crate::database::read_durable_session_record(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, SessionState::Error);
+        assert_eq!(failed.last_error.as_deref(), Some(cause));
+        assert!(!session_target_is_pollable(&failed));
+        assert!(crate::database::load_worker_restart(id).unwrap().is_none());
+        assert_eq!(recover().unwrap(), WorkerRecoveryOutcome::Suppressed);
+        assert!(!restarted.exists());
+        std::fs::remove_file(&exit_path).unwrap();
+    }
 }
 
 #[tokio::test]
