@@ -331,6 +331,15 @@ pub struct MaterializedTurnOutcome {
 }
 
 impl MaterializedTurnOutcome {
+    /// Whether this command carries out the request again, including provider
+    /// retries and any generation of worker restart continuation.
+    pub fn is_resubmitted_by(&self, command_id: &str) -> bool {
+        let carried = crate::continuation::carried_command(command_id);
+        crate::relay::retried_turn(carried) == Some(self.completed_ordinal)
+            || (carried != command_id
+                && carried == crate::continuation::carried_command(&self.command_id))
+    }
+
     /// The highest acceptance answered by the projection, or a legacy row.
     pub fn answered_ordinal(&self) -> Option<u64> {
         self.answered_through.or_else(|| {
@@ -2077,7 +2086,8 @@ pub struct StartSelection {
 }
 
 impl SessionRecord {
-    /// Whether this session's recorded target runs with `permissions = "yolo"`.
+    /// Whether this session's harness runs without approvals on its recorded
+    /// target (a container, or `permissions = "yolo"`).
     pub fn is_yolo_target(&self, config: &Config) -> bool {
         self.target_runtime_settings(config)
             .is_ok_and(|settings| settings.is_yolo())

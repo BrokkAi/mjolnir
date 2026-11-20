@@ -75,7 +75,7 @@ impl KimiTaskMonitor {
             .clone()
             .expect("Kimi refresh is guarded by a native session id");
         let follower = self.follower.take();
-        let scanned = tokio::task::spawn_blocking(move || -> Result<_> {
+        let scanned = mj_core::runtime::spawn_blocking(move || -> Result<_> {
             let session_dir = acp::resolve_kimi_session_dir(&home, &native_session_id)?;
             let wire_path = session_dir.join("agents/main/wire.jsonl");
             let mut follower = match follower {

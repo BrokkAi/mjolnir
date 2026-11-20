@@ -395,7 +395,7 @@ mod publication_tests {
         let cancellation = CancellationToken::new();
         let server_cancel = cancellation.clone();
         let serving = state.clone();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             // The same synchronous drain used by the real serving tick must
             // finish before this task can accept and answer a connection.
             publish_background_results(

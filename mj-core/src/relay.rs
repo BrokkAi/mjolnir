@@ -175,8 +175,12 @@ pub const RELAY_HELD_LOGIN_PROTOCOL: u32 = 69;
 pub const RELAY_AUTHENTICATION_RETRY_INTENT_PROTOCOL: u32 = 70;
 /// 71 reports the notification stack and accepts exact Clear and read pruning.
 pub const RELAY_NOTIFICATION_STACK_PROTOCOL: u32 = 71;
+/// 72 atomically transfers an interrupted prompt into restart recovery. The
+/// continuation ID is digest-covered, so older readers must not consume it.
+pub const RELAY_RESTART_RECOVERY_PROTOCOL: u32 = 72;
+
 /// Operation-owned command retention and acknowledgement-only journal GC.
-pub const RELAY_COMMAND_RETENTION_PROTOCOL: u32 = 72;
+pub const RELAY_COMMAND_RETENTION_PROTOCOL: u32 = 73;
 /// 74 reserves the next quiescent boundary for cancellable adoption cuts.
 pub const RELAY_LIVE_BASELINE_PROTOCOL: u32 = 74;
 pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_LIVE_BASELINE_PROTOCOL;

@@ -453,7 +453,8 @@ impl ViewerSnapshot {
                 id: id.to_owned(),
                 harness_kind: profile.kind.id().into(),
                 quota_pools: if profile.kind == mj_core::config::HarnessKind::Antigravity {
-                    mj_client::quota::AntigravityQuotaPool::ALL
+                    profile
+                        .antigravity_pools()
                         .into_iter()
                         .map(|pool| pool.label().to_owned())
                         .collect()
@@ -476,6 +477,7 @@ impl ViewerSnapshot {
                 id: id.to_owned(),
                 kind: target.kind_name().into(),
                 permission_mode: target.permission_mode(),
+                yolo: target.is_yolo(),
                 subagents_configured: config.subagents.is_configured_for(target.is_yolo()),
                 oracle_configured: config.subagents.oracle_configured_for(target.is_yolo()),
                 resource_allocation_kind: target.into(),
@@ -1198,6 +1200,10 @@ pub struct ViewerTarget {
     /// The approval mode of a bare target; `None` for an isolated runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<mj_core::config::PermissionMode>,
+    /// Whether the harness runs without approvals here, which selects the
+    /// YOLO sub-agent and oracle choices.
+    #[serde(default)]
+    pub yolo: bool,
     /// Whether the Mjolnir sub-agent choices this target would use are
     /// configured. A YOLO target reads its own set.
     #[serde(default)]

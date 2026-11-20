@@ -553,12 +553,12 @@ with it yet, so it describes the policy rather than the next hourly pass.
 A running session is indexed from the transcript the daemon holds, and a suspended
 one from its checkpoint, so a session is searchable before it has ever been
 closed. The daemon indexes when it starts, when a session reaches the suspended
-state, once an hour, and before a Resume search that has not synced in the last
-minute. The first build walks every tool's store and can take many minutes on a
-large corpus. Until it finishes, the Resume search box cannot be typed into and
-reads **Indexing…**; the tabs and the list keep working, and the box becomes
-typable as soon as the build finishes, though moving the keyboard focus there
-still takes `/` or a click. What is stored is the conversation: the prompts,
+state, once an hour, when the Resume search opens, and when text is first entered
+in the Sessions filter. The first build walks every tool's store and can take
+many minutes on a large corpus. Searches stay usable during the build and show
+sync progress; the current query runs again when its requested pass finishes.
+In the terminal dialog, `/` or a click moves the keyboard focus to search.
+What is stored is the conversation: the prompts,
 the agent's replies, the titles of the tool calls, the session title, and the
 project directory. Native sessions from every enabled profile home that
 Mjolnir can read are indexed too, including Kimi Code, Grok Build, Muse and
@@ -609,11 +609,17 @@ carries the text the search matched. That includes text that appears only inside
 a transcript, and a title or project the index knows, so a session you remember
 only by something said inside it is findable.
 
-The box is closed while the index cannot answer. It reads **Indexing…** during
-the first build and while Mjolnir rebuilds an index an older SessionWiki wrote.
-It names a version mismatch when a newer SessionWiki wrote the index file on
-disk (see [Match the `sessionwiki` version](#match-the-sessionwiki-version)).
-Either way the tabs and row navigation keep working.
+Opening the dialog starts an index sync. Its results title shows the tool being
+scanned, then a progress bar and session counts. You can search while it runs;
+the current query runs again when that sync finishes, so recent messages appear
+without retyping. The Sessions filter works the same way: its first text starts
+a sync, with progress below the create/open/filter row. Clearing the filter
+ends that search episode. A failed sync or interrupted connection shows its error
+in the same place. Reopen Resume, or clear and re-enter the filter, to try again.
+
+Only an index written by a newer SessionWiki closes the history search box
+(see [Match the `sessionwiki` version](#match-the-sessionwiki-version)). The
+tabs and row navigation keep working while the index builds.
 
 ### The Archived tab
 
@@ -661,17 +667,17 @@ sessions survive a rebuild, but re-indexing takes tens of minutes on a large
 corpus.
 
 When an older SessionWiki wrote the index, Mjolnir rebuilds it at its own
-version and the box reads **Indexing…** until that finishes. A `sessionwiki`
+version and shows sync progress while that finishes. A `sessionwiki`
 command older than 0.34.1 rebuilds it back the next time it runs, so the two
 take turns re-indexing everything until you upgrade the command. When a newer
 SessionWiki wrote the index, Mjolnir leaves it alone and search stays closed
 until you upgrade Mjolnir.
 
-This build links the `brokk-sessionwiki` crate, version 0.34.25. Install the
+This build links the `brokk-sessionwiki` crate, version 0.34.27. Install the
 matching tool with:
 
 ```sh
-cargo install --locked brokk-sessionwiki@0.34.25
+cargo install --locked brokk-sessionwiki@0.34.27
 ```
 
 If you installed the `sessionwiki` package for an earlier Mjolnir build, remove

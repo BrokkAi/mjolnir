@@ -68,6 +68,7 @@ impl RuntimeState {
         request: mj_controller::controller::RegisterSubagentRequest,
     ) -> Result<mj_core::subagent::SubagentRecord> {
         let _upgrade_work = mj_controller::upgrade::activity("subagent admission")?;
+        let manager = self.session_manager.clone();
         let (relation, needs_provisioning, registered_here) = blocking(move || {
             let mut controller = Controller::load()?;
             if let Some(existing) = mj_controller::database::lookup_subagent_request(
@@ -102,7 +103,7 @@ impl RuntimeState {
                 );
             }
             controller
-                .register_subagent(request)
+                .register_subagent_with_manager(request, &manager)
                 .map(|relation| (relation, true, true))
         })
         .await?;
@@ -469,6 +470,7 @@ impl RuntimeState {
                     no_project_memory: request.no_project_memory,
                     no_github_events: request.no_github_events,
                     no_github_credentials: request.no_github_credentials,
+                    notifications_ignored: request.notifications_ignored,
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,
                     additional_mounts: request.additional_mounts,
@@ -691,7 +693,7 @@ impl RuntimeState {
             mj_controller::launch_timing::LaunchPhaseTimer::new(&session_id, "create lifecycle");
         let loading =
             mj_controller::launch_timing::LaunchPhaseTimer::new(&session_id, "load controller");
-        let mut controller = tokio::task::spawn_blocking(Controller::load)
+        let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
             .await
             .context("load controller for daemon create task")??;
         drop(loading);
@@ -847,7 +849,12 @@ impl RuntimeState {
             }
             tracing::info!(session_id = %intent.session_id, "resuming a session creation interrupted by a daemon restart");
             let inputs = match mj_controller::database::load_subagent(&intent.session_id)? {
-                Some(relation) => CreateInputs::Subagent(Box::new(relation)),
+                Some(relation) => {
+                    self.session_manager
+                        .restore_starting(intent.session_id.clone())
+                        .await?;
+                    CreateInputs::Subagent(Box::new(relation))
+                }
                 None => CreateInputs::TopLevel {
                     publication: None,
                     remember_launch_choices: intent.remember_launch_choices,
@@ -1023,6 +1030,7 @@ mod delegation_replay_tests {
                 no_project_memory: false,
                 no_github_events: false,
                 no_github_credentials: false,
+                notifications_ignored: false,
                 initial_prompt: None,
                 workspace_id: workspace.id.clone(),
                 profile_id: "codex".into(),
@@ -1199,6 +1207,7 @@ mod delegation_replay_tests {
             no_project_memory: false,
             no_github_events: false,
             no_github_credentials: false,
+            notifications_ignored: false,
             initial_prompt: None,
             workspace_id: workspace.id,
             profile_id: "codex".into(),

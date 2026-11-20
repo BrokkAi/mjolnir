@@ -77,7 +77,7 @@ const CLAUDE_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
 /// has are kept. A home that is not a private staged directory may be the
 /// person's own, so it is never edited: a delegating parent or a child cannot
 /// start without its tools there, while a message-only session starts without
-/// `send_message`.
+/// `send_message`. Returns whether the role servers were registered.
 pub(super) fn configure_claude_subagent_mcp(
     root: &Path,
     session_id: &str,
@@ -86,7 +86,7 @@ pub(super) fn configure_claude_subagent_mcp(
     agent_mailboxes_enabled: bool,
     subtle_subagents: bool,
     review_tools: bool,
-) -> Result<()> {
+) -> Result<bool> {
     use mj_core::subagent::{
         REVIEW_MCP_SERVER, REVIEW_MCP_TOOLS, SUBAGENT_MCP_SERVER, SubagentMcpRole,
     };
@@ -112,9 +112,9 @@ pub(super) fn configure_claude_subagent_mcp(
             )),
             Some(SubagentMcpRole::MessageOnly) => {
                 tracing::warn!(path = %home.display(), "skipping the Claude send_message server: the profile is not a private staged directory");
-                Ok(())
+                Ok(false)
             }
-            None => Ok(()),
+            None => Ok(false),
         };
     }
 
@@ -186,7 +186,7 @@ pub(super) fn configure_claude_subagent_mcp(
     })?;
 
     let Some(role) = role else {
-        return Ok(());
+        return Ok(false);
     };
     // In any mode but Auto, Claude would otherwise ask a person before a
     // child's mandatory `handback` or a parent's `spawn` (R11-1).
@@ -229,7 +229,8 @@ pub(super) fn configure_claude_subagent_mcp(
             }
         }
         Ok(())
-    })
+    })?;
+    Ok(true)
 }
 
 /// Kimi binds stdio servers to a runtime through its private MCP profile.
@@ -2177,6 +2178,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
         );
     }
 
+    // Hard-won: 5fc951f2e: skipped shared-home registration must report tools unavailable.
     #[cfg(unix)]
     #[test]
     fn the_claude_registration_never_edits_a_profile_that_may_be_the_persons_own() {
@@ -2202,16 +2204,18 @@ print(sys.argv[sys.argv.index('--role') + 1])
                 "{role:?} cannot start without its tools"
             );
         }
-        configure_claude_subagent_mcp(
-            root.path(),
-            "session",
-            &home,
-            Some(SubagentMcpRole::MessageOnly),
-            true,
-            true,
-            false,
-        )
-        .unwrap();
+        assert!(
+            !configure_claude_subagent_mcp(
+                root.path(),
+                "session",
+                &home,
+                Some(SubagentMcpRole::MessageOnly),
+                true,
+                true,
+                false,
+            )
+            .unwrap()
+        );
         assert_eq!(
             std::fs::read(own.path().join(".claude.json")).unwrap(),
             b"{}"
@@ -2851,7 +2855,7 @@ enabled = false
             message: "x".repeat(128 * 1024),
         };
         let (client, server) = UnixStream::pair().unwrap();
-        let served = tokio::spawn(serve_one(server, endpoint.clone()));
+        let served = mj_core::runtime::spawn(serve_one(server, endpoint.clone()));
         let (read, mut write) = client.into_split();
         write
             .write_all(format!("{}\n", serde_json::to_string(&input).unwrap()).as_bytes())
@@ -2895,7 +2899,7 @@ enabled = false
         let directory = tempfile::tempdir().unwrap();
         let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
         let (mut client, server) = UnixStream::pair().unwrap();
-        let served = tokio::spawn(serve_one(server, endpoint.clone()));
+        let served = mj_core::runtime::spawn(serve_one(server, endpoint.clone()));
         let mut body = serde_json::to_vec(&request("r1")).unwrap();
         body.push(b'\n');
         client.write_all(&body).await.unwrap();
@@ -2945,7 +2949,7 @@ enabled = false
             endpoint.record_collection();
             let socket = directory.path().join("test.sock");
             let listener = UnixListener::bind(&socket).unwrap();
-            let served = tokio::spawn({
+            let served = mj_core::runtime::spawn({
                 let endpoint = endpoint.clone();
                 async move {
                     let (stream, _) = listener.accept().await.unwrap();

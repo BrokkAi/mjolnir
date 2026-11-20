@@ -594,7 +594,7 @@ fn spawn_with_gate(
     tokio::task::JoinHandle<Result<FeedEnd>>,
 ) {
     let (tx, rx) = coalesced_update_channel();
-    let task = tokio::spawn(async move {
+    let task = mj_core::runtime::spawn(async move {
         // A quota recovery can wait for the same turn to reconnect; the value
         // is the completed turn it was deferred for.
         let mut deferred = BTreeMap::<String, String>::new();
@@ -673,7 +673,7 @@ fn spawn_with_gate(
                             let result = async {
                                 let _work = seed_work;
                                 let expected = RelayCursor { ordinal: snapshot.operational.latest_ordinal, digest: snapshot.operational.latest_digest.clone() };
-                                let evidence = tokio::task::spawn_blocking(move || {
+                                let evidence = mj_core::runtime::spawn_blocking(move || {
                                     mj_controller::database::load_continuation_evidence(&snapshot.materialized.session_id, snapshot.materialized.applied_event_ordinal, &snapshot.materialized.applied_event_digest)
                                 }).await.context("collect retained authorization")??;
                                 let context = mj_core::assessment::ContextHistory { messages: evidence.messages, authorization_complete: true, assistant_history_omitted: evidence.assistant_history_omitted, open_assistant_id: None, final_reply_omitted: false, set_aside_through: None };

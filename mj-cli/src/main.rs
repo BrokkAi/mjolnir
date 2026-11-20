@@ -6,6 +6,7 @@
 //! feeds both of them read, and [`import`] session adoption.
 
 // glibc retained tens of GiB of freed heap across the daemon's session tasks.
+// jemalloc also replaces `malloc` for C code (see the Cargo.toml feature).
 #[cfg(target_os = "linux")]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -15,9 +16,9 @@ static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemall
 // arena, so freed memory sat in partly used slabs across ~260 arenas (measured
 // 2026-11-12: 380 MB of slab fragmentation and 198 MB of metadata against
 // 1.6 GB live). The daemon averages under one core, so a few arenas do not
-// contend. `_RJEM_MALLOC_CONF` still overrides this per process.
+// contend. `MALLOC_CONF` still overrides this per process.
 #[cfg(target_os = "linux")]
-#[unsafe(export_name = "_rjem_malloc_conf")]
+#[unsafe(export_name = "malloc_conf")]
 static JEMALLOC_CONF: Option<&'static std::ffi::c_char> = Some(unsafe { &*c"narenas:8".as_ptr() });
 
 mod acp;
@@ -30,7 +31,6 @@ mod go;
 mod hints;
 mod import;
 mod logging;
-mod observe;
 mod pollers;
 mod session_presentation;
 mod simple;
@@ -118,8 +118,6 @@ enum Command {
     Acp(acp::AcpArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
-    /// Inspect or export Mjolnir sessions for Brokk Observe.
-    Observe(observe::ObserveArgs),
     /// Create, list, or destroy persistent EC2 hosts with rootless Podman.
     Ec2(ec2::Ec2Args),
     /// Rerun agent and repository discovery, preserving existing configuration.
@@ -891,7 +889,6 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::DaemonRun) => "daemon-run",
         Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
-        Some(Command::Observe(_)) => "observe",
         Some(Command::Ec2(_)) => "ec2",
         Some(Command::Setup(_)) => "setup",
         Some(Command::Import(_)) => "import",
@@ -1022,7 +1019,7 @@ async fn run_command(
                 "mj go selects its workspace from the folder; omit --workspace"
             );
             let setup = args.setup || args.global_default;
-            let mode = tokio::task::spawn_blocking(move || go::prepare(args))
+            let mode = mj_core::runtime::spawn_blocking(move || go::prepare(args))
                 .await
                 .context("prepare fast start")??;
             // `mj go` never runs the startup update check.
@@ -1033,7 +1030,7 @@ async fn run_command(
                 requested_workspace.is_none(),
                 "mj simple selects its workspace from the folder; omit --workspace"
             );
-            let mode = tokio::task::spawn_blocking(move || simple::prepare(args))
+            let mode = mj_core::runtime::spawn_blocking(move || simple::prepare(args))
                 .await
                 .context("prepare simple mode")??;
             // `mj simple` never runs the startup update check or setup flow.
@@ -1086,7 +1083,6 @@ async fn run_command(
             }
             doctor(args).await.map(|()| DashboardExit::Normal)
         }
-        Some(Command::Observe(args)) => observe::run(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Setup(args)) => {
             if daemon::run_where_daemon_lives(&daemon_forwarded_args(), true).await? {
                 return Ok(DashboardExit::Normal);
@@ -1097,7 +1093,7 @@ async fn run_command(
             let workspace_id =
                 resolve_store_workspace(args.workspace().or(requested_workspace).as_deref())
                     .await?;
-            tokio::task::spawn_blocking(move || import(args, &workspace_id))
+            mj_core::runtime::spawn_blocking(move || import(args, &workspace_id))
                 .await
                 .context("import task panicked")??;
             Ok(DashboardExit::Normal)
@@ -1688,7 +1684,7 @@ impl LaunchWarnings {
 }
 
 async fn prompt_queue_choice(pending: usize) -> Result<ResumeQueueDisposition> {
-    let answer = tokio::task::spawn_blocking(move || {
+    let answer = mj_core::runtime::spawn_blocking(move || {
         eprint!(
             "{pending} queued command{} found. [D]iscard queued work (default) or [S]tart after move? ",
             if pending == 1 { "" } else { "s" }
@@ -1761,7 +1757,7 @@ async fn prompt_move_confirmation(
     let clear_resource_allocation = preparation.selection.clear_resource_allocation;
     let queued_commands = preparation.queued_commands.clone();
     let session_id = preparation.selection.session_id.clone();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         eprintln!(
             "Move session {} from {source_profile}/{source_target} to {profile}/{target}.",
             session_id
@@ -1916,7 +1912,7 @@ async fn run_workspace_dashboard(
         )
     };
     let (go_mode, go_setup) = go.map_or((None, false), |(mode, setup)| (Some(mode), setup));
-    let startup = tokio::spawn(start_dashboard(
+    let startup = mj_core::runtime::spawn(start_dashboard(
         resume.as_ref().map(|resume| resume.workspace_id.clone()),
         requested_workspace
             .filter(|_| resume.is_none())
@@ -2168,7 +2164,7 @@ async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::
             })
             .ok(),
         Err(error) if daemon::daemon_not_running(&error).is_some() => {
-            tokio::task::spawn_blocking(stored_workspaces_on_this_computer)
+            mj_core::runtime::spawn_blocking(stored_workspaces_on_this_computer)
                 .await
                 .ok()
                 .flatten()

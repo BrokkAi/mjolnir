@@ -122,6 +122,23 @@ pub fn append_subagent_policy(
     Ok(())
 }
 
+/// Called only on a fresh profile stage, never on a retained session profile.
+pub fn append_composed_session_instructions(
+    launch: &WorkerLaunchConfig,
+    destination: &Path,
+    index: std::result::Result<&str, &str>,
+) -> Result<()> {
+    if !mj_core::session_instructions::delivered_by_staging(launch.harness) {
+        return Ok(());
+    }
+    let facts = mj_core::session_instructions::InstructionContext::from_launch(launch);
+    let text = mj_core::session_instructions::compose(&facts, index);
+    if !text.is_empty() {
+        append_staged_instructions(launch.harness, destination, &text)?;
+    }
+    Ok(())
+}
+
 pub fn append_staged_instructions(
     harness: mj_core::config::HarnessKind,
     destination: &Path,
@@ -136,6 +153,33 @@ pub fn append_staged_instructions(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => "",
         Err(error) => return Err(error.into()),
     };
+    // This is our fresh copy: make it owner-writable without changing the
+    // source profile or granting write access to other users.
+    match std::fs::metadata(&path) {
+        Ok(metadata) => {
+            let mut permissions = metadata.permissions();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                permissions.set_mode(permissions.mode() | 0o200);
+            }
+            #[cfg(not(unix))]
+            // Windows files carry only a read-only attribute; clearing it is
+            // the owner-write grant above, not world-writable Unix modes.
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            if permissions != metadata.permissions() {
+                std::fs::set_permissions(&path, permissions).with_context(|| {
+                    format!(
+                        "make staged harness instructions {} writable",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     use std::io::Write;
 
     let mut file = std::fs::OpenOptions::new()
@@ -1528,7 +1572,7 @@ fn profile_archive_entries(
             );
             let mut header = tar::Header::new_gnu();
             header.set_metadata(&metadata);
-            let digest = mj_core::worker_launch::worker_executable_digest(&absolute)?;
+            let digest = mj_core::hex::file_sha256(&absolute)?;
             Some(if header.mode()? & 0o100 != 0 {
                 format!("{digest}.x")
             } else {

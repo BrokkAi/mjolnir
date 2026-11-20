@@ -607,11 +607,26 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.cancelling_prompt_id = snapshot
                         .active_prompt
                         .as_ref()
-                        .map(|prompt| prompt.command_id.clone());
-                    // With no prompt of ours running, the stop is aimed at the
-                    // harness's own turn. A second stop of the same turn never
+                        .map(|prompt| prompt.command_id.clone())
+                        .or_else(|| {
+                            matches!(command, RelayCommand::CancelTurn)
+                                .then(|| {
+                                    snapshot
+                                        .queued_prompts
+                                        .iter()
+                                        .find(|queued| {
+                                            crate::continuation::is_restart_continuation(
+                                                &queued.command_id,
+                                            )
+                                        })
+                                        .map(|queued| queued.command_id.clone())
+                                })
+                                .flatten()
+                        });
+                    // Without a prompt or queued recovery target, the stop
+                    // is aimed at the harness's own turn. A second stop of the same turn never
                     // downgrades an acknowledged first one.
-                    if snapshot.active_prompt.is_none()
+                    if snapshot.cancelling_prompt_id.is_none()
                         && let Some(turn) = snapshot.autonomous_harness_turn()
                         && snapshot
                             .cancelling_harness_turn
@@ -1430,6 +1445,12 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             message,
             ..
         } => {
+            let continuation_id = match &event.observation {
+                RelayObservation::CommandInterrupted {
+                    continuation_id, ..
+                } => continuation_id.as_deref(),
+                _ => None,
+            };
             if snapshot
                 .retry_assessment
                 .as_ref()
@@ -1499,7 +1520,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             snapshot
                 .queued_prompts
                 .retain(|queued| queued.command_id != *command_id);
-            snapshot.mailbox_prompt_contexts.remove(command_id);
+            let mailbox_context = snapshot.mailbox_prompt_contexts.remove(command_id);
             snapshot.active_user_shells.remove(command_id);
             if let RelayCommand::RunUserShell { command } = &command {
                 let accepted_ordinal = snapshot
@@ -1576,6 +1597,67 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 && snapshot.execution == RelayExecutionState::Closing
             {
                 snapshot.execution = RelayExecutionState::Idle;
+            }
+            if let Some(recovery_id) = continuation_id {
+                if !matches!(
+                    event.observation,
+                    RelayObservation::CommandInterrupted {
+                        reason: Some(crate::event_outcome::OutcomeReason::WorkerRestarted),
+                        ..
+                    }
+                ) || *observed_command != RelayCommandKind::Prompt
+                    || recovery_id != snapshot.restart_continuation_id(command_id)
+                    || snapshot.handled_commands.contains_key(recovery_id)
+                {
+                    bail!("invalid interrupted prompt recovery {recovery_id}");
+                }
+                let accepted_ordinal = snapshot.handled_commands[command_id].accepted_ordinal;
+                // Release every stored copy of the old execution payload before
+                // installing its replacement. No journal prefix or snapshot can
+                // contain two accepted copies, even at the snapshot byte limit.
+                snapshot.compact_terminal_commands()?;
+                let prompt = command
+                    .prompt_blocks()
+                    .ok_or_else(|| anyhow!("recovery command is not a prompt"))?
+                    .into_owned();
+                snapshot.handled_commands.insert(
+                    recovery_id.to_owned(),
+                    HandledRelayCommand {
+                        command: Some(command.clone()),
+                        terminal_identity: None,
+                        accepted_ordinal,
+                        terminal_ordinal: None,
+                        outcome: None,
+                        failure: None,
+                    },
+                );
+                snapshot.dispatches.insert(
+                    recovery_id.to_owned(),
+                    RelayDispatchRecord {
+                        command,
+                        state: RelayDispatchState::Queued,
+                    },
+                );
+                snapshot.queued_prompts.insert(
+                    0,
+                    StoredQueuedRelayCommand {
+                        command_id: recovery_id.to_owned(),
+                        payload: StoredQueuedRelayPayload::Prompt { prompt },
+                        created_at_ms: event.recorded_at_ms,
+                    },
+                );
+                if let Some(context) = mailbox_context {
+                    snapshot
+                        .mailbox_prompt_contexts
+                        .insert(recovery_id.to_owned(), context);
+                }
+                // This is the same accepted turn, not a fresh mailbox claim.
+                // Keep its acceptance and the actual latest input unchanged:
+                // input already queued after this turn still supersedes it.
+                // A stale retry intent must not also resume it.
+                snapshot.capacity_retry = None;
+                snapshot.retry_assessment = None;
+                snapshot.continuation.quota_recovery = None;
             }
         }
         RelayObservation::ConfigurationUpdated { key, value } => {
@@ -2020,11 +2102,19 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
     {
         steering.status = SteeringStatus::Resolved;
     }
-    if snapshot
-        .cancelling_prompt_id
-        .as_ref()
-        .is_some_and(|id| snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(id))
-    {
+    if snapshot.cancelling_prompt_id.as_ref().is_some_and(|id| {
+        snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(id)
+            && !(crate::continuation::is_restart_continuation(id)
+                && snapshot.dispatches.values().any(|dispatch| {
+                    matches!(dispatch.command, RelayCommand::CancelTurn)
+                        && matches!(
+                            dispatch.state,
+                            RelayDispatchState::Queued
+                                | RelayDispatchState::Pending
+                                | RelayDispatchState::InFlight
+                        )
+                }))
+    }) {
         snapshot.cancelling_prompt_id = None;
     }
     // The stop belongs to the autonomous turn it named; once that turn is gone
@@ -2115,6 +2205,9 @@ fn terminalize_removed_prompts(
             .get_mut(command_id)
             .expect("removed command ledger was just checked")
             .failure = Some("queued command was removed".into());
+        // A removed entry never starts, so nothing else will release the
+        // mailbox context it holds (a restart continuation inherits one).
+        snapshot.mailbox_prompt_contexts.remove(command_id);
     }
     snapshot.queued_prompts.retain(|queued| {
         !removed_command_ids
@@ -2198,7 +2291,20 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
     use crate::assessment::{Status, TurnAssessment};
     let mut delivered = None;
     match &event.observation {
-        RelayObservation::CommandStarted { command_id, .. } => delivered = Some(command_id),
+        RelayObservation::CommandStarted { command_id, .. } => {
+            if snapshot
+                .dispatches
+                .get(command_id)
+                .is_some_and(|dispatch| dispatch.command.kind() == RelayCommandKind::Prompt)
+            {
+                // A withdrawn old permission may resolve after the next turn
+                // starts. It must never mark that newer prompt cancelled.
+                snapshot
+                    .assessment_questions
+                    .retain(|id| !id.starts_with(crate::elicitation::TOOL_PERMISSION_ID_PREFIX));
+            }
+            delivered = Some(command_id);
+        }
         RelayObservation::CommandCompleted {
             outcome: RelayCommandOutcome::Steered { queued_command_id },
             ..
@@ -2210,6 +2316,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         _ => {}
     }
     if let Some(id) = delivered
+        && !crate::continuation::is_restart_continuation(id)
         && let Some(RelayCommand::MailboxWake { events }) =
             snapshot.dispatches.get(id).map(|d| &d.command)
     {
@@ -2254,10 +2361,21 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         }
         RelayObservation::ElicitationResolved {
             elicitation_id,
+            action,
             reply,
-            ..
         } => {
-            snapshot.assessment_questions.remove(elicitation_id);
+            let pending = snapshot.assessment_questions.remove(elicitation_id);
+            if pending
+                && action == "cancel"
+                && elicitation_id.starts_with(crate::elicitation::TOOL_PERMISSION_ID_PREFIX)
+            {
+                // Permission Cancel and relay Cancel stop the same accepted
+                // prompt. Restart recovery reads this single durable fact.
+                snapshot.cancelling_prompt_id = snapshot
+                    .active_prompt
+                    .as_ref()
+                    .map(|prompt| prompt.command_id.clone());
+            }
             snapshot.pending_elicitations.remove(elicitation_id);
             if reply.is_some() {
                 clear_notifications(snapshot, event.ordinal);

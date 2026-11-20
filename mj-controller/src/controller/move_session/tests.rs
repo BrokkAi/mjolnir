@@ -12,10 +12,12 @@ use anyhow::Result;
 use super::MoveSourceRelay;
 pub(crate) use super::test_fixtures::*;
 use super::{Controller, MoveMutationGuard, move_owns_session, move_refuses_command};
+#[cfg(unix)]
+use crate::controller::test_support::IsolatedTest;
 use crate::controller::test_support::{
-    IsolatedTest, RefusingExecutor, checkout_with_network_remote, checkpoint_test_session,
-    committed_repository, local_bundle, managed_raw_session, raw_session_on,
-    resume_compatibility_config, ssh_worktree_target,
+    RefusingExecutor, checkout_with_network_remote, checkpoint_test_session, committed_repository,
+    local_bundle, managed_raw_session, raw_session_on, resume_compatibility_config,
+    ssh_worktree_target,
 };
 #[cfg(unix)]
 use mj_checkpoint::archive::{
@@ -26,7 +28,9 @@ use mj_checkpoint::archive::{
 use mj_core::config::{Config, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository};
 #[cfg(unix)]
 use mj_core::state::CheckpointMetadata;
-use mj_core::state::{MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition};
+use mj_core::state::MovePhase;
+#[cfg(unix)]
+use mj_core::state::{MoveOperation, MoveSelection, ResumeQueueDisposition};
 #[cfg(unix)]
 use mj_core::test_hooks::install_fake_command;
 #[cfg(unix)]
@@ -112,6 +116,7 @@ fn move_queue_relay_child() {
     // The delegation-only connection must not open a second journal writer.
     let mut relay = None;
     let mut baseline_download = None;
+    let mut _live_question = None;
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let stdout = io::stdout();
@@ -201,6 +206,11 @@ fn move_queue_relay_child() {
             } else {
                 DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "1.0.0")
             }.expect("open move queue test relay");
+            if let Ok(bytes) = fs::read(root.join("test-live-question.json")) {
+                _live_question = Some(mj_worker::stand_in_relay::keep_question_live(
+                    &relay, serde_json::from_slice(&bytes).unwrap(),
+                ));
+            }
             let goal_mode = std::env::var(MOVE_QUEUE_GOAL).unwrap_or_default();
             if crash_after_first && matches!(goal_mode.as_str(), "1" | "active") {
                 relay.record_session_update(serde_json::from_value(serde_json::json!({
@@ -787,7 +797,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 additional_mounts: None,
                 resource_allocation: None,
             },
-            "[subagents.straightforward]",
+            "[subagents.yolo.straightforward]",
         ),
     ];
 
@@ -1006,6 +1016,33 @@ fn queued_prompt(command_id: &str) -> MaterializedQueuedPrompt {
 fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetadata {
     let archive_path = directory.join("move-queue.hel.zip");
     let image = ContentBlock::Image(ImageContent::new("x".repeat(70 * 1024), "image/png"));
+    // Recover a real in-flight source command before archiving its queued ID.
+    let source_root = directory.join("interrupted-source");
+    let mut source = DurableRelay::open(&source_root, session_id, "test").unwrap();
+    let response = source.handle(mj_core::relay::RelayRequestEnvelope {
+        request_id: "queue-source".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "interrupted-source-turn".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("finish interrupted work")],
+            },
+        },
+    });
+    assert!(matches!(
+        response.body,
+        mj_core::relay::RelayResponseBody::Ok { .. }
+    ));
+    assert_eq!(source.claim_pending_commands(true).unwrap().len(), 1);
+    drop(source);
+    let source = DurableRelay::open(&source_root, session_id, "test").unwrap();
+    let recovered_id = source.operational_state().queued_prompts[0]
+        .command_id
+        .clone();
+    assert_eq!(
+        recovered_id,
+        mj_core::continuation::restart_continuation_id("interrupted-source-turn")
+    );
     let canonical = CanonicalSessionSnapshot {
         command_ledger: None,
         assessment_state: None,
@@ -1020,6 +1057,12 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
         },
         transcript: Vec::new(),
         queued_prompts: vec![
+            CanonicalQueuedPrompt {
+                command_id: recovered_id,
+                kind: CanonicalQueuedCommandKind::Prompt,
+                content: vec![serde_json::json!({"type":"text", "text":"finish interrupted work"})],
+                queued_at_ms: 0,
+            },
             CanonicalQueuedPrompt {
                 command_id: "queued-image".into(),
                 kind: CanonicalQueuedCommandKind::Prompt,
@@ -1082,6 +1125,7 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
 
 #[cfg(unix)]
 // Hard-won: #1498: quota-stopped active goals blocked automatic in-place Move.
+// Hard-won: ebb2e9611: Move refused its own archived restart continuation.
 #[test]
 fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store() {
     let short = "move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store";
@@ -1092,7 +1136,10 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
                 .env("MJ_MOVE_QUEUE_REPLAY_CHILD", "1")
                 .env(MOVE_QUEUE_GOAL, goal)
                 .isolated_store(directory.path())
-                .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+                .env(
+                    "MJ_WORKER_BINARY",
+                    mj_core::worker_build::test_worker_executable(),
+                )
                 .run();
         }
         return;
@@ -1380,7 +1427,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         image_bytes > 64 * 1024,
         "large image crossed the relay protocol"
     );
-    let reopened = DurableRelay::open(&worker_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
+    let mut reopened = DurableRelay::open(&worker_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
     let operational = reopened.operational_state();
     // Hard-won: a turn starting after preparation must still block source replacement.
     assert!(!operational.safe_to_move(
@@ -1412,7 +1459,11 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
                 .iter()
                 .map(|queued| queued.command_id.as_str())
                 .collect::<Vec<_>>(),
-            ["queued-image", "queued-config"]
+            [
+                mj_core::continuation::restart_continuation_id("interrupted-source-turn").as_str(),
+                "queued-image",
+                "queued-config"
+            ]
         );
     }
     assert_eq!(
@@ -1462,6 +1513,33 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     assert!(journal.contains("because the weekly quota is exhausted"));
     assert!(journal.contains("Continuing the interrupted work"));
     assert!(!journal.contains("The interrupted prompt was not replayed"));
+
+    if std::env::var(MOVE_QUEUE_GOAL).as_deref() == Ok("0") {
+        reopened
+            .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        let active = reopened.claim_pending_commands(true).unwrap();
+        assert_eq!(active[0].command_id, retry_id);
+        reopened
+            .record_command_completed(
+                &retry_id,
+                mj_core::relay::RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                    work_facts: None,
+                    diagnostic: None,
+                },
+            )
+            .unwrap();
+        let recovered = reopened.claim_pending_commands(true).unwrap();
+        assert_eq!(
+            recovered[0].command_id,
+            mj_core::continuation::restart_continuation_id("interrupted-source-turn")
+        );
+        assert!(recovered[0].command.prompt_blocks().unwrap().iter().any(|block| matches!(block, ContentBlock::Text(text) if text.text == "finish interrupted work")));
+    }
 
     let replacement_target = TargetLocator::LocalBare {
         worker_root: replacement_root,
@@ -6705,6 +6783,11 @@ fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
     let question = mj_core::elicitation::ElicitationRequest::from_acp_params("pending-question", serde_json::json!({
         "mode":"form", "sessionId":MOVE_QUEUE_SESSION_ID, "message":"Approve?", "requestedSchema":{"type":"object", "properties":{}}
     })).unwrap();
+    fs::write(
+        root.join("test-live-question.json"),
+        serde_json::to_vec(&question).unwrap(),
+    )
+    .unwrap();
     relay
         .record_observation(RelayObservation::ElicitationRequested {
             request: question.clone(),
@@ -7541,7 +7624,7 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                 | AdoptionProbe::ProfileRemovedAfterInstall
         )
         .then_some(installed);
-        let work = tokio::spawn(async move {
+        let work = mj_core::runtime::spawn(async move {
             controller
                 .adopt_orphan_worker_controlled(
                     &request,
@@ -7613,7 +7696,7 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
             // notice is acknowledged or ordinary attachment can begin.
             let (_, config_guard) = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                tokio::task::spawn_blocking(Config::load_locked),
+                mj_core::runtime::spawn_blocking(Config::load_locked),
             )
             .await
             .unwrap()
@@ -7870,7 +7953,7 @@ fn adoption_interrupted_probe(trimmed: bool, disposition: AdoptionProbe, short: 
                     .unwrap()
                     .is_none()
             );
-            let (_, guard) = tokio::task::spawn_blocking(Config::load_locked)
+            let (_, guard) = mj_core::runtime::spawn_blocking(Config::load_locked)
                 .await
                 .unwrap()
                 .unwrap();

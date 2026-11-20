@@ -150,10 +150,10 @@ async fn next_wake(
 }
 
 async fn reconcile_durable_state(state: &RuntimeState, stop: &CancellationToken) -> Result<()> {
-    tokio::task::spawn_blocking(mj_controller::database::reconcile_pending_subagent_questions)
+    mj_core::runtime::spawn_blocking(mj_controller::database::reconcile_pending_subagent_questions)
         .await
         .context("child question reconciliation task failed")??;
-    let pruned_stopped_children = tokio::task::spawn_blocking(
+    let pruned_stopped_children = mj_core::runtime::spawn_blocking(
         mj_controller::database::prune_pending_messages_for_stopped_children,
     )
     .await
@@ -165,7 +165,7 @@ async fn reconcile_durable_state(state: &RuntimeState, stop: &CancellationToken)
         );
     }
     let pruned_stale_questions =
-        tokio::task::spawn_blocking(mj_controller::database::prune_stale_subagent_questions)
+        mj_core::runtime::spawn_blocking(mj_controller::database::prune_stale_subagent_questions)
             .await
             .context("stale child question cleanup task failed")??;
     if pruned_stale_questions > 0 {
@@ -195,7 +195,7 @@ async fn process_pending(
     sessions: SessionManagerControl,
     stop: CancellationToken,
 ) -> Result<()> {
-    let entries = tokio::task::spawn_blocking(|| {
+    let entries = mj_core::runtime::spawn_blocking(|| {
         mj_controller::database::pending_mailbox_events(PENDING_BATCH_PER_SESSION)
     })
     .await
@@ -274,7 +274,7 @@ pub(crate) async fn deliver_session_events(
             Ok(MailboxEventDelivery::Accepted(ordinal)) => {
                 let key = entry.event_key.clone();
                 let mark_id = command_id.clone();
-                match tokio::task::spawn_blocking(move || {
+                match mj_core::runtime::spawn_blocking(move || {
                     mj_controller::database::mark_mailbox_event_accepted(&key, &mark_id, ordinal)
                 })
                 .await
@@ -301,7 +301,7 @@ pub(crate) async fn deliver_session_events(
             Ok(MailboxEventDelivery::Failed(reason)) => {
                 let key = entry.event_key.clone();
                 let persisted_reason = reason.clone();
-                match tokio::task::spawn_blocking(move || {
+                match mj_core::runtime::spawn_blocking(move || {
                     mj_controller::database::mark_mailbox_event_failed(&key, &persisted_reason)
                 })
                 .await

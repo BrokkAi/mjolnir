@@ -1,7 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -35,12 +36,14 @@ use mj_core::state::TargetLocator;
 use mj_core::state::{
     CheckpointMetadata, ManagedSessionSnapshot, MaterializedSession, SessionState, State,
 };
-use mj_transcript::projection::canonical_session_from_materialized;
+use mj_transcript::projection::canonical_session_from_materialized_owned as canonical_session_from_materialized;
 
 #[cfg(unix)]
 use crate::targets::ProvisionStage;
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
-use mj_core::relay::{RelayCommand, RelayCursor, RelayExecutionState};
+#[cfg(unix)]
+use mj_core::relay::RelayCommand;
+use mj_core::relay::{RelayCursor, RelayExecutionState};
 
 pub(crate) use super::stand_in::*;
 use super::*;
@@ -449,7 +452,7 @@ fn export_spec_fixture() -> CheckpointExportSpec {
         harness_home: PathBuf::from("/var/lib/hel/profiles/codex"),
         workspace_root: PathBuf::from("/workspace"),
         repositories: Vec::new(),
-        canonical_session: canonical_session_from_materialized(&MaterializedSession::empty(
+        canonical_session: canonical_session_from_materialized(MaterializedSession::empty(
             LATCH_RELAY_SESSION.to_owned(),
         ))
         .unwrap(),
@@ -542,6 +545,87 @@ impl CommandExecutor for ExportExecutor {
             },
         })
     }
+}
+
+/// The spec reaches the worker as the same JSON `serde_json::to_vec` gives,
+/// although it is serialized while the command reads; a borrowed pack spec
+/// matches the owned one. The transcript is far larger than a pipe buffer and
+/// the stream's chunks.
+#[test]
+fn a_streamed_spec_is_the_same_json_as_the_whole_spec() {
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
+        workspace_storage: Default::default(),
+    };
+    let mut spec = export_spec_fixture();
+    spec.canonical_session.transcript = (0..40)
+        .map(|index| mj_core::archive::CanonicalTranscriptItem {
+            stable_id: format!("item-{index}"),
+            position: index,
+            latest_content_event_ordinal: None,
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: mj_core::archive::CanonicalTranscriptBody::System {
+                text: format!("{index}: {}", "é\"line\n".repeat(20_000)),
+            },
+        })
+        .collect();
+    // serde_json writes an unescaped run in one call; it must cross chunks intact.
+    spec.canonical_session
+        .transcript
+        .push(mj_core::archive::CanonicalTranscriptItem {
+            stable_id: "item-unescaped".into(),
+            position: 40,
+            latest_content_event_ordinal: None,
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: mj_core::archive::CanonicalTranscriptBody::System {
+                text: "a".repeat(1024 * 1024 + 7),
+            },
+        });
+    let expected = serde_json::to_vec(&spec).unwrap();
+    assert!(expected.len() > 4 * 1024 * 1024);
+    let executor = ExportExecutor::new(0, "");
+    run_checkpoint_staging_command(
+        &executor,
+        &locator,
+        LATCH_RELAY_SESSION,
+        &spec,
+        export_stdin_command,
+        "export target checkpoint",
+        None,
+    )
+    .unwrap();
+    assert!(executor.streamed_spec.into_inner() == expected);
+
+    let owned = mj_checkpoint::checkpoint::CheckpointPackSpec {
+        protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+        relay_root: spec.relay_root.clone(),
+        stage_path: PathBuf::from("/stage"),
+        canonical_session: spec.canonical_session.clone(),
+        output_path: spec.output_path.clone(),
+    };
+    let stage_path = PathBuf::from("/stage");
+    let borrowed = CheckpointPackSpecRef {
+        protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+        relay_root: &spec.relay_root,
+        stage_path: &stage_path,
+        canonical_session: &spec.canonical_session,
+        output_path: &spec.output_path,
+    };
+    let executor = ExportExecutor::new(0, "");
+    run_checkpoint_staging_command(
+        &executor,
+        &locator,
+        LATCH_RELAY_SESSION,
+        &borrowed,
+        pack_stdin_command,
+        "pack target checkpoint",
+        None,
+    )
+    .unwrap();
+    assert!(executor.streamed_spec.into_inner() == serde_json::to_vec(&owned).unwrap());
 }
 
 #[test]
@@ -2790,7 +2874,7 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
     .await
     .unwrap();
     let submitting = handle.clone();
-    let mut prompt = tokio::spawn(async move {
+    let mut prompt = mj_core::runtime::spawn(async move {
         submitting
             .submit(
                 new_command_id("after-write").unwrap(),
@@ -3688,7 +3772,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
         mj_core::relay::RELAY_NOTIFICATION_STACK_PROTOCOL.to_string(),
     );
     let targets = channels.targets.clone();
-    let restore_actor = tokio::spawn(async move {
+    let restore_actor = mj_core::runtime::spawn(async move {
         tokio::time::timeout(Duration::from_secs(10), async move {
             loop {
                 let state = crate::database::load_session_record(LATCH_RELAY_SESSION)

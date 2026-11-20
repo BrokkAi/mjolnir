@@ -17,6 +17,9 @@ use crate::review::RuntimeReviewView;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCursor {
+    /// Durable alert frontier acknowledged by this client.
+    #[serde(default)]
+    pub alert_sequence: u64,
     pub incarnation: String,
     pub sequence: u64,
     /// Families whose historical session rows belong to this cursor's view.
@@ -334,17 +337,157 @@ pub struct NotificationCard {
     pub form: Option<CardForm>,
 }
 
+impl NotificationCard {
+    /// Stack messages belong to the card session; only the live form uses its holder.
+    /// `item` is the oldest-first entry index, with the form after the entries.
+    pub fn item_destination<'a>(&'a self, session: &'a str, item: usize) -> &'a str {
+        if self.form.is_some() && item >= self.entries.len() {
+            self.holder.as_deref().unwrap_or(session)
+        } else {
+            session
+        }
+    }
+
+    /// The durable notify-once key shared by the ledger and delayed alerts.
+    pub fn item_identity(&self, session: &str, item: usize) -> Option<String> {
+        use mj_core::attention::EntryMessage;
+        let identity = if let Some(entry) = self.entries.get(item) {
+            match &entry.message {
+                EntryMessage::Locating => return None,
+                EntryMessage::Found(id) => serde_json::json!(["message", session, id]),
+                EntryMessage::None => {
+                    serde_json::json!(["completion", session, entry.completed_ordinal])
+                }
+            }
+        } else if item == self.entries.len() {
+            let form = self.form.as_ref()?;
+            // An unknown raise time is not an identity: keying it with 0 would
+            // make a just-answered form look like a new one and alert again.
+            if form.raised_at_ms == 0 {
+                return None;
+            }
+            serde_json::json!([
+                "form",
+                self.item_destination(session, item),
+                form.request_id,
+                form.raised_at_ms
+            ])
+        } else {
+            return None;
+        };
+        Some(identity.to_string())
+    }
+
+    /// The newest shown stack question, even when a live form shares the card.
+    pub fn shown_question(&self) -> Option<&mj_core::attention::NotificationStackEntry> {
+        if !matches!(
+            self.dismissal,
+            Some(mj_core::attention::NotificationDismissal::Stack { .. })
+        ) {
+            return None;
+        }
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == mj_core::attention::NotificationKind::NeedsInput)
+    }
+}
+
+/// Form provenance is explicit because harness request IDs are opaque.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CardFormSource {
+    /// Older publishers did not distinguish requests from notification projections.
+    #[default]
+    Unknown,
+    Elicitation,
+    Native,
+    ReviewFindings,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardForm {
+    #[serde(default)]
+    pub source: CardFormSource,
     #[serde(default)]
     pub raised_at_ms: i64,
     pub request_id: String,
     pub message: String,
 }
 
+impl CardForm {
+    pub fn elicitation(
+        request: &mj_core::elicitation::ElicitationRequest,
+        raised_at_ms: i64,
+    ) -> Self {
+        Self {
+            source: CardFormSource::Elicitation,
+            raised_at_ms,
+            request_id: request.id.clone(),
+            message: request.message.clone(),
+        }
+    }
+
+    /// Native input is a notification projection served through its owner's
+    /// quick reply, rather than an elicitation on the owner chat.
+    pub fn native(
+        source: &str,
+        generation: u64,
+        request: &str,
+        raised_at_ms: i64,
+        message: String,
+    ) -> Self {
+        Self {
+            source: CardFormSource::Native,
+            raised_at_ms,
+            request_id: format!("native.{}:{source}.{generation}.{request}", source.len()),
+            message,
+        }
+    }
+
+    pub fn review_findings(reviewer: &str, raised_at_ms: i64, message: String) -> Self {
+        Self {
+            source: CardFormSource::ReviewFindings,
+            raised_at_ms,
+            request_id: format!("review-verdict.{reviewer}.findings"),
+            message,
+        }
+    }
+
+    /// Native input and completed findings are notification projections,
+    /// rather than an elicitation that the content session's chat can answer.
+    #[must_use]
+    pub fn requires_elicitation(&self) -> bool {
+        self.source == CardFormSource::Elicitation
+    }
+
+    #[must_use]
+    pub fn is_native(&self) -> bool {
+        self.source == CardFormSource::Native
+    }
+}
+
+/// A notify-once decision persisted alongside the Web Push item identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertEvent {
+    pub sequence: u64,
+    /// Durable item key, used to verify it is still published after a delay.
+    #[serde(default)]
+    pub identity: String,
+    pub destination: String,
+    pub session_title: String,
+    pub text: String,
+    pub kind: mj_core::attention::NotificationKind,
+}
+
 /// Configuration and bounded active-operation views are separate from history.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
+    /// Events after the requesting client cursor; empty on initial attach.
+    #[serde(default)]
+    pub alert_events: Vec<AlertEvent>,
+    #[serde(default)]
+    pub alert_high_sequence: u64,
     /// Absent on daemons that do not publish cards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification_cards: Option<SnapshotMap<String, NotificationCard>>,
@@ -888,7 +1031,16 @@ impl RuntimeReplica {
     pub fn apply(&mut self, frame: RuntimeFrame) -> Result<bool> {
         match frame {
             RuntimeFrame::Snapshot { cursor, projection } => {
+                let acknowledged = self
+                    .cursor
+                    .as_ref()
+                    .map_or(self.projection.metadata.alert_high_sequence, |cursor| {
+                        cursor.alert_sequence
+                    });
                 self.projection = *projection;
+                self.projection.metadata.alert_events.retain(|event| {
+                    event.sequence > acknowledged && event.sequence <= cursor.alert_sequence
+                });
                 self.cursor = Some(cursor);
                 Ok(true)
             }
@@ -898,18 +1050,27 @@ impl RuntimeReplica {
                 changes,
             } => {
                 if self.cursor.as_ref() == Some(&cursor) {
+                    self.projection.metadata.alert_events.clear();
                     return Ok(false);
                 }
                 ensure!(self.cursor.as_ref() == Some(&from), "runtime cursor gap");
                 ensure!(
-                    from.incarnation == cursor.incarnation && from.sequence < cursor.sequence,
+                    from.incarnation == cursor.incarnation
+                        && (from.sequence < cursor.sequence
+                            || (from.sequence == cursor.sequence
+                                && from.alert_sequence < cursor.alert_sequence)),
                     "invalid runtime cursor transition"
                 );
+                self.projection.metadata.alert_events.clear();
                 changes.apply(&mut self.projection);
+                self.projection.metadata.alert_events.retain(|event| {
+                    event.sequence > from.alert_sequence && event.sequence <= cursor.alert_sequence
+                });
                 self.cursor = Some(cursor);
                 Ok(true)
             }
             RuntimeFrame::ResetRequired => {
+                self.projection.metadata.alert_events.clear();
                 self.cursor = None;
                 Ok(false)
             }
@@ -936,8 +1097,46 @@ pub(crate) fn serialize_client_projection<T: Serialize, S: serde::Serializer>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn shown_question_survives_a_live_form_on_the_same_card() {
+        let question = mj_core::attention::NotificationStackEntry {
+            completed_at_ms: 1,
+            completed_ordinal: 7,
+            kind: mj_core::attention::NotificationKind::NeedsInput,
+            message: mj_core::attention::EntryMessage::None,
+        };
+        let card = NotificationCard {
+            since_ms: 1,
+            badge: mj_core::attention::NotificationKind::NeedsInput,
+            entries: vec![question.clone()],
+            dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 1 }),
+            holder: Some("child".into()),
+            form: Some(CardForm {
+                source: CardFormSource::Elicitation,
+                raised_at_ms: 2,
+                request_id: "request".into(),
+                message: "child form".into(),
+            }),
+        };
+        assert_eq!(card.shown_question(), Some(&question));
+        let wire: NotificationCard =
+            serde_json::from_slice(&serde_json::to_vec(&card).unwrap()).unwrap();
+        assert_eq!(wire.item_destination("parent", 0), "parent");
+        assert_eq!(wire.item_destination("parent", 1), "child");
+        assert!(wire.item_identity("parent", 1).is_some());
+        let mut unknown = wire.clone();
+        unknown.form.as_mut().unwrap().raised_at_ms = 0;
+        assert_eq!(
+            unknown.item_identity("parent", 1),
+            None,
+            "a form with an unknown raise time has no notify identity"
+        );
+        assert!(unknown.item_identity("parent", 0).is_some());
+    }
+
     fn cursor(incarnation: &str, sequence: u64) -> RuntimeCursor {
         RuntimeCursor {
+            alert_sequence: 0,
             incarnation: incarnation.into(),
             sequence,
             subagent_parents: Default::default(),

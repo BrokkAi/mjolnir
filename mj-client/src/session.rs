@@ -428,7 +428,33 @@ impl fmt::Debug for SessionHandle {
     }
 }
 
+/// The session manager owns launch registration before a relay actor attaches.
+#[derive(Clone, Copy, Debug)]
+pub enum ParentMessageRoute {
+    Starting,
+    Published(Option<u32>),
+    Unmanaged,
+}
+
 pub trait SessionControlBackend: Send + Sync {
+    fn parent_message_route(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<ParentMessageRoute>> {
+        Box::pin(async move {
+            Ok(match self.session(session_id).await {
+                Ok(handle) => ParentMessageRoute::Published(
+                    handle
+                        .view()
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.operational.relay_protocol_version),
+                ),
+                Err(_) => ParentMessageRoute::Unmanaged,
+            })
+        })
+    }
+
     fn snapshot(
         &self,
         session_id: String,
@@ -452,6 +478,10 @@ pub struct SessionControl {
 }
 
 impl SessionControl {
+    pub async fn parent_message_route(&self, session_id: String) -> Result<ParentMessageRoute> {
+        self.backend.parent_message_route(session_id).await
+    }
+
     pub async fn snapshot(
         &self,
         session_id: String,

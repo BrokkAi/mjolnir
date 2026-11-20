@@ -335,11 +335,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &session_environment,
         &mut additional_directories,
     );
-    let observe_policy = config
-        .observe_policy
-        .clone()
-        .map(|policy| crate::observe::PolicyClient::new(policy, config.session_id.clone()))
-        .transpose()?;
+    let instruction_role = crate::acp::InstructionRole::from_launch(&config);
     let acp_spec = LaunchSpec {
         operator_away,
         imported_logins: None,
@@ -377,6 +373,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             config.subagents.clone()
         },
         managed_subagent,
+        instruction_role,
         subagent_mcp_socket: subagent_role.map(|role| crate::acp::SubagentMcpSocket {
             path: root.join(super::subagents::SUBAGENT_SOCKET),
             role,
@@ -393,7 +390,6 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         harness: config.harness,
         execution_policy: config.execution_policy,
         claude_permission_mode: config.claude_permission_mode,
-        observe_policy,
         acp_activity,
         step_clock,
         tools_in_flight,
@@ -701,7 +697,7 @@ mod history_tests {
         let mut connections = Vec::new();
         for _ in 0..2 {
             let (server, client) = UnixStream::pair().unwrap();
-            tasks.push(tokio::spawn(serve_client_with_memory(
+            tasks.push(mj_core::runtime::spawn(serve_client_with_memory(
                 server,
                 relay.clone(),
                 wake.clone(),
@@ -1073,7 +1069,7 @@ pub async fn run_daemon_owned(
     {
         let endpoint = endpoint.clone();
         let relay = relay.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let identity = relay
                 .observe()
                 .expect("relay state lock poisoned")
@@ -1095,7 +1091,7 @@ pub async fn run_daemon_owned(
     if let Some(observer) = capture.clone() {
         let relay = relay.clone();
         let fatal = fatal_tx.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let error = crate::work_facts::watch_liveness(
                 relay,
                 observer,
@@ -1106,7 +1102,7 @@ pub async fn run_daemon_owned(
         });
     }
     let (cpu_tx, cpu_rx) = tokio::sync::watch::channel(Ok(None));
-    let cpu_task = tokio::spawn(crate::cpu_usage::sample_cpu(
+    let cpu_task = mj_core::runtime::spawn(crate::cpu_usage::sample_cpu(
         cpu_tx,
         config.cpu_accounting.clone(),
     ));
@@ -1119,7 +1115,7 @@ pub async fn run_daemon_owned(
     let _stop_cpu = StopCpu(cpu_task.abort_handle());
     let cpu_fatal = fatal_tx.clone();
     let cpu_session_id = config.session_id.clone();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         match cpu_task.await {
             Err(error) if error.is_cancelled() => {}
             result => {
@@ -1189,7 +1185,7 @@ pub async fn run_daemon_owned(
     let (listener, socket_guard) = publish_control_socket(&root, &socket)?;
     let subagent_role = config.subagent_mcp_role();
     let has_subagent_tools = subagent_role.is_some();
-    let mut client_task = tokio::spawn(accept_worker_clients(
+    let mut client_task = mj_core::runtime::spawn(accept_worker_clients(
         listener,
         socket_guard,
         relay.clone(),
@@ -1220,7 +1216,7 @@ pub async fn run_daemon_owned(
     };
     let prep_status = preparation_tx.clone();
     let prep_cancel = preparation_cancel.clone();
-    let mut prep_task = tokio::spawn(async move {
+    let mut prep_task = mj_core::runtime::spawn(async move {
         supervise_harness_preparation(
             preparation_setup,
             dispatch_wake_rx,
@@ -1498,7 +1494,7 @@ async fn accept_worker_clients(
         let client_credentials = credentials.clone();
         let client_runtime = runtime.clone();
         let client_fatal = fatal.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             if let Err(error) = serve_client_with_memory(
                 stream,
                 client_relay,
@@ -1538,7 +1534,7 @@ where
     // process teardown reclaims it if the call never returns.
     let step_cancel = cancel.child_token();
     let operation_cancel = step_cancel.clone();
-    let task = tokio::task::spawn_blocking(move || operation(operation_cancel));
+    let task = mj_core::runtime::spawn_blocking(move || operation(operation_cancel));
     tokio::select! {
         biased;
         _ = cancel.cancelled() => {
@@ -1617,7 +1613,7 @@ async fn supervise_preparation<T>(
         let root = root.to_owned();
         let record_step = step.clone();
         let record_message = message.clone();
-        let record = tokio::task::spawn_blocking(move || {
+        let record = mj_core::runtime::spawn_blocking(move || {
             super::record_startup_failure(&root, &record_step, &record_message);
         });
         match tokio::time::timeout(LOCAL_PREPARATION_STEP_TIMEOUT, record).await {
@@ -1693,7 +1689,7 @@ async fn prepare_project_tools(
             });
         });
         let breadcrumb_root = root.to_owned();
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             super::record_startup_step(&breadcrumb_root, "Install project tools");
         })
         .await
@@ -1784,6 +1780,15 @@ async fn prepare_and_start_harness(
         .context("login environment resolution exceeded its 10-second bound")?
     })
     .await?;
+    if config.harness == HarnessKind::OpenCode {
+        // Retained launch files can predate the explicit OpenCode config pin.
+        let home = super::credential_endpoint(&config)
+            .map_err(anyhow::Error::msg)?
+            .home;
+        config
+            .harness
+            .configure_staged_home_environment(&home, &mut config.environment);
+    }
     let mut session_environment = base_environment.clone();
     session_environment.extend(config.environment.clone());
     session_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
@@ -1970,7 +1975,7 @@ async fn prepare_and_start_harness(
                     if step_cancel.is_cancelled() {
                         bail!("preparation cancelled before configuring the Claude profile");
                     }
-                    super::subagents::configure_claude_subagent_mcp(
+                    let registered = super::subagents::configure_claude_subagent_mcp(
                         &root,
                         &session_id,
                         &home,
@@ -1987,7 +1992,7 @@ async fn prepare_and_start_harness(
                         &home,
                         user_home.as_deref(),
                     )?;
-                    Ok((true, mailbox_hook_available))
+                    Ok((registered, mailbox_hook_available))
                 })
                 .await?;
             claude_mailbox_hook_available = mailbox_hook_available;
@@ -2059,49 +2064,6 @@ async fn prepare_and_start_harness(
             relay.set_mailbox_delivery_mode(mode);
         }
     }
-    if config.project_memory.is_some()
-        && resume_session.is_none()
-        && config.harness != HarnessKind::Claude
-    {
-        let budget = preparation_step(
-            root,
-            status,
-            "project-memory",
-            LOCAL_PREPARATION_STEP_TIMEOUT,
-            cancel,
-        )
-        .await?;
-        let memory = config.project_memory.clone();
-        let relay = relay.clone();
-        bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
-            if step_cancel.is_cancelled() {
-                bail!("preparation cancelled before loading project memory");
-            }
-            let should_install = relay
-                .lock()
-                .expect("relay state lock poisoned")
-                .operational_state()
-                .native_session_id
-                .is_none();
-            if should_install && let Some(memory) = memory {
-                let store = mj_core::project_memory::ProjectMemoryStore::new(&memory.root);
-                let text = mj_core::project_memory::startup_prompt_context(
-                    &store,
-                    &memory.repository_roots,
-                )?;
-                if step_cancel.is_cancelled() {
-                    bail!("preparation cancelled before installing project memory");
-                }
-                relay
-                    .lock()
-                    .expect("relay state lock poisoned")
-                    .install_prompt_context(text)?;
-            }
-            Ok(())
-        })
-        .await?;
-    }
-
     if config.prepares_review() {
         let budget = preparation_step(
             root,
@@ -2317,7 +2279,7 @@ pub(super) async fn serve_terminal_relay(
         let client_credentials = credentials.clone();
         let client_fatal = fatal.clone();
         let client_runtime = runtime.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             // A sealed session has no ACP runtime left, so compaction
             // cannot be served here.
             if let Err(error) = serve_client_with_memory(
@@ -2572,7 +2534,7 @@ pub(super) async fn serve_client_with_memory(
                 let request_id = envelope.request_id.clone();
                 let protocol_version = envelope.protocol_version;
                 let mut download = live_baseline_download.take();
-                let (result, download) = tokio::task::spawn_blocking(move || {
+                let (result, download) = mj_core::runtime::spawn_blocking(move || {
                     let result = mj_core::relay::live_baseline_reply(&envelope.request, cut, &mut download, &envelope.request_id, protocol_version);
                     (result, download)
                 }).await.context("live recovery baseline download task failed")?;
@@ -2595,7 +2557,7 @@ pub(super) async fn serve_client_with_memory(
                 let protocol_version = envelope.protocol_version;
                 let store = mj_core::attachment::AttachmentStore::worker(&relay_root);
                 let body =
-                    match tokio::task::spawn_blocking(move || -> Result<RelayResponsePayload> {
+                    match mj_core::runtime::spawn_blocking(move || -> Result<RelayResponsePayload> {
                         use base64::Engine as _;
                         let base64 = base64::engine::general_purpose::STANDARD;
                         match envelope.request {
@@ -3054,7 +3016,7 @@ mod preparation_tests {
         let socket = root.join("control.sock");
         let (listener, guard) = publish_control_socket(root, &socket).unwrap();
         let (fatal, _fatal_reports) = mpsc::channel(1);
-        let accept = tokio::spawn(accept_worker_clients(
+        let accept = mj_core::runtime::spawn(accept_worker_clients(
             listener,
             guard,
             relay,
@@ -3431,7 +3393,7 @@ mod preparation_tests {
         let fake_status = prep_status.clone();
         let prep_cancellation = cancellation.clone();
         let fake_cancellation = prep_cancellation.clone();
-        let prep = tokio::spawn(async move {
+        let prep = mj_core::runtime::spawn(async move {
             supervise_preparation(&prep_root, &prep_status, &prep_cancellation, async move {
                 preparation_step(
                     &fake_root,
@@ -3548,7 +3510,7 @@ mod preparation_tests {
             BTreeMap::new(),
             shell_events,
         );
-        let coordinator = tokio::spawn(run_relay_coordinator_with_verdict(
+        let coordinator = mj_core::runtime::spawn(run_relay_coordinator_with_verdict(
             relay,
             event_stream,
             dispatch_wakes,
@@ -3881,7 +3843,7 @@ mod preparation_tests {
         let (blocking_started_tx, blocking_started_rx) = tokio::sync::oneshot::channel();
         let (release_blocking_tx, release_blocking_rx) = std::sync::mpsc::channel();
         let (blocking_finished_tx, blocking_finished_rx) = std::sync::mpsc::channel();
-        let prep = tokio::spawn(async move {
+        let prep = mj_core::runtime::spawn(async move {
             supervise_preparation(&prep_root, &prep_status, &prep_cancellation, async move {
                 status_for_step.send_replace(PreparationSnapshot {
                     state: Some(mj_core::relay::HarnessPreparation::Preparing {
@@ -3968,7 +3930,7 @@ mod preparation_tests {
         ));
 
         release_blocking_tx.send(()).unwrap();
-        tokio::task::spawn_blocking(move || blocking_finished_rx.recv())
+        mj_core::runtime::spawn_blocking(move || blocking_finished_rx.recv())
             .await
             .unwrap()
             .unwrap();
@@ -4000,7 +3962,7 @@ mod preparation_tests {
         let fake_pid_path = pid_path.clone();
         let prep_cancellation = cancellation.clone();
         let fake_cancellation = prep_cancellation.clone();
-        let prep = tokio::spawn(async move {
+        let prep = mj_core::runtime::spawn(async move {
             supervise_preparation::<()>(&prep_root, &prep_status, &prep_cancellation, async move {
                 preparation_step(
                     &fake_root,

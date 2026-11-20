@@ -51,7 +51,7 @@ fn spawn_with(
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
         let blocking_upgrade_task = upgrade_task.clone();
-        let mut blocking = tokio::task::spawn_blocking(move || {
+        let mut blocking = mj_core::runtime::spawn_blocking(move || {
             let _upgrade_task = blocking_upgrade_task;
             discover(request, cancelled)
         });

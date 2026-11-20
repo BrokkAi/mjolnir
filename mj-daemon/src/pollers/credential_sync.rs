@@ -105,18 +105,22 @@ pub(crate) async fn current_profile_login(
     profile: &mj_core::config::HarnessProfile,
 ) -> anyhow::Result<Option<LoginFingerprint>> {
     let kind = profile.kind;
-    let marker = match kind.login_store(mj_core::config::HarnessHost::current(), &profile.home) {
-        mj_core::config::HarnessLoginStore::MacKeychain => {
-            return Ok(
-                mj_controller::worker_client::current_claude_access_token(profile)
-                    .await
-                    .map(LoginFingerprint::AccessToken),
-            );
-        }
-        mj_core::config::HarnessLoginStore::File { marker } => marker,
+    if kind == mj_core::config::HarnessKind::Claude {
+        // A plain read (also for the Keychain): only the sync pass reads under
+        // the native lock and creates a refusal; this re-checks it and may lag.
+        return Ok(
+            mj_controller::worker_client::current_claude_access_token(profile)
+                .await
+                .map(LoginFingerprint::AccessToken),
+        );
+    }
+    let mj_core::config::HarnessLoginStore::File { marker } =
+        kind.login_store(mj_core::config::HarnessHost::current(), &profile.home)
+    else {
+        return Ok(None);
     };
     let profile = profile.clone();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         // Codex's auth scheme comes from its config file.
         if profile.auth_scheme().uses_native_login_file() {
             LoginFingerprint::read_file(kind, &marker)
@@ -151,24 +155,6 @@ pub fn log_credential_sync_actions(result: &mj_core::credentials::CredentialSync
     }
 }
 
-/// The extra option a Claude profile has after an auth failure.
-///
-/// Claude Code cannot refresh its rotating login early, so a container copy
-/// can lose the single-use refresh race with the host. A setup token does not
-/// rotate, which takes the race away rather than retrying it.
-pub(super) fn setup_token_advice(
-    profile_id: &str,
-    harness: Option<mj_core::config::HarnessKind>,
-) -> String {
-    if harness == Some(mj_core::config::HarnessKind::Claude) {
-        format!(
-            ", or store a long-lived token with `mj login --profile {profile_id} --setup-token`"
-        )
-    } else {
-        String::new()
-    }
-}
-
 /// One credential-sync notice and whether it only reports routine syncs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialNotice {
@@ -183,10 +169,10 @@ impl CredentialSyncNotices {
     pub fn notice(
         &mut self,
         result: &mj_core::credentials::CredentialSyncResult,
-        harness: Option<mj_core::config::HarnessKind>,
+        _harness: Option<mj_core::config::HarnessKind>,
         state: &State,
     ) -> Option<String> {
-        self.leveled_notice(result, harness, state, None)
+        self.leveled_notice(result, state, None)
             .map(|notice| notice.text)
     }
 
@@ -196,7 +182,6 @@ impl CredentialSyncNotices {
     pub fn leveled_notice(
         &mut self,
         result: &mj_core::credentials::CredentialSyncResult,
-        harness: Option<mj_core::config::HarnessKind>,
         state: &State,
         login_verdict: Option<&LoginFailureVerdict>,
     ) -> Option<CredentialNotice> {
@@ -204,7 +189,6 @@ impl CredentialSyncNotices {
             text,
             routine: false,
         };
-        let advice = setup_token_advice(&result.profile_id, harness);
         // Completed event-triggered syncs always speak. An authentication
         // failure is handled once per failed turn; only an empty response
         // waits out the per-session cooldown upstream.
@@ -218,22 +202,36 @@ impl CredentialSyncNotices {
             });
             if trigger.reason == CredentialSyncReason::AuthenticationFailure {
                 let profile = &result.profile_id;
+                // The person hears what nothing else will resolve: a refused
+                // login, a reconciliation that failed, or a cause that stays
+                // unknown. A stale login that was or will be replaced by the
+                // renewed one needs nothing from them.
                 let conclusion = match login_verdict {
                     Some(LoginFailureVerdict::Refused) => format!(
-                        "the provider refused the login checked during reconciliation. Run `mj login --profile {profile}`{advice}."
+                        "the provider refused the login checked during reconciliation. Run `mj login --profile {profile}`."
                     ),
-                    Some(LoginFailureVerdict::Renewed) if result.pushed_to(session_id) => {
-                        "the session held a stale login. The renewed login was pushed.".into()
-                    }
-                    Some(LoginFailureVerdict::Renewed) => {
-                        "the session failed on a stale login. The profile's login has since been renewed.".into()
-                    }
                     _ if let Some(detail) = sync_failure => {
                         format!("credential reconciliation failed: {detail}.")
                     }
-                    Some(LoginFailureVerdict::Unrefused { reason }) => {
-                        format!("a refusal of the profile's current login was not established: {reason}.")
+                    Some(LoginFailureVerdict::Renewed) if result.pushed_to(session_id) => {
+                        tracing::info!(
+                            profile_id = %profile,
+                            session_id = %session_id,
+                            "the session held a stale login. The renewed login was pushed."
+                        );
+                        return None;
                     }
+                    Some(LoginFailureVerdict::Renewed) => {
+                        tracing::info!(
+                            profile_id = %profile,
+                            session_id = %session_id,
+                            "the session failed on a stale login. The profile's login has since been renewed."
+                        );
+                        return None;
+                    }
+                    Some(LoginFailureVerdict::Unrefused { reason }) => format!(
+                        "a refusal of the profile's current login was not established: {reason}."
+                    ),
                     _ => return None,
                 };
                 return Some(warning(format!(
@@ -253,7 +251,20 @@ impl CredentialSyncNotices {
             {
                 return None;
             }
-            return Some(warning(if result.pushed_to(session_id) {
+            // Either kind of replaced credentials is worth a retry.
+            let replaced = result.outcomes.iter().any(|outcome| {
+                outcome.session_id == *session_id
+                    && outcome.outcome.as_ref().is_ok_and(|actions| {
+                        actions.iter().any(|action| {
+                            matches!(
+                            action,
+                            mj_core::credentials::CredentialSyncAction::Pushed
+                                | mj_core::credentials::CredentialSyncAction::AwsCredentialsPushed
+                        )
+                        })
+                    })
+            });
+            return Some(warning(if replaced {
                 format!(
                     "Session {} returned no response; fresher credentials from profile {} were pushed. Retry the prompt.",
                     session, result.profile_id

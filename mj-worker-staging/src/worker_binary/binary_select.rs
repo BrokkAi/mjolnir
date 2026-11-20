@@ -245,13 +245,14 @@ pub fn download_worker(url: &str, expected_sha256: &str, triple: &str) -> Result
     let destination = directory.join(&digest).join("hel");
     std::fs::create_dir_all(destination.parent().unwrap_or(&directory))?;
     if destination.is_file() {
-        let bytes = std::fs::read(&destination).with_context(|| {
-            format!(
-                "read cached worker for {triple} from {}",
-                destination.display()
-            )
-        })?;
-        if lower_hex(Sha256::digest(&bytes)).eq_ignore_ascii_case(expected_sha256) {
+        let actual =
+            mj_core::worker_launch::worker_executable_digest(&destination).with_context(|| {
+                format!(
+                    "read cached worker for {triple} from {}",
+                    destination.display()
+                )
+            })?;
+        if actual == digest {
             verify_worker_build(&destination)?;
             return Ok(destination);
         }

@@ -174,6 +174,18 @@ pub struct CheckpointPackSpec {
     pub output_path: PathBuf,
 }
 
+/// [`CheckpointPackSpec`] borrowing the canonical session, so a sender can
+/// serialize a large snapshot without first cloning it. Its JSON is identical
+/// to the owned spec's.
+#[derive(Debug, Serialize)]
+pub struct CheckpointPackSpecRef<'a> {
+    pub protocol_version: u32,
+    pub relay_root: &'a Path,
+    pub stage_path: &'a Path,
+    pub canonical_session: &'a CanonicalSessionSnapshot,
+    pub output_path: &'a Path,
+}
+
 /// Report files omitted from a sealed generation, retained when it is refreshed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointReportOmissions {

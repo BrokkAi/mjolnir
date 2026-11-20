@@ -53,6 +53,8 @@ mod session_target;
 pub use session_target::*;
 mod container_listing;
 pub use container_listing::*;
+mod managed_target;
+pub use managed_target::*;
 mod profile_home;
 pub use profile_home::*;
 mod bootstrap;

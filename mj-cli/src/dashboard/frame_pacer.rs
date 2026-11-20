@@ -197,7 +197,7 @@ mod tests {
         let mut model = Model::new(feed, keys);
         // 200 updates, one every millisecond: many more than a 60 Hz
         // display can show.
-        let producer = tokio::spawn(async move {
+        let producer = mj_core::runtime::spawn(async move {
             for message in 0..200 {
                 feed_tx.send(message).expect("the model is listening");
                 tokio::time::sleep(Duration::from_millis(1)).await;

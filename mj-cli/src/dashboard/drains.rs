@@ -56,6 +56,9 @@ fn take_lifecycle_completion(
 impl DashboardContext {
     pub(crate) fn cancel_background_work(&mut self) {
         self.wiki_search_task = None;
+        self.wiki_sync_task = None;
+        self.sessions_sync_task = None;
+        self.sessions_text_task = None;
         self.usage_report.cancel();
         self.cancel_chat_open();
         self.critical_operations.cancel_all();
@@ -74,6 +77,9 @@ impl DashboardContext {
         self.cancel_stale_path_input();
         self.drain_quota_updates();
         self.drain_runtime_state();
+        while let Some((high, events)) = self.runtime_alerts.next_ready() {
+            self.dashboard.set_alert_events(high, events);
+        }
         while let Some(health) = self.runtime_health.next_ready() {
             self.notices.set_persistent_failure(health.error());
         }
@@ -110,6 +116,7 @@ impl DashboardContext {
             self.profile_capabilities.take_delivered(),
             self.worker.take_delivered(),
             self.runtime_state.take_delivered(),
+            self.runtime_alerts.take_delivered(),
             self.runtime_health.take_delivered(),
             self.runtime_reviews.take_delivered(),
             self.runtime_notices.take_delivered(),

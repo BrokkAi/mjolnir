@@ -777,6 +777,7 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
         no_project_memory: false,
         no_github_events: false,
         no_github_credentials: false,
+        notifications_ignored: false,
         at: None,
         branch: None,
         base: None,
@@ -3462,10 +3463,9 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     assert_eq!(
         oracle.initial_prompt,
         format!(
-            "Your report directory is /reports/{}.\n\n{} Your answer may contain up to {} characters.\n\nQuestion:\nWhich option?",
+            "Your report directory is /reports/{}.\n\n{}\n\nQuestion:\nWhich option?",
             oracle.child_session_id,
-            super::subagents::ORACLE_INSTRUCTIONS,
-            mj_core::subagent::SubagentKind::Oracle.max_handback_chars()
+            mj_core::subagent::READ_ONLY_TASK_SCOPE,
         )
     );
     assert_eq!(oracle.model.as_deref(), Some("oracle-model"));
@@ -3531,11 +3531,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         })
         .unwrap();
     assert!(!muse_oracle.handback_tool);
-    assert!(
-        muse_oracle
-            .initial_prompt
-            .contains("Send each answer as your last message")
-    );
+    assert!(muse_oracle.initial_prompt.ends_with("Question:\nWhy?"));
     assert!(
         muse_oracle
             .initial_prompt

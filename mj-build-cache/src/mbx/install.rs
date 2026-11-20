@@ -1555,7 +1555,7 @@ else:
         };
         let worker_home = home.clone();
         let worker_binary = binary.clone();
-        let install = tokio::task::spawn_blocking(move || {
+        let install = mj_core::runtime::spawn_blocking(move || {
             install_mbx_with(&local_machine(), &executor, Some(&worker_home), |_| {
                 Ok(worker_binary)
             })
@@ -1572,7 +1572,7 @@ else:
         );
         assert!(marker.is_file());
         assert!(
-            !crate::upgrade::active_labels()
+            !mj_store::upgrade::active_labels()
                 .iter()
                 .any(|label| label.contains("mbx installation"))
         );
@@ -1583,7 +1583,7 @@ else:
             std::io::ErrorKind::UnexpectedEof
         );
         let rerun_home = home.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = mj_core::runtime::spawn_blocking(move || {
             std::thread::scope(|scope| {
                 let installs: Vec<_> = (0..2)
                     .map(|_| {

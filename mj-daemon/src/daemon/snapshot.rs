@@ -14,7 +14,7 @@ impl RuntimeState {
     fn observe_background_policy(
         &self,
         session: &SessionRecord,
-        config: &Config,
+        config: &mj_core::snapshot_map::SharedSnapshot<Config>,
         policy: &BackgroundPolicyState,
     ) {
         if policy.quiet {
@@ -33,7 +33,8 @@ impl RuntimeState {
     pub(super) fn refresh_background_policies(&self) {
         let mut owner = self.owner();
         let records = owner.controller().state.sessions.clone();
-        let config = owner.controller().config.clone();
+        // The owner's shared snapshot: no copy of the configuration per refresh.
+        let config = owner.config_snapshot.clone();
         owner.background_policies.retain(|session_id, policy| {
             let Some(session) = records
                 .get(session_id)
@@ -51,14 +52,14 @@ impl RuntimeState {
         // a later completed lifecycle with the controller snapshot it loaded.
         let mut inactivity = self.config_mutation.lock().await;
         if self.committed.is_some() {
-            let config = tokio::task::spawn_blocking(Config::load)
+            let config = mj_core::runtime::spawn_blocking(Config::load)
                 .await
                 .context("daemon configuration reader panicked")??;
             self.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
             self.owner().install_config(config);
         } else {
             let controller_loader = self.controller_loader;
-            let controller = tokio::task::spawn_blocking(controller_loader)
+            let controller = mj_core::runtime::spawn_blocking(controller_loader)
                 .await
                 .context("daemon controller loader panicked")??;
             self.configure_inactivity(&mut inactivity, controller.config.advanced.auto_afk_minutes);
@@ -322,7 +323,8 @@ impl RuntimeState {
                     quiet: snapshot.operational.safe_to_replace(session.harness_kind),
                     worker_build: snapshot.worker_build.clone(),
                 };
-                self.observe_background_policy(session, &controller.config, &policy);
+                let config = owner.config_snapshot.clone();
+                self.observe_background_policy(session, &config, &policy);
                 owner.background_policies.insert(session_id.clone(), policy);
             } else {
                 owner.background_policies.remove(&session_id);
@@ -356,7 +358,7 @@ impl RuntimeState {
             let state = self.clone();
             match mj_controller::upgrade::activity("lifecycle failure clear") {
                 Ok(upgrade_task) => {
-                    tokio::spawn(async move {
+                    mj_core::runtime::spawn(async move {
                         let _upgrade_task = upgrade_task;
                         state
                             .clear_recorded_lifecycle_failure(&session_id, &recorded_error)
@@ -393,7 +395,7 @@ impl RuntimeState {
         let auto_afk_window = self.with_config(|config| {
             Duration::from_secs(u64::from(config.advanced.auto_afk_minutes) * 60)
         });
-        let changed = tokio::task::spawn_blocking(move || {
+        let changed = mj_core::runtime::spawn_blocking(move || {
             mj_controller::database::set_operator_away(away, auto_afk_window)
         })
         .await
@@ -405,7 +407,7 @@ impl RuntimeState {
         // committed feed and install the freshly loaded controller instead.
         if self.committed.is_none() {
             let load = self.controller_loader;
-            let controller = tokio::task::spawn_blocking(load).await??;
+            let controller = mj_core::runtime::spawn_blocking(load).await??;
             self.owner().install_controller(controller);
         }
         self.publish_revision();

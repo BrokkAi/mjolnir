@@ -937,9 +937,9 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
             .iter()
             .map(|c| c.profile_id.as_str())
             .collect::<Vec<_>>(),
-        // A top-level quota move ranks the five-hour-windowed profile below
-        // even usage-priced ones, however full its window is.
-        ["healthy", "unknown", "paid", "api", "windowed"]
+        // A top-level quota move ranks a profile inside a five-hour window
+        // below unwindowed and unknown quota, above paid credits and API.
+        ["healthy", "unknown", "windowed", "paid", "api"]
     );
 }
 
@@ -1122,7 +1122,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             }
         };
         let retry_environment = environment.clone();
-        let mut task = Some(tokio::spawn(async move {
+        let mut task = Some(mj_core::runtime::spawn(async move {
             quota::schedule(&environment, "one", blocked.clone(), plan).await
         }));
         let mut unknown_fallback = None;
@@ -1223,7 +1223,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                 let env = retry_environment.clone();
                 let view = blocked.clone();
                 let recovery = fallback.clone();
-                task = Some(tokio::spawn(async move {
+                task = Some(mj_core::runtime::spawn(async move {
                     quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
                 }));
                 continue;
@@ -1243,7 +1243,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                 let env = retry_environment.clone();
                 let view = blocked.clone();
                 let recovery = fallback.clone();
-                task = Some(tokio::spawn(async move {
+                task = Some(mj_core::runtime::spawn(async move {
                     quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
                 }));
             }
@@ -1281,7 +1281,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                 "destination",
             )
             .expect("a failed Move reports a conversation notice");
-            let recording = tokio::spawn(async move {
+            let recording = mj_core::runtime::spawn(async move {
                 crate::daemon::session_move::record_quota_move_failure(
                     &failure_control,
                     "one",
@@ -1516,12 +1516,7 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
         rate_limited_until_epoch_seconds: None,
         next_check_at_epoch_seconds: None,
     };
-    let request = QuotaRefreshRequest::for_profile(
-        "claude",
-        &profile,
-        home.path().to_path_buf(),
-        mj_controller::quota::QuotaRuntimeConfig::of(&config),
-    );
+    let request = QuotaRefreshRequest::for_profile("claude", &profile, home.path().to_path_buf());
     mj_controller::database::save_quota_report(&request.cache_identity(), &stored).unwrap();
     let reports = Arc::new(Mutex::new(mj_controller::quota::QuotaReportMap::new()));
     let (publications, quota_feed) =
@@ -1677,7 +1672,6 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 "claude",
                 &config.profiles["claude"],
                 home.path().to_path_buf(),
-                mj_controller::quota::QuotaRuntimeConfig::of(config),
             )
             .cache_identity()
         };
@@ -2195,6 +2189,10 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
         return;
     }
     let mode = std::env::var(CHILD).unwrap();
+    // The relay this test starts reports to its stderr, which the client
+    // logs at debug and nothing else shows; a failure below prints it.
+    let log = mj_controller::test_log::CapturedLog::default();
+    tracing::subscriber::set_global_default(log.clone()).expect("isolated test log subscriber");
     let _writer = mj_controller::database::install_isolated_test_writer();
     register_leased_relay_session();
     let root = tempfile::tempdir().unwrap();
@@ -2277,7 +2275,7 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
     };
     std::fs::write(root.path().join("block-quota-submit"), b"hold").unwrap();
     let recovery = recovery_for(&blocked, None);
-    let scheduling = tokio::spawn(async move {
+    let scheduling = mj_core::runtime::spawn(async move {
         quota::schedule(&environment, ID, blocked, quota::Plan::Wait(recovery)).await
     });
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -2295,7 +2293,7 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
     );
     tokio::time::resume();
     let moving = (mode == "move").then(|| {
-        tokio::spawn({
+        mj_core::runtime::spawn({
             let gate = session_gate.clone();
             let handle = handle.clone();
             async move {
@@ -2309,8 +2307,9 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
                     )
                     .await
                     .unwrap();
-                let lease = handle.lease_connection(&admission).await.unwrap();
+                let lease = handle.lease_connection(&admission).await?;
                 lease.release();
+                anyhow::Ok(())
             }
         })
     });
@@ -2329,14 +2328,25 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
             result.is_err(),
             "a person's foreground Move preempts scheduling"
         );
-        tokio::time::timeout(Duration::from_secs(5), moving)
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(5), moving)
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+        {
+            panic!(
+                "the Move could not lease the connection: {error:#}\nlogged:\n{}",
+                log.at_or_above(tracing::Level::DEBUG).join("\n")
+            );
+        }
     } else {
+        let scheduled = result.unwrap_or_else(|error| {
+            panic!(
+                "quota scheduling failed: {error:#}\nlogged:\n{}",
+                log.at_or_above(tracing::Level::DEBUG).join("\n")
+            )
+        });
         assert!(
-            result
-                .unwrap()
+            scheduled
                 .snapshot
                 .unwrap()
                 .operational
@@ -2381,7 +2391,7 @@ async fn quota_schedule_keeps_the_identical_command_until_acceptance_is_known() 
             .publish("one".into(), blocked.clone())
             .await
             .unwrap();
-        let first = tokio::spawn({
+        let first = mj_core::runtime::spawn({
             let env = environment.clone();
             let view = blocked.clone();
             async move {
@@ -2496,7 +2506,7 @@ async fn quota_schedule_keeps_the_identical_command_until_acceptance_is_known() 
             .publish("one".into(), blocked.clone())
             .await
             .unwrap();
-        let second = tokio::spawn({
+        let second = mj_core::runtime::spawn({
             let env = environment.clone();
             let view = blocked.clone();
             async move {
@@ -2546,7 +2556,7 @@ async fn quota_schedule_keeps_the_identical_command_until_acceptance_is_known() 
             second.await.unwrap().is_err(),
             "reconciling the earlier completion must leave the newer one retryable"
         );
-        let third = tokio::spawn({
+        let third = mj_core::runtime::spawn({
             let env = environment.clone();
             let view = blocked.clone();
             async move {

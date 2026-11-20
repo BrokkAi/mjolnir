@@ -296,7 +296,7 @@ impl Controller {
             let projection_build = rebuild_projection.then(|| {
                 let canonical = std::sync::Arc::clone(&canonical_session);
                 let session_id = session_id.to_owned();
-                tokio::task::spawn_blocking(move || {
+                mj_core::runtime::spawn_blocking(move || {
                     materialized_session_from_canonical(session_id, &canonical)
                 })
             });

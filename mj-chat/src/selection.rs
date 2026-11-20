@@ -76,6 +76,8 @@ pub enum SurfaceId {
     Transcript,
     /// Notification body; a new card or row layout gets a new identity.
     NotificationText(u64),
+    /// Rendered answer body of the notification's chat-owned form.
+    NotificationFormBody(u64),
     /// Scrollable message body of an elicitation dialog.
     ElicitationMessage,
     /// Prompt editor.

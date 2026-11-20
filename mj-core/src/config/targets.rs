@@ -682,11 +682,12 @@ impl TargetTemplate {
         }
     }
 
-    /// Whether this target runs with `permissions = "yolo"`. Container
-    /// runtimes are unconstrained inside their boundary but have no
-    /// permission mode, so they are not YOLO targets.
+    /// Whether the harness runs without approvals on this target: the
+    /// execution policy a new session records and its worker launch
+    /// enforces. Containers and SSH bare targets with
+    /// `permissions = "yolo"` qualify.
     pub const fn is_yolo(&self) -> bool {
-        matches!(self.permission_mode(), Some(PermissionMode::Yolo))
+        matches!(self.execution_policy(), ExecutionPolicy::Unconstrained)
     }
 
     pub(super) fn validate(&self, id: &str) -> Result<()> {

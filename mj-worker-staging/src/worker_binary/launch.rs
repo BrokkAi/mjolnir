@@ -326,14 +326,7 @@ pub fn worker_launch_config_with_checkout(
     }
     profile
         .kind
-        .configure_home_environment(Path::new(&target_profile_home), &mut environment);
-    let observe_policy = mj_core::observe::ObserveEnforcementConfig::from_environment()?
-        .map(|config| config.supports_harness(profile.kind))
-        .transpose()?;
-    // An enforced DSH session asks Mjolnir for every command, write, and MCP
-    // call. This overrides a container target's otherwise unconstrained mode;
-    // isolation remains as a second boundary, not as a reason to skip policy.
-    let execution_policy = effective_execution_policy(execution_policy, observe_policy.is_some());
+        .configure_staged_home_environment(Path::new(&target_profile_home), &mut environment);
     profile.configure_execution_environment(execution_policy, &mut environment)?;
     // The project's identity also keys the shared tool cache and names the
     // Claude project directory, so it is worked out for every session. Only
@@ -460,22 +453,11 @@ pub fn worker_launch_config_with_checkout(
             project_memory: project_memory.clone(),
             execution_policy,
             claude_permission_mode: profile.approval_choices().claude_permission_mode,
-            observe_policy,
+            observe_policy: None,
         },
         project_memory,
         target_profile_home,
     ))
-}
-
-pub fn effective_execution_policy(
-    policy: mj_core::config::ExecutionPolicy,
-    observe_enforced: bool,
-) -> mj_core::config::ExecutionPolicy {
-    if observe_enforced {
-        mj_core::config::ExecutionPolicy::ConfiguredApprovals
-    } else {
-        policy
-    }
 }
 
 /// Leave out of a launch every variable the profile's harness must never see,

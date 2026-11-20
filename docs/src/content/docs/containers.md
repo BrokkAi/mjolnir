@@ -117,24 +117,18 @@ use `:latest`. This image carries Mjolnir, its worker, and pinned harnesses.
 [Daemon-container mode](/daemon-container/) uses this release image by default.
 It is separate from the default session image.
 
-The daemon also uses this image for quota checks that start a harness: the
-Codex app-server, Grok's agent, and Claude Code's login refresh. With
-`[quota] runtime = "auto"`, the default, a check runs on this machine when the
-machine already has that harness: Mjolnir's managed Codex installation, or a
-`grok` or `claude` on `PATH` (Grok also finds the copy in the profile's home).
-Otherwise the check runs in the release image using your enabled local Podman
-runtime, else your enabled local Docker runtime, when its engine is installed; with no
-such runtime it runs on this machine and reports the missing harness. A machine
-that runs every session in containers therefore needs no harness installed to
-show its quota, and the daemon keeps the release image downloaded for quota
-checks. The profile's account directory is mounted at its own path, so a refreshed login lands where the host keeps it. Set `runtime` to
-`podman` or `docker` to insist on one engine (with the release's agent-dev
-image), or to `host` to never use a container. A check never downloads the image; the daemon downloads it in the
-background, and until then the check reports that it is waiting for it. The
-runtime's `pull_policy` governs that download too: with `never`, the daemon
-leaves the image to you, and a check that finds it missing says so.
-Claude Code on macOS always checks on the host, because its login lives in the
-Keychain.
+Quota checks run beside the daemon and never start a container. Codex, Grok
+and Claude Code use an installed CLI on the host's `PATH`; Grok also finds the
+copy in its profile's `bin` directory. If the CLI is missing, Mjolnir prepares
+the same pinned managed installation used by bare workers. If preparation
+fails or the platform is unsupported, the quota report explains why the
+harness is unavailable. Quota checks do not cause the release image to be
+pulled.
+
+Older `[quota] runtime` values (`auto`, `host`, `podman`, and `docker`) are
+accepted but ignored and dropped when the configuration is saved. When the
+daemon itself runs in a container, checks use that container's installed
+harnesses. Claude Code on macOS reads its login from the host's Keychain.
 
 The image also carries the session worker, built from the same commit at
 `/opt/mjolnir/mj-worker` and labelled `org.brokk.mjolnir.worker-build`. A release

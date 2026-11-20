@@ -59,9 +59,9 @@ impl Drop for ForegroundHolder {
     }
 }
 
-/// What a background admission is for. The gate admits a kind only beside
-/// holders it can share the session with (see [`BackgroundWork::runs_beside`]),
-/// and a foreground lifecycle operation preempts every holder.
+/// What a background admission is for. Background operations exclude each
+/// other and every connection lease; foreground lifecycle operations preempt
+/// each background holder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundWork {
     /// Stops and replaces the worker, so it shares the session with nothing.
@@ -70,9 +70,6 @@ pub enum BackgroundWork {
     WorkerObservation,
     DelegationDelivery,
     QuotaScheduling,
-    /// Reconciles the session's logins (harness, AWS, GitHub, skills) with a
-    /// few relay requests.
-    CredentialSync,
 }
 
 impl BackgroundWork {
@@ -84,23 +81,7 @@ impl BackgroundWork {
             Self::WorkerObservation => "worker readiness observation",
             Self::DelegationDelivery => "delegation delivery",
             Self::QuotaScheduling => "quota scheduling",
-            Self::CredentialSync => "credential sync",
         }
-    }
-
-    /// Needs exclusivity with connection holders. Quota scheduling uses
-    /// actor exchanges directly, but must exclude every competing lease.
-    pub fn needs_lease(self) -> bool {
-        self != Self::CredentialSync
-    }
-
-    fn runs_beside(self, other: Self) -> bool {
-        use BackgroundWork::*;
-        matches!(
-            (self, other),
-            (CredentialSync, DelegationDelivery | QuotaScheduling)
-                | (DelegationDelivery | QuotaScheduling, CredentialSync)
-        )
     }
 }
 
@@ -132,7 +113,6 @@ pub struct RecoveryGate {
     /// Which sessions are busy, for waiters. Published from inside the gate so
     /// every holder updates it, whatever started the work.
     busy: watch::Sender<BTreeSet<String>>,
-    credential_wakes: watch::Sender<BTreeSet<String>>,
     foreground_releases: watch::Sender<BTreeMap<String, LifecycleOrigin>>,
 }
 
@@ -142,7 +122,6 @@ impl Default for RecoveryGate {
             state: Mutex::default(),
             closed: Notify::new(),
             busy: watch::channel(BTreeSet::new()).0,
-            credential_wakes: watch::channel(BTreeSet::new()).0,
             foreground_releases: watch::channel(BTreeMap::new()).0,
         }
     }
@@ -157,7 +136,6 @@ struct RecoveryGateState {
     busy: BTreeMap<String, Vec<BackgroundHolder>>,
     reservations: BTreeMap<String, Vec<Reservation>>,
     leases: BTreeMap<String, &'static str>,
-    deferred_credentials: BTreeSet<String>,
 }
 
 /// Reviews exclude automatic work except accepted replies, but cannot hold
@@ -340,8 +318,8 @@ impl RecoveryGate {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if reservation.is_none()
                     // A waiting review does not preempt background work, so
-                    // compatible work (notably credential sync beside a copy)
-                    // must remain admissible until the review can start.
+                    // compatible work must remain admissible until the review
+                    // can start.
                     && (kind == ReservationKind::Foreground || !state.busy.contains_key(session_id))
                     && !state
                         .reservations
@@ -529,7 +507,7 @@ impl RecoveryGate {
         // Move explicitly yields to while draining. Neither reservation can
         // defer these completions for the lifetime of the review/drain.
         if state.closed
-            || (kind.needs_lease() && state.leases.contains_key(session_id))
+            || state.leases.contains_key(session_id)
             || state
                 .reservations
                 .get(session_id)
@@ -550,7 +528,7 @@ impl RecoveryGate {
             || state
                 .busy
                 .get(session_id)
-                .is_some_and(|holders| holders.iter().any(|holder| !kind.runs_beside(holder.work)))
+                .is_some_and(|holders| !holders.is_empty())
         {
             let mut holders = state
                 .busy
@@ -721,7 +699,7 @@ impl RecoveryAttempt {
         work: impl FnOnce(RecoveryAttempt) -> T + Send + 'static,
     ) -> (Result<T, tokio::task::JoinError>, Self) {
         let executing = self.clone();
-        let result = tokio::task::spawn_blocking(move || work(executing)).await;
+        let result = mj_core::runtime::spawn_blocking(move || work(executing)).await;
         (result, self)
     }
 }
@@ -842,11 +820,6 @@ impl SessionAdmission {
                             "{} was cancelled before taking its relay lease",
                             holder.work.label()
                         );
-                        anyhow::ensure!(
-                            holder.work.needs_lease(),
-                            "{} cannot take a relay lease",
-                            holder.work.label()
-                        );
                         holder.work.label()
                     }
                 };
@@ -895,20 +868,10 @@ impl Drop for ForegroundDelegationDrain {
 }
 
 /// Retained by the actor until it has applied the lease return. Admission
-/// cannot end or wake deferred credential work before the relay is available.
+/// cannot end before the relay is available.
 pub struct RelayLeaseAdmission {
     admission: SessionAdmission,
     pub label: &'static str,
-}
-impl RelayLeaseAdmission {
-    pub fn defer_credentials(&self) {
-        let (gate, session) = self.admission.gate_and_session();
-        gate.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .deferred_credentials
-            .insert(session.to_owned());
-    }
 }
 impl Drop for RelayLeaseAdmission {
     fn drop(&mut self) {
@@ -918,25 +881,10 @@ impl Drop for RelayLeaseAdmission {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.leases.remove(session);
-        if state.deferred_credentials.remove(session) {
-            gate.credential_wakes.send_modify(|sessions| {
-                sessions.insert(session.to_owned());
-            });
-        }
         gate.publish_busy(&state);
     }
 }
 impl RecoveryGate {
-    // Its one caller is a Unix-only test.
-    #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub fn credentials_deferred_for_test(&self, session_id: &str) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .deferred_credentials
-            .contains(session_id)
-    }
-
     pub fn foreground_releases(&self) -> watch::Receiver<BTreeMap<String, LifecycleOrigin>> {
         let mut releases = self.foreground_releases.subscribe();
         releases.mark_changed();
@@ -946,25 +894,6 @@ impl RecoveryGate {
         let mut ready = BTreeMap::new();
         self.foreground_releases.send_if_modified(|releases| {
             ready = std::mem::take(releases);
-            false
-        });
-        ready
-    }
-
-    pub fn wake_credentials(&self, session_id: &str) {
-        self.credential_wakes
-            .send_if_modified(|sessions| sessions.insert(session_id.to_owned()));
-    }
-
-    pub fn credential_wakes(&self) -> watch::Receiver<BTreeSet<String>> {
-        let mut wakes = self.credential_wakes.subscribe();
-        wakes.mark_changed();
-        wakes
-    }
-    pub fn take_credential_wakes(&self) -> BTreeSet<String> {
-        let mut ready = BTreeSet::new();
-        self.credential_wakes.send_if_modified(|sessions| {
-            ready = std::mem::take(sessions);
             false
         });
         ready
@@ -1052,10 +981,10 @@ mod tests {
     async fn lifecycle_reservation_preempts_background_work_before_releasing_admission() {
         let gate = Arc::new(RecoveryGate::default());
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn({
+        let task = mj_core::runtime::spawn({
             let gate = gate.clone();
             async move {
-                gate.run_background("child", BackgroundWork::CredentialSync, async {
+                gate.run_background("child", BackgroundWork::DelegationDelivery, async {
                     started_tx.send(()).unwrap();
                     std::future::pending::<()>().await;
                 })
@@ -1075,58 +1004,33 @@ mod tests {
         );
         assert!(!gate.is_busy("child"));
         assert!(
-            gate.run_background("child", BackgroundWork::CredentialSync, async {
+            gate.run_background("child", BackgroundWork::DelegationDelivery, async {
                 panic!("reserved worker accessed")
             })
             .await
             .is_none()
         );
         assert_eq!(
-            gate.run_background("other", BackgroundWork::CredentialSync, async { 7 })
+            gate.run_background("other", BackgroundWork::DelegationDelivery, async { 7 })
                 .await,
             Some(7)
         );
         drop(reservation);
         assert_eq!(
-            gate.run_background("child", BackgroundWork::CredentialSync, async { 9 })
+            gate.run_background("child", BackgroundWork::DelegationDelivery, async { 9 })
                 .await,
             Some(9)
         );
-    }
-
-    /// With a copy and a sync holding one session, a lifecycle operation must
-    /// stop both and still find the session busy until the last one is gone.
-    #[test]
-    fn lifecycle_reservation_waits_for_every_holder_it_preempts() {
-        let gate = Arc::new(RecoveryGate::default());
-        let copy = gate
-            .try_start("session", BackgroundWork::DelegationDelivery)
-            .unwrap();
-        let sync = gate
-            .try_start("session", BackgroundWork::CredentialSync)
-            .unwrap();
-        let reservation = gate.reserve("session");
-        gate.cancel_busy("session");
-        assert!(copy.load(Ordering::Acquire) && sync.load(Ordering::Acquire));
-        drop(copy);
-        assert!(gate.is_busy("session"), "the running sync was forgotten");
-        assert!(
-            gate.try_start("session", BackgroundWork::CredentialSync)
-                .is_err()
-        );
-        drop(sync);
-        assert!(gate.busy_sessions().is_empty());
-        drop(reservation);
     }
 
     #[tokio::test]
     async fn aborting_background_task_releases_worker_admission() {
         let gate = Arc::new(RecoveryGate::default());
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn({
+        let task = mj_core::runtime::spawn({
             let gate = gate.clone();
             async move {
-                gate.run_background("child", BackgroundWork::CredentialSync, async {
+                gate.run_background("child", BackgroundWork::DelegationDelivery, async {
                     started_tx.send(()).unwrap();
                     std::future::pending::<()>().await;
                 })
@@ -1135,14 +1039,14 @@ mod tests {
         });
         started_rx.await.unwrap();
         assert!(
-            gate.run_background("child", BackgroundWork::CredentialSync, async { 1 })
+            gate.run_background("child", BackgroundWork::DelegationDelivery, async { 1 })
                 .await
                 .is_none()
         );
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert_eq!(
-            gate.run_background("child", BackgroundWork::CredentialSync, async { 2 })
+            gate.run_background("child", BackgroundWork::DelegationDelivery, async { 2 })
                 .await,
             Some(2)
         );
@@ -1218,7 +1122,7 @@ mod tests {
             .unwrap();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
-        let waiter = tokio::spawn(attempt.run_blocking(move |_| {
+        let waiter = mj_core::runtime::spawn(attempt.run_blocking(move |_| {
             started_tx.send(()).unwrap();
             finish_rx.recv().unwrap();
         }));
@@ -1276,9 +1180,8 @@ mod tests {
     }
 
     /// A review waits for background delivery already running, then holds the
-    /// session so no copy or worker upgrade can start until it is done.
+    /// session so no worker upgrade can start until it is done.
     // Hard-won: 352a87453: a review hold blocked foreground work and daemon handoff.
-    // Hard-won: 373784672: a waiting review blocked credential sync beside a recovery copy.
     #[tokio::test]
     async fn reserving_when_idle_waits_for_running_work_then_blocks_new_work() {
         let gate = Arc::new(RecoveryGate::default());
@@ -1287,19 +1190,13 @@ mod tests {
             .expect("the slot starts free");
         let mut waiter = Box::pin(gate.reserve_when_idle("session-1"));
         assert!(futures::poll!(&mut waiter).is_pending());
-        let sync = gate
-            .try_start("session-1", BackgroundWork::CredentialSync)
-            .expect("a waiting review must allow credentials through beside the running copy");
         assert!(!copy.cancellation().load(Ordering::Acquire));
         drop(copy);
-        assert!(futures::poll!(&mut waiter).is_pending());
-        assert!(!sync.cancellation().load(Ordering::Acquire));
-        drop(sync);
         let reservation = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
             .await
             .expect("the reservation follows all background holders");
         assert!(
-            gate.try_start("session-1", BackgroundWork::CredentialSync)
+            gate.try_start("session-1", BackgroundWork::QuotaScheduling)
                 .is_err(),
             "an admitted review excludes new background work"
         );
@@ -1393,9 +1290,6 @@ mod tests {
         let copy = gate
             .try_start("session", BackgroundWork::DelegationDelivery)
             .unwrap();
-        let sync = gate
-            .try_start("session", BackgroundWork::CredentialSync)
-            .unwrap();
         let cancelled = AtomicBool::new(true);
         assert!(
             gate.enter_foreground(
@@ -1409,7 +1303,6 @@ mod tests {
             .is_err()
         );
         assert!(!copy.load(Ordering::Acquire));
-        assert!(!sync.load(Ordering::Acquire));
         cancelled.store(false, Ordering::Release);
         let mut waiting = Box::pin(gate.enter_foreground(
             "session",
@@ -1425,17 +1318,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             notices.0.lock().unwrap().as_slice(),
-            &["Waiting for delegation delivery and credential sync to stop"]
+            &["Waiting for delegation delivery to stop"]
         );
-        assert_eq!(
-            refusal.holders,
-            vec!["delegation delivery", "credential sync", "Move"]
-        );
+        assert_eq!(refusal.holders, vec!["delegation delivery", "Move"]);
         assert!(copy.load(Ordering::Acquire));
-        assert!(sync.load(Ordering::Acquire));
         drop(copy);
-        assert!(futures::poll!(&mut waiting).is_pending());
-        drop(sync);
         let admission = waiting.await.unwrap();
         let mut second = Box::pin(gate.enter_foreground(
             "session",

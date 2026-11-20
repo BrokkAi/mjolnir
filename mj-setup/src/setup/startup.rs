@@ -74,6 +74,30 @@ pub fn run_setup(
     )
 }
 
+/// Whether automatic setup has work to do: a new installation, or one whose
+/// setup did not finish. A dashboard asks before it shows the first-run
+/// welcome, so an existing installation never sees one; `run_setup` then
+/// decides again under the setup lock.
+pub fn automatic_setup_due(config_path: &Path, instance_data: &Path) -> Result<bool> {
+    automatic_setup_is_due(&instance_data.join("setup-state"), config_path)
+}
+
+/// The one reading of the setup marker and the configuration.
+fn automatic_setup_is_due(marker: &Path, config_path: &Path) -> Result<bool> {
+    let state = match std::fs::read(marker) {
+        Ok(state) => Some(state),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("read setup state"),
+    };
+    let pending = match state.as_deref() {
+        None | Some(b"complete\n") => false,
+        Some(b"pending\n") => true,
+        Some(_) => bail!("unrecognized setup state in {}", marker.display()),
+    };
+    let existing = Config::load_from(config_path)?;
+    Ok(!(state.as_deref() == Some(b"complete\n") || (!pending && !existing.is_unconfigured())))
+}
+
 fn run_setup_with_discovery(
     config_path: &Path,
     instance_data: &Path,
@@ -85,20 +109,8 @@ fn run_setup_with_discovery(
     std::fs::create_dir_all(instance_data).context("create setup state directory")?;
     let _owner = acquire_setup_lock(&instance_data.join("setup.lock"), cancelled)?;
     let marker = instance_data.join("setup-state");
-    let state = match std::fs::read(&marker) {
-        Ok(state) => Some(state),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error).context("read setup state"),
-    };
-    let pending = match state.as_deref() {
-        None | Some(b"complete\n") => false,
-        Some(b"pending\n") => true,
-        Some(_) => bail!("unrecognized setup state in {}", marker.display()),
-    };
-    let existing = Config::load_from(config_path)?;
-    if !force
-        && (state.as_deref() == Some(b"complete\n") || (!pending && !existing.is_unconfigured()))
-    {
+    let due = automatic_setup_is_due(&marker, config_path)?;
+    if !force && !due {
         return Ok(None);
     }
     ensure!(!cancelled(), "setup cancelled");

@@ -22,7 +22,7 @@ impl UpgradeResume {
         let Some(path) = std::env::var_os(RESUME_ENV) else {
             return Ok(None);
         };
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             let path = PathBuf::from(path);
             let resume: Self = serde_json::from_slice(&std::fs::read(&path)?)
                 .context("read terminal upgrade handoff")?;
@@ -94,6 +94,20 @@ impl DashboardContext {
         {
             self.capture_composer_draft(&session);
             self.save_question_draft(&session);
+            let parked = self.dashboard.standby_question_drafts(&session);
+            if !parked.is_empty() {
+                let ordinal = self
+                    .chats
+                    .get(&session)
+                    .map_or(0, |chat| chat.latest_event_ordinal());
+                self.question_drafts
+                    .entry(session.clone())
+                    .or_default()
+                    .extend(parked.into_iter().map(|draft| CachedQuestionDraft {
+                        draft,
+                        captured_event_ordinal: ordinal,
+                    }));
+            }
             if let Some(text) = self.dashboard.take_standby_prompt_draft(&session) {
                 self.composer_drafts.capture(
                     &session,
@@ -142,7 +156,7 @@ impl DashboardContext {
         // Only discard the handoff after its contents have reached the new
         // context. A startup error before this point leaves it recoverable.
         if let Some(path) = std::env::var_os(RESUME_ENV) {
-            let result = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+            let result = mj_core::runtime::spawn_blocking(move || std::fs::remove_file(path)).await;
             if !matches!(&result, Ok(Ok(()))) {
                 tracing::warn!(
                     ?result,

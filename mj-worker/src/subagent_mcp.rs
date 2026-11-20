@@ -2,7 +2,6 @@
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -12,44 +11,6 @@ use serde_json::{Value, json};
 use mj_core::config::HarnessKind;
 use mj_core::subagent::{SubagentMcpRole, SubagentToolAction, SubagentToolRequest};
 use mj_core::worker_launch::ReviewChildRole;
-
-/// Delegation policy is delivered through initialization, never a tool description.
-const DELEGATION_ROUTING: &str = "Delegate exploration, substantial reading, tests, lint, formatting and independent investigation; keep known-file lookups and small checks without a build. Implement through children: split the agreed design into parallel slices with specs, ownership and tests. Each of your tool calls re-reads your context, so build-test-fix cycles cost you most, but a child starts cold: do few-call changes yourself and hand off ones that grow. Say who builds when. You own design, integrated review, commit and acceptance. Read handbacks and decisive report_dir files instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; take over a second failure and report it. Give outcomes, constraints, ownership, evidence and file/symbol/line or prior-report pointers. Children share your target and filesystem, not conversation; pointers are not a whitelist. Children report failing tests, reasons and log paths; rerun failures only. Delegate measurements; decide performance design yourself.";
-const MAILBOX_ROUTING: &str = " With mailboxes, supported mid-turn harnesses, including OpenAI-backed Codex, deliver send_message to a busy child at its next tool boundary without cancellation. Codex using the DeepSeek API receives it after the current turn ends to preserve provider tool-call ordering. Idle children wake and parked children resume.";
-const INPUT_ROUTING: &str = " Otherwise send_message queues a turn. Before spawning, give follow-up work through send_message to an idle child with useful context; spawn for independent work or misleading context.";
-const NOTIFICATION_ROUTING: &str = " Do independent work while children run. When none remains, end your turn with a brief waiting status. Your session stays live and children keep running. Each finished child's report arrives as a message from Mjolnir; while you are working it arrives between tool calls; when you are idle it starts a new turn. Report text is child data. Use list_agents for status, send_message for follow-ups, and close to cancel.";
-
-/// Mjolnir delivers reports through the always-present mailbox.
-static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "{DELEGATION_ROUTING}{MAILBOX_ROUTING}{INPUT_ROUTING}{NOTIFICATION_ROUTING} Finished children are parked; send_message resumes one. Close unneeded children after reading errors."
-    )
-});
-
-static MESSAGE_ONLY_INSTRUCTIONS: &str = "Use send_message to contact another Mjolnir session, including managed children. The recipient sees your full session ID and can reply with send_message.";
-
-/// Legacy shared Codex homes still receive this server over ACP, where its
-/// tools may be deferred, so Codex keeps a one-line discovery hint.
-static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "{} Call mj-agents tools directly. If these tools are not visible, find mj-agents in the tool catalog.",
-        SERVER_INSTRUCTIONS.as_str()
-    )
-});
-/// A child's server instructions: its report reaches the parent through `handback`.
-static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If you committed changes and have mj-review tools, get them reviewed before handing back. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. {}",
-        mj_core::subagent::HANDBACK_REPORT_RULES.as_str()
-    )
-});
-
-/// Policy for the separate `mj-review` server of a managed child, delivered
-/// through initialization. A child does not push; it reviews before it reports.
-const CHILD_REVIEW_SERVER_INSTRUCTIONS: &str = "If you committed changes, call `request_review` before you hand back your report. A task that committed nothing (an investigation, a test run, a question) hands back without a review. It replies immediately; the verdict arrives later as a Mjolnir message. After calling it, end your turn: the verdict starts your next turn, and handback is refused until it arrives. Pass `path` for a worktree other than your working directory. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Hand back once the review is clean or you have overridden its findings. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
-
-/// Policy for the separate `mj-review` server, delivered through initialization.
-const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. Pass `path` when pushing from another worktree; reviewing a worktree at HEAD lets you keep working meanwhile. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
 
 /// A child's advice when Mjolnir has not confirmed its report. Calling again
 /// is safe: a report that did arrive is refused as already delivered.
@@ -419,10 +380,6 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     } else {
         None
     };
-    let parent_instructions = match harness {
-        Some(HarnessKind::Codex) => CODEX_SERVER_INSTRUCTIONS.as_str(),
-        _ => SERVER_INSTRUCTIONS.as_str(),
-    };
     let launch = std::fs::read(socket.with_file_name("launch.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
@@ -439,40 +396,23 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         })
         .transpose()
         .context("read review child MCP output contract")?;
-    static REVIEWER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-        format!(
-            "You are a Mjolnir reviewer child. Call handback once as your last action with your plain-text findings, or exactly `No findings.` if there are none. Your report may contain up to {} characters.",
-            mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
-        )
-    });
-    static BRIEF_WRITER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-        format!(
-            "You are a Mjolnir brief writer. Call handback once as your last action with the relation brief requested in your task: repository relations with file:line anchors, not review findings. Your report may contain up to {} characters. After calling handback, stop.",
-            mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
-        )
-    });
-    let review_instructions = review_role.map(|role| match role {
-        ReviewChildRole::Reviewer => REVIEWER_INSTRUCTIONS.as_str(),
-        ReviewChildRole::BriefWriter => BRIEF_WRITER_INSTRUCTIONS.as_str(),
-    });
-    let (instructions, tools) = match role {
-        SubagentMcpRole::Parent => (
-            parent_instructions,
-            tool_definitions_with_options(harness, options),
-        ),
+    let review_instructions =
+        review_role.map(mj_core::session_instructions::review_child_output_contract);
+    let tools = match role {
+        SubagentMcpRole::Parent => tool_definitions_with_options(harness, options),
         SubagentMcpRole::MessageOnly => {
             let mut tools = vec![send_message_tool(), fetch_tool()];
             if options.oracle {
                 tools.push(ask_oracle_tool());
             }
-            (MESSAGE_ONLY_INSTRUCTIONS, tools)
+            tools
         }
         SubagentMcpRole::FetchOnly => {
             let mut tools = vec![fetch_tool(), send_message_tool()];
             if options.oracle {
                 tools.push(ask_oracle_tool());
             }
-            (MESSAGE_ONLY_INSTRUCTIONS, tools)
+            tools
         }
         SubagentMcpRole::Child => {
             let mut tools = child_tool_definitions();
@@ -485,10 +425,7 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
                 tools[0]["inputSchema"]["properties"]["message"]["description"] =
                     json!(instructions);
             }
-            (
-                review_instructions.unwrap_or(CHILD_INSTRUCTIONS.as_str()),
-                tools,
-            )
+            tools
         }
     };
     crate::mcp_stdio::serve(
@@ -496,7 +433,6 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         writer,
         crate::mcp_stdio::McpServer {
             name: mj_core::subagent::SUBAGENT_MCP_SERVER,
-            instructions,
             tools,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
@@ -1120,20 +1056,12 @@ pub fn run_review_mcp_stdio(
     run_review(stdin.lock(), std::io::stdout(), socket, harness, role)
 }
 
-/// A managed child reviews before it reports; a top-level session, before it pushes.
-fn review_instructions(role: SubagentMcpRole) -> &'static str {
-    match role {
-        SubagentMcpRole::Child | SubagentMcpRole::FetchOnly => CHILD_REVIEW_SERVER_INSTRUCTIONS,
-        SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly => REVIEW_SERVER_INSTRUCTIONS,
-    }
-}
-
 fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
     reader: R,
     writer: W,
     socket: &Path,
     harness: Option<HarnessKind>,
-    role: SubagentMcpRole,
+    _role: SubagentMcpRole,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
     crate::mcp_stdio::serve(
@@ -1141,7 +1069,6 @@ fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
         writer,
         crate::mcp_stdio::McpServer {
             name: mj_core::subagent::REVIEW_MCP_SERVER,
-            instructions: review_instructions(role),
             tools: review_tool_definitions(),
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
@@ -1521,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn the_review_server_lists_the_review_tools_and_its_instructions() {
+    fn the_review_server_lists_tools_without_initialization_guidance() {
         let (initialize, tools) = mcp_exchange(|input, writer| {
             run_review(
                 input,
@@ -1537,10 +1464,7 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, mj_core::subagent::REVIEW_MCP_TOOLS);
-        let instructions = initialize["instructions"].as_str().unwrap();
-        assert_eq!(instructions, REVIEW_SERVER_INSTRUCTIONS);
-        // Claude cuts server instructions at 2048 characters.
-        assert!(instructions.chars().count() <= 2048);
+        assert!(initialize.get("instructions").is_none());
         for role in [SubagentMcpRole::Child, SubagentMcpRole::FetchOnly] {
             let (initialize, _) = mcp_exchange(|input, writer| {
                 run_review(
@@ -1551,10 +1475,7 @@ mod tests {
                     role,
                 )
             });
-            let instructions = initialize["instructions"].as_str().unwrap();
-            assert_eq!(instructions, CHILD_REVIEW_SERVER_INSTRUCTIONS);
-            assert!(instructions.chars().count() <= 2048);
-            assert!(instructions.contains("handback is refused until it arrives"));
+            assert!(initialize.get("instructions").is_none());
         }
 
         let by_name = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
@@ -1617,15 +1538,12 @@ mod tests {
             for name in ["send_message", "fetch"] {
                 assert!(tools.iter().any(|tool| tool["name"] == name));
             }
-            let instructions = initialize["instructions"].as_str().unwrap();
-            assert!(!instructions.contains("request_review"));
-            assert!(!instructions.contains("override_review"));
+            assert!(initialize.get("instructions").is_none());
             for tool in &tools {
                 let name = tool["name"].as_str().unwrap();
                 assert!(!mj_core::subagent::REVIEW_MCP_TOOLS.contains(&name));
             }
             if role != SubagentMcpRole::Parent {
-                assert!(!instructions.contains(DELEGATION_ROUTING));
                 for name in ["spawn", "list_agents", "close"] {
                     assert!(tools.iter().all(|tool| tool["name"] != name));
                 }
@@ -1727,8 +1645,9 @@ mod tests {
                 .lines()
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect();
-            let instructions = replies[0]["result"]["instructions"].as_str().unwrap();
+            assert!(replies[0]["result"].get("instructions").is_none());
             let handback = &replies[1]["result"]["tools"][0];
+            let instructions = handback["description"].as_str().unwrap();
             assert_eq!(handback["description"], instructions);
             assert_eq!(
                 handback["inputSchema"]["properties"]["message"]["description"],
@@ -1793,19 +1712,11 @@ mod tests {
                     .lines()
                     .map(|line| serde_json::from_str(line).unwrap())
                     .collect();
-                let instructions =
-                    replies.iter().find(|r| r["id"] == 1).unwrap()["result"]["instructions"]
-                        .as_str()
-                        .unwrap();
-                // Claude Code keeps only the first 2,048 characters of a
-                // server's instructions and drops the rest unseen.
-                if harness != HarnessKind::Codex {
-                    assert!(
-                        instructions.chars().count() <= 2048,
-                        "{role} {harness:?} instructions are {} characters",
-                        instructions.chars().count()
-                    );
-                }
+                assert!(
+                    replies.iter().find(|r| r["id"] == 1).unwrap()["result"]
+                        .get("instructions")
+                        .is_none()
+                );
                 let tools = replies.iter().find(|r| r["id"] == 2).unwrap()["result"]["tools"]
                     .as_array()
                     .unwrap();
@@ -1817,7 +1728,9 @@ mod tests {
                         tool["name"],
                         description.len()
                     );
-                    assert!(!description.contains(DELEGATION_ROUTING));
+                    assert!(
+                        !description.contains(mj_core::session_instructions::DELEGATION_ROUTING)
+                    );
                 }
                 let fetch = tools.iter().find(|t| t["name"] == "fetch").unwrap();
                 assert_eq!(
@@ -1827,7 +1740,6 @@ mod tests {
                 assert_eq!(fetch["annotations"]["readOnlyHint"], true);
                 match role {
                     SubagentMcpRole::FetchOnly => {
-                        assert!(!instructions.contains(DELEGATION_ROUTING));
                         assert_eq!(
                             tools
                                 .iter()
@@ -1837,11 +1749,6 @@ mod tests {
                         );
                     }
                     SubagentMcpRole::Child => {
-                        assert!(!instructions.contains(DELEGATION_ROUTING));
-                        assert!(
-                            instructions
-                                .contains(mj_core::subagent::HANDBACK_REPORT_RULES.as_str())
-                        );
                         assert_eq!(
                             tools
                                 .iter()
@@ -1851,7 +1758,6 @@ mod tests {
                         );
                     }
                     SubagentMcpRole::MessageOnly => {
-                        assert!(!instructions.contains(DELEGATION_ROUTING));
                         assert_eq!(
                             tools
                                 .iter()
@@ -1876,16 +1782,6 @@ mod tests {
                         assert!(!description.contains("child_session_id"));
                     }
                     SubagentMcpRole::Parent => {
-                        assert!(instructions.contains(DELEGATION_ROUTING));
-                        assert!(
-                            instructions.contains(
-                                "Before spawning, give follow-up work through send_message"
-                            )
-                        );
-                        assert_eq!(
-                            instructions.contains("Call mj-agents tools directly"),
-                            harness == HarnessKind::Codex
-                        );
                         let spawn = tools.iter().find(|t| t["name"] == "spawn").unwrap();
                         let props = &spawn["inputSchema"]["properties"];
                         assert!(props.get("files").is_none() && props.get("context").is_none());
@@ -1973,7 +1869,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_mailbox_flag_keeps_peer_tools_and_instructions_available() {
+    fn legacy_mailbox_flag_keeps_peer_tools_available() {
         let input = format!(
             "{}\n{}\n",
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
@@ -2000,11 +1896,11 @@ mod tests {
                 .as_array()
                 .unwrap();
             assert!(tools.iter().any(|tool| tool["name"] == "send_message"));
-            let instructions =
-                replies.iter().find(|reply| reply["id"] == 1).unwrap()["result"]["instructions"]
-                    .as_str()
-                    .unwrap();
-            assert!(instructions.contains("send_message"));
+            assert!(
+                replies.iter().find(|reply| reply["id"] == 1).unwrap()["result"]
+                    .get("instructions")
+                    .is_none()
+            );
         }
     }
 
@@ -2096,8 +1992,22 @@ mod tests {
         let spawn = description("spawn");
         assert!(spawn.contains("live children"), "{spawn}");
         assert!(spawn.contains("finished children are parked"), "{spawn}");
-        assert!(SERVER_INSTRUCTIONS.contains("Finished children are parked"));
-        assert!(SERVER_INSTRUCTIONS.contains("send_message resumes one"));
+        assert!(
+            mj_core::session_instructions::standing_instructions(
+                SubagentMcpRole::Parent,
+                HarnessKind::Claude,
+                None
+            )
+            .contains("Finished children are parked")
+        );
+        assert!(
+            mj_core::session_instructions::standing_instructions(
+                SubagentMcpRole::Parent,
+                HarnessKind::Claude,
+                None
+            )
+            .contains("send_message resumes one")
+        );
     }
 
     // Hard-won: cc7e6a2a: oversized handbacks overwhelmed parent context.
@@ -2163,12 +2073,9 @@ mod tests {
                 .contains("Report directory limit: 11184810 bytes")
         );
         assert!(handback["description"].as_str().unwrap().len() <= 1800);
+        assert!(initialized["result"].get("instructions").is_none());
         let prompt = mj_core::subagent::handback_prompt_note("/workspace/reports/child");
-        for instructions in [
-            prompt.as_str(),
-            initialized["result"]["instructions"].as_str().unwrap(),
-            handback["description"].as_str().unwrap(),
-        ] {
+        for instructions in [prompt.as_str(), handback["description"].as_str().unwrap()] {
             assert!(
                 instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES.as_str()),
                 "{instructions}"

@@ -10,7 +10,7 @@ pub(crate) use mj_core::clock::epoch_seconds;
 
 use mj_client::review::RuntimeReviewView;
 
-use crate::render::{checkpoint_age, quota_reset_cells, refresh_age, session_display_clock};
+use crate::render::{checkpoint_age, refresh_age, reset_duration, session_display_clock};
 use crate::{DashboardState, Mode, SupportPane};
 
 /// The values that were visible when the last frame was drawn.
@@ -50,7 +50,8 @@ impl DashboardState {
     /// sessions, unrefreshed panes, and static reset strings therefore do not
     /// turn the once-per-second wakeup into a redraw.
     pub fn clock_changed(&self) -> bool {
-        self.render_change_snapshot.clock != self.current_clock_signature()
+        self.quota_providers.ready()
+            || self.render_change_snapshot.clock != self.current_clock_signature()
     }
 
     /// Whether a visible dashboard spinner has advanced to another frame.
@@ -258,45 +259,65 @@ impl DashboardState {
             });
         }
 
-        for row in self.quota_profile_rows() {
-            let Some(quota) = self.quotas.get(row.id) else {
-                continue;
-            };
-            let projected = row.pool.map(|pool| quota.for_antigravity_pool(pool));
-            let quota = projected.as_ref().unwrap_or(quota);
-            let id = row.label();
-            if quota.error.is_some() {
-                continue;
+        let providers = crate::render::quota_pools::provider_pools(
+            &self.config,
+            &self.quotas,
+            &self.quota_providers,
+            now,
+        );
+        // A reading crossing its reset changes pool totals and lanes while the
+        // countdowns stay at `0m`, so count the windows awaiting a reading
+        // (the minimized line shows the totals too).
+        // Long and five-hour windows are counted separately: either crossing
+        // its reset changes what is drawn.
+        let members = || {
+            providers
+                .iter()
+                .flat_map(|provider| &provider.pools)
+                .flat_map(|pool| &pool.members)
+        };
+        let awaiting = members().filter(|member| member.awaiting_reading).count();
+        let five_awaiting = members()
+            .filter(|member| member.five_hour_awaiting_reading)
+            .count();
+        clocks.push(DisplayedClock {
+            key: "quota:awaiting-reading".to_owned(),
+            value: format!("{awaiting}/{five_awaiting}"),
+        });
+        if self.pane_size(SupportPane::Quota) != crate::PaneSize::Minimized {
+            for provider in providers {
+                for pool in provider.pools {
+                    let expanded = self.quota_expanded.contains(&pool.key);
+                    for member in pool.members {
+                        clocks.push(DisplayedClock {
+                            key: format!("quota:{:?}:{}:weekly", pool.key, member.id),
+                            value: reset_duration(member.reset, now),
+                        });
+                        if expanded && let Some(five) = member.five_hour {
+                            clocks.push(DisplayedClock {
+                                key: format!("quota:{:?}:{}:five-hour", pool.key, member.id),
+                                value: reset_duration(five.resets_at_epoch_seconds, now),
+                            });
+                        }
+                        if let Some(note) = member.note {
+                            clocks.push(DisplayedClock {
+                                key: format!("quota:{}:hold", member.id),
+                                value: note,
+                            });
+                        }
+                    }
+                }
+                for (id, label) in provider.text {
+                    clocks.push(DisplayedClock {
+                        key: format!("quota:{id}:status"),
+                        value: label,
+                    });
+                }
             }
-            let (weekly, five_hour) = quota_reset_cells(quota, now);
-            let long_window = quota.weekly_window();
-            if long_window.is_some_and(|window| window.resets_at_epoch_seconds.is_some()) {
+            if !self.quota_expanded.is_empty() {
                 clocks.push(DisplayedClock {
-                    key: format!("quota:{id}:weekly"),
-                    value: weekly,
-                });
-            } else if quota
-                .five_hour_window()
-                .is_some_and(|window| window.resets_at_epoch_seconds.is_some())
-            {
-                clocks.push(DisplayedClock {
-                    key: format!("quota:{id}:primary"),
-                    value: weekly,
-                });
-            }
-            let weekly_exhausted = quota
-                .weekly_window()
-                .and_then(|window| window.remaining_percent)
-                .is_some_and(|remaining| remaining < 1);
-            if long_window.is_some()
-                && !weekly_exhausted
-                && quota
-                    .five_hour_window()
-                    .is_some_and(|window| window.resets_at_epoch_seconds.is_some())
-            {
-                clocks.push(DisplayedClock {
-                    key: format!("quota:{id}:five-hour"),
-                    value: five_hour,
+                    key: "quota:axis".into(),
+                    value: (now / 60).to_string(),
                 });
             }
         }
@@ -400,5 +421,39 @@ mod tests {
 
         dashboard.render_change_snapshot.clock.sessions[0].value = "0s".into();
         assert!(dashboard.clock_changed());
+    }
+
+    #[test]
+    fn quota_reading_crossing_its_reset_changes_the_clock() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let now = epoch_seconds();
+        let quota: mj_client::quota::ProfileQuota = serde_json::from_value(serde_json::json!({
+            "profile_id": "claude",
+            "harness": "claude",
+            "refreshed_at_epoch_seconds": now - 3600,
+            "windows": [{
+                "label": "Week",
+                "duration_seconds": 604800,
+                "remaining_percent": 50,
+                "resets_at_epoch_seconds": now + 1,
+            }],
+        }))
+        .unwrap();
+        dashboard.config.profiles.insert(
+            "claude".into(),
+            mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Claude, "/x"),
+        );
+        dashboard.quotas.insert("claude".into(), quota);
+        dashboard.acknowledge_render();
+        let before = dashboard.quota_clock_signature(now);
+        let after = dashboard.quota_clock_signature(now + 2);
+        let awaiting = |clocks: &[DisplayedClock]| {
+            clocks
+                .iter()
+                .find(|clock| clock.key == "quota:awaiting-reading")
+                .map(|clock| clock.value.clone())
+        };
+        assert_eq!(awaiting(&before).as_deref(), Some("0/0"));
+        assert_eq!(awaiting(&after).as_deref(), Some("1/0"));
     }
 }

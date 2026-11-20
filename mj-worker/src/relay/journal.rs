@@ -1157,8 +1157,8 @@ impl DurableRelay {
             .snapshot
             .dispatches
             .iter()
-            .filter(|(_, dispatch)| {
-                dispatch.command.is_relay_local()
+            .filter(|(id, dispatch)| {
+                (dispatch.command.is_relay_local() || self.is_queued_recovery_cancel(id))
                     && !matches!(
                         dispatch.state,
                         RelayDispatchState::Completed

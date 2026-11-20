@@ -183,7 +183,7 @@ pub(super) async fn read_file(
                     "daemon stopped during fetched payload delivery",
                 )),
                 result = async move {
-                    tokio::task::spawn_blocking(move || {
+                    mj_core::runtime::spawn_blocking(move || {
                         // An I/O chunk, not a transfer size limit.
                         let mut chunk = vec![0; 64 * 1024];
                         let count = std::io::Read::read(&mut reader, &mut chunk)?;

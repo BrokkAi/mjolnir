@@ -117,9 +117,9 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled.",
+                "help": "Quota checks run on this machine, using an installed harness or Mjolnir's pinned installation.",
                 "control": "page",
-                "summary": "Auto · container when available"
+                "summary": "Host"
               },
               {
                 "path": [
@@ -516,9 +516,9 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled.",
+                "help": "Quota checks run on this machine, using an installed harness or Mjolnir's pinned installation.",
                 "control": "page",
-                "summary": "Auto · container when available"
+                "summary": "Host"
               },
               {
                 "path": [
@@ -974,9 +974,9 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled.",
+                "help": "Quota checks run on this machine, using an installed harness or Mjolnir's pinned installation.",
                 "control": "page",
-                "summary": "Auto · container when available"
+                "summary": "Host"
               },
               {
                 "path": [
@@ -1222,7 +1222,7 @@
                   "use_same_on_all_targets"
                 ],
                 "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
+                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
                 "control": "checkbox",
                 "checked": true
               }
@@ -1416,7 +1416,7 @@
                   "use_same_on_all_targets"
                 ],
                 "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
+                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
                 "control": "checkbox",
                 "checked": true
               }
@@ -1586,7 +1586,7 @@
                   "use_same_on_all_targets"
                 ],
                 "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
+                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
                 "control": "checkbox",
                 "checked": true
               }
@@ -1791,7 +1791,7 @@
                   "use_same_on_all_targets"
                 ],
                 "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
+                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
                 "control": "checkbox",
                 "checked": true
               }
@@ -1984,7 +1984,7 @@
                   "use_same_on_all_targets"
                 ],
                 "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
+                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
                 "control": "checkbox",
                 "checked": true
               }
@@ -2175,7 +2175,7 @@
                   "use_same_on_all_targets"
                 ],
                 "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
+                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
                 "control": "checkbox",
                 "checked": false
               }
@@ -2449,7 +2449,7 @@
                   "use_same_on_all_targets"
                 ],
                 "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
+                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
                 "control": "checkbox",
                 "checked": false
               }
@@ -2748,7 +2748,7 @@
                   "use_same_on_all_targets"
                 ],
                 "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
+                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
                 "control": "checkbox",
                 "checked": false
               }
@@ -3044,7 +3044,7 @@
                   "use_same_on_all_targets"
                 ],
                 "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
+                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
                 "control": "checkbox",
                 "checked": true
               }
@@ -3235,7 +3235,7 @@
                   "use_same_on_all_targets"
                 ],
                 "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
+                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
                 "control": "checkbox",
                 "checked": false
               }
@@ -3539,7 +3539,7 @@
                   "use_same_on_all_targets"
                 ],
                 "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
+                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
                 "control": "checkbox",
                 "checked": false
               }

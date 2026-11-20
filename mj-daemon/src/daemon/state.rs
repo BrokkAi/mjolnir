@@ -36,10 +36,6 @@ fn session_message_terminal_reason(state: Option<SessionState>) -> Option<String
 }
 
 impl RuntimeState {
-    pub(crate) fn worker_background_gate(&self) -> Arc<mj_controller::recovery_gate::RecoveryGate> {
-        self.session_gate.clone()
-    }
-
     pub(crate) fn new(
         session_manager: SessionManagerControl,
         controller: Controller,
@@ -87,7 +83,7 @@ impl RuntimeState {
             .flatten();
         let profile_catalog = crate::review_host::SharedProfileCatalog::default();
         let reviewer_runtime = crate::review_host::SharedReviewerRuntime::default();
-        let review_host = TurnReviewHost::spawn_notifying(
+        let review_host = crate::review_host::spawn_notifying(
             session_manager.clone(),
             {
                 let installed = review_config.clone();
@@ -255,38 +251,24 @@ impl RuntimeState {
     /// Search the user's SessionWiki index, with this daemon's own live
     /// sessions marked so a surface can resume them instead of restoring them.
     pub async fn wiki_search(&self, query: String, limit: usize) -> Result<WikiSearchPage> {
-        self.request_wiki_sync_if_stale();
         let live = self.live_session_ids();
-        // Every caller is a resume list, and a sub-agent is never resumed on
-        // its own.
+        let status = self.wiki.status();
         let rows =
             blocking(move || mj_controller::sessionwiki::query_rows(&query, limit, &live, false))
                 .await?;
-        // The status is read after the rows, so a sync that finished while the
-        // query ran is reported as finished.
-        Ok(WikiSearchPage {
-            rows,
-            status: self.wiki.status(),
-        })
+        Ok(WikiSearchPage { rows, status })
     }
 
-    /// Ask for a background sync when the index is stale. Every search asks
-    /// here, so this is the one place that decides when a search syncs.
-    /// Answering now matters more than answering fresh: the sync runs in the
-    /// background and the next keystroke sees its result.
-    fn request_wiki_sync_if_stale(&self) {
-        if mj_controller::sessionwiki::sync_is_stale(self.wiki.last_success()) {
-            self.wiki.request_sync(false);
-        }
-    }
-
-    /// The live sessions whose user or agent messages contain `query`. Like
-    /// [`Self::wiki_search`], it answers from the index as it is and asks for
-    /// a sync for the next search.
-    pub async fn session_text_search(&self, query: String) -> Result<Vec<SessionTextMatch>> {
-        self.request_wiki_sync_if_stale();
+    /// Search the live sessions from the index as it stands.
+    pub async fn session_text_search(
+        &self,
+        query: String,
+    ) -> Result<mj_client::daemon::SessionTextSearchPage> {
         let live = self.live_session_ids();
-        blocking(move || mj_controller::sessionwiki::session_text_matches(&query, &live)).await
+        let matches =
+            blocking(move || mj_controller::sessionwiki::session_text_matches(&query, &live))
+                .await?;
+        Ok(mj_client::daemon::SessionTextSearchPage { matches })
     }
 
     /// The markdown briefing for one indexed session, or `None` when the index
@@ -379,6 +361,7 @@ impl RuntimeState {
                 no_project_memory: false,
                 no_github_events: false,
                 no_github_credentials: false,
+                notifications_ignored: false,
                 initial_prompt: None,
                 workspace_id: request.workspace_id,
                 profile_id: request.profile_id,
@@ -795,7 +778,7 @@ impl RuntimeState {
         self.revisions.allocate()
     }
 
-    pub(super) fn publish_revision(&self) -> u64 {
+    pub(crate) fn publish_revision(&self) -> u64 {
         self.revisions.publish()
     }
 
@@ -915,13 +898,15 @@ impl RuntimeState {
         mj_controller::controller::QuickBundleFailure,
     > {
         let _mutation = self.config_mutation.lock().await;
-        tokio::task::spawn_blocking(move || mj_controller::controller::create_quick_bundle(&source))
-            .await
-            .map_err(|error| {
-                mj_controller::controller::QuickBundleFailure::Persistence(anyhow!(
-                    "bundle creation task panicked: {error}"
-                ))
-            })?
+        mj_core::runtime::spawn_blocking(move || {
+            mj_controller::controller::create_quick_bundle(&source)
+        })
+        .await
+        .map_err(|error| {
+            mj_controller::controller::QuickBundleFailure::Persistence(anyhow!(
+                "bundle creation task panicked: {error}"
+            ))
+        })?
     }
 
     /// Persist exactly the picker-selected repository set under the same
@@ -934,7 +919,7 @@ impl RuntimeState {
         mj_controller::controller::QuickBundleFailure,
     > {
         let _mutation = self.config_mutation.lock().await;
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             mj_controller::controller::create_bundle_from_sources(&sources)
         })
         .await
@@ -949,7 +934,7 @@ impl RuntimeState {
     /// then publish the exact config returned by the persisted mutation.
     pub async fn remove_project(&self, bundle_id: String) -> Result<()> {
         let mut inactivity = self.config_mutation.lock().await;
-        let config = tokio::task::spawn_blocking(move || {
+        let config = mj_core::runtime::spawn_blocking(move || {
             mj_controller::controller::remove_bundle(&bundle_id)
         })
         .await
@@ -976,7 +961,7 @@ impl RuntimeState {
         // Keep the read and publication together: a delayed read must not
         // publish an older list after a newer removal has been published.
         let _refresh = self.workspace_refresh.lock().await;
-        let workspaces = tokio::task::spawn_blocking(mj_controller::database::list_workspaces)
+        let workspaces = mj_core::runtime::spawn_blocking(mj_controller::database::list_workspaces)
             .await
             .context("daemon workspace refresh task panicked")??;
         self.publish_workspaces(workspaces);
@@ -1128,7 +1113,7 @@ impl RuntimeState {
         let drain_session = session_id.to_owned();
         // One owned future: abort+join also settles the producer before a
         // cancellation releases its durable command receipts.
-        let task = tokio::spawn(async move {
+        let task = mj_core::runtime::spawn(async move {
             use futures::FutureExt;
             let mut backoff = Duration::from_secs(1);
             let mut failed_rounds: u32 = 0;
@@ -2239,30 +2224,5 @@ impl RuntimeState {
             }
         }
         outcome
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::tests::test_runtime_state;
-    use std::sync::Arc;
-
-    /// RCL-1 (2026-09-29): the Sessions filter's conversation search asks for
-    /// the same non-forced sync the resume dialog's search asks for, so a
-    /// message sent since the last sync is found by the next keystroke.
-    // Hard-won: 13425c7c: session search missed messages newer than SessionWiki until it requested a sync.
-    #[tokio::test]
-    async fn a_session_text_search_asks_for_a_sync_like_the_resume_search() {
-        let mut state = test_runtime_state();
-        Arc::get_mut(&mut state).expect("the only handle").wiki =
-            mj_controller::sessionwiki::WikiIndexer::inert();
-        assert!(!state.wiki().sync_requested());
-
-        // An empty query never reads the index, so the request is all it does.
-        state.session_text_search("  ".into()).await.unwrap();
-        assert!(
-            state.wiki().sync_requested(),
-            "a stale index is synced for the next search"
-        );
     }
 }

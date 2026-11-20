@@ -45,7 +45,7 @@ const WORKER_UPGRADE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 #[derive(Debug, Clone)]
 pub struct WorkerUpgradeObservation {
     pub session: SessionRecord,
-    pub config: Config,
+    pub config: mj_core::snapshot_map::SharedSnapshot<Config>,
     /// Worker-input compatibility identity reported in hello, or `None` when
     /// it is too old to report one. `None` counts as outdated.
     pub worker_build: Option<String>,
@@ -108,7 +108,7 @@ impl WorkerUpgradeCoordinator {
         let (results_tx, results_rx) = observation_channel();
         let gate = recovery.clone();
         let coordinator_gate = gate.clone();
-        let supervisor = tokio::spawn(async move {
+        let supervisor = mj_core::runtime::spawn(async move {
             let mut policies = BTreeMap::<String, PolicyState>::new();
             let mut attempts = JoinSet::new();
             let mut closing = false;
@@ -142,7 +142,7 @@ impl WorkerUpgradeCoordinator {
                                 let mut state = State::default();
                                 state.sessions.insert(task_session_id.clone(), session);
                                 let controller = Controller {
-                                    config: observation.config,
+                                    config: (*observation.config).clone(),
                                     state,
                                 };
                                 let executor = CancellableProcessExecutor::new(cancelled.cancellation())
@@ -455,7 +455,7 @@ mod tests {
     fn observation(worker_build: Option<&str>, quiet: bool) -> WorkerUpgradeObservation {
         WorkerUpgradeObservation {
             session: session_record(SessionState::Running),
-            config: Config::default(),
+            config: Config::default().into(),
             worker_build: worker_build.map(str::to_owned),
             quiet,
         }
@@ -740,7 +740,7 @@ mod tests {
             .unwrap();
         let id = session.id.clone();
         let revision = session.updated_at.clone();
-        let settling = tokio::spawn(admission.run_blocking(move |cancelled| {
+        let settling = mj_core::runtime::spawn(admission.run_blocking(move |cancelled| {
             settle_preparation_failure(&id, &failure, &revision, &cancelled)
         }));
         tokio::time::timeout(Duration::from_secs(5), async {

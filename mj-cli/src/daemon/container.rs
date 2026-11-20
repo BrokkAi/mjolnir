@@ -258,7 +258,7 @@ pub(crate) async fn exec_in_container(args: &[String], interactive: bool) -> Res
         .arg(IMAGE_EXECUTABLE)
         .args(args);
     let status =
-        tokio::task::spawn_blocking(move || mj_core::subprocess::run_inherited(&mut command))
+        mj_core::runtime::spawn_blocking(move || mj_core::subprocess::run_inherited(&mut command))
             .await
             .context("container command task panicked")??;
     if !status.success() {

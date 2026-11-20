@@ -1,21 +1,51 @@
-//! One cancellable attachment per selection; failed requests require a retry.
+//! One cancellable attachment per session, shared by its display surfaces.
 
 use mj_chat::chat::{ActiveChat, ChatInstance};
 use mj_tui::tile_layout::PaneId;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
 
 pub(super) const ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 
-#[derive(Default)]
+// Records are retired with their last surface. Completion identities must
+// remain unique when the same session later receives a fresh record.
+static NEXT_ATTACHMENT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
 pub(super) struct SessionAttachment {
     selection: Option<String>,
-    assignment: Option<mj_tui::PaneAssignment>,
+    assignments: BTreeMap<PaneId, PaneInterest>,
+    notification_requested: bool,
     generation: u64,
     task: Option<JoinHandle<()>>,
+}
+
+impl Default for SessionAttachment {
+    fn default() -> Self {
+        Self {
+            selection: None,
+            assignments: BTreeMap::new(),
+            notification_requested: false,
+            generation: NEXT_ATTACHMENT_GENERATION.fetch_add(1, Ordering::Relaxed),
+            task: None,
+        }
+    }
+}
+
+enum PaneInterest {
+    Requested(mj_tui::PaneAssignment),
+    Cancelled(mj_tui::PaneAssignment),
+}
+
+impl PaneInterest {
+    fn assignment(&self) -> mj_tui::PaneAssignment {
+        match self {
+            Self::Requested(assignment) | Self::Cancelled(assignment) => *assignment,
+        }
+    }
 }
 
 /// Resources that existed when a lifecycle operation was admitted. The
@@ -23,14 +53,14 @@ pub(super) struct SessionAttachment {
 pub(super) struct ChatRetirement {
     session_id: String,
     chat: Option<ChatInstance>,
-    attachments: BTreeMap<PaneId, u64>,
+    attachments: BTreeMap<String, u64>,
 }
 
 impl ChatRetirement {
     pub(super) fn capture(
         session_id: &str,
         chats: &BTreeMap<String, ActiveChat>,
-        attachments: &BTreeMap<PaneId, SessionAttachment>,
+        attachments: &BTreeMap<String, SessionAttachment>,
     ) -> Self {
         Self {
             session_id: session_id.to_owned(),
@@ -40,7 +70,7 @@ impl ChatRetirement {
                 .filter_map(|(pane, attachment)| {
                     attachment
                         .identity(session_id)
-                        .map(|generation| (*pane, generation))
+                        .map(|generation| (pane.clone(), generation))
                 })
                 .collect(),
         }
@@ -49,7 +79,7 @@ impl ChatRetirement {
     pub(super) fn is_current(
         &self,
         chats: &BTreeMap<String, ActiveChat>,
-        attachments: &BTreeMap<PaneId, SessionAttachment>,
+        attachments: &BTreeMap<String, SessionAttachment>,
     ) -> bool {
         chats.get(&self.session_id).is_none_or(|chat| {
             self.chat
@@ -66,7 +96,7 @@ impl ChatRetirement {
         &self.session_id
     }
 
-    pub(super) fn retire_attachments(&self, attachments: &mut BTreeMap<PaneId, SessionAttachment>) {
+    pub(super) fn retire_attachments(&self, attachments: &mut BTreeMap<String, SessionAttachment>) {
         for (pane, generation) in &self.attachments {
             if let Some(attachment) = attachments.get_mut(pane)
                 && attachment.accepts(*generation, Some(&self.session_id))
@@ -77,10 +107,173 @@ impl ChatRetirement {
     }
 }
 
+/// An inline form or its accepted input retains its one logical chat even
+/// after navigation removes the conversation surface.
+pub(super) fn chat_retained_without_conversation(
+    dashboard: &mj_tui::DashboardState,
+    chats: &BTreeMap<String, ActiveChat>,
+    session: &str,
+) -> bool {
+    dashboard.notification_form_session().as_deref() == Some(session)
+        || chats
+            .get(session)
+            .is_some_and(ActiveChat::has_pending_elicitation_input)
+}
+
+/// The sessions retained by live conversation or notification interests.
+pub(super) fn wanted_chat_sessions(
+    dashboard: &mj_tui::DashboardState,
+    attachments: &BTreeMap<String, SessionAttachment>,
+    chats: &BTreeMap<String, ActiveChat>,
+) -> std::collections::BTreeSet<String> {
+    let mut sessions = dashboard
+        .pane_sessions()
+        .into_iter()
+        .filter(|(pane, session)| {
+            attachments
+                .get(session)
+                .is_none_or(|attachment| attachment.pane_can_show(dashboard, *pane))
+        })
+        .map(|(_, session)| session)
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(session) = dashboard.notification_form_session() {
+        sessions.insert(session);
+    }
+    sessions.extend(
+        chats
+            .iter()
+            .filter(|(_, chat)| chat.has_pending_elicitation_input())
+            .map(|(session, _)| session.clone()),
+    );
+    sessions
+}
+
+/// Retire records as soon as neither the layout nor Notifications references
+/// them. A cancelled current assignment is retained to preserve Esc semantics.
+pub(super) fn retire_unused_attachments(
+    dashboard: &mj_tui::DashboardState,
+    attachments: &mut BTreeMap<String, SessionAttachment>,
+) {
+    let assigned = dashboard.pane_session_ids();
+    let notification = dashboard.notification_form_session();
+    attachments.retain(|session, attachment| {
+        attachment.release_unowned_task(dashboard, session);
+        assigned.contains(session) || notification.as_deref() == Some(session.as_str())
+    });
+}
+
 impl SessionAttachment {
-    /// A completion supplies content only to the assignment that requested it.
-    /// Read the navigation owner directly: it may have changed before the
-    /// supervisor has observed another selection or spawned another attempt.
+    /// Forget departed assignments, including closed panes, while retaining
+    /// a current cancelled assignment until an explicit retry or navigation.
+    pub(super) fn prune_assignments(&mut self, dashboard: &mj_tui::DashboardState, session: &str) {
+        self.assignments.retain(|pane, interest| {
+            dashboard.pane_session(*pane) == Some(session)
+                && dashboard.pane_assignment(*pane) == Some(interest.assignment())
+        });
+    }
+
+    /// Observe navigation before permitting an old task to join its new
+    /// assignment. Work survives reassignment only through another live lease.
+    pub(super) fn observe_pane(
+        &mut self,
+        dashboard: &mj_tui::DashboardState,
+        pane: PaneId,
+        session: &str,
+    ) {
+        let Some(assignment) = dashboard.pane_assignment(pane) else {
+            return;
+        };
+        let changed = self
+            .assignments
+            .get(&pane)
+            .is_none_or(|interest| interest.assignment() != assignment);
+        if changed && self.pending() && !self.has_surface_interest(dashboard, session) {
+            self.cancel();
+            self.selection = None;
+        }
+        self.bind(pane, assignment);
+    }
+
+    /// A navigation assignment joins the session's one attachment operation.
+    pub(super) fn bind(&mut self, pane: PaneId, assignment: mj_tui::PaneAssignment) {
+        if self
+            .assignments
+            .get(&pane)
+            .is_some_and(|interest| interest.assignment() == assignment)
+        {
+            return;
+        }
+        self.request_pane(pane, assignment);
+    }
+
+    /// An explicit retry can rejoin an assignment that Esc cancelled.
+    pub(super) fn request_pane(&mut self, pane: PaneId, assignment: mj_tui::PaneAssignment) {
+        let unchanged = matches!(self.assignments.get(&pane), Some(PaneInterest::Requested(current)) if *current == assignment);
+        self.assignments
+            .insert(pane, PaneInterest::Requested(assignment));
+        if !unchanged && !self.pending() {
+            self.selection = None;
+        }
+    }
+
+    /// Observe the notification lease so a newly displayed card can start
+    /// work even when its conversation's earlier attempt was cancelled.
+    pub(super) fn bind_notification(&mut self, requested: bool) {
+        if requested && !self.notification_requested && !self.pending() {
+            self.selection = None;
+        }
+        self.notification_requested = requested;
+    }
+
+    pub(super) fn pane_pending(&self, pane: PaneId) -> bool {
+        self.pending()
+            && matches!(
+                self.assignments.get(&pane),
+                Some(PaneInterest::Requested(_))
+            )
+    }
+
+    pub(super) fn release_pane(
+        &mut self,
+        dashboard: &mj_tui::DashboardState,
+        pane: PaneId,
+        session: &str,
+    ) {
+        if let Some(assignment) = dashboard.pane_assignment(pane) {
+            self.assignments
+                .insert(pane, PaneInterest::Cancelled(assignment));
+        }
+        if !self.has_surface_interest(dashboard, session) {
+            self.cancel();
+        }
+    }
+
+    /// Access follows this assignment's interest, even if another surface
+    /// completed the session's shared attach after this pane cancelled.
+    pub(super) fn pane_can_show(&self, dashboard: &mj_tui::DashboardState, pane: PaneId) -> bool {
+        self.assignments.get(&pane).is_some_and(|interest| {
+            matches!(interest, PaneInterest::Requested(assignment)
+                if dashboard.pane_assignment(pane) == Some(*assignment))
+        })
+    }
+
+    pub(super) fn has_conversation_interest(
+        &self,
+        dashboard: &mj_tui::DashboardState,
+        session: &str,
+    ) -> bool {
+        dashboard
+            .pane_sessions()
+            .into_iter()
+            .any(|(pane, held)| held == session && self.pane_can_show(dashboard, pane))
+    }
+
+    fn has_surface_interest(&self, dashboard: &mj_tui::DashboardState, session: &str) -> bool {
+        dashboard.notification_form_session().as_deref() == Some(session)
+            || self.has_conversation_interest(dashboard, session)
+    }
+
+    #[cfg(test)]
     pub(super) fn accepts_pane_result(
         &self,
         generation: u64,
@@ -90,19 +283,26 @@ impl SessionAttachment {
         session: &str,
     ) -> bool {
         self.accepts(generation, Some(session))
+            && matches!(self.assignments.get(&pane), Some(PaneInterest::Requested(current)) if *current == assignment)
             && dashboard.pane_assignment(pane) == Some(assignment)
             && dashboard.pane_session(pane) == Some(session)
     }
 
-    /// Observe the authoritative pane binding before starting or accepting work.
-    pub(super) fn bind(&mut self, assignment: Option<mj_tui::PaneAssignment>) -> bool {
-        if self.assignment == assignment {
-            return false;
-        }
-        self.cancel();
-        self.selection = None;
-        self.assignment = assignment;
-        true
+    pub(super) fn accepts_surface_result(
+        &self,
+        generation: u64,
+        dashboard: &mj_tui::DashboardState,
+        session: &str,
+    ) -> bool {
+        self.accepts(generation, Some(session)) && self.has_surface_interest(dashboard, session)
+    }
+
+    pub(super) fn pending(&self) -> bool {
+        self.task.is_some()
+    }
+
+    pub(super) fn finish(&mut self) {
+        self.task = None;
     }
 
     fn identity(&self, session_id: &str) -> Option<u64> {
@@ -119,8 +319,28 @@ impl SessionAttachment {
         true
     }
 
+    pub(super) fn release_unowned_task(
+        &mut self,
+        dashboard: &mj_tui::DashboardState,
+        session: &str,
+    ) {
+        if self.pending() && !self.has_surface_interest(dashboard, session) {
+            self.cancel();
+        }
+    }
+
+    pub(super) fn select_for_pane(&mut self, pane: PaneId, session: &str) -> bool {
+        if !matches!(
+            self.assignments.get(&pane),
+            Some(PaneInterest::Requested(_))
+        ) {
+            return false;
+        }
+        self.select(session)
+    }
+
     pub(super) fn cancel(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
+        self.generation = NEXT_ATTACHMENT_GENERATION.fetch_add(1, Ordering::Relaxed);
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -158,10 +378,10 @@ impl SessionAttachment {
         self.cancel();
         self.select(session);
         let generation = self.generation;
-        self.task = Some(tokio::spawn(async move {
+        self.task = Some(mj_core::runtime::spawn(async move {
             let result = tokio::time::timeout(
                 timeout,
-                tokio_util::task::AbortOnDropHandle::new(tokio::spawn(work)),
+                tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn(work)),
             )
             .await;
             let result = match result {

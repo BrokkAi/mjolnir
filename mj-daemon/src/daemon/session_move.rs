@@ -309,7 +309,7 @@ impl RuntimeState {
             .admit_move_session(request, None, Some((reason, continuation)))
             .await?;
         let state = self.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             let channel = result.result.clone();
             match Self::wait_lifecycle_result(result.result).await {
                 Ok(DaemonLifecycleResult::Move(_)) => {}
@@ -529,7 +529,7 @@ impl RuntimeState {
                 .await?;
             owned.insert(id.clone());
             let state = self.clone();
-            tokio::spawn(async move {
+            mj_core::runtime::spawn(async move {
                 let channel = result.clone();
                 match Self::wait_lifecycle_result(result).await {
                     Ok(DaemonLifecycleResult::Move(outcome))
@@ -638,7 +638,7 @@ impl RuntimeState {
             match result {
                 Ok(result) => {
                     let state = self.clone();
-                    tokio::spawn(async move {
+                    mj_core::runtime::spawn(async move {
                         let channel = result.clone();
                         if let Err(error) = Self::wait_lifecycle_result(result).await {
                             tracing::warn!(session_id=%id, %error, "EC2 Move destination cleanup remains pending; retry in 30s");
@@ -688,7 +688,7 @@ impl RuntimeState {
             + 'static,
         Fut: std::future::Future<Output = Result<MoveOutcome>>,
     {
-        tokio::task::spawn_blocking(move || {
+        mj_core::runtime::spawn_blocking(move || {
             let loading = std::time::Instant::now();
             let controller = (self.controller_loader)()?;
             tracing::info!(

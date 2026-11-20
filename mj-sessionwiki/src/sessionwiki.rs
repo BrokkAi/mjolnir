@@ -776,52 +776,79 @@ impl Adapter for SharedMjolnirAdapter {
 /// of queueing a second one, so a burst of closing sessions costs one extra
 /// pass. Syncs are single-flight because SessionWiki holds a write transaction
 /// per adapter batch, and two writers only produce a busy error.
+#[derive(Clone)]
 pub struct WikiIndexer {
     inner: Arc<Indexer>,
 }
 
+/// The complete externally observable generation state.
+pub type WikiSyncState = mj_client::daemon::WikiSyncStatus;
+
 struct Indexer {
-    /// Held for the whole of one run: this is what makes syncs single-flight.
-    running: tokio::sync::Mutex<()>,
+    state: std::sync::Mutex<SyncState>,
+    updates: tokio::sync::watch::Sender<WikiSyncState>,
     notify: tokio::sync::Notify,
-    /// A trigger arrived; the worker has not consumed it yet.
-    requested: AtomicBool,
-    /// At least one waiting trigger asked for a full sync.
-    full_requested: AtomicBool,
-    /// A sync pass is running now. A surface shows this as "topping up", so a
-    /// user knows more results may arrive.
-    in_flight: AtomicBool,
-    last_success: std::sync::Mutex<Option<Success>>,
     native_scan_cache: crate::import::NativeScanCache,
-    /// Completed sync passes. Observe uses this to look again for sessions
-    /// that exist only in the index, without polling or delaying live events.
     completed: tokio::sync::watch::Sender<u64>,
+}
+
+struct SyncState {
+    view: WikiSyncState,
+    full_requested: bool,
+    last_success: Option<i64>,
+    counts: BTreeMap<(String, usize), usize>,
+}
+
+impl SyncState {
+    fn finish_pass(
+        &mut self,
+        generation: u64,
+        full: bool,
+        started_epoch: i64,
+        result: &Result<()>,
+    ) -> mj_client::daemon::WikiSyncOutcome {
+        let outcome = match result {
+            Ok(()) => {
+                self.last_success = Some(started_epoch);
+                self.view.successful = generation;
+                mj_client::daemon::WikiSyncOutcome::Succeeded
+            }
+            Err(error) => {
+                // Preserve the demand, without requesting any retry. A queued
+                // or later explicit request must cover the failed full pass.
+                self.full_requested |= full;
+                mj_client::daemon::WikiSyncOutcome::Failed(format!("{error:#}"))
+            }
+        };
+        self.view.finished = generation;
+        self.view.outcome = Some(outcome.clone());
+        self.view.running = None;
+        outcome
+    }
 }
 
 impl Default for Indexer {
     fn default() -> Self {
+        let view = WikiSyncState {
+            epoch: mj_core::state::new_session_id().expect("generate SessionWiki indexer epoch"),
+            ..Default::default()
+        };
         Self {
-            running: tokio::sync::Mutex::new(()),
+            updates: tokio::sync::watch::channel(view.clone()).0,
+            state: std::sync::Mutex::new(SyncState {
+                view,
+                full_requested: false,
+                last_success: None,
+                counts: BTreeMap::new(),
+            }),
             notify: tokio::sync::Notify::new(),
-            requested: AtomicBool::new(false),
-            full_requested: AtomicBool::new(false),
-            in_flight: AtomicBool::new(false),
-            last_success: std::sync::Mutex::new(None),
             native_scan_cache: crate::import::NativeScanCache::default(),
             completed: tokio::sync::watch::channel(0).0,
         }
     }
 }
 
-#[derive(Clone, Copy)]
-struct Success {
-    at: Instant,
-    epoch_seconds: i64,
-}
-
 impl WikiIndexer {
-    /// Start the background sync worker. Without a Tokio runtime (some tests
-    /// build a runtime state without one) the indexer stays inert.
     pub fn spawn() -> Self {
         let inner = Arc::new(Indexer {
             native_scan_cache: crate::import::NativeScanCache::shared(),
@@ -834,17 +861,14 @@ impl WikiIndexer {
         Self { inner }
     }
 
-    /// Ask for a sync. Returns immediately; the work happens in the background.
-    pub fn request_sync(&self, full: bool) {
-        if full {
-            self.inner.full_requested.store(true, Ordering::Release);
-        }
-        self.inner.requested.store(true, Ordering::Release);
+    /// Request the next pass. Requests during a pass coalesce into its successor.
+    pub fn request_sync(&self, full: bool) -> u64 {
+        let mut state = self.inner.lock();
+        let target = self.inner.request(&mut state, full);
         self.inner.notify.notify_one();
+        target
     }
 
-    /// An indexer with no worker, so a test can see a request that nothing
-    /// takes and no test runs a sync against the real index.
     #[cfg(any(test, feature = "test-support"))]
     pub fn inert() -> Self {
         Self {
@@ -852,103 +876,180 @@ impl WikiIndexer {
         }
     }
 
-    /// Whether a sync has been requested and not yet taken by the worker.
     #[cfg(any(test, feature = "test-support"))]
     pub fn sync_requested(&self) -> bool {
-        self.inner.requested.load(Ordering::Acquire)
+        let state = self.inner.lock();
+        state.view.requested > state.view.started
     }
 
-    /// Run a sync and wait for it, joining a sync already in flight.
-    pub async fn sync_now(&self, full: bool) -> Result<()> {
-        self.inner.sync(full).await
+    pub fn state(&self) -> WikiSyncState {
+        self.inner.lock().view.clone()
     }
 
-    /// The state of the index and whether a sync is running, for the surfaces
-    /// that say so while the first build is under way.
-    pub fn status(&self) -> WikiStatus {
-        WikiStatus {
-            state: index_state(),
-            topping_up: self.inner.in_flight.load(Ordering::Acquire)
-                || self.inner.requested.load(Ordering::Acquire),
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<WikiSyncState> {
+        self.inner.updates.subscribe()
+    }
+
+    /// Wait for the next publication, or answer immediately for another epoch.
+    pub async fn watch_after(&self, epoch: String, after: u64) -> Result<WikiSyncState> {
+        let mut changes = self.watch();
+        loop {
+            let state = changes.borrow_and_update().clone();
+            if state.epoch != epoch || state.version > after {
+                return Ok(state);
+            }
+            changes
+                .changed()
+                .await
+                .context("SessionWiki indexer stopped")?;
         }
     }
 
-    /// When the last sync succeeded, for callers that trigger on staleness.
-    pub fn last_success(&self) -> Option<Instant> {
-        self.inner
-            .last_success
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .map(|success| success.at)
+    /// A later successful pass also covers everything this request needed.
+    pub async fn sync_now(&self, full: bool) -> Result<()> {
+        let mut changes = self.watch();
+        let target = self.request_sync(full);
+        loop {
+            let state = changes.borrow_and_update().clone();
+            if state.finished >= target {
+                if state.successful >= target {
+                    return Ok(());
+                }
+                match state.outcome {
+                    Some(mj_client::daemon::WikiSyncOutcome::Failed(error)) => anyhow::bail!(error),
+                    _ => anyhow::bail!(
+                        "SessionWiki generation {} finished without covering target {target}",
+                        state.finished
+                    ),
+                }
+            }
+            changes
+                .changed()
+                .await
+                .context("SessionWiki indexer stopped")?;
+        }
     }
 
-    /// A change fires after each successful pass. A receiver made before
-    /// `request_sync` therefore cannot miss the pass it asked for.
+    pub fn status(&self) -> WikiStatus {
+        WikiStatus {
+            state: index_state(),
+        }
+    }
+
     pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.inner.completed.subscribe()
     }
 }
 
 impl Indexer {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SyncState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// All publications happen under the owner's lock, preserving transition order.
+    fn publish(&self, state: &mut SyncState) {
+        state.view.version += 1;
+        self.updates.send_replace(state.view.clone());
+    }
+
+    fn request(&self, state: &mut SyncState, full: bool) -> u64 {
+        let target = state.view.started + 1;
+        if state.view.requested < target || (full && !state.full_requested) {
+            state.view.requested = target;
+            state.full_requested |= full;
+            self.publish(state);
+        }
+        target
+    }
+
+    fn start_next_pass(&self) -> Option<(u64, bool, Option<i64>)> {
+        let mut state = self.lock();
+        if state.view.requested <= state.view.started {
+            return None;
+        }
+        state.view.started += 1;
+        state.counts.clear();
+        state.view.running = Some(Default::default());
+        let full = std::mem::take(&mut state.full_requested);
+        let since = if full {
+            None
+        } else {
+            state.last_success.map(|at| at - 60)
+        };
+        self.publish(&mut state);
+        Some((state.view.started, full, since))
+    }
+
     async fn run(self: Arc<Self>) {
         loop {
             self.notify.notified().await;
-            while self.requested.swap(false, Ordering::AcqRel) {
-                let full = self.full_requested.swap(false, Ordering::AcqRel);
-                if let Err(error) = self.sync(full).await {
-                    self.report(&error);
-                    // A failure waits for the next trigger rather than
-                    // retrying straight away: a busy index stays busy for as
-                    // long as the other writer holds it, and a spin would only
-                    // add to the contention.
-                    break;
+            while let Some((generation, full, since)) = self.start_next_pass() {
+                let started = Instant::now();
+                let started_epoch = Utc::now().timestamp();
+                tracing::info!(generation, full, ?since, "SessionWiki sync started");
+                let cache = self.native_scan_cache.clone();
+                let owner = Arc::clone(&self);
+                let result = run_abandonable(move || sync_blocking(since, &cache, &owner)).await;
+                let mut state = self.lock();
+                let outcome = state.finish_pass(generation, full, started_epoch, &result);
+                if let mj_client::daemon::WikiSyncOutcome::Failed(error) = &outcome {
+                    tracing::warn!(generation, %error, "SessionWiki sync failed");
                 }
+                let mjolnir_sessions: usize = state
+                    .counts
+                    .iter()
+                    .filter(|((phase, _), _)| phase == "Mjolnir")
+                    .map(|(_, done)| done)
+                    .sum();
+                let native_sessions: usize = state
+                    .counts
+                    .iter()
+                    .filter(|((phase, _), _)| phase == "Native")
+                    .map(|(_, done)| done)
+                    .sum();
+                tracing::info!(
+                    generation,
+                    duration_ms = started.elapsed().as_millis(),
+                    mjolnir_sessions,
+                    native_sessions,
+                    ?outcome,
+                    "SessionWiki sync finished"
+                );
+                self.publish(&mut state);
+                self.completed.send_replace(generation);
             }
         }
     }
 
-    /// Log a failed sync at the level its cause deserves. A busy index is an
-    /// expected collision with another writer, not a fault: mark a rerun and
-    /// say so only in debug output.
-    fn report(&self, error: &anyhow::Error) {
-        if crate::database::is_busy_error(error) {
-            self.requested.store(true, Ordering::Release);
-            tracing::debug!(%error, "the SessionWiki index was busy; retrying on the next trigger");
-        } else {
-            tracing::warn!(%error, "could not sync sessions into SessionWiki");
-        }
-    }
-
-    async fn sync(&self, full: bool) -> Result<()> {
-        let _guard = self.running.lock().await;
-        let since = if full {
-            None
-        } else {
-            self.last_success
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                // A minute of overlap covers checkpoints written while the
-                // previous run was reading the directory.
-                .map(|success| success.epoch_seconds - 60)
+    fn progress(&self, phase: &str, progress: &sessionwiki::index::SyncProgress<'_>) {
+        let next = mj_client::daemon::WikiSyncProgress {
+            phase: phase.into(),
+            tool: progress.tool.into(),
+            adapter: progress.adapter,
+            adapters: progress.adapters,
+            done: progress.done,
+            total: progress.total,
         };
-        let started = Instant::now();
-        self.in_flight.store(true, Ordering::Release);
-        let cache = self.native_scan_cache.clone();
-        let ran = run_abandonable(move || sync_blocking(since, &cache)).await;
-        self.in_flight.store(false, Ordering::Release);
-        let ran = ran?;
-        if ran {
-            *self
-                .last_success
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Success {
-                at: started,
-                epoch_seconds: Utc::now().timestamp(),
-            });
-            self.completed
-                .send_modify(|generation| *generation = generation.saturating_add(1));
+        let mut state = self.lock();
+        state
+            .counts
+            .insert((phase.into(), progress.adapter), progress.done);
+        let visible = |p: &mj_client::daemon::WikiSyncProgress| {
+            (
+                p.phase.clone(),
+                p.tool.clone(),
+                p.adapter,
+                p.adapters,
+                p.total
+                    .map(|total| p.done.saturating_mul(100).checked_div(total).unwrap_or(100)),
+            )
+        };
+        if state.view.running.as_ref().map(visible) != Some(visible(&next)) {
+            state.view.running = Some(next);
+            self.publish(&mut state);
         }
-        Ok(())
     }
 }
 
@@ -1010,11 +1111,15 @@ fn open_for_sync() -> Result<rusqlite::Connection> {
     Ok(connection)
 }
 
-/// One synchronous sync pass. Returns false when this process must not touch
+/// One synchronous sync pass. Refuses writes when this process must not touch
 /// the index, so a refused run never records a success it did not have.
-fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> Result<bool> {
-    if !index_is_writable() {
-        return Ok(false);
+fn sync_blocking(
+    since: Option<i64>,
+    cache: &crate::import::NativeScanCache,
+    owner: &Indexer,
+) -> Result<()> {
+    if let Some(reason) = index_write_refusal() {
+        anyhow::bail!("{reason}");
     }
     // Isolated tests park a pass here to stand for one that takes minutes.
     mj_core::test_hooks::reach_test_hook("sessionwiki_sync_pass")?;
@@ -1042,12 +1147,27 @@ fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> 
     let generation = IndexStamp::of(&connection).context("read the SessionWiki index header")?;
     let since = since.filter(|_| full_pass_holds(&marker, generation));
     top_level::prune(&mut connection, &BTreeSet::new(), &ownership)?;
-    sessionwiki::index::sync_with(&mut connection, &owned, since)
-        .context("sync Mjolnir sessions into SessionWiki")?;
-    let (native, excluded) = top_level::prepare(native_adapters(&config), cache);
+    sessionwiki::index::sync_with_progress(&mut connection, &owned, since, &mut |p| {
+        owner.progress("Mjolnir", p)
+    })
+    .context("sync Mjolnir sessions into SessionWiki")?;
+    let adapters = native_adapters(&config);
+    owner.progress(
+        "Native",
+        &sessionwiki::index::SyncProgress {
+            tool: "native sessions",
+            adapter: 0,
+            adapters: adapters.len(),
+            done: 0,
+            total: None,
+        },
+    );
+    let (native, excluded) = top_level::prepare(adapters, cache);
     top_level::prune(&mut connection, &excluded, &ownership)?;
-    sessionwiki::index::sync_with(&mut connection, &native, since)
-        .context("sync native sessions into SessionWiki")?;
+    sessionwiki::index::sync_with_progress(&mut connection, &native, since, &mut |p| {
+        owner.progress("Native", p)
+    })
+    .context("sync native sessions into SessionWiki")?;
     top_level::prune(&mut connection, &excluded, &ownership)?;
     write_session_tags(&mut connection, &mjolnir.indexed_tags())
         .context("store Mjolnir's session metadata in the SessionWiki index")?;
@@ -1061,7 +1181,7 @@ fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> 
     {
         record_full_pass(&marker, generation);
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Store each session's target, profile and harness in the index, in one
@@ -1281,7 +1401,7 @@ fn index_version() -> IndexVersion {
 /// Whether this process may write the index. Only a newer index is refused:
 /// writing an older one is what brings it to this build's schema.
 fn index_is_writable() -> bool {
-    index_is_isolated() && !matches!(index_version(), IndexVersion::Newer(_))
+    index_write_refusal().is_none()
 }
 
 /// Open the index for reading, or `None` when this process has no index of
@@ -1348,6 +1468,10 @@ pub fn index_state() -> WikiIndexState {
     let Some(stamp) = on_disk_stamp() else {
         return WikiIndexState::Indexing;
     };
+    index_state_for(stamp)
+}
+
+fn index_state_for(stamp: IndexStamp) -> WikiIndexState {
     match stamp.version() {
         IndexVersion::Newer(_) => WikiIndexState::VersionMismatch,
         IndexVersion::Older(_) => WikiIndexState::Indexing,
@@ -1413,7 +1537,8 @@ impl WikiIndexer {
             return IndexedBeforeDestroy::Unavailable(reason);
         }
         let root = session_id.to_owned();
-        let pending = match tokio::task::spawn_blocking(move || unindexed_session(&root)).await {
+        let pending = match mj_core::runtime::spawn_blocking(move || unindexed_session(&root)).await
+        {
             Ok(Ok(pending)) => pending,
             Ok(Err(error)) => {
                 return IndexedBeforeDestroy::Failed(format!(
@@ -1429,9 +1554,11 @@ impl WikiIndexer {
         if pending.is_empty() {
             return IndexedBeforeDestroy::Current;
         }
-        let inner = Arc::clone(&self.inner);
+        let indexer = Self {
+            inner: Arc::clone(&self.inner),
+        };
         index_before_destroy_with(
-            async move { inner.sync(false).await },
+            async move { indexer.sync_now(false).await },
             wait,
             move || capture_sessions(&pending),
             DEFERRED_WRITE_RETRY,
@@ -1441,14 +1568,45 @@ impl WikiIndexer {
 }
 
 /// Why this process may not write the index, if it may not.
-fn unwritable_reason() -> Option<&'static str> {
+enum IndexWriteRefusal {
+    NotIsolated,
+    NewerSchema(i64),
+}
+
+impl IndexWriteRefusal {
+    fn summary(&self) -> &'static str {
+        match self {
+            Self::NotIsolated => "this process did not resolve a SessionWiki index of its own",
+            Self::NewerSchema(_) => "a newer SessionWiki wrote the SessionWiki index",
+        }
+    }
+}
+
+impl std::fmt::Display for IndexWriteRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotIsolated => f.write_str(self.summary()),
+            Self::NewerSchema(found) => write!(
+                f,
+                "a newer SessionWiki wrote index schema {found}; this build supports schema {}; upgrade Mjolnir to sync it",
+                sessionwiki::index::SCHEMA_VERSION
+            ),
+        }
+    }
+}
+
+fn index_write_refusal() -> Option<IndexWriteRefusal> {
     if !index_is_isolated() {
-        return Some("this process did not resolve a SessionWiki index of its own");
+        return Some(IndexWriteRefusal::NotIsolated);
     }
-    if let IndexVersion::Newer(_) = index_version() {
-        return Some("a newer SessionWiki wrote the SessionWiki index");
+    match index_version() {
+        IndexVersion::Newer(found) => Some(IndexWriteRefusal::NewerSchema(found)),
+        _ => None,
     }
-    None
+}
+
+fn unwritable_reason() -> Option<&'static str> {
+    index_write_refusal().map(|reason| reason.summary())
 }
 
 /// The bounded wait and its fallback, with the sync pass and the reading of
@@ -1463,11 +1621,9 @@ where
     S: std::future::Future<Output = Result<()>> + Send + 'static,
     C: FnOnce() -> Result<Vec<CapturedSession>> + Send + 'static,
 {
-    // Spawned rather than awaited here, so a wait that runs out drops only
-    // the handle and the pass still finishes. Dropping `Indexer::sync`
-    // part-way would release the single-flight lock while its blocking half
-    // was still writing.
-    match tokio::time::timeout(wait, tokio::spawn(sync)).await {
+    // A timed-out caller leaves its generation with the owner; the pass
+    // finishes even when destroy proceeds with its captured session copy.
+    match tokio::time::timeout(wait, mj_core::runtime::spawn(sync)).await {
         Ok(Ok(Ok(()))) => return IndexedBeforeDestroy::Synced,
         Ok(Ok(Err(error))) => tracing::warn!(
             error = %format!("{error:#}"),
@@ -1482,7 +1638,7 @@ where
             "the SessionWiki sync did not finish in time; indexing the session on its own"
         ),
     }
-    let captured = match tokio::task::spawn_blocking(capture).await {
+    let captured = match mj_core::runtime::spawn_blocking(capture).await {
         Ok(Ok(captured)) => Arc::new(captured),
         Ok(Err(error)) => {
             return IndexedBeforeDestroy::Failed(format!(
@@ -1499,7 +1655,7 @@ where
         return IndexedBeforeDestroy::Current;
     }
     let attempt = Arc::clone(&captured);
-    match tokio::task::spawn_blocking(move || write_captured(&attempt)).await {
+    match mj_core::runtime::spawn_blocking(move || write_captured(&attempt)).await {
         Ok(Ok(())) => IndexedBeforeDestroy::WrittenDirectly,
         Ok(Err(error)) if crate::database::is_busy_error(&error) => {
             write_captured_later(captured, retry);
@@ -1652,19 +1808,20 @@ fn write_captured_later(captured: Arc<Vec<CapturedSession>>, retry: Duration) {
         ?sessions,
         "the SessionWiki index is busy; indexing the destroyed sessions once it is free"
     );
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let started = Instant::now();
         loop {
             tokio::time::sleep(retry).await;
             let attempt = Arc::clone(&captured);
-            let error = match tokio::task::spawn_blocking(move || write_captured(&attempt)).await {
-                Ok(Ok(())) => {
-                    tracing::info!(?sessions, "indexed the destroyed sessions");
-                    return;
-                }
-                Ok(Err(error)) => error,
-                Err(error) => anyhow::Error::new(error),
-            };
+            let error =
+                match mj_core::runtime::spawn_blocking(move || write_captured(&attempt)).await {
+                    Ok(Ok(())) => {
+                        tracing::info!(?sessions, "indexed the destroyed sessions");
+                        return;
+                    }
+                    Ok(Err(error)) => error,
+                    Err(error) => anyhow::Error::new(error),
+                };
             if !crate::database::is_busy_error(&error) || started.elapsed() >= DEFERRED_WRITE_LIMIT
             {
                 tracing::warn!(
@@ -1783,14 +1940,6 @@ pub const DEFAULT_WIKI_LIMIT: usize = 50;
 /// SessionWiki's full-text index needs three characters; shorter queries fall
 /// back to a substring scan.
 const MIN_FULLTEXT_QUERY: usize = 3;
-/// How stale the index may be before a query triggers a background sync.
-pub const SYNC_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Whether a query should trigger a bounded background sync before it answers.
-pub fn sync_is_stale(last_success: Option<Instant>) -> bool {
-    last_success.is_none_or(|at| at.elapsed() >= SYNC_STALE_AFTER)
-}
-
 /// One page of the index, newest first or best match first.
 ///
 /// `live` is the set of session ids this daemon still holds, which is what
@@ -3363,6 +3512,74 @@ mod tests {
     /// schema after Mjolnir's last full pass, through SessionWiki's real
     /// rebuild.
     // Hard-won: 4ce2f9a78: an index an older SessionWiki wrote was refused for good, and nothing else rebuilt it.
+    // Hard-won: acd65766f: a coalesced later incremental success hid a failed full pass.
+    #[tokio::test]
+    async fn a_failed_full_sync_carries_coverage_into_its_requested_successor() {
+        let wiki = WikiIndexer::inert();
+        wiki.inner.lock().last_success = Some(1_700_000_000);
+        let mut waiter = Box::pin(wiki.sync_now(true));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                std::future::Future::poll(waiter.as_mut(), cx).is_pending()
+            ))
+            .await
+        );
+        let (first, full, since) = wiki.inner.start_next_pass().unwrap();
+        assert!(full);
+        assert_eq!(since, None);
+        let next = wiki.request_sync(false);
+        {
+            let mut state = wiki.inner.lock();
+            state.finish_pass(
+                first,
+                full,
+                1_700_000_001,
+                &Err(anyhow::anyhow!("full pass failed")),
+            );
+            wiki.inner.publish(&mut state);
+        }
+        // Do not poll the waiter between publications: its watch coalesces them.
+        let (second, full, since) = wiki.inner.start_next_pass().unwrap();
+        assert_eq!(second, next);
+        assert!(
+            full,
+            "the queued ordinary request must cover the failed full pass"
+        );
+        assert_eq!(
+            since, None,
+            "a valid prior full pass must not narrow this retry"
+        );
+        {
+            let mut state = wiki.inner.lock();
+            state.finish_pass(second, full, 1_700_000_002, &Ok(()));
+            wiki.inner.publish(&mut state);
+        }
+        waiter.await.unwrap();
+        assert!(
+            wiki.inner.start_next_pass().is_none(),
+            "failure did not schedule a hidden generation"
+        );
+        // With no successor request, a failure remains terminal and does not run.
+        let third = wiki.request_sync(true);
+        let (_, full, _) = wiki.inner.start_next_pass().unwrap();
+        {
+            let mut state = wiki.inner.lock();
+            state.finish_pass(
+                third,
+                full,
+                1_700_000_003,
+                &Err(anyhow::anyhow!("still unavailable")),
+            );
+            wiki.inner.publish(&mut state);
+        }
+        assert!(wiki.inner.start_next_pass().is_none());
+        let fourth = wiki.request_sync(false);
+        let (generation, full, since) = wiki.inner.start_next_pass().unwrap();
+        assert_eq!(generation, fourth);
+        assert!(full);
+        assert_eq!(since, None);
+    }
+
     #[test]
     fn an_index_an_older_sessionwiki_wrote_is_rebuilt_and_needs_a_full_pass() {
         use sessionwiki::index::SCHEMA_VERSION;
@@ -3419,6 +3636,15 @@ mod tests {
         drop(connection);
         assert_eq!(index_state(), WikiIndexState::VersionMismatch);
         assert!(!index_is_writable());
+        let refusal = index_write_refusal().unwrap().to_string();
+        assert!(
+            refusal.contains(&format!("index schema {}", SCHEMA_VERSION + 1)),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains(&format!("supports schema {SCHEMA_VERSION}")),
+            "{refusal}"
+        );
         assert!(readable_index().unwrap().is_none());
     }
 

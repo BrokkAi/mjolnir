@@ -20,6 +20,79 @@ use super::super::{
 
 const MAILBOX_EVENT_RETRY_CHILD: &str = "MJ_API_MAILBOX_EVENT_RETRY_CHILD";
 
+// Hard-won: c6ac3b7aa: new sync requests extended an already draining handoff.
+#[tokio::test]
+async fn wiki_sync_request_is_refused_during_handoff_drain() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |_| {});
+    backend.upgrade_gate.begin_draining();
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/wiki/sync"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(crate::server::UPGRADE_HEADER)
+            .unwrap(),
+        "pending"
+    );
+    assert_eq!(json_body(response).await["code"], DAEMON_HANDOFF_CODE);
+}
+
+// Hard-won: 18753da4d: backend corruption was retried forever as a shutdown503.
+#[tokio::test]
+async fn wiki_backend_failures_are_not_retryable_shutdowns() {
+    let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    for (method, path, expected) in [
+        (
+            "GET",
+            "/api/v1/wiki/search?q=needle",
+            "SessionWiki search failed: SessionWiki search is unavailable",
+        ),
+        (
+            "POST",
+            "/api/v1/wiki/sync",
+            "SessionWiki sync failed: SessionWiki sync is unavailable",
+        ),
+        (
+            "GET",
+            "/api/v1/wiki/sync/watch?epoch=fixture&after=0",
+            "SessionWiki sync watch failed: SessionWiki sync is unavailable",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::builder().method(method).uri(path))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{path}"
+        );
+        assert!(
+            response
+                .headers()
+                .get(crate::server::UPGRADE_HEADER)
+                .is_none()
+        );
+        assert_eq!(
+            json_body(response).await,
+            serde_json::json!({"error": expected})
+        );
+    }
+}
+
 // Hard-won: 3c523cbdd: CLI callers could not retrieve cleanup warnings after Destroy removed the record.
 #[tokio::test]
 async fn cleanup_notices_are_authenticated_and_readable_after_session_removal() {
@@ -488,7 +561,7 @@ async fn a_message_without_a_sender_is_submitted_as_the_users_prompt() {
             ))
             .unwrap()
     };
-    let held = tokio::spawn(app.clone().oneshot(send()));
+    let held = mj_core::runtime::spawn(app.clone().oneshot(send()));
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(
         !held.is_finished() && backend.submissions.lock().unwrap().is_empty(),
@@ -2370,7 +2443,7 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
         ..FakeBackend::default()
     });
     let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), waiting_for_its_worker);
-    let request = tokio::spawn(
+    let request = mj_core::runtime::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/prompt"))
                 .header(CONTENT_TYPE, "application/json")
@@ -2410,7 +2483,7 @@ async fn an_interrupt_during_the_history_write_withdraws_a_ready_sessions_prompt
         snapshot.sessions[0].capabilities.prompt = true;
         snapshot.sessions[0].capabilities.interrupt_turn = false;
     });
-    let prompt = tokio::spawn(
+    let prompt = mj_core::runtime::spawn(
         app.clone().oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/prompt"))
                 .header(CONTENT_TYPE, "application/json")
@@ -2469,7 +2542,7 @@ async fn an_interrupt_withdraws_a_prompt_held_until_its_session_is_ready() {
                 waiting_for_its_worker(snapshot);
             }
         });
-        let held = tokio::spawn(
+        let held = mj_core::runtime::spawn(
             app.clone().oneshot(
                 bearer(Request::post("/api/v1/sessions/session-1/prompt"))
                     .header(CONTENT_TYPE, "application/json")
@@ -2706,7 +2779,7 @@ async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
         },
         preferences_path,
     );
-    let response = tokio::spawn(app.oneshot(start_request(
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(
         r#"{"bundle_id":"hel","model":"grok-4.6","effort":"high"}"#.into(),
     )));
 
@@ -2758,7 +2831,7 @@ async fn session_start_accepts_a_named_disabled_profile_but_not_a_disabled_saved
         "{body}"
     );
 
-    let response = tokio::spawn(app.oneshot(start_request(
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(
         r#"{"profile_id":"gemini","target_id":"podman","bundle_id":"hel"}"#.into(),
     )));
     let request = actions.recv().await.unwrap();
@@ -2840,7 +2913,7 @@ async fn start_without_later_history_needs_at_and_reaches_the_controller() {
 
     let at = "0123456789abcdef0123456789abcdef01234567";
     let base = "89abcdef0123456789abcdef0123456789abcdef";
-    let _response = tokio::spawn(app.oneshot(start_request(start_body(&format!(
+    let _response = mj_core::runtime::spawn(app.oneshot(start_request(start_body(&format!(
         r#","at":"{at}","base":"{base}","no_later_history":true"#
     )))));
     let request = actions.recv().await.unwrap();
@@ -2872,7 +2945,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert_eq!(old_name.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert!(actions.try_recv().is_err());
 
-    let response = tokio::spawn(app.oneshot(start_request(start_body(
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(start_body(
         r#","prompt":"add a README line","no_github_events":true,"no_github_credentials":true,"remember_container_size":true"#,
     ))));
     let request = actions.recv().await.unwrap();
@@ -2887,6 +2960,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
             no_project_memory: false,
             no_github_events: true,
             no_github_credentials: true,
+            notifications_ignored: false,
             at: None,
             branch: None,
             base: None,
@@ -2981,7 +3055,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
         preferences,
     );
 
-    let response = tokio::spawn(app.oneshot(start_request(
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(
         r#"{"bundle_id":"hel","model":"luna","effort":"high","prompt":"go"}"#.into(),
     )));
     let request = actions.recv().await.unwrap();
@@ -3099,9 +3173,9 @@ async fn start_without_a_profile_load_balances_with_and_without_explicit_effort(
         // Exercise both session-selection paths through the public API. With
         // equal weights, missing either account in 64 draws has probability 2^-63.
         for _ in 0..64 {
-            let mut response = tokio::spawn(app.clone().oneshot(start_request(format!(
-                "{{\"bundle_id\":\"hel\",\"model\":\"luna\"{effort}}}"
-            ))));
+            let mut response = mj_core::runtime::spawn(app.clone().oneshot(start_request(
+                format!("{{\"bundle_id\":\"hel\",\"model\":\"luna\"{effort}}}"),
+            )));
             let request = tokio::select! {
                 request = actions.recv() => request.unwrap(),
                 early = &mut response => panic!("start returned before its action: {:?}", early.unwrap().unwrap().status()),
@@ -3182,7 +3256,8 @@ async fn model_first_sonnet_alias_uses_the_selected_profiles_launch_value() {
             if let Some(effort) = effort {
                 body["effort"] = effort.into();
             }
-            let mut response = tokio::spawn(app.oneshot(start_request(body.to_string())));
+            let mut response =
+                mj_core::runtime::spawn(app.oneshot(start_request(body.to_string())));
             let request = tokio::select! {
                 request = actions.recv() => request.unwrap(),
                 early = &mut response => panic!("start failed before creating a session: {:?}", early.unwrap().unwrap().status()),
@@ -3240,7 +3315,7 @@ async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target()
         }
     });
 
-    let response = tokio::spawn(app.oneshot(start_request(
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(
         r#"{"bundle_id":"hel","target_id":"podman","model":"luna"}"#.into(),
     )));
     let request = actions.recv().await.unwrap();
@@ -3365,7 +3440,7 @@ async fn start_answers_an_unavailable_subagent_model_with_a_code() {
     let backend = Arc::new(FakeBackend::default());
     let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
     let body = start_body(r#","subagents":{"mode":"single_model","model":"fake-model"}"#);
-    let response = tokio::spawn(app.oneshot(start_request(body)));
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(body)));
     let request = actions.recv().await.unwrap();
     request
         .reply
@@ -3405,7 +3480,7 @@ async fn start_sizes_a_container_session_from_the_host_default_and_overrides() {
     });
 
     // One override keeps the default for the other dimension.
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.clone()
             .oneshot(start_request(start_body(r#","cpus":4"#))),
     );
@@ -3739,7 +3814,7 @@ async fn suspend_requires_publication_ack_only_for_owned_clones() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert!(actions.try_recv().is_err());
 
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/suspend"))
                 .header(CONTENT_TYPE, "application/json")
@@ -3768,7 +3843,7 @@ async fn suspend_requires_publication_ack_only_for_owned_clones() {
                 Some(mj_core::state::PublicationState::Unknown);
             snapshot.sessions[0].is_subagent_session = true;
         });
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/suspend"))
                 .body(Body::empty())
@@ -3809,7 +3884,7 @@ fn with_a_running_subagent(snapshot: &mut ViewerSnapshot) {
 async fn a_forced_close_ignores_active_subagents() {
     let (app, mut actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), with_a_running_subagent);
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/destroy"))
                 .header(CONTENT_TYPE, "application/json")
@@ -3840,7 +3915,7 @@ async fn a_forced_close_asks_to_delete_the_branch_only_when_the_body_does() {
         api_app(Arc::new(FakeBackend::default()), |_| {});
 
     for (body, delete_branch) in [(r#"{}"#, false), (r#"{"delete_branch":true}"#, true)] {
-        let response = tokio::spawn(
+        let response = mj_core::runtime::spawn(
             app.clone().oneshot(
                 bearer(Request::post("/api/v1/sessions/session-1/destroy"))
                     .header(CONTENT_TYPE, "application/json")
@@ -4055,7 +4130,7 @@ async fn a_wait_ended_by_an_upgrade_handoff_tells_its_client_to_ask_the_next_dae
             ..FakeBackend::default()
         });
         let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-        let waiting = tokio::spawn(
+        let waiting = mj_core::runtime::spawn(
             app.oneshot(
                 bearer(Request::post("/api/v1/sessions/session-1/wait"))
                     .header(CONTENT_TYPE, "application/json")
@@ -4114,7 +4189,7 @@ async fn a_wait_whose_feed_closes_during_a_handoff_still_sends_its_client_on() {
         ..FakeBackend::default()
     });
     let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-    let waiting = tokio::spawn(
+    let waiting = mj_core::runtime::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/wait"))
                 .header(CONTENT_TYPE, "application/json")
@@ -4710,88 +4785,137 @@ async fn a_turn_the_harness_starts_itself_holds_only_the_session_wait() {
 /// armed, queued or running; the retry's own ending answers for it. A retry
 /// the worker armed for some other turn does not hold turn 10.
 // Hard-won: #1304: a wait on a turn answered while the worker's retry of that turn was still running.
+// Hard-won: 70b45ac58: waits treated a worker's restart continuation as a final interrupted turn.
+// Hard-won: 7c195cfd8: steering hid the continuation from the wait policy.
 #[test]
 fn a_wait_on_a_turn_follows_the_workers_retry_of_it() {
     use mj_core::activity::ActivityState;
-    let refused = completed(10, "end_turn");
-    let retry_id = format!("server-retry-{}", refused.completed_ordinal);
-    let on_turn_10 = WaitRequest {
-        turn_id: Some(10),
-        ..WaitRequest::default()
-    };
-    let armed_for = |command_id: &str| {
-        let mut operational = worker_state(ActivityState::Retry);
-        operational.capacity_retry = Some(CapacityRetry {
-            attempt: 1,
-            retry_at_ms: 60_000,
-            command_id: command_id.into(),
-            submitted: false,
-        });
-        live_observation(projection_with(refused.clone()), operational)
-    };
-    assert_eq!(resolve_wait(&armed_for(&retry_id), &on_turn_10), None);
+    for restarting in [false, true] {
+        let mut refused = completed(10, "end_turn");
+        if restarting {
+            refused.outcome = TurnOutcomeKind::Interrupted {
+                reason: Some(mj_core::event_outcome::OutcomeReason::WorkerRestarted),
+                message: "worker restarted".into(),
+            };
+        }
+        let retry_id = if restarting {
+            mj_core::continuation::restart_continuation_id(&refused.command_id)
+        } else {
+            format!("server-retry-{}", refused.completed_ordinal)
+        };
+        let retry_accepted = if restarting { 10 } else { 15 };
+        let on_turn_10 = WaitRequest {
+            turn_id: Some(10),
+            ..WaitRequest::default()
+        };
+        let armed_for = |command_id: &str| {
+            let mut operational = worker_state(ActivityState::Retry);
+            operational.capacity_retry = Some(CapacityRetry {
+                attempt: 1,
+                retry_at_ms: 60_000,
+                command_id: command_id.into(),
+                submitted: false,
+            });
+            live_observation(projection_with(refused.clone()), operational)
+        };
+        if !restarting {
+            assert_eq!(resolve_wait(&armed_for(&retry_id), &on_turn_10), None);
+        }
 
-    let retry_turn = MaterializedTurn {
-        command_id: retry_id.clone(),
-        accepted_ordinal: Some(15),
-        turn_start_position: 16,
-        started_at_ms: 2_000,
-        steered_into: None,
-    };
-    let mut queued = projection_with(refused.clone());
-    queued.queued_prompts = vec![mj_core::state::MaterializedQueuedPrompt {
-        command_id: retry_id.clone(),
-        kind: Default::default(),
-        content: Vec::new(),
-        queued_at_ms: 2_000,
-        accepted_ordinal: Some(15),
-    }];
-    assert_eq!(
-        resolve_wait(
-            &live_observation(queued, worker_state(ActivityState::Idle { since_ms: None })),
-            &on_turn_10
-        ),
-        None,
-        "the retry is queued"
-    );
-    let mut running = projection_with(refused.clone());
-    running.execution = MaterializedExecutionState::Running {
-        started_at_ms: 2_000,
-    };
-    running.active_turn = Some(retry_turn);
-    let turn = ActivityState::Turn {
-        started_at_ms: Some(2_000),
-        last_activity_at_ms: Some(2_500),
-    };
-    assert_eq!(
-        resolve_wait(&live_observation(running, worker_state(turn)), &on_turn_10),
-        None,
-        "the retry is running"
-    );
+        let retry_turn = MaterializedTurn {
+            command_id: retry_id.clone(),
+            accepted_ordinal: Some(retry_accepted),
+            turn_start_position: 16,
+            started_at_ms: 2_000,
+            steered_into: None,
+        };
+        let mut queued = projection_with(refused.clone());
+        queued.queued_prompts = vec![mj_core::state::MaterializedQueuedPrompt {
+            command_id: retry_id.clone(),
+            kind: Default::default(),
+            content: Vec::new(),
+            queued_at_ms: 2_000,
+            accepted_ordinal: Some(retry_accepted),
+        }];
+        assert_eq!(
+            resolve_wait(
+                &live_observation(queued, worker_state(ActivityState::Idle { since_ms: None })),
+                &on_turn_10
+            ),
+            None,
+            "the retry is queued"
+        );
+        let mut running = projection_with(refused.clone());
+        running.execution = MaterializedExecutionState::Running {
+            started_at_ms: 2_000,
+        };
+        running.active_turn = Some(retry_turn);
+        let turn = ActivityState::Turn {
+            started_at_ms: Some(2_000),
+            last_activity_at_ms: Some(2_500),
+        };
+        assert_eq!(
+            resolve_wait(
+                &live_observation(running.clone(), worker_state(turn.clone())),
+                &on_turn_10
+            ),
+            None,
+            "the retry is running"
+        );
 
-    let retried = MaterializedTurnOutcome {
-        command_id: retry_id,
-        accepted_ordinal: Some(15),
-        turn_start_position: Some(16),
-        completed_ordinal: 20,
-        ..refused.clone()
-    };
-    let decision = resolve_wait(
-        &live_observation(
+        if restarting {
+            let active = running.active_turn.as_mut().unwrap();
+            active.command_id = "other-running-turn".into();
+            active.steered_into = Some(mj_core::continuation::restart_continuation_id(&retry_id));
+            assert_eq!(
+                resolve_wait(&live_observation(running, worker_state(turn)), &on_turn_10),
+                None,
+                "the continuation steered into another turn still carries the request"
+            );
+        }
+
+        let retried = MaterializedTurnOutcome {
+            command_id: retry_id,
+            accepted_ordinal: Some(retry_accepted),
+            turn_start_position: Some(16),
+            completed_ordinal: 20,
+            outcome: TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+            ..refused.clone()
+        };
+        let settled = live_observation(
             projection_with(retried),
             worker_state(ActivityState::Idle { since_ms: None }),
-        ),
-        &on_turn_10,
-    )
-    .expect("the retry ended");
-    assert_eq!(decision.outcome, WaitOutcome::Finished);
-    assert_eq!(decision.turn_id, Some(15));
+        );
+        if restarting {
+            assert!(
+                resolve_wait(
+                    &settled,
+                    &WaitRequest {
+                        turn_id: Some(11),
+                        ..WaitRequest::default()
+                    }
+                )
+                .is_none(),
+                "recovery of A must not answer a later queued B"
+            );
+        }
+        let decision = resolve_wait(&settled, &on_turn_10).expect("the retry ended");
+        assert_eq!(decision.outcome, WaitOutcome::Finished);
+        assert_eq!(decision.turn_id, Some(retry_accepted));
 
-    assert_eq!(
-        resolve_wait(&armed_for("server-retry-30"), &on_turn_10).map(|decision| decision.outcome),
-        Some(WaitOutcome::Finished),
-        "a retry of another turn does not resend turn 10"
-    );
+        assert_eq!(
+            resolve_wait(&armed_for("server-retry-30"), &on_turn_10)
+                .map(|decision| decision.outcome),
+            Some(if restarting {
+                WaitOutcome::Error
+            } else {
+                WaitOutcome::Finished
+            }),
+            "a retry of another turn does not resend turn 10"
+        );
+    }
 }
 
 /// The turn's own assessment record is the owner of Jev's verdict on it. A
@@ -5564,7 +5688,7 @@ async fn structured_inputs_are_listed_validated_and_forwarded() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(actions.try_recv().is_err());
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.oneshot(
             bearer(Request::post(
                 "/api/v1/sessions/session-1/elicitations/question-1",
@@ -5693,7 +5817,7 @@ async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operatio
                     assert!(snapshot.sessions[0].failed_launch_retry);
                 }
             });
-        let mut response = tokio::spawn(
+        let mut response = mj_core::runtime::spawn(
             app.oneshot(
                 bearer(Request::post("/api/v1/sessions/session-1/resume"))
                     .body(Body::empty())
@@ -5974,7 +6098,7 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
 
     // The child reaches the snapshot a moment after the spawn returns from the
     // controller, which is what happens in a live daemon.
-    let publisher = tokio::spawn({
+    let publisher = mj_core::runtime::spawn({
         let snapshot_tx = snapshot_tx.clone();
         async move {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -6302,6 +6426,7 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
                 id: "docker".into(),
                 kind: "local-docker".into(),
                 permission_mode: None,
+                yolo: true,
                 subagents_configured: false,
                 oracle_configured: false,
                 resource_allocation_kind: mj_core::state::ResourceAllocationKind::Container,
@@ -6374,6 +6499,7 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
             id: "docker".into(),
             kind: "local-docker".into(),
             permission_mode: None,
+            yolo: true,
             subagents_configured: false,
             oracle_configured: false,
             resource_allocation_kind: mj_core::state::ResourceAllocationKind::Container,
@@ -6527,7 +6653,8 @@ async fn start_without_identifiers_uses_the_saved_default() {
     let (app, mut actions, _, _) =
         api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path.clone());
 
-    let response = tokio::spawn(app.oneshot(start_request(r#"{"bundle_id":"hel"}"#.into())));
+    let response =
+        mj_core::runtime::spawn(app.oneshot(start_request(r#"{"bundle_id":"hel"}"#.into())));
     let request = actions.recv().await.unwrap();
     let ControllerAction::New {
         profile_id,
@@ -6560,7 +6687,7 @@ async fn start_without_identifiers_uses_the_saved_default() {
     let (app, mut actions, _, _) =
         api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
     let body = r#"{"target_id":"podman","bundle_id":"hel"}"#;
-    let response = tokio::spawn(app.oneshot(start_request(body.into())));
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(body.into())));
     let request = actions.recv().await.unwrap();
     let ControllerAction::New {
         profile_id,
@@ -6909,7 +7036,7 @@ fn spawn_wait(
     app: axum::Router,
     body: &'static str,
 ) -> tokio::task::JoinHandle<Result<Response, std::convert::Infallible>> {
-    tokio::spawn(
+    mj_core::runtime::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/wait"))
                 .header(CONTENT_TYPE, "application/json")
@@ -7131,7 +7258,7 @@ async fn a_waiter_answers_when_its_child_s_report_lands() {
 async fn a_review_that_cannot_start_is_a_conflict_with_its_reason() {
     let (app, mut actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |_| {});
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/review"))
                 .body(Body::empty())
@@ -7323,7 +7450,7 @@ async fn published_apply_queued_crosses_the_api_without_retargeting_or_child_act
         active_prompt_id: "parent-turn".into(),
         queued_command_id: "change-model".into(),
     };
-    let response = tokio::spawn(
+    let response = mj_core::runtime::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/turn-control"))
                 .header(CONTENT_TYPE, "application/json")
@@ -7624,7 +7751,7 @@ async fn session_review_api_rejects_stored_legacy_fields() {
 #[tokio::test]
 async fn session_review_api_forwards_an_explicitly_empty_reviewer_list() {
     let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
-    let response = tokio::spawn(app.oneshot(start_request(start_body(
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(start_body(
         r#", "review":{"mode":"push","reviewers":[]}"#,
     ))));
     let request = actions.recv().await.unwrap();
@@ -7653,7 +7780,7 @@ async fn session_review_api_forwards_an_explicitly_empty_reviewer_list() {
 #[tokio::test]
 async fn session_review_api_accepts_inherit_and_forwards_its_settings() {
     let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
-    let response = tokio::spawn(app.oneshot(start_request(start_body(
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(start_body(
         r#", "review":{"mode":"inherit","reviewers":[{"model":"gpt-6-astra","effort":"high"}]}"#,
     ))));
     let request = actions.recv().await.unwrap();

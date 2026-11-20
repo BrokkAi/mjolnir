@@ -474,7 +474,7 @@ impl Controller {
         // durable conversation at the verified checkpoint cut.
         let materialized = if barrier.window.omitted_items > 0 {
             let session_id = barrier.materialized.session_id.clone();
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 crate::database::load_materialized_session(&session_id)?
                     .context("checkpoint durable projection disappeared")
             })
@@ -495,7 +495,7 @@ impl Controller {
             "checkpoint projection digest does not match the relay frontier digest"
         );
         ensure_exact_checkpoint_cut(&cursor, expected_ordinal, &expected_digest)?;
-        let mut canonical_session = canonical_session_from_materialized(&materialized)?;
+        let mut canonical_session = canonical_session_from_materialized_owned(materialized)?;
         if barrier
             .operational
             .relay_protocol_version
@@ -646,12 +646,13 @@ impl Controller {
                 )
                 .await?;
                 record_checkpoint_report_notice(&mut relay, session_id, &captured).await;
-                let pack_spec = CheckpointPackSpec {
+                let pack_stage_path = target_path(&remote_stage);
+                let pack_spec = CheckpointPackSpecRef {
                     protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
-                    relay_root: spec.relay_root.clone(),
-                    stage_path: target_path(&remote_stage),
-                    canonical_session: spec.canonical_session.clone(),
-                    output_path: spec.output_path.clone(),
+                    relay_root: &spec.relay_root,
+                    stage_path: &pack_stage_path,
+                    canonical_session: &spec.canonical_session,
+                    output_path: &spec.output_path,
                 };
                 let pack_started = Instant::now();
                 let output = {

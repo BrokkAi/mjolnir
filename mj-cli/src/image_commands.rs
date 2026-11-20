@@ -88,7 +88,7 @@ pub(crate) async fn run(args: ImageArgs) -> Result<()> {
         ),
         ImageCommand::Status(args) => (args.path, args.bundle, args.target, None, false, true),
     };
-    let (path, files) = tokio::task::spawn_blocking(move || collect(path))
+    let (path, files) = mj_core::runtime::spawn_blocking(move || collect(path))
         .await
         .context("join recipe collection")??;
     let request = ImageRequest {

@@ -369,7 +369,7 @@ impl DashboardState {
                 targets_scroll: 0,
                 quota_scroll: 0,
                 capacity_index: 0,
-                quota_index: 0,
+                quota_selection: None,
                 pane_sizes: PaneSizes::default(),
                 conversation_layout: ConversationLayout::default(),
                 collapsed_project_keys: BTreeSet::new(),

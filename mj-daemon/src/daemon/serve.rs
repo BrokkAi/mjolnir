@@ -7,7 +7,7 @@ where
     F: std::future::Future<Output = Result<T>> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         use futures::FutureExt;
         let result = match std::panic::AssertUnwindSafe(operation).catch_unwind().await {
             Ok(result) => result,
@@ -38,7 +38,7 @@ pub(super) fn spawn_phone_server(
 ) -> tokio::task::JoinHandle<()> {
     state.set_phone_status(WebViewerStatus::Starting);
     let workspaces = state.workspaces();
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let push = crate::daemon::push_delivery::run(state.clone());
         let server = crate::server_runtime::run_server(
             (&config).into(),
@@ -78,7 +78,7 @@ pub(super) fn spawn_remote_request_bridge(
     mut requests: mj_controller::session_manager::RemoteSessionRequests,
     manager: SessionManagerControl,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         // One session's requests reach its relay actor in the order they were
         // made; different sessions still overlap.
         let mut request_order = mj_controller::session_manager::SessionRequestOrder::new();
@@ -253,7 +253,7 @@ pub(super) async fn serve_client(
                     let root = mj_core::config::data_dir().join("uploads");
                     tokio::fs::create_dir_all(&root).await?;
                     directory = Some(Arc::new(
-                        tokio::task::spawn_blocking(move || tempfile::tempdir_in(root))
+                        mj_core::runtime::spawn_blocking(move || tempfile::tempdir_in(root))
                             .await
                             .context("upload directory task failed")??,
                     ));
@@ -264,7 +264,7 @@ pub(super) async fn serve_client(
                     .path()
                     .to_owned();
                 // Connection storage must remain available while admission drains.
-                let (file, path) = tokio::task::spawn_blocking(move || {
+                let (file, path) = mj_core::runtime::spawn_blocking(move || {
                     Ok::<_, std::io::Error>(tempfile::NamedTempFile::new_in(root)?.into_parts())
                 })
                 .await
@@ -350,6 +350,23 @@ pub(super) async fn serve_client(
                 "incompatible daemon protocol {}; expected {}",
                 request.protocol_version, PROTOCOL_VERSION
             ))
+        } else if matches!(&request.action, DaemonAction::WikiSyncWatch { .. }) {
+            // A read-only watch owns no admission. Closing the transport
+            // on handoff makes the client reconnect and retain its target.
+            let mut byte = [0];
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Ok(()),
+                result = handle_action(request.action, &metadata, &state, &cancellation) =>
+                    result.map_err(|error| format!("{error:#}")),
+                closed = stream.peek(&mut byte) => {
+                    match closed {
+                        Ok(0) => return Ok(()),
+                        Ok(_) => return Err(anyhow::anyhow!("unexpected input during SessionWiki watch")),
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
         } else if cancellation.is_cancelled() && !is_management {
             // A daemon in its epilogue still holds a snapshot in memory and
             // would happily serve it, from a store it has stopped reading and
@@ -629,7 +646,7 @@ pub(super) async fn serve_client(
                         let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let _cancel = CancelImportPreparation(stopped.clone());
                         let storage = directory.clone();
-                        let mut prepare = tokio::task::spawn_blocking(move || {
+                        let mut prepare = mj_core::runtime::spawn_blocking(move || {
                             let outcome = (|| -> Result<_> {
                                 // Keep connection storage alive until every reader has stopped.
                                 let _storage = storage;
@@ -705,7 +722,7 @@ pub(super) async fn serve_client(
                                     Ok(registration) => {
                                         // The transaction and its acknowledgement own admission.
                                         let held = registration.clone();
-                                        let registered = tokio::task::spawn_blocking(move || -> Result<_> {
+                                        let registered = mj_core::runtime::spawn_blocking(move || -> Result<_> {
                                             let _registration = held;
                                             let destination = mj_core::config::sessions_dir().join(format!("{}.hel.zip", session.id));
                                             session.checkpoint.as_mut().context("imported session has no checkpoint")?.archive_path = destination.clone();
@@ -839,7 +856,7 @@ pub(super) async fn write_response(
             // bootstrap, the resume dialog's history). Encode away from the
             // control loop, then bound each write without rebuilding the
             // reply per page.
-            let body = tokio::task::spawn_blocking(move || serde_json::to_vec(&reply))
+            let body = mj_core::runtime::spawn_blocking(move || serde_json::to_vec(&reply))
                 .await
                 .context("reply encoder task failed")??;
             let mut chunks = body.chunks(64 * 1024).peekable();
@@ -893,7 +910,7 @@ pub(super) async fn blocking<T: Send + 'static>(
 ) -> Result<T> {
     let activity = mj_controller::upgrade::activity("database operation")?;
     let owner = mj_controller::worker_lifecycle::capture();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let _activity = activity;
         match owner {
             Some(owner) => owner.scope_blocking(work),
@@ -907,7 +924,7 @@ pub(super) async fn blocking<T: Send + 'static>(
 pub(super) async fn reach_test_hook(name: &'static str) -> Result<()> {
     #[cfg(feature = "test-hooks")]
     {
-        tokio::task::spawn_blocking(move || mj_core::test_hooks::reach_test_hook(name))
+        mj_core::runtime::spawn_blocking(move || mj_core::test_hooks::reach_test_hook(name))
             .await
             .context("test hook task panicked")??;
     }
@@ -927,6 +944,71 @@ impl Drop for CancelImportPreparation {
 #[cfg(test)]
 mod bridge_admission_tests {
     use super::*;
+
+    // Hard-won: c6ac3b7aa: ordinary client admission accepted sync requests during drain.
+    #[test]
+    fn wiki_sync_admission_is_named_and_deferrable() {
+        const CHILD: &str = "MJ_TEST_WIKI_SYNC_ADMISSION";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            mj_controller::controller::test_support::IsolatedTest::new(
+                mj_controller::controller::test_support::test_name(
+                    module_path!(),
+                    "wiki_sync_admission_is_named_and_deferrable",
+                ),
+            )
+            .isolated_store(root.path())
+            .env(CHILD, "1")
+            .run();
+            return;
+        }
+        let work = upgrade_request_activity(&DaemonAction::WikiSyncRequest).unwrap();
+        assert!(
+            mj_controller::upgrade::gate()
+                .blockers()
+                .iter()
+                .any(|label| label.label.starts_with("wiki sync request"))
+        );
+        drop(work);
+        mj_controller::upgrade::gate().begin_draining();
+        assert!(upgrade_request_activity(&DaemonAction::WikiSyncRequest).is_err());
+    }
+
+    // Hard-won: eb0fbd8: a watch sent between handoff polls received a terminal refusal.
+    #[tokio::test]
+    async fn wiki_sync_watch_closes_transport_when_handoff_begins_between_polls() {
+        let mut state = super::super::tests::test_runtime_state();
+        Arc::get_mut(&mut state).unwrap().wiki = mj_controller::sessionwiki::WikiIndexer::inert();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = super::super::tests::test_metadata(listener.local_addr().unwrap());
+        let server_metadata = metadata.clone();
+        let cancellation = CancellationToken::new();
+        let server_cancellation = cancellation.clone();
+        let server = mj_core::runtime::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(stream, server_metadata, state, server_cancellation).await
+        });
+        let mut client = mj_client::daemon::DaemonClient::connect(metadata)
+            .await
+            .unwrap();
+        let first = client
+            .wiki_sync_watch("another-epoch".into(), 0)
+            .await
+            .unwrap();
+        // The first reply is delivered; handoff starts before the next poll.
+        cancellation.cancel();
+        let error = client
+            .wiki_sync_watch(first.epoch, first.version)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<mj_client::daemon::DaemonTransportLost>()
+                .is_some(),
+            "{error:#}"
+        );
+        server.await.unwrap().unwrap();
+    }
 
     #[tokio::test]
     async fn queued_web_mutations_hold_handoff_until_reply_and_late_requests_are_refused() {

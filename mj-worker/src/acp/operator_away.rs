@@ -91,6 +91,13 @@ pub(super) enum AwayRequest {
 }
 
 impl OperatorAway {
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn keep_fixture_question_live(&self, question: ElicitationRequest) -> Box<dyn Send> {
+        let bridge = self.pending_for_bridge_with_source(Some(VerdictSource::Disabled), None);
+        let answer = bridge.register(question, String::new(), AwayRequest::Question);
+        Box::new((bridge, answer))
+    }
+
     pub(crate) fn live_questions(&self) -> BTreeMap<String, ElicitationRequest> {
         // Recovery calls this with the relay held: Relay -> OperatorAway is
         // the lock order. This owner never takes the relay lock while held;
@@ -535,6 +542,19 @@ impl Drop for CommandLoopQuestion {
     }
 }
 
+impl PendingElicitation {
+    /// Preserve explicit user intent instead of conflating it with a dropped bridge.
+    pub(super) fn cancel(self) {
+        if let PendingResponder::Acp { answer, .. } = self.responder
+            && answer
+                .send(PendingAnswer::Human(ElicitationResponse::Cancel))
+                .is_err()
+        {
+            tracing::debug!(elicitation_id = %self.question.id, "permission responder closed before cancellation was answered");
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum PendingAnswer {
     Human(ElicitationResponse),
@@ -778,7 +798,7 @@ mod tests {
         let id = question.id.clone();
         let answer = pending.register(question, String::new(), AwayRequest::Question);
         let pending = pending.clone();
-        tokio::spawn(async move {
+        mj_core::runtime::spawn(async move {
             await_elicitation_response(&pending, &id, answer, std::future::pending()).await
         })
     }
@@ -1128,7 +1148,7 @@ mod tests {
             let (cancel, cancelled) = oneshot::channel();
             let response = {
                 let pending = pending.clone();
-                tokio::spawn(async move {
+                mj_core::runtime::spawn(async move {
                     await_elicitation_response(&pending, "racing", answer, async {
                         let _ = cancelled.await;
                     })

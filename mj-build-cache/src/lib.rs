@@ -16,8 +16,6 @@
 // The moved modules name these by their old paths.
 pub(crate) use mj_import::import;
 pub(crate) use mj_store::database;
-#[cfg(test)]
-pub(crate) use mj_store::upgrade;
 pub(crate) use mj_targets::targets;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use mj_targets::test_isolation;

@@ -5,12 +5,39 @@ impl DashboardContext {
     /// filter's text changed since the last one. Cheap when it did not.
     pub(crate) fn start_sessions_text_search(&mut self) {
         if let Some((request_id, query)) = self.dashboard.next_sessions_text_search() {
-            crate::dashboard::io::spawn_sessions_text_search(
+            self.sessions_text_task = Some(crate::dashboard::io::spawn_sessions_text_search(
                 request_id,
                 query,
-                self.sessions_text_request.clone(),
                 self.dashboard_io_tx.clone(),
-            );
+            ));
+        }
+    }
+
+    /// One cancellable follower per surface episode, independent of queries.
+    pub(crate) fn reconcile_wiki_syncs(&mut self) {
+        if self.dashboard.wiki_sync_episode(false).is_none() {
+            self.sessions_text_task = None;
+        }
+        for dialog in [true, false] {
+            let episode = self.dashboard.wiki_sync_episode(dialog);
+            let task = if dialog {
+                &mut self.wiki_sync_task
+            } else {
+                &mut self.sessions_sync_task
+            };
+            if task.as_ref().map(|(id, _)| *id) != episode {
+                *task = None;
+                if let Some(id) = episode {
+                    *task = Some((
+                        id,
+                        crate::dashboard::io::spawn_wiki_sync(
+                            dialog,
+                            id,
+                            self.dashboard_io_tx.clone(),
+                        ),
+                    ));
+                }
+            }
         }
     }
 
@@ -56,7 +83,7 @@ impl DashboardContext {
         {
             let updates = self.import_updates_tx.clone();
             let cache = self.native_scan_cache.clone();
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 let completed = crate::import::discover_client_import_profile(
                     profile_id,
                     profile,

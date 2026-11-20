@@ -33,7 +33,7 @@ pub async fn native_prior_from_archive(
     let archive_path = archive_path.to_owned();
     let manifest = manifest.clone();
     let snapshot = std::sync::Arc::clone(snapshot);
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         match claude::prior_compaction(&archive_path, &manifest, &snapshot, &cancel) {
             Ok(prior) => Ok(prior),
             Err(error) if cancel.is_cancelled() => Err(error),

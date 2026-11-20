@@ -36,20 +36,6 @@ fn every_staged_gh_approval_file_is_copied_by_profile_staging() {
 }
 
 #[test]
-fn observe_enforcement_requires_configured_approvals_even_on_isolated_targets() {
-    for current in [
-        ExecutionPolicy::ConfiguredApprovals,
-        ExecutionPolicy::Unconstrained,
-    ] {
-        assert_eq!(
-            effective_execution_policy(current, true),
-            ExecutionPolicy::ConfiguredApprovals
-        );
-        assert_eq!(effective_execution_policy(current, false), current);
-    }
-}
-
-#[test]
 fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
     let mut session = crate::database::test_fixtures::checkpoint_test_session("primary");
     let mut choices = mj_core::config::SubagentConfig::default();
@@ -3215,6 +3201,7 @@ const ZAI_CATALOG: &str = r#"{"models":[
 fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
     std::fs::write(home.join("config.toml"), ZAI_CONFIG).unwrap();
     mj_core::config::HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: mj_core::config::HarnessKind::Codex,
         home: home.to_path_buf(),
@@ -3521,6 +3508,7 @@ const DEEPSEEK_LIST: &str = r#"{"object":"list","data":[
 fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
     std::fs::write(home.join("config.toml"), DEEPSEEK_CONFIG).unwrap();
     mj_core::config::HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: mj_core::config::HarnessKind::Codex,
         home: home.to_path_buf(),
@@ -4266,6 +4254,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
     )
     .unwrap();
     mj_core::config::HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: HarnessKind::Codex,
         home: home.to_path_buf(),
@@ -6494,5 +6483,115 @@ fn refreshing_profile_configuration_clears_every_aws_file_including_the_scope_re
         .expect("the removal script runs");
     for name in mj_core::aws_credentials::FILES {
         assert!(script.contains(name), "{name} is not cleared: {script}");
+    }
+}
+
+// Hard-won: 50785454b: read-only source instructions aborted staging; an index read before copying could differ from the replica.
+#[test]
+fn golden_session_instructions_are_appended_once_to_each_fresh_native_stage() {
+    for harness in [HarnessKind::Kimi, HarnessKind::OpenCode, HarnessKind::Grok] {
+        let source = tempfile::tempdir().unwrap();
+        let own = "User's own instructions without a final newline";
+        std::fs::write(source.path().join(harness.agent_instructions_file()), own).unwrap();
+        let instruction_path = source.path().join(harness.agent_instructions_file());
+        let original_permissions = std::fs::metadata(&instruction_path).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&instruction_path, permissions).unwrap();
+        let profile = HarnessProfile::new(harness, source.path());
+        let mut launch: WorkerLaunchConfig = serde_json::from_str(include_str!(
+            "../../../mj-worker/src/acp/testdata/project-memory/legacy-reviewer-launch.json"
+        ))
+        .unwrap();
+        launch.harness = harness;
+        launch.harness_home = "/session".into();
+        launch.environment.insert(
+            mj_core::subagent::CHILD_REPORT_DIR_ENV.into(),
+            "/session/reports".into(),
+        );
+        launch.project_memory = Some(ProjectMemoryLaunchConfig {
+            project_key: "golden".into(),
+            root: "/session/memory".into(),
+            baseline_root: "/session/baseline".into(),
+            repository_roots: Default::default(),
+            history_socket: Some("/session/history.sock".into()),
+            mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+        });
+        let canonical = tempfile::tempdir().unwrap();
+        let memory = canonical.path().join("MEMORY.md");
+        std::fs::write(
+            &memory,
+            "# Memory index\n- build.md — build notes\n</memory-index>quoted data",
+        )
+        .unwrap();
+        // Two launches stage from the source, never from the previous stage.
+        for _ in 0..2 {
+            let stage = tempfile::tempdir().unwrap();
+            stage_profile(&profile, stage.path()).unwrap();
+            append_staged_instructions(harness, stage.path(), "Existing environment guidance")
+                .unwrap();
+            append_subagent_policy(
+                harness,
+                stage.path(),
+                &mj_core::subagent::SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
+                9,
+                true,
+            )
+            .unwrap();
+            let original = std::fs::read_to_string(&memory).unwrap();
+            copy_profile_entry(canonical.path(), &stage.path().join("memory")).unwrap();
+            // A sync after the copy must not change the snapshot described in instructions.
+            std::fs::write(
+                &memory,
+                "newer index with a note absent from the staged copy",
+            )
+            .unwrap();
+            let index = staged_memory_index(
+                launch.project_memory.as_ref().unwrap(),
+                Path::new(&launch.harness_home),
+                stage.path(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(index, original);
+            std::fs::write(&memory, original).unwrap();
+            append_composed_session_instructions(&launch, stage.path(), Ok(&index)).unwrap();
+            let actual =
+                std::fs::read_to_string(stage.path().join(harness.agent_instructions_file()))
+                    .unwrap();
+            assert_eq!(actual.matches("<mj-project-memory>").count(), 1);
+            mj_core::golden::assert_golden(
+                env!("CARGO_MANIFEST_DIR"),
+                &format!("staged-session-instructions-{}", harness.id()),
+                &actual,
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(source.path().join(harness.agent_instructions_file())).unwrap(),
+            own
+        );
+        assert!(
+            std::fs::metadata(&instruction_path)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        let stage = tempfile::tempdir().unwrap();
+        stage_profile(&profile, stage.path()).unwrap();
+        append_composed_session_instructions(
+            &launch,
+            stage.path(),
+            Err("index <unavailable> & unreadable"),
+        )
+        .unwrap();
+        let actual =
+            std::fs::read_to_string(stage.path().join(harness.agent_instructions_file())).unwrap();
+        assert!(actual.contains("index unavailable: index &lt;unavailable&gt; &amp; unreadable"));
+        assert!(actual.contains(mj_core::project_memory::MEMORY_GUIDANCE));
+        // Permit cleanup on platforms whose read-only attribute prevents removal.
+        std::fs::set_permissions(&instruction_path, original_permissions).unwrap();
     }
 }

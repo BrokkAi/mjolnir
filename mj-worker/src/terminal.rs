@@ -227,7 +227,7 @@ impl TerminalRegistry {
             .context("client terminal stderr unavailable")?;
         let buffer = Arc::new(Mutex::new(TerminalBuffer::new(spawn.output_byte_limit)));
         let (exit_tx, exit_rx) = watch::channel(None);
-        let supervisor = tokio::spawn(supervise(
+        let supervisor = mj_core::runtime::spawn(supervise(
             terminal_id.clone(),
             child,
             stdout,
@@ -764,7 +764,7 @@ mod tests {
                     },
                     buffer: Arc::new(Mutex::new(TerminalBuffer::new(1024))),
                     exit: exit_rx,
-                    supervisor: tokio::spawn(std::future::pending::<()>()),
+                    supervisor: mj_core::runtime::spawn(std::future::pending::<()>()),
                 },
             );
     }

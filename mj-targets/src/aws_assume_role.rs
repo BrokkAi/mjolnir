@@ -343,7 +343,7 @@ async fn scope_key_without_blocking() -> Result<&'static [u8]> {
     if let Some(key) = SCOPE_KEY.get() {
         return Ok(key);
     }
-    tokio::task::spawn_blocking(scope_key)
+    mj_core::runtime::spawn_blocking(scope_key)
         .await
         .context("signing key load task stopped")?
 }

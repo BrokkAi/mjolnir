@@ -608,7 +608,12 @@ pub(super) fn viewer_snapshot_selected(
         let Some(quota) = quotas.get(&profile.id) else {
             continue;
         };
-        let quota = mj_controller::quota::surface_quota_report(quota);
+        let mut quota = mj_controller::quota::surface_quota_report(quota);
+        // The viewer reads stored reports, which keep every pool; show the
+        // pools the profile uses, as the published quota does.
+        if let Ok(config) = controller.config.named_profile(&profile.id) {
+            quota.retain_antigravity_pools(&config.antigravity_pools());
+        }
         let master_weekly = quota.weekly_window();
         let fable_remaining = master_weekly.and_then(|master| {
             master.remaining_percent?;
@@ -628,7 +633,7 @@ pub(super) fn viewer_snapshot_selected(
                 .map(|window| crate::server::ViewerQuotaWindow {
                     label: window.label.clone(),
                     pool: (quota.harness == mj_core::config::HarnessKind::Antigravity)
-                        .then(|| mj_client::quota::AntigravityQuotaPool::of_window(window))
+                        .then(|| mj_client::quota::antigravity_pool_of_window(window))
                         .flatten()
                         .map(|pool| pool.label().to_owned()),
                     resets_at_epoch_seconds: window.resets_at_epoch_seconds,
@@ -1077,7 +1082,7 @@ pub(super) async fn load_materialized_activity(
         .keys()
         .cloned()
         .collect::<Vec<_>>();
-    tokio::task::spawn_blocking(move || {
+    mj_core::runtime::spawn_blocking(move || {
         let activity_by_session = mj_controller::database::load_materialized_activity()?;
         Ok(session_ids
             .into_iter()

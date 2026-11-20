@@ -480,7 +480,7 @@ impl Controller {
             None
         };
         #[cfg(any(test, feature = "test-hooks", feature = "test-support"))]
-        tokio::task::spawn_blocking(|| {
+        mj_core::runtime::spawn_blocking(|| {
             mj_core::test_hooks::reach_test_hook("adoption_cut_before_install")
         })
         .await
@@ -507,10 +507,10 @@ impl Controller {
             biased;
             _ = control.cancelled.cancelled() => bail!("adoption cancelled before configuration validation"),
             _ = crate::upgrade::gate().wait_until_draining() => bail!("daemon handoff began before configuration validation"),
-            config = tokio::task::spawn_blocking(mj_core::config::Config::load_locked) => config.context("read current adoption configuration")??,
+            config = mj_core::runtime::spawn_blocking(mj_core::config::Config::load_locked) => config.context("read current adoption configuration")??,
         };
         let durable_id = session_id.to_owned();
-        let already_installed = tokio::task::spawn_blocking(move || {
+        let already_installed = mj_core::runtime::spawn_blocking(move || {
             crate::database::read_durable_session_record(&durable_id)
         })
         .await

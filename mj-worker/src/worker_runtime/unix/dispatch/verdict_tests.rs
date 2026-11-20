@@ -41,7 +41,7 @@ async fn completed_turn_response(
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let (requested_tx, mut requested_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(async move {
+    let server = mj_core::runtime::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = BufReader::new(stream);
         let mut length = 0;
@@ -177,7 +177,7 @@ async fn completed_turn_response(
         .with_env_filter(crate::DEFAULT_WORKER_LOG_FILTER)
         .with_writer(move || log.try_clone().unwrap())
         .finish();
-    let coordinator = tokio::spawn(
+    let coordinator = mj_core::runtime::spawn(
         run_relay_coordinator_with_verdict(
             relay.clone(),
             events_rx,

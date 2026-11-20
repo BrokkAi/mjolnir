@@ -94,6 +94,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
     )
     .expect("write Codex configuration");
     HarnessProfile {
+        third_party_models: true,
         enabled: true,
         kind: HarnessKind::Codex,
         home: home.to_path_buf(),
@@ -775,16 +776,25 @@ fn obsolete_startup_settings_are_ignored_and_removed_when_saving() {
 fn retired_stopped_session_filters_load_and_are_dropped_on_save() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    let legacy =
-        "version = 6\nshow_stopped_sessions = true\n\n[advanced]\nshow_stopped_sessions = true\n";
-    fs::write(&path, legacy).unwrap();
-    let config = Config::load_from(&path).unwrap();
-    assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
-
-    config.save_to(&path).unwrap();
-    let body = fs::read_to_string(&path).unwrap();
-    assert!(!body.contains("show_stopped_sessions"), "{body}");
-    assert_eq!(Config::load_from(&path).unwrap(), config);
+    for runtime in ["auto", "host", "podman", "docker"] {
+        let legacy = format!(
+            "version = 6\nshow_stopped_sessions = true\n\n[advanced]\nshow_stopped_sessions = true\n\n[quota]\nruntime = \"{runtime}\"\n"
+        );
+        fs::write(&path, &legacy).unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+        config.save_to(&path).unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("show_stopped_sessions"), "{body}");
+        let saved: toml::Value = toml::from_str(&body).unwrap();
+        assert!(
+            saved
+                .get("quota")
+                .is_none_or(|quota| quota.get("runtime").is_none()),
+            "{body}"
+        );
+        assert_eq!(Config::load_from(&path).unwrap(), config);
+    }
 }
 
 #[test]
@@ -884,7 +894,7 @@ fn every_harness_is_pointed_at_its_staged_home() {
     for kind in HarnessKind::ALL {
         let mut environment = BTreeMap::new();
         let home = Path::new("/private/session").join(kind.id());
-        kind.configure_home_environment(&home, &mut environment);
+        kind.configure_staged_home_environment(&home, &mut environment);
         assert!(environment.contains_key(kind.home_env()), "{kind:?}");
         assert_eq!(
             kind.home_from_environment(&environment[kind.home_env()]),
@@ -913,12 +923,14 @@ fn only_claude_on_macos_keeps_its_own_home_for_profile_commands() {
     assert_eq!(linux["CLAUDE_CONFIG_DIR"], home.to_string_lossy());
 
     for kind in HarnessKind::ALL {
-        let mut environment = BTreeMap::new();
+        let mut environment =
+            BTreeMap::from([("OPENCODE_CONFIG_DIR".into(), "/host/provider-config".into())]);
         kind.configure_profile_home_environment(
             Path::new("/home/me/muse"),
             HarnessHost::MacOs,
             &mut environment,
         );
+        assert_eq!(environment["OPENCODE_CONFIG_DIR"], "/host/provider-config");
         assert_eq!(
             environment.contains_key(kind.home_env()),
             kind != HarnessKind::Claude,
@@ -3704,4 +3716,143 @@ fn an_aws_role_table_on_a_profile_that_cannot_use_it_does_not_refuse_sessions() 
     });
     assert_ne!(profile.auth_scheme(), AuthScheme::AwsCredentialChain);
     profile.ensure_ready("claude").unwrap();
+}
+
+/// Real harness configuration must attribute the quota source, even when
+/// model requests or the local provider table name point somewhere else.
+// Hard-won: quota pooling attributed Anthropic OAuth allowance to endpoint overrides.
+#[test]
+fn quota_provider_reads_harness_configuration() {
+    let home = tempfile::tempdir().expect("profile home");
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model_provider = 'openai'\n",
+    )
+    .unwrap();
+    std::fs::write(home.path().join("deep.config.toml"), "model_provider = 'openai-compatible'\n[model_providers.openai-compatible]\nname = 'Proxy'\nbase_url = 'https://api.deepseek.com/v1'\nwire_api = 'responses'\nenv_key = 'DEEPSEEK_API_KEY'\n").unwrap();
+    let mut profile = HarnessProfile::new(HarnessKind::Codex, home.path());
+    profile.codex_profile = Some("deep".into());
+    assert_eq!(profile.quota_provider(), QuotaProvider::DeepSeek);
+    profile.codex_profile = None;
+    assert_eq!(profile.quota_provider(), QuotaProvider::OpenAI);
+    profile.environment.insert(
+        "OPENAI_BASE_URL".into(),
+        "https://api.deepseek.com/v1".into(),
+    );
+    std::fs::write(
+        home.path().join("auth.json"),
+        r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"access_token":"a"}}"#,
+    )
+    .unwrap();
+    assert_eq!(profile.quota_provider(), QuotaProvider::OpenAI);
+    std::fs::write(
+        home.path().join("auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test"}"#,
+    )
+    .unwrap();
+    // Collection still asks the ChatGPT login for its allowance, even though
+    // API-key model requests can follow OPENAI_BASE_URL to DeepSeek.
+    assert_eq!(
+        CodexQuotaSource::of_profile(&profile),
+        CodexQuotaSource::ChatGptLogin
+    );
+    assert_eq!(profile.quota_provider(), QuotaProvider::OpenAI);
+
+    // Custom table names cannot split one service's quota or impersonate another.
+    for (id, endpoint) in [
+        ("anthropic", "https://api.z.ai/api/coding/paas/v4"),
+        ("another-table", "https://open.bigmodel.cn/api/paas/v4"),
+    ] {
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "model_provider = '{id}'\n[model_providers.{id}]\nbase_url = '{endpoint}'\nwire_api = 'responses'\nenv_key = 'ZAI_API_KEY'\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(profile.quota_provider(), QuotaProvider::Zai);
+    }
+
+    std::fs::write(
+        home.path().join("opencode.jsonc"),
+        r#"{
+        // OpenCode allows comments and trailing commas.
+        "model": "local-table/some-model",
+        "provider": {"local-table": {"options": {"baseURL": "https://api.moonshot.ai/v1"}}},
+    }"#,
+    )
+    .unwrap();
+    let profile = HarnessProfile::new(HarnessKind::OpenCode, home.path());
+    assert_eq!(profile.quota_provider(), QuotaProvider::Moonshot);
+
+    std::fs::write(
+        home.path().join(".credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"test-oauth","refreshToken":"test-refresh","expiresAt":4102444800000,"subscriptionType":"max"}}"#,
+    )
+    .unwrap();
+    let mut profile = HarnessProfile::new(HarnessKind::Claude, home.path());
+    profile.environment.insert(
+        "ANTHROPIC_BASE_URL".into(),
+        "https://api.deepseek.com/anthropic".into(),
+    );
+    assert_eq!(profile.quota_provider(), QuotaProvider::Anthropic);
+    // Claude quota comes from the same OAuth login even through a model proxy.
+    profile.environment.insert(
+        "ANTHROPIC_BASE_URL".into(),
+        "https://openrouter.ai/api".into(),
+    );
+    assert_eq!(profile.quota_provider(), QuotaProvider::Anthropic);
+    profile
+        .environment
+        .insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
+    assert_eq!(profile.auth_scheme(), AuthScheme::AwsCredentialChain);
+    assert_eq!(profile.quota_provider(), QuotaProvider::Anthropic);
+
+    let mut profile = HarnessProfile::new(HarnessKind::Muse, home.path());
+    profile
+        .environment
+        .insert("TBH_MINT_BASE_URL".into(), "https://api.meta.ai".into());
+    profile
+        .environment
+        .insert("TBH_AUTH_BASE_URL".into(), "https://auth.meta.com".into());
+    assert_eq!(profile.quota_provider(), QuotaProvider::Meta);
+    assert_eq!(profile.quota_provider().display_name(), "Meta");
+    // Only the mint endpoint supplies quota; the OAuth endpoint renews tokens.
+    profile.environment.insert(
+        "TBH_AUTH_BASE_URL".into(),
+        "https://login.example.test".into(),
+    );
+    assert_eq!(profile.quota_provider(), QuotaProvider::Meta);
+    profile.environment.insert(
+        "TBH_MINT_BASE_URL".into(),
+        "https://mint.example.test".into(),
+    );
+    assert_eq!(
+        profile.quota_provider(),
+        QuotaProvider::Other("mint.example.test".into())
+    );
+
+    // Meta deployments group together across harnesses and local table names.
+    let profile = HarnessProfile::new(HarnessKind::OpenCode, home.path());
+    for endpoint in [
+        "https://api.meta.ai/v1",
+        "https://auth.meta.com/oidc/device/token/",
+        "https://openrouter.ai/api",
+    ] {
+        std::fs::write(
+            home.path().join("opencode.jsonc"),
+            serde_json::json!({
+                "model": "local-table/some-model",
+                "provider": {"local-table": {"options": {"baseURL": endpoint}}},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let expected = if endpoint.contains("openrouter") {
+            QuotaProvider::Other("openrouter.ai".into())
+        } else {
+            QuotaProvider::Meta
+        };
+        assert_eq!(profile.quota_provider(), expected);
+    }
 }

@@ -18,7 +18,7 @@ async fn open_session(
     let (client, bridge) = tokio::io::duplex(64 * 1024);
     let accepts_directories =
         initialize["agentCapabilities"]["sessionCapabilities"]["additionalDirectories"].is_object();
-    let bridge = tokio::spawn(async move {
+    let bridge = mj_core::runtime::spawn(async move {
         let (read, mut write) = tokio::io::split(bridge);
         let mut lines = BufReader::new(read).lines();
         let mut seen = Vec::new();
@@ -56,7 +56,7 @@ async fn open_session(
     let transport = ByteStreams::new(write.compat_write(), read.compat());
     let (requests, mut request_rx) = mpsc::channel(4);
     let (events, mut event_rx) = mpsc::channel(32);
-    let driver = tokio::spawn(async move {
+    let driver = mj_core::runtime::spawn(async move {
         drive(
             transport,
             spec,

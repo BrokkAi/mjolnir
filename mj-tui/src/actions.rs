@@ -28,6 +28,7 @@ pub enum CommandId {
     NotificationDefault,
     NotificationClear,
     NotificationSkip,
+    NotificationIgnoreSession,
     NotificationPreviousMessage,
     NotificationNextMessage,
     NotificationClearImportant,
@@ -81,6 +82,7 @@ pub enum CommandId {
     TargetActions,
     TargetDisks,
     EditProfile,
+    ToggleQuotaPool,
     Refresh,
     OpenConfig,
     ManageProfiles,
@@ -631,7 +633,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: footer_word!("send"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: notification_available,
+        available: notification_reply_available,
     },
     CommandSpec {
         id: CommandId::NotificationRestore,
@@ -655,7 +657,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: footer_word!("send/session"),
         footer_group: FooterGroup::Pane,
         footer_rank: 1,
-        available: notification_available,
+        available: notification_reply_available,
     },
     CommandSpec {
         id: CommandId::NotificationClear,
@@ -677,6 +679,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         pane_keys: &[KeyHint::alt(KeyCode::Char('s'), "Alt+s")],
         action: None,
         footer: footer_word!("skip"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationIgnoreSession,
+        label: "Ignore Session",
+        description: "Skip this card and ignore all notifications from its session.",
+        scope: Scope::Notifications,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: notification_available,
@@ -731,7 +745,13 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: footer_word!("scroll"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: notification_available,
+        available: |dashboard| {
+            if dashboard.notification_form_owns_keyboard() {
+                Availability::Hidden
+            } else {
+                notification_available(dashboard)
+            }
+        },
     },
     CommandSpec {
         id: CommandId::NotificationScrollDown,
@@ -743,7 +763,13 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: notification_available,
+        available: |dashboard| {
+            if dashboard.notification_form_owns_keyboard() {
+                Availability::Hidden
+            } else {
+                notification_available(dashboard)
+            }
+        },
     },
     CommandSpec {
         id: CommandId::ChangeGoSetup,
@@ -1379,14 +1405,23 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: targets_visible,
     },
     CommandSpec {
+        id: CommandId::ToggleQuotaPool,
+        label: "Expand quota pool",
+        description: "Expand or collapse the selected provider pool's next 24 hours.",
+        scope: Scope::Quota,
+        pane_keys: &[KeyHint::plain(KeyCode::Enter, "Enter")],
+        action: None,
+        footer: footer_word!("expand/collapse"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: profiles_present,
+    },
+    CommandSpec {
         id: CommandId::EditProfile,
         label: "Rename profile",
         description: "Rename the selected profile's configuration id.",
         scope: Scope::Quota,
-        pane_keys: &[
-            KeyHint::plain(KeyCode::Enter, "Enter"),
-            KeyHint::plain(KeyCode::Char('e'), "e"),
-        ],
+        pane_keys: &[KeyHint::plain(KeyCode::Char('e'), "e")],
         action: None,
         footer: footer_word!("rename profile"),
         footer_group: FooterGroup::Pane,
@@ -1450,7 +1485,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Pane,
         pane_keys: &[KeyHint::plain(KeyCode::Tab, "Tab")],
         action: Some(KeyAction::NextPane),
-        footer: footer_word!("pane"),
+        footer: focus_cycle_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 1,
         available: always_ready,
@@ -1761,8 +1796,20 @@ fn notification_available(dashboard: &DashboardState) -> Availability {
         Availability::Ready
     }
 }
+fn focus_cycle_footer(dashboard: &DashboardState) -> Option<String> {
+    (!dashboard.notification_form_owns_keyboard()).then(|| "pane".to_owned())
+}
+fn notification_reply_available(dashboard: &DashboardState) -> Availability {
+    if dashboard.notification_form_session().is_some() {
+        Availability::Hidden
+    } else {
+        notification_available(dashboard)
+    }
+}
 fn notification_restore_available(dashboard: &DashboardState) -> Availability {
-    if dashboard.notification_has_recoverable_reply() {
+    if dashboard.notification_form_session().is_none()
+        && dashboard.notification_has_recoverable_reply()
+    {
         Availability::Ready
     } else {
         Availability::Hidden
@@ -2135,6 +2182,9 @@ impl DashboardState {
             | CommandId::NotificationNextMessage => self.notification_action(id),
             CommandId::NotificationClear => self.notification_clear(),
             CommandId::NotificationSkip => self.notification_skip(),
+            CommandId::NotificationIgnoreSession => {
+                self.notification_action(CommandId::NotificationIgnoreSession)
+            }
             CommandId::NotificationClearImportant => self.notification_clear_important(),
             CommandId::NotificationScrollUp => {
                 self.scroll_notification(-1);
@@ -2288,6 +2338,12 @@ impl DashboardState {
                 self.begin_capacity_disks_menu(self.capacity_index);
                 DashboardAction::None
             }
+            CommandId::ToggleQuotaPool => {
+                if self.pane_size(crate::SupportPane::Quota) != crate::PaneSize::Minimized {
+                    self.toggle_quota_pool();
+                }
+                DashboardAction::None
+            }
             CommandId::EditProfile => {
                 if self.pane_size(crate::SupportPane::Quota) == crate::PaneSize::Minimized {
                     return DashboardAction::None;
@@ -2296,6 +2352,7 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::Refresh => {
+                self.quota_providers.request_refresh();
                 // Refreshing checks again what is available. It is allowed
                 // through an open modal (see `command_allowed_now`), so an
                 // open picker gets fresh answers.

@@ -259,8 +259,14 @@ fn github_token_is_inherited_only_by_managed_containers() {
     let mut bare = targets::TargetTemplate::LocalBare;
     assert!(!configure_github_token_environment(&mut bare));
     assert_eq!(bare, targets::TargetTemplate::LocalBare);
-    assert_eq!(usable_github_token("  token-value\n"), Some("token-value"));
-    assert_eq!(usable_github_token("not a token"), None);
+    assert_eq!(
+        crate::github_credential::usable_github_token("  token-value\n"),
+        Some("token-value")
+    );
+    assert_eq!(
+        crate::github_credential::usable_github_token("not a token"),
+        None
+    );
 
     let mut bundle = targets::ProjectBundleSpec {
         primary: "app".into(),

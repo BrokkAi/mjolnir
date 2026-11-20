@@ -98,12 +98,12 @@ struct SessionMailbox {
 impl SessionMailbox {
     fn new() -> Self {
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<SaveJob>(64);
-        let worker = AbortOnDropHandle::new(tokio::spawn(async move {
+        let worker = AbortOnDropHandle::new(mj_core::runtime::spawn(async move {
             while let Some(work) = receiver.recv().await {
                 work.await;
             }
         }));
-        let worker = tokio::spawn(async move {
+        let worker = mj_core::runtime::spawn(async move {
             if let Err(error) = worker.await
                 && !error.is_cancelled()
             {

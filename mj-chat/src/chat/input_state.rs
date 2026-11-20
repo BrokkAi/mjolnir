@@ -30,11 +30,11 @@ pub(super) const IMAGE_PASTE_UNSUPPORTED_NOTICE: &str =
     "This agent does not accept images; only text can be pasted";
 pub(super) const IMAGE_CAPABILITY_NOTICE: &str = "This agent has not advertised image support; paste text or remove image markers before sending";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum ClipboardTarget {
     Composer,
     Search,
-    Answer(String),
+    Answer(Box<super::ElicitationIdentity>),
     Unavailable,
 }
 
@@ -171,7 +171,7 @@ impl ChatState {
     }
 
     pub(crate) fn handle_clipboard_content(&mut self, content: ClipboardContent) {
-        if self.clipboard_target() == ClipboardTarget::Unavailable {
+        if self.clipboard_target() == ClipboardTarget::Unavailable && self.elicitation.is_none() {
             return;
         }
         if self.elicitation.is_some() {
@@ -312,11 +312,18 @@ impl ChatState {
         }
     }
 
+    pub(super) fn elicitation_clipboard_target(&self) -> ClipboardTarget {
+        self.elicitation_identity()
+            .map_or(ClipboardTarget::Unavailable, |identity| {
+                ClipboardTarget::Answer(Box::new(identity))
+            })
+    }
+
     pub(super) fn clipboard_target(&self) -> ClipboardTarget {
-        if self.earlier.is_some() {
+        if self.earlier_reader_has_focus() {
             ClipboardTarget::Unavailable
-        } else if let Some(dialog) = &self.elicitation {
-            ClipboardTarget::Answer(dialog.request().id.clone())
+        } else if self.elicitation.is_some() {
+            self.elicitation_clipboard_target()
         } else if self.turn_control_dialog_open
             || self.task_dialog_open
             || self.config_picker_active()

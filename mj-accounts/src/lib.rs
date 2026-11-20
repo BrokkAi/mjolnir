@@ -35,6 +35,6 @@ pub mod profile_health;
 pub mod profile_login;
 pub mod profile_scheduler;
 pub mod quota;
-pub mod quota_runtime;
+mod quota_harness;
 pub mod review_selection;
 pub mod zai_usage;

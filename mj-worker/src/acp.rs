@@ -6,7 +6,9 @@
 
 mod air_tasks;
 pub(crate) mod drive;
+mod instructions;
 mod launch;
+pub use instructions::InstructionRole;
 mod native_agents;
 mod opencode_logins;
 mod operator_away;
@@ -539,7 +541,7 @@ async fn run_bridge(
     if spec.harness.keeps_logins_in_database() {
         let environment = spec.environment.clone();
         spec.imported_logins = Some(
-            tokio::task::spawn_blocking(move || {
+            mj_core::runtime::spawn_blocking(move || {
                 opencode_logins::ImportedLogins::prepare(&environment)
             })
             .await
@@ -550,7 +552,7 @@ async fn run_bridge(
     // grants at startup.
     {
         let staged = spec.clone();
-        tokio::task::spawn_blocking(move || stage_antigravity_grants(&staged))
+        mj_core::runtime::spawn_blocking(move || stage_antigravity_grants(&staged))
             .await
             .context("stage Antigravity permission grants task failed")??;
     }
@@ -594,7 +596,7 @@ async fn run_bridge(
         .stderr
         .take()
         .context("ACP bridge stderr unavailable")?;
-    let stderr_task = tokio::spawn(read_stderr_tail(stderr));
+    let stderr_task = mj_core::runtime::spawn(read_stderr_tail(stderr));
     let transport = ByteStreams::new(stdin.compat_write(), skip_stdout_preamble(stdout).compat());
 
     let terminals = TerminalRegistry::new()?;
@@ -892,7 +894,7 @@ where
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     let (reader, mut writer) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(async move {
+    mj_core::runtime::spawn(async move {
         let mut stdout = tokio::io::BufReader::new(stdout);
         let mut line = Vec::new();
         loop {

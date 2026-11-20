@@ -823,7 +823,10 @@ impl DurableRelay {
                     NativeSessionUse::Unknown
                 });
                 for queued in restored.queued_prompts {
-                    validate_identifier(&queued.command_id, "restored queued command ID")?;
+                    anyhow::ensure!(
+                        mj_core::continuation::valid_command_id(&queued.command_id),
+                        "invalid restored queued command ID"
+                    );
                     if queued.content.is_empty() {
                         bail!("restored queued command {} is empty", queued.command_id);
                     }

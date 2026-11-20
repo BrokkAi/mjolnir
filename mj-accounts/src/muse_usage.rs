@@ -7,6 +7,10 @@
 //! The daemon keeps that login fresh itself, as it does for Kimi: a token near
 //! its expiry, or one the endpoint rejects, is refreshed under the lock Muse
 //! takes for `auth.json`, so the quota does not depend on Muse having run.
+//!
+//! While no five-hour window is open, Meta reports no usage at all, weekly
+//! included. That idle state is a reading of its own ([`MuseUsage::Idle`]);
+//! [`idle_windows`] carries the weekly figure across it from stored probes.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,17 +22,12 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
+use mj_core::config::MuseQuotaEndpoints as Endpoints;
 use mj_core::credentials::MAX_CREDENTIAL_BYTES;
 
-const MINT_BASE_URL_ENV: &str = "TBH_MINT_BASE_URL";
-const DEFAULT_MINT_BASE_URL: &str = "https://api.meta.ai";
 const MINT_PATH: &str = "/muse-code/key";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Muse's own override for its OAuth host, honoured the same way as the mint
-/// override so a profile's environment points both at one deployment.
-const AUTH_BASE_URL_ENV: &str = "TBH_AUTH_BASE_URL";
-const DEFAULT_AUTH_BASE_URL: &str = "https://auth.meta.com";
 /// The token endpoint and public client id `muse login` uses (observed on the
 /// wire from Muse 1.4.12). A refresh is the standard `refresh_token` grant
 /// against the same endpoint.
@@ -60,11 +59,23 @@ pub struct MuseUsageWindow {
     pub resets_at: Option<i64>,
 }
 
-/// One usage reading, plus a short note when the windows are the last good
-/// reading served while Meta is rate limiting this account.
+/// What Meta's key endpoint said about the subscription's usage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MuseUsage {
+    /// A five-hour window is open, and Meta reported the windows it has.
+    Open(Vec<MuseUsageWindow>),
+    /// The subscription is active and no five-hour window is open. Meta then
+    /// leaves `subs_usage` out entirely, the weekly window included, until the
+    /// next request opens a window. Muse's own `muse usage` reports the same
+    /// state as `server_sent_no_usage`.
+    Idle,
+}
+
+/// One usage reading, plus a short note when it is the last good reading
+/// served while Meta is rate limiting this account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MuseUsageReport {
-    pub windows: Vec<MuseUsageWindow>,
+    pub usage: MuseUsage,
     pub note: Option<String>,
 }
 
@@ -84,7 +95,7 @@ impl std::error::Error for RateLimited {}
 
 #[derive(Debug, Default)]
 struct GateEntry {
-    windows: Option<Vec<MuseUsageWindow>>,
+    reading: Option<MuseUsage>,
     fetched_at: Option<SystemTime>,
     next_allowed_at: Option<SystemTime>,
     consecutive_rate_limits: u32,
@@ -110,29 +121,6 @@ pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result
     .await
 }
 
-/// Where one profile's Muse reaches Meta: the mint endpoint that reports
-/// usage, and the OAuth host that refreshes the login.
-struct Endpoints {
-    mint: String,
-    auth: String,
-}
-
-impl Endpoints {
-    fn of(environment: &HashMap<String, String>) -> Self {
-        let configured = |name: &str, default: &str| {
-            environment
-                .get(name)
-                .cloned()
-                .or_else(|| std::env::var(name).ok())
-                .unwrap_or_else(|| default.to_owned())
-        };
-        Self {
-            mint: configured(MINT_BASE_URL_ENV, DEFAULT_MINT_BASE_URL),
-            auth: configured(AUTH_BASE_URL_ENV, DEFAULT_AUTH_BASE_URL),
-        }
-    }
-}
-
 /// The rate-limit and minimum-interval gate above the network step. `now` is
 /// supplied by the caller so tests can drive the clock without sleeping.
 async fn query_gated(
@@ -147,18 +135,15 @@ async fn query_gated(
         return Ok(report);
     }
     match query_with_timeout(home, endpoints, timeout).await {
-        Ok(windows) => {
+        Ok(usage) => {
             let mut entries = gate.lock().unwrap_or_else(|error| error.into_inner());
             let entry = entries.entry(key).or_default();
-            entry.windows = Some(windows.clone());
+            entry.reading = Some(usage.clone());
             entry.fetched_at = Some(now);
             entry.next_allowed_at = None;
             entry.consecutive_rate_limits = 0;
             entry.rate_limit_reason = None;
-            Ok(MuseUsageReport {
-                windows,
-                note: None,
-            })
+            Ok(MuseUsageReport { usage, note: None })
         }
         Err(error) => {
             let Some(rate_limited) = error.downcast_ref::<RateLimited>() else {
@@ -175,9 +160,9 @@ async fn query_gated(
             entry.consecutive_rate_limits = entry.consecutive_rate_limits.saturating_add(1);
             entry.next_allowed_at = Some(next_allowed_at);
             entry.rate_limit_reason = Some(rate_limit_reason(next_allowed_at));
-            match entry.windows.clone() {
-                Some(windows) => Ok(MuseUsageReport {
-                    windows,
+            match entry.reading.clone() {
+                Some(usage) => Ok(MuseUsageReport {
+                    usage,
                     note: Some(RATE_LIMITED_PREFIX.to_owned()),
                 }),
                 None => Err(anyhow::anyhow!(
@@ -196,9 +181,9 @@ fn cached_report(gate: &Gate, key: &Path, now: SystemTime) -> Result<Option<Muse
         return Ok(None);
     };
     if entry.next_allowed_at.is_some_and(|allowed| now < allowed) {
-        return match entry.windows.clone() {
-            Some(windows) => Ok(Some(MuseUsageReport {
-                windows,
+        return match entry.reading.clone() {
+            Some(usage) => Ok(Some(MuseUsageReport {
+                usage,
                 note: Some(RATE_LIMITED_PREFIX.to_owned()),
             })),
             None => Err(anyhow::anyhow!(
@@ -210,11 +195,8 @@ fn cached_report(gate: &Gate, key: &Path, now: SystemTime) -> Result<Option<Muse
         .fetched_at
         .and_then(|fetched_at| now.duration_since(fetched_at).ok())
         .is_some_and(|age| age < MIN_REFRESH_INTERVAL);
-    match entry.windows.clone().filter(|_| fresh) {
-        Some(windows) => Ok(Some(MuseUsageReport {
-            windows,
-            note: None,
-        })),
+    match entry.reading.clone().filter(|_| fresh) {
+        Some(usage) => Ok(Some(MuseUsageReport { usage, note: None })),
         None => Ok(None),
     }
 }
@@ -249,7 +231,7 @@ async fn query_with_timeout(
     home: &Path,
     endpoints: &Endpoints,
     timeout: Duration,
-) -> Result<Vec<MuseUsageWindow>> {
+) -> Result<MuseUsage> {
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
@@ -287,11 +269,7 @@ impl std::fmt::Display for LoginRejected {
 
 impl std::error::Error for LoginRejected {}
 
-async fn mint(
-    client: &reqwest::Client,
-    base_url: &str,
-    token: &str,
-) -> Result<Vec<MuseUsageWindow>> {
+async fn mint(client: &reqwest::Client, base_url: &str, token: &str) -> Result<MuseUsage> {
     let url = format!("{}{}", base_url.trim_end_matches('/'), MINT_PATH);
     let response = client
         .post(url)
@@ -557,18 +535,21 @@ async fn read_bounded_body(response: reqwest::Response) -> Result<Vec<u8>> {
 /// Parse the native endpoint's subscription usage object.
 ///
 /// A window is shown only when the endpoint supplied the fields needed to
-/// describe it. In particular, absent usage never becomes a fabricated 100%
-/// allowance. Invalid percentages are rejected so corrupt data cannot look
-/// like a healthy quota.
-fn parse(payload: &Value) -> Result<Vec<MuseUsageWindow>> {
-    let Some(subs_usage_value) = payload.get("subs_usage") else {
-        bail!("Muse subscription usage is unavailable")
-    };
-    let Some(subs_usage) = subs_usage_value.as_object() else {
-        if subs_usage_value.is_null() {
-            bail!("Muse subscription usage is unavailable")
+/// describe it. Absent usage on an active subscription is the idle state, not
+/// a reading: [`idle_windows`] decides what can still be said about it.
+/// Invalid percentages are rejected so corrupt data cannot look like a healthy
+/// quota.
+fn parse(payload: &Value) -> Result<MuseUsage> {
+    let subs_usage = match payload.get("subs_usage") {
+        None | Some(Value::Null) => {
+            return match payload.get("is_subs_active").and_then(Value::as_bool) {
+                Some(true) => Ok(MuseUsage::Idle),
+                Some(false) => bail!("Muse reports no active subscription"),
+                None => bail!("Muse subscription usage is unavailable"),
+            };
         }
-        bail!("Muse subscription usage is malformed")
+        Some(Value::Object(subs_usage)) => subs_usage,
+        Some(_) => bail!("Muse subscription usage is malformed"),
     };
     let mut windows = Vec::new();
     if let Some(weekly) = optional_window(subs_usage, "weekly")? {
@@ -593,7 +574,68 @@ fn parse(payload: &Value) -> Result<Vec<MuseUsageWindow>> {
     if windows.is_empty() {
         bail!("Muse subscription usage is unavailable")
     }
-    Ok(windows)
+    Ok(MuseUsage::Open(windows))
+}
+
+/// Meta's short usage window: its plans state the allowance per five hours,
+/// and the endpoint reports `window_duration_mins: 300`.
+const USAGE_WINDOW: Duration = Duration::from_secs(5 * 60 * 60);
+
+/// How recent the last observed probe must be for an idle reading to keep
+/// its weekly figure. A probe's time can trail Meta's answer it carries by up
+/// to [`MIN_REFRESH_INTERVAL`] (the gate serves a cached answer that long), so
+/// that much is taken off the window to keep the bound exact.
+const IDLE_CONTINUITY: Duration =
+    Duration::from_secs(USAGE_WINDOW.as_secs() - MIN_REFRESH_INTERVAL.as_secs());
+
+/// The earliest probe [`idle_windows`] can use for an idle reading at `now`.
+pub(crate) fn idle_history_since(now: u64) -> u64 {
+    now.saturating_sub(IDLE_CONTINUITY.as_secs())
+}
+
+/// What an idle reading at `now` can show, from this profile's earlier probes
+/// (newest first).
+///
+/// Meta withholds the weekly window while idle, but the week cannot move
+/// without a request, and a request opens a five-hour window that Meta reports
+/// until it closes. So when the last observed probe is recent enough that no
+/// window can have opened and closed since, its weekly figure still holds.
+/// Past its reset, the week is untouched: full, next reset unknown. Without a
+/// recent enough probe the week is unknown and nothing is shown. The
+/// five-hour window is left out, as Claude leaves out an idle one.
+///
+/// A probe served from the gate during a rate limit observed nothing, and a
+/// failed one neither, so neither counts.
+pub(crate) fn idle_windows(
+    history: &[crate::quota::ProfileQuota],
+    now: u64,
+) -> Vec<crate::quota::QuotaWindow> {
+    let Some(observed) = history.iter().find(|report| {
+        report.error.is_none()
+            && !report
+                .extra
+                .as_deref()
+                .is_some_and(|note| note.starts_with(RATE_LIMITED_PREFIX))
+    }) else {
+        return Vec::new();
+    };
+    if now.saturating_sub(observed.refreshed_at_epoch_seconds) >= IDLE_CONTINUITY.as_secs() {
+        return Vec::new();
+    }
+    let Some(week) = observed.weekly_window() else {
+        return Vec::new();
+    };
+    let mut week = week.clone();
+    if week
+        .resets_at_epoch_seconds
+        .is_some_and(|reset| u64::try_from(reset).map_or(true, |reset| reset <= now))
+    {
+        week.remaining_percent = Some(100);
+        week.used = None;
+        week.resets = None;
+        week.resets_at_epoch_seconds = None;
+    }
+    vec![week]
 }
 
 fn optional_window<'a>(
@@ -692,7 +734,7 @@ mod tests {
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
+        let server = mj_core::runtime::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}"), server)
@@ -724,7 +766,9 @@ mod tests {
                 "window": null
             }
         });
-        let windows = parse(&payload).unwrap();
+        let MuseUsage::Open(windows) = parse(&payload).unwrap() else {
+            panic!("usage was reported")
+        };
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "Week");
         assert_eq!(windows[0].remaining_percent, 75);
@@ -787,8 +831,8 @@ mod tests {
         let second = tempfile::tempdir().unwrap();
         write_credentials(first.path(), "first-token");
         write_credentials(second.path(), "second-token");
-        let first_environment = HashMap::from([(MINT_BASE_URL_ENV.to_owned(), base_url.clone())]);
-        let second_environment = HashMap::from([(MINT_BASE_URL_ENV.to_owned(), base_url)]);
+        let first_environment = HashMap::from([("TBH_MINT_BASE_URL".to_owned(), base_url.clone())]);
+        let second_environment = HashMap::from([("TBH_MINT_BASE_URL".to_owned(), base_url)]);
 
         query(first.path(), &first_environment).await.unwrap();
         query(second.path(), &second_environment).await.unwrap();
@@ -812,6 +856,13 @@ mod tests {
         }
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    fn open(usage: &MuseUsage) -> &[MuseUsageWindow] {
+        match usage {
+            MuseUsage::Open(windows) => windows,
+            MuseUsage::Idle => panic!("expected an open window"),
+        }
     }
 
     fn usage_body() -> String {
@@ -843,7 +894,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(report.windows[0].remaining_percent, 99);
+        assert_eq!(open(&report.usage)[0].remaining_percent, 99);
         assert_eq!(report.note, None);
 
         // A second caller inside the minimum interval reuses the reading.
@@ -871,7 +922,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(report.windows[0].remaining_percent, 99);
+        assert_eq!(open(&report.usage)[0].remaining_percent, 99);
         assert_eq!(report.note.as_deref(), Some("rate limited"));
         assert_eq!(state.requests.lock().unwrap().len(), 2);
 
@@ -970,7 +1021,8 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let base_url = format!("http://{address}");
         let gate = Gate::default();
         let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -1097,7 +1149,8 @@ mod tests {
             .route("/oidc/device/token/", post(token));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            mj_core::runtime::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{address}"), server)
     }
 
@@ -1132,10 +1185,10 @@ mod tests {
         // The recorded expiry says the token is good; the endpoint disagrees.
         let home = tempfile::tempdir().unwrap();
         write_login(home.path(), "stale-access", far_future);
-        let windows = query_with_timeout(home.path(), &endpoints(&base_url), REQUEST_TIMEOUT)
+        let usage = query_with_timeout(home.path(), &endpoints(&base_url), REQUEST_TIMEOUT)
             .await
             .unwrap();
-        assert_eq!(windows[0].remaining_percent, 99);
+        assert_eq!(open(&usage)[0].remaining_percent, 99);
         assert_eq!(
             *minted_with.lock().unwrap(),
             ["Bearer stale-access", "Bearer fresh-access"]
@@ -1173,7 +1226,7 @@ mod tests {
             .open(raced.path().join(".auth.json.lock"))
             .unwrap();
         muse.lock().unwrap();
-        let query = tokio::spawn({
+        let query = mj_core::runtime::spawn({
             let home = raced.path().to_owned();
             let auth_base_url = base_url;
             async move { fresh_access_token(&reqwest::Client::new(), &home, &auth_base_url, None).await }
