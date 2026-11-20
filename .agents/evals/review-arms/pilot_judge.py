@@ -146,7 +146,7 @@ def run_artifacts(root, jobs, manifest_sha256):
         entry = {**job, "artifact": str(path), "text_sha256": done[digest_field],
                  "session_id": done["session_id"]}
         if kind == "writer" and job["arm"] in {"R", "R-loc"}:
-            log = directory / "queries.jsonl"
+            log = directory / f"queries-{entry['session_id']}.jsonl"
             if not log.is_file():
                 continue
             entry["query_sha256"] = sha(log.read_bytes())

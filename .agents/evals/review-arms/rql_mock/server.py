@@ -58,7 +58,7 @@ class Server:
 
     def page_answer(self, result, page):
         status = result["status"]
-        if status in {"parse_error", "engine_error"}:
+        if status in {"parse_error", "engine_error", "quota_hold"}:
             message = result.get("message")
             if not isinstance(message, str):
                 raise ValueError("missing engine error message")
@@ -108,7 +108,9 @@ class Server:
             payload = error("invalid_arguments", "rql_query takes a string query and a positive integer page.")
         else:
             try:
-                result = self.answer(self.assignment["intro"], query)
+                expected_inputs = {key: self.assignment.get(key)
+                                   for key in ("manifest_sha256", "engine_inputs_sha256")}
+                result = self.answer(self.assignment["intro"], query, expected_inputs=expected_inputs)
                 payload = self.page_answer(result, page)
                 provenance = result.get("provenance")
                 encode(provenance)

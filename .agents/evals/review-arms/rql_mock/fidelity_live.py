@@ -4,14 +4,13 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import re
-import time
 from uuid import uuid4
 
 import brief_driver
 import driver
 from pilot_judge import expected_provider_model, provider_model
 
-from .engine import CONFIG, answer, frozen_inputs, locked
+from .engine import CONFIG, load_engine, locked
 from .engine.prompt import assert_blind, semantics_only, turn_prompt
 from .engine.runner import SealedRunner
 from .engine.snapshot import blob_reader, manifest_sources, prepared_snapshot
@@ -147,15 +146,7 @@ class LiveModels:
         session = runner.attest(sid, snapshot, directory)
         if session["profile_id"] != profile:
             raise ValueError("sealed fidelity session uses the wrong profile")
-        while True:
-            try:
-                brief_driver.configure_pilot_model(sid, model, EFFORT)
-                break
-            except RuntimeError as error:
-                if "initialization is still running" not in str(error):
-                    raise
-                driver.wait_idle(sid)
-                time.sleep(5)
+        brief_driver.configure_pilot_model_ready(sid, model, EFFORT)
         configured = driver.wait_idle(sid)
         advertised = verify_session_selection(configured, model, profile,
                                               self.manifest["model_versions"]["fable"])
@@ -255,6 +246,10 @@ def planned_calls(queries, fresh):
             "fable_adjudicator_at_most": len(queries)}
 
 
+def checkpoint_directory(directory, engine):
+    return directory / engine.identity["manifest_sha256"] / engine.identity["engine_inputs_sha256"]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=CENSUS / "pilot/manifest.json")
@@ -272,15 +267,15 @@ def main(argv=None):
     if args.live and (args.engine_config.resolve() != CONFIG.resolve() or not args.terra_profile):
         parser.error("--live requires the engine's default configuration and an allotted --terra-profile")
     manifest_path = args.manifest.resolve()
-    digest, manifest, served, documents, eligible = load_inputs(manifest_path)
-    config = json.loads(args.engine_config.read_bytes())
-    if args.live and sha(Path(config["manifest"]).read_bytes()) != digest:
+    digest, _, served, documents, eligible = load_inputs(manifest_path)
+    engine = load_engine(args.engine_config, manifest_path=manifest_path if args.sample_only else None)
+    if engine.identity["manifest_sha256"] != digest:
         parser.error("engine manifest differs from the fidelity manifest")
-    manifest, _, fable_version = frozen_inputs(manifest_path)
+    config, manifest, fable_version = engine.config, engine.manifest, engine.model_version
     if fable_version != expected_provider_model(manifest):
         parser.error("frozen Fable display and provider versions disagree")
     directory = args.run_root / "fidelity"
-    run = directory / digest
+    run = checkpoint_directory(directory, engine)
     with locked(directory / ".lock"):
         pool = {diff["key"]: sorted(touched_symbols(Path(config["repos"][diff["repo"]]), diff["base"],
                                                    diff["intro"], args.rust_grammar, args.js_grammar))
@@ -294,7 +289,7 @@ def main(argv=None):
                 read = blob_reader(repos[query.commit], query.commit)
                 candidate_lines(dict(enumerate(query.census)), read)
         calls = planned_calls(queries, fresh)
-        design = {"manifest_sha256": digest, "seed": manifest["seed"], "served_steps": served,
+        design = {**engine.identity, "seed": manifest["seed"], "served_steps": served,
                   "grammar_sha256": {name: sha((grammar / "src/parser.c").read_bytes())
                                      for name, grammar in (("rust", args.rust_grammar), ("javascript", args.js_grammar))},
                   "touched_callable_seeds": json.loads(canonical(pool)),
@@ -321,7 +316,7 @@ def main(argv=None):
                 receipt = path.parent / ("fresh-engine.json" if fresh else "engine.json")
                 if receipt.exists():
                     return json.loads(receipt.read_bytes())
-                response = answer(commit, text, fresh=fresh)
+                response = engine.answer(commit, text, fresh=fresh)
                 if response["status"] == "ok":
                     driver.save(receipt, response)
                 return response
@@ -331,6 +326,7 @@ def main(argv=None):
             driver.save(path, result)
             records[query.key] = result
         report = gate_report(digest, served, queries, records, manifest["seed"])
+        report.update(engine.identity)
         report["sample"] = str(blueprint.relative_to(directory))
         report["sample_sha256"] = sha(blueprint.read_bytes())
         driver.save(directory / "gate-report.json", report)

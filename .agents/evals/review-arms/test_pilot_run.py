@@ -2,6 +2,7 @@
 from contextlib import redirect_stdout
 from decimal import Decimal
 from io import StringIO
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -77,6 +78,75 @@ class PilotTest(unittest.TestCase):
         self.root = Path(tmp.name)
         self.manifest = pilot.load_manifest(manifest_fixture())
         self.groups = pilot.select_jobs(self.manifest, arms=["N", "G"])
+
+    # Hard-won: 49e16b8: reused engines could spend below quota and the writer could still finish.
+    def test_reused_engine_quota_hold_interrupts_writer_and_supersedes_attempt(self):
+        from rql_mock.engine.test_engine import CATALOGUE, COMMIT, MENU, QUERY, SOURCE, VERSION, Engine, FakeAcpRunner
+
+        reused = FakeAcpRunner()
+        engine = Engine(self.root / "cache", (CATALOGUE, MENU),
+                        lambda commit: (SOURCE.get, {"tree": "frozen", "orphan": COMMIT}),
+                        lambda: reused, VERSION)
+        self.assertEqual(engine.answer(COMMIT, QUERY)["status"], "ok")
+        reused.quota_hold = "weekly quota below floor"
+        turns = len(reused.turns)
+        query = '(function :name "different")'
+
+        runner = pilot.Pilot.__new__(pilot.Pilot)
+        runner.args = SimpleNamespace(run_root=self.root)
+        runner.diffs = {"mjolnir/first": {}}
+        runner.writer_model = ("gpt-6.1-sol", "high")
+        runner.gate, runner.attested = None, set()
+        job = {"job": "mjolnir/first/R/r1/writer", "diff": "mjolnir/first",
+               "arm": "R", "replicate": 1, "kind": "writer"}
+        path = pilot.job_path(self.root, job)
+        runner.render = lambda job: {"path": path, "bug": {"id": "first"}, "inputs": {"rql_tools": ["rql_query"]}}
+
+        def write(bug_id, gate, *, pilot):
+            answer = engine.answer(COMMIT, query)
+            sid = f"{pilot['tag'].split('/')[-1]:0>32}"
+            output = b"Writer brief.\n"
+            (path / "brief-candidate.md").write_bytes(output)
+            (path / "accepted.json").write_text(json.dumps({"brief_sha256": hashlib.sha256(output).hexdigest()}))
+            (path / "mcp-reconnect-result.json").write_text("{}")
+            (path / f"queries-{sid}.jsonl").write_text(
+                json.dumps({"session": sid, "delivered": True, "status": answer["status"]}) + "\n")
+            # The launch and teardown IPC are faked here. Use the real writer publication decision.
+            pilot.pop("revoke_tool_assignment", None)
+            return brief_driver.finish_pilot_writer(pilot, sid, bug_id, "fixture")
+
+        self.addCleanup(setattr, brief_driver, "run", brief_driver.run)
+        self.addCleanup(setattr, brief_driver.driver, "destroy_captured_pilot",
+                        brief_driver.driver.destroy_captured_pilot)
+        brief_driver.run = write
+        brief_driver.driver.destroy_captured_pilot = lambda *args, **kwargs: "done"
+        state = runner.execute(job)
+        self.assertIn("interrupted: RQL engine weekly quota", state)
+        self.assertEqual(len(reused.turns), turns)
+        self.assertIsNone(runner.complete(job))
+        self.assertFalse((path / "done.json").exists())
+        self.assertTrue((path / "failed.json").is_file())
+        reused.quota_hold = None
+        self.assertEqual(runner.execute(job), "done")
+        self.assertEqual(len(reused.turns), turns + 1)
+        self.assertTrue((path / "done.json").is_file())
+        self.assertEqual(len(list(path.parent.glob(f"{path.name}.superseded-*"))), 1)
+
+    # Hard-won: 49e16b8: startup refusal retained a session and charged a replacement.
+    def test_config_startup_refusal_retries_same_session(self):
+        calls, waits = [], []
+        def configure(sid, model, effort):
+            calls.append(sid)
+            if len(calls) == 1:
+                raise RuntimeError("session initialization is still running")
+            return {"model": model, "effort": effort}
+        with unittest.mock.patch.object(brief_driver, "configure_pilot_model", configure), \
+                unittest.mock.patch("brief_driver.time.sleep"), \
+                unittest.mock.patch.object(brief_driver.driver, "wait_idle", lambda sid: waits.append(sid)):
+            result = brief_driver.configure_pilot_model_ready("same-session", "model", "high")
+        self.assertEqual(result, {"model": "model", "effort": "high"})
+        self.assertEqual(calls, ["same-session", "same-session"])
+        self.assertEqual(waits, ["same-session"])
 
     def run_fake(self, groups, sessions, quota):
         with redirect_stdout(StringIO()):
@@ -272,26 +342,52 @@ class PilotTest(unittest.TestCase):
                     self.assertNotIsInstance(raised.exception, brief_driver.WriterBriefMissing)
 
     def test_fidelity_gate_requires_exact_manifest_and_every_served_step(self):
-        manifest = {**self.manifest, "served_steps": ["contract-cases", "value-transfers"]}
-        raw = json.dumps(manifest).encode()
+        path, engine = self.pilot_engine_fixture(["contract-cases", "value-transfers"])
+        raw = path.read_bytes()
+        manifest = pilot.load_manifest(raw)
         rql = pilot.select_jobs(manifest, arms=["R", "R-loc"])
         gate = self.root / "fidelity/gate-report.json"
         pilot.require_fidelity(self.root, raw, manifest, self.groups)  # N/G can run before a report exists.
         with self.assertRaisesRegex(ValueError, "require a passing fidelity gate"):
             pilot.require_fidelity(self.root, raw, manifest, rql)
         outcomes = {"contract-cases": {"pass": True}, "value-transfers": {"pass": False}}
-        report = {"manifest_sha256": pilot.digest(raw), "served_steps": manifest["served_steps"], "steps": outcomes}
+        report = {**engine.identity, "served_steps": manifest["served_steps"], "steps": outcomes}
         pilot.driver.save(gate, report)
         with self.assertRaisesRegex(ValueError, "no passing result for value-transfers"):
             pilot.require_fidelity(self.root, raw, manifest, rql)
         outcomes["value-transfers"]["pass"] = True
         pilot.driver.save(gate, report)
-        pilot.require_fidelity(self.root, raw, manifest, rql)
+        self.assertEqual(pilot.require_fidelity(self.root, raw, manifest, rql), engine.identity)
         with self.assertRaisesRegex(ValueError, "another manifest"):
             pilot.require_fidelity(self.root, raw + b"\n", manifest, rql)
         pilot.driver.save(gate, {**report, "served_steps": ["value-transfers", "contract-cases"]})
-        with self.assertRaisesRegex(ValueError, "another manifest or step list"):
+        with self.assertRaisesRegex(ValueError, "another manifest, engine identity, or step list"):
             pilot.require_fidelity(self.root, raw, manifest, rql)
+        pilot.driver.save(gate, {**report, "engine_inputs_sha256": "0" * 64})
+        with self.assertRaisesRegex(ValueError, "engine identity"):
+            pilot.require_fidelity(self.root, raw, manifest, rql)
+
+    def pilot_engine_fixture(self, steps):
+        from rql_mock import engine
+
+        reference = pilot.driver.SCRIPTS / "brief/rql-census"
+        manifest = {**self.manifest, "served_steps": steps, "input_paths": {}, "inputs": {},
+                    "model_versions": {"fable_provider_id": "claude-fable-5-2"}}
+        documents = {"catalogue": (reference / "rql-documented-steps.md").read_bytes(),
+                     "steps": (reference / "menu-steps.md").read_bytes(), "menu": b"{}",
+                     "eligible_labels": "\n".join(map(json.dumps, manifest["diffs"])).encode()}
+        for name, data in documents.items():
+            path = self.root / name
+            path.write_bytes(data)
+            manifest["input_paths"][name] = path.name
+            manifest["inputs"][f"{name}_sha256"] = pilot.digest(data)
+        path = self.root / "manifest.json"
+        pilot.driver.save(path, manifest)
+        config = self.root / "engine.json"
+        pilot.driver.save(config, {"manifest": str(path)})
+        self.addCleanup(setattr, engine, "CONFIG", engine.CONFIG)
+        engine.CONFIG = config
+        return path, engine.load_engine()
 
     def test_writer_menu_lists_only_the_frozen_two_steps(self):
         refdir = pilot.driver.SCRIPTS / "brief/rql-census"
@@ -317,6 +413,7 @@ class PilotTest(unittest.TestCase):
             pilot.preflight(config, "codex3")
 
     def test_assignments_only_expose_rql_to_tool_arm_writers(self):
+        manifest_path, engine = self.pilot_engine_fixture(["contract-cases"])
         hook = self.root / "hook"
         hook.write_text(
             "#!/usr/bin/env python3\n"
@@ -326,24 +423,29 @@ class PilotTest(unittest.TestCase):
             "print(json.dumps({'session_id': assignment['session_id'], 'tools': tools}))\n"
         )
         hook.chmod(0o700)
-        args = SimpleNamespace(rql_hook=hook, manifest=self.root / "manifest.json")
+        args = SimpleNamespace(rql_hook=hook, manifest=manifest_path)
         diff = self.manifest["diffs"][0]
         jobs = pilot.select_jobs(self.manifest, diff=diff["key"])[diff["key"]]
         for index, job in enumerate(jobs):
             path = pilot.job_path(self.root, job)
             sid = f"{index:032x}"
-            pilot.publish_tool_assignment(path, args, job, diff, sid)
+            identity = engine.identity if pilot.tool_arm(job) != "none" else None
+            if identity is not None:
+                with self.assertRaisesRegex(ValueError, "admitted engine identity"):
+                    pilot.publish_tool_assignment(path, args, job, diff, sid, engine_identity=None)
+            pilot.publish_tool_assignment(path, args, job, diff, sid, engine_identity=identity)
             assignment = pilot.read_json(path / "tool-assignment.json")
             endpoint = pilot.read_json(path / "tool-endpoint.json")
             if job["kind"] == "writer" and job["arm"] in ("R", "R-loc"):
                 self.assertEqual(assignment["arm"], job["arm"])
                 self.assertEqual(assignment["intro"], diff["intro"])
+                self.assertEqual({key: assignment[key] for key in identity}, identity)
                 self.assertEqual(endpoint, {"session_id": sid, "tools": ["rql_query"]})
-                self.assertTrue((path / "queries.jsonl").exists())
+                self.assertTrue((path / f"queries-{sid}.jsonl").exists())
             else:
                 self.assertEqual(assignment, {"session_id": sid, "arm": "none", "manifest": str(args.manifest)})
                 self.assertEqual(endpoint, {"session_id": sid, "tools": []})
-                self.assertFalse((path / "queries.jsonl").exists())
+                self.assertFalse(list(path.glob("queries-*.jsonl")))
 
     def test_reconnect_only_reads_the_live_connected_server_and_separates_turns(self):
         response = "**Failed**\n- `rql`: 1 tool\n\n**Connected**\n- `another`: 1 tool"

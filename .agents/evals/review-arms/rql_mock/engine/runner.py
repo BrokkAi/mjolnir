@@ -108,7 +108,7 @@ class IsolationFailure(TurnFailure):
 
 
 class LaunchHeld(RuntimeError):
-    """Quota admission refused before any session launch was attempted."""
+    """Quota admission refused before a session launch or paid turn was attempted."""
 
 
 class SealedRunner:
@@ -196,13 +196,16 @@ class SealedRunner:
         self.verify(sid)
 
     def start(self, snapshot, record_id):
-        if hold := self.driver.pilot_weekly_hold(self.config["profile"], scope=MODEL):
-            raise LaunchHeld(hold)
+        self.check_quota()
         sid = self.launch(self.config["bundle"], snapshot["orphan"], self.config["profile"],
                           f"RQL pilot engine {record_id[:12]}", base=snapshot["orphan"], effort=EFFORT)
         if not SESSION_ID.fullmatch(sid):
             raise RuntimeError("unexpected engine session id")
         return sid
+
+    def check_quota(self):
+        if hold := self.driver.pilot_weekly_hold(self.config["profile"], scope=MODEL):
+            raise LaunchHeld(hold)
 
     def message(self, sid, text, command):
         accepted = json.loads(self.command(
@@ -265,6 +268,8 @@ class SealedRunner:
             result["status"] = "passed" if empty else "failed"
             if not empty:
                 result["message"] = "engine recalled prior query text or failed to report empty context after /clear"
+        except LaunchHeld:
+            raise
         except TurnFailure as error:
             key = "recall" if result["context_id"] else "primer"
             result[key] = error.record
@@ -286,9 +291,12 @@ class SealedRunner:
             raise RuntimeError(f"engine workspace check failed: {proc.stderr.decode(errors='replace').strip()}")
         return scratch
 
-    def prompt(self, sid, text, context_id=None):
+    def prompt(self, sid, text, context_id=None, *, before_send=None):
         before = self.driver.mj("usage", "--session", sid)
         command = f"engine-{uuid4().hex}"
+        self.check_quota()
+        if before_send is not None:
+            before_send()
         turn = self.message(sid, text, command)
         record = {"session": sid, "turn": turn, "command_id": command, "tokens": None,
                   "context_id": context_id}
@@ -418,9 +426,12 @@ class SealedRunner:
             self.command("put-file", "--session", sid, "--path", path, "-",
                          data=contents.encode("utf-8"))
         evidence = directory_on_host / "answers" / context_id
-        save_json(evidence / "pending.json", {"path": output_path, "query": query,
-                                             "prior_validation_errors": errors})
-        _, record = self.prompt(sid, prompt, context_id)
+
+        def record_pending():
+            save_json(evidence / "pending.json", {"path": output_path, "query": query,
+                                                 "prior_validation_errors": errors})
+
+        _, record = self.prompt(sid, prompt, context_id, before_send=record_pending)
         try:
             save_json(evidence / "turn.json", record)
             try:

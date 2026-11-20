@@ -22,7 +22,11 @@ DOCUMENT_KEYS = ("catalogue", "steps", "menu", "eligible_labels")
 
 
 def frozen_inputs(manifest_path):
-    manifest = load(manifest_path)
+    return read_frozen_inputs(manifest_path, manifest_path.read_bytes())
+
+
+def read_frozen_inputs(manifest_path, raw):
+    manifest = json.loads(raw)
     paths, hashes = manifest["input_paths"], manifest["inputs"]
     data = {}
     for key in DOCUMENT_KEYS:
@@ -123,14 +127,16 @@ def teardown(cache, runner):
 
 class Engine:
     def __init__(self, cache, documents, source, runner, model_version,
-                 *, served_steps=tuple(MENU), menu_sha256=""):
+                 *, served_steps=tuple(MENU), menu_sha256="", manifest_sha256=""):
         self.cache = cache
         self.catalogue, self.menu = documents
         self.source = source
         self.runner = runner
         self.model_version = model_version
         self.served_steps = served_steps
-        self.menu_sha256 = menu_sha256
+        self.identity = {"manifest_sha256": manifest_sha256,
+                         "engine_inputs_sha256": input_hash(self.catalogue, self.menu, model_version,
+                                                            served_steps, menu_sha256)}
 
     def session(self, commit, snapshot, record_path):
         record_path.parent.mkdir(parents=True, exist_ok=True)
@@ -152,14 +158,14 @@ class Engine:
                 record_path.unlink()
                 raise
             record = {**identity, "session_id": sid, "instance": runner.instance,
-                      "model_version": self.model_version()}
+                      "model_version": self.model_version}
             save(record_path, record)
         if not record.get("prepared"):
             runner.prepare(record["session_id"], snapshot, record_path.parent)
             save(record_path, {**record, "prepared": True})
         return runner, record["session_id"]
 
-    def answer(self, commit, query_text, *, fresh=False):
+    def answer(self, commit, query_text, *, fresh=False, expected_inputs=None):
         provenance = {"model": MODEL, "effort": EFFORT, "steps": [], "turns": [],
                       "validation_retries": 0, "session": None, "turn": None, "tokens": {},
                       "fresh": fresh, "context_id": None, "context_probe": None}
@@ -171,6 +177,8 @@ class Engine:
                 result["message"] = message
             return result
 
+        if expected_inputs is not None and expected_inputs != self.identity:
+            return response("engine_error", message="RQL engine inputs differ from the frozen writer assignment.")
         try:
             if not isinstance(query_text, str):
                 raise ValueError("RQL query must be a string")
@@ -182,9 +190,8 @@ class Engine:
         try:
             if not isinstance(commit, str) or not OID.fullmatch(commit):
                 raise ValueError("expected a full introducing commit ID")
-            model_version = self.model_version()
-            inputs = input_hash(self.catalogue, self.menu, model_version, self.served_steps, self.menu_sha256)
-            provenance["model_version"] = model_version
+            inputs = self.identity["engine_inputs_sha256"]
+            provenance["model_version"] = self.model_version
             key = cache_key(commit, query, inputs)
             provenance.update({"inputs_sha256": inputs, "normalized_query": query})
             directory = self.cache / commit
@@ -246,24 +253,38 @@ class Engine:
                         if provenance["validation_retries"]:
                             return response("engine_error", message="; ".join(errors))
                         provenance["validation_retries"] += 1
+        except LaunchHeld as error:
+            return response("quota_hold", message=str(error))
         except (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
             return response("engine_error", message=str(error))
 
 
-def answer(commit, query_text, *, fresh=False):
-    """Answer a writer query, or make a separate host-only stability re-ask."""
-    try:
-        config = load(CONFIG)
-        manifest, documents, version = frozen_inputs(Path(config["manifest"]))
-    except (OSError, KeyError, ValueError, TypeError) as error:
-        return {"status": "engine_error", "rows": [], "total": 0, "provenance": {"fresh": fresh},
-                "coverage": {"complete": False, "open": []}, "message": f"cannot verify frozen engine inputs: {error}"}
+def load_engine(config_path=None, *, manifest_path=None):
+    config_path = CONFIG if config_path is None else config_path
+    config = load(config_path)
+    manifest_path = Path(config["manifest"]) if manifest_path is None else manifest_path
+    raw = manifest_path.read_bytes()
+    manifest, documents, version = read_frozen_inputs(manifest_path, raw)
 
     def source(revision):
         repo = manifest_sources(manifest, config["repos"])[revision]
         return blob_reader(repo, revision), prepared_snapshot(repo, config["snapshot_repo"], revision)
 
-    return Engine(CONFIG.parent / "engine-cache", documents, source,
-                  lambda: SealedRunner({**config, "model_version": version}, manifest), lambda: version,
-                  served_steps=manifest["served_steps"], menu_sha256=manifest["inputs"]["menu_sha256"]
-                  ).answer(commit, query_text, fresh=fresh)
+    engine = Engine(config_path.parent / "engine-cache", documents, source,
+                    lambda: SealedRunner({**config, "model_version": version}, manifest), version,
+                    served_steps=manifest["served_steps"], menu_sha256=manifest["inputs"]["menu_sha256"],
+                    manifest_sha256=hashlib.sha256(raw).hexdigest())
+    engine.manifest = manifest
+    engine.config = config
+    return engine
+
+
+def answer(commit, query_text, *, fresh=False, expected_inputs=None):
+    """Answer a writer query, or make a separate host-only stability re-ask."""
+    try:
+        engine = load_engine()
+    except (OSError, KeyError, ValueError, TypeError) as error:
+        return {"status": "engine_error", "rows": [], "total": 0, "provenance": {"fresh": fresh},
+                "coverage": {"complete": False, "open": []}, "message": f"cannot verify frozen engine inputs: {error}"}
+
+    return engine.answer(commit, query_text, fresh=fresh, expected_inputs=expected_inputs)

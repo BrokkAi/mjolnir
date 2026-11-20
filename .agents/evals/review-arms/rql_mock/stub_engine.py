@@ -3,7 +3,7 @@
 import hashlib
 
 
-def answer(commit, query_text):
+def answer(commit, query_text, *, expected_inputs=None):
     provenance = {"engine": "stub", "commit": commit}
     if query_text == "parse-error":
         return {"status": "parse_error", "message": "Stub parser rejected the query.",

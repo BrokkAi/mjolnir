@@ -24,6 +24,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import threading
 import time
 import traceback
@@ -165,6 +166,18 @@ def configure_pilot_model(sid, model, effort):
     return settings
 
 
+def configure_pilot_model_ready(sid, model, effort, *, wait_idle=None, delay=5):
+    """Retry only the daemon's explicit startup refusal on this same session."""
+    while True:
+        try:
+            return configure_pilot_model(sid, model, effort)
+        except RuntimeError as error:
+            if "initialization is still running" not in str(error):
+                raise
+            (wait_idle or driver.wait_idle)(sid)
+            time.sleep(delay)
+
+
 def final_messages(pages, completion):
     """Find the completed assistant messages belonging to just this turn."""
     start = completion.get("turn_start_position")
@@ -269,7 +282,7 @@ def run(bug_id, gate, *, pilot=None):
     if not (d / "settings.json").exists():
         s = driver.wait_idle(sid) if pilot else session(sid)
         assert s["no_later_history"] and s["at"] == bug["intro_commit"] and s["base"] == bug["base_commit"], s
-        settings = configure_pilot_model(sid, model, effort)
+        settings = configure_pilot_model_ready(sid, model, effort)
         if profile:
             assert s.get("profile_id") == profile, s.get("profile_id")
         if not pilot:
@@ -383,6 +396,15 @@ def finish_pilot_writer(pilot, sid, bug_id, profile):
                                           allow_rql=bool(inputs["rql_tools"]))
     if state != "done":
         return state
+    revoke = pilot.get("revoke_tool_assignment")
+    if callable(revoke):
+        revoke(sid)
+    interruption = pilot.get("writer_interruption")
+    if callable(interruption):
+        reason = interruption(d, sid)
+        if reason:
+            save(d / "failed.json", {"session_id": sid, "reason": reason})
+            return f"interrupted: {reason}"
     save(d / "done.json", dict(accepted, bug=bug_id, session_id=sid,
                                profile=profile, inputs=inputs, finished_ns=time.time_ns(),
                                mcp_reconnect_sha256=hashlib.sha256((d / "mcp-reconnect-result.json").read_bytes()).hexdigest()))

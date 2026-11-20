@@ -16,6 +16,18 @@ publishing the output.
 
 ## Private instance
 
+The pilot runs on a development build of mj, because the installed build
+can't serve the engine's host-only Git source to a container (fixed in
+`020257d9f`). Frozen copies live outside the checkout, so a later build can't
+replace them mid-run: `/mnt/optane/review-arms-pilot/bin/mj-020257d9f` and its
+matching worker `mj-worker-020257d9f`. Export both for every pilot command;
+`mjx` then runs that binary and passes the worker to any daemon it starts:
+
+```sh
+export REVIEW_ARMS_MJ=/mnt/optane/review-arms-pilot/bin/mj-020257d9f
+export REVIEW_ARMS_MJ_WORKER=/mnt/optane/review-arms-pilot/bin/mj-worker-020257d9f
+```
+
 Use a dedicated `mj --instance rql-census-pilot` configuration at
 `~/.config/mjolnir/instances/rql-census-pilot/config.toml`. Configure exactly
 one Codex profile, the allotted login, using its existing native home.

@@ -26,6 +26,8 @@ the config, and the config selects the engine callable and that writer's log.
       "diff": "mjolnir/123",
       "intro": "1111111111111111111111111111111111111111",
       "arm": "R-loc",
+      "manifest_sha256": "<64 hexadecimal digits>",
+      "engine_inputs_sha256": "<64 hexadecimal digits>",
       "log": "/mnt/optane/review-arms-pilot/runs/mjolnir/123/R-loc/r1/writer/queries.jsonl"
     },
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {"arm": "none"}
@@ -37,7 +39,10 @@ Register G writers and reviewers with arm `none` and issue keys only for the
 R and R-loc sessions. Use the actual frozen manifest path. The server reads `page_rows` from it on
 each connection and verifies the assigned diff and introduction commit against
 it. The `engine` is an importable Python `module:callable`; its callable receives
-`answer(intro, query_text)`. The forced command can import modules next to
+`answer(intro, query_text, expected_inputs=...)`. The expected inputs are the
+assignment's manifest digest and the same engine input digest used to key the
+answer cache. The engine refuses the query if they differ from its loaded inputs.
+The forced command can import modules next to
 `server.py` by package name, such as `rql_mock.engine:answer`. Keep engine stdout
 free for the JSON-RPC server. The engine owns the cache shared by R and R-loc.
 
@@ -58,6 +63,51 @@ compares `SSH_ORIGINAL_COMMAND` with the ID bound by the key entry. The server
 then verifies the ID exists in the host config before loading the engine. Revoke
 the key when the writer is done. The writer cannot select a different commit,
 arm, engine, config, or log path.
+
+### Pilot enrollment hook
+
+Pass `rql_mock/install-assignment.py` to the pilot's `--rql-hook`. The hook reads
+the client settings from the private pilot's Codex profile in
+`~/.config/mjolnir/instances/rql-census-pilot/config.toml` or the file named by
+`RQL_PILOT_CONFIG`. Set `RQL_SSH_TARGET` in that profile's environment so both
+preflight and the Codex client use the same address. Use a host address the
+container can reach, such as `ssh://PILOT_USER@host.containers.internal:22222`.
+
+Export these paths for the launcher.
+
+| Variable | Host path |
+| --- | --- |
+| `RQL_TRANSPORT_CONFIG` | The private transport JSON. The hook creates it if absent. |
+| `RQL_AUTHORIZED_KEYS` | The pilot sshd's dedicated key file, outside `~/.ssh`. |
+| `RQL_SSH_HOST_PUBLIC_KEY` | The trusted public half of the pilot sshd's host key. |
+
+Configure a dedicated sshd with a private host key and an unprivileged port.
+Substitute the Podman-reachable host address, dedicated login and absolute paths.
+The account running an unprivileged sshd must be the allowed login and have
+access to the forced command, engine files and logs.
+
+```text
+ListenAddress PODMAN_REACHABLE_HOST_ADDRESS
+Port 22222
+HostKey /absolute/pilot/ssh_host_ed25519_key
+PidFile /absolute/pilot/sshd.pid
+AuthorizedKeysFile /absolute/pilot/authorized_keys
+AllowUsers PILOT_USER
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitUserEnvironment no
+PermitUserRC no
+```
+
+Run `/usr/sbin/sshd -D -e -f /absolute/pilot/sshd_config` as the pilot login.
+Use the absolute path of the installed `sshd` binary. Keep the
+host key and the dedicated authorization file private to that login. The
+hook enrolls the session, publishes its local record, and runs the container's
+MCP preflight so an unreachable address or wrong host pin stops setup. After
+capture, `install-assignment.py --revoke /absolute/path/to/tool-assignment.json`
+revokes that session's authorization and transport assignment. Both operations
+can be repeated.
 
 ## Slice 5 session setup
 

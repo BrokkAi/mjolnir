@@ -1,6 +1,7 @@
 import contextlib
 import copy
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -68,11 +69,12 @@ def setup(root, manifest, snapshot_bytes, defects):
         j.save(path.parent / "done.json", {field: j.sha(text.encode()), "session_id": f"job-{n}", "inputs": inputs})
         j.save(path.parent / "usage.json", {})
         if kind == "writer" and job["arm"] in {"R", "R-loc"}:
-            event = {"status": "ok", "delivered": True, "page": 2, "latency_ms": 3, "payload": {"rows": [
+            session_id = f"job-{n}"
+            event = {"session": session_id, "status": "ok", "delivered": True, "page": 2, "latency_ms": 3, "payload": {"rows": [
                 {"sites": [{"path": "out.rs", "start_line": 2, "end_line": 2}]},
                 {"sites": [{"path": "out.rs", "start_line": 3, "end_line": 3}]},
             ]}}
-            (path.parent / "queries.jsonl").write_text(json.dumps(event) + "\n")
+            (path.parent / f"queries-{session_id}.jsonl").write_text(json.dumps(event) + "\n")
     return j.prepare(root, manifest, snapshot, defects)
 
 
@@ -129,6 +131,22 @@ class PilotFixture(unittest.TestCase):
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
+
+    # Hard-won: 49e16b8: a retained writer's reconnect polluted its replacement's exposure.
+    def test_retained_writer_log_record_is_not_credited_to_replacement(self):
+        key = setup(self.root, *fixture())
+        writer = next(entry for entry in key["outputs"].values()
+                      if entry["kind"] == "writer" and entry["arm"] == "R")
+        path = self.root / "runs" / j.artifact(writer).relative_to("runs").parent / f"queries-{writer['session_id']}.jsonl"
+        record = {"session": "retained-session", "delivered": True, "status": "ok", "payload": {"rows": []}}
+        with path.open("a") as stream:
+            stream.write(json.dumps(record) + "\n")
+        # The stray record was already in the log when the judge froze it; a later append
+        # instead fails the frozen-hash check, which is the visible failure we want.
+        writer["query_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        deliveries = r.load_deliveries(self.root / "runs", key)[writer["job"]]
+        self.assertEqual(len(deliveries), 1)
+        self.assertEqual(deliveries[0]["session"], writer["session_id"])
 
     def test_batches_mix_arms_without_metadata_and_keep_exact_text(self):
         manifest, labels, defects = fixture()
@@ -294,8 +312,13 @@ class PilotFixture(unittest.TestCase):
         writer = next(job for job in manifest["jobs"] if job["job"] == "repo/d0/R/r1/writer")
         path = self.root / j.artifact(writer)
         done = j.load(path.parent / "done.json")
+        old_log = path.parent / f"queries-{done['session_id']}.jsonl"
         done["session_id"] = "new-writer-same-bytes"
         j.save(path.parent / "done.json", done)
+        # The replacement writes its own session-bound delivery log.
+        records = [json.loads(line) for line in old_log.read_text().splitlines() if line.strip()]
+        (path.parent / f"queries-{done['session_id']}.jsonl").write_text(
+            "".join(json.dumps({**record, "session": done["session_id"]}) + "\n" for record in records))
         # Same text still makes the earlier reviewer receipt stale.
         old_id, old_entry = next((oid, job) for oid, job in original.items() if job["kind"] == "reviewer")
         j.save(self.root / "judge" / f"{old_id}.json", blank_judgments(initial)[old_id])
@@ -450,8 +473,9 @@ class PilotFixture(unittest.TestCase):
                                           "status": "", "ignored": ""},
                                       attest_pilot_cache=lambda *a: {"snapshots": {"only": {"commits": [pin]}}},
                                       transcript=transcript)
-        fake_brief = SimpleNamespace(sealed_launch=launch,
-                                     configure_pilot_model=lambda *a: {"model": "fable", "effort": "high"})
+        configured = lambda *a, **k: {"model": "fable", "effort": "high"}
+        fake_brief = SimpleNamespace(sealed_launch=launch, configure_pilot_model=configured,
+                                     configure_pilot_model_ready=configured)
         args = [str(j.HERE / "verify_driver.py"), str(tasks), "--kind", "task", "--text-only",
                 "--output", "verdicts.jsonl", "--profiles", profile, "--model", "fable", "--instance",
                 "fixture-instance", "--bundle", "empty", "--repo-commit", pin, "--seal-probe", str(probe),

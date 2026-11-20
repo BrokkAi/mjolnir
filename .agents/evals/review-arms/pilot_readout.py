@@ -312,12 +312,14 @@ def load_deliveries(runs, key):
     for entry in key["outputs"].values():
         if entry["kind"] != "writer" or entry["arm"] not in {"R", "R-loc"}:
             continue
-        path = runs / artifact(entry).relative_to("runs").parent / "queries.jsonl"
+        path = runs / artifact(entry).relative_to("runs").parent / f"queries-{entry['session_id']}.jsonl"
         data = path.read_bytes()
         if sha(data) != entry["query_sha256"]:
             raise ValueError(f"{path}: delivery log differs from the judge input's frozen run")
         records = [json.loads(line) for line in data.splitlines() if line.strip()]
-        deliveries[entry["job"]] = [record for record in records if record.get("delivered") is True]
+        deliveries[entry["job"]] = [record for record in records
+                                     if record.get("delivered") is True
+                                     and record.get("session") == entry["session_id"]]
     return deliveries
 
 

@@ -14,6 +14,7 @@ import unittest
 import driver
 from census_label import CENSUS
 from rql_mock import fidelity_live
+from rql_mock import engine as live_engine
 
 from . import Engine, frozen_inputs, teardown
 from .__main__ import audit
@@ -190,6 +191,69 @@ class FrozenInputTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, key):
                     frozen_inputs(path)
 
+    # Hard-won: 49e16b8: an old endpoint could answer for a different frozen writer assignment.
+    def test_writer_endpoint_refuses_mismatched_frozen_inputs(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self.fixture(root)
+            raw = json.loads(manifest.read_text())
+            raw["page_rows"] = 50
+            manifest.write_text(json.dumps(raw))
+            config = root / "engine.json"
+            config.write_text(json.dumps({"manifest": str(manifest)}))
+            engine = live_engine.load_engine(config)
+            query, _ = parse(QUERY, engine.catalogue, engine.served_steps)
+            key = live_engine.cache_key(COMMIT, query, engine.identity["engine_inputs_sha256"])
+            cache = engine.cache / COMMIT / f"{key}.json"
+            cache.parent.mkdir(parents=True)
+            cache.write_text(json.dumps({"status": "ok", "rows": ROWS, "total": len(ROWS), "coverage": closed()}))
+            sid, diff = SESSION, raw["diffs"][0]["key"]
+            transport, log = root / "transport.json", root / "queries.jsonl"
+            wrapper = Path(__file__).resolve().parents[1] / "serve-rql.sh"
+            env = {**os.environ, "SSH_ORIGINAL_COMMAND": sid, "REVIEW_ARMS_ENGINE_ROOT": str(root)}
+            request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": "rql_query", "arguments": {"query": QUERY}}}
+            for altered in (None, "manifest_sha256", "engine_inputs_sha256"):
+                with self.subTest(altered=altered):
+                    identity = dict(engine.identity)
+                    if altered:
+                        identity[altered] = "0" * 64
+                    transport.write_text(json.dumps({
+                        "manifest": str(manifest), "engine": "rql_mock.engine:answer",
+                        "sessions": {sid: {"diff": diff, "intro": COMMIT, "arm": "R", "log": str(log), **identity}},
+                    }))
+                    result = subprocess.run([wrapper, transport, sid], check=True, env=env, capture_output=True,
+                                            text=True, input=json.dumps(request) + "\n")
+                    response = json.loads(result.stdout)["result"]
+                    body = json.loads(response["content"][0]["text"])
+                    if altered:
+                        self.assertTrue(response["isError"])
+                        self.assertEqual(body["status"], "engine_error")
+                        self.assertIn("inputs differ", body["message"])
+                    else:
+                        self.assertEqual(body["rows"], ROWS)
+
+    # Hard-won: 49e16b8: a prompt change reused prior raw answers and fidelity measurements.
+    def test_fidelity_checkpoints_follow_the_answer_cache_input_hash(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "engine.json"
+            config.write_text(json.dumps({"manifest": str(self.fixture(root))}))
+            initial = live_engine.load_engine(config)
+            before = fidelity_live.checkpoint_directory(root / "fidelity", initial) / "test-query"
+            before.mkdir(parents=True)
+            for name in ("measurement.json", "engine.json", "fresh-engine.json"):
+                (before / name).write_text('{"from":"old prompt"}')
+            self.addCleanup(setattr, live_engine, "REPAIR", live_engine.REPAIR)
+            live_engine.REPAIR += "\nChanged repair instructions."
+            updated = live_engine.load_engine(config)
+            after = fidelity_live.checkpoint_directory(root / "fidelity", updated) / "test-query"
+            self.assertEqual(before.parents[1], after.parents[1])
+            self.assertEqual(after.parent.name, updated.identity["engine_inputs_sha256"])
+            self.assertNotEqual(before.parent.name, after.parent.name)
+            self.assertFalse(after.exists())
+            self.assertTrue((before / "measurement.json").is_file())
+
 
 class ValidationTests(unittest.TestCase):
     def test_missing_path_wrong_line_and_non_verbatim_value(self):
@@ -289,7 +353,7 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(commit, COMMIT)
             return SOURCE.get, {"tree": "frozen-tree", "orphan": "root"}
 
-        return Engine(self.cache, (catalogue, menu), source, lambda: runner, lambda: model)
+        return Engine(self.cache, (catalogue, menu), source, lambda: runner, model)
 
     # Hard-won: a19cfbf: an engine launch could ignore either Fable weekly quota window.
     def test_fable_launch_checks_both_weekly_windows_and_can_retry(self):
@@ -297,6 +361,7 @@ class EngineTests(unittest.TestCase):
         runner.driver = driver
         runner.config = {"profile": "claude-fixture", "bundle": "test-bundle"}
         runner.start = MethodType(SealedRunner.start, runner)
+        runner.check_quota = MethodType(SealedRunner.check_quota, runner)
 
         def launch(*args, **kwargs):
             runner.launches.append((args, kwargs))
@@ -442,6 +507,10 @@ class FakeAcpRunner(SealedRunner):
     def prepare(self, sid, snapshot, directory):
         pass
 
+    def pilot_weekly_hold(self, profile, *, scope):
+        assert (profile, scope) == ("claude-test", "fable")
+        return getattr(self, "quota_hold", None)
+
     def wait_idle(self, sid):
         return {"profile_id": "claude-test",
                 "config_options": [{"key": "model", "current": "fable"},
@@ -533,7 +602,7 @@ class ContextTests(unittest.TestCase):
             path = Path(directory)
             engine = Engine(path, (CATALOGUE, MENU),
                             lambda commit: (SOURCE.get, {"tree": "fake", "orphan": "root"}),
-                            lambda: runner, lambda: VERSION)
+                            lambda: runner, VERSION)
             result = engine.answer(COMMIT, QUERY)
             self.assertEqual(result["status"], "engine_error")
             self.assertIn("recalled prior query", result["message"])
@@ -577,7 +646,7 @@ class ContextTests(unittest.TestCase):
             manifest = temp / "manifest.json"
             manifest.write_text(json.dumps({"page_rows": 50, "diffs": [{"key": diff, "intro": COMMIT}]}))
             (temp / "transport_fixture.py").write_text("""
-def answer(commit, query, *, fresh=False):
+def answer(commit, query, *, fresh=False, expected_inputs=None):
     return {"status": "ok", "rows": [], "total": 0,
             "coverage": {"complete": True, "open": []}, "provenance": {"fresh": fresh, "commit": commit}}
 """)

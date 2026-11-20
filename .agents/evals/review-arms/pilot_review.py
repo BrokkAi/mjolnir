@@ -114,7 +114,7 @@ def run(params):
             place = driver.container(sid)
             if driver.image_digest(place["image"]) != params["inputs"]["image_digest"]:
                 return driver.retain_pilot_session(d, sid, "reviewer image differs from pinned image", placement=place)
-            settings = brief_driver.configure_pilot_model(sid, model, effort)
+            settings = brief_driver.configure_pilot_model_ready(sid, model, effort)
             before = driver.inventory(place, "audit", bug["base_commit"])
             assert not before["remotes"] and not before["alternates"] and not before["status"], before
             if params["attest_cache"]:

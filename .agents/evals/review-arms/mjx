@@ -5,6 +5,9 @@
 # instance, where runs have happened since 2026-11-16 (brief/PLAN-writer-terra.md);
 # REVIEW_ARMS_INSTANCE=private reaches the earlier private instance under
 # $REVIEW_ARMS_DIR/instance instead.
+# REVIEW_ARMS_MJ names another mj binary, such as the RQL pilot's frozen copy of a
+# development build; REVIEW_ARMS_MJ_WORKER then names its matching portable worker,
+# passed as MJ_WORKER_BINARY so a daemon this call starts stages that worker.
 B="${REVIEW_ARMS_DIR:-/mnt/optane/review-arms-20261113}/instance"
 dirs=()
 case "${REVIEW_ARMS_INSTANCE:-default}" in
@@ -12,9 +15,15 @@ case "${REVIEW_ARMS_INSTANCE:-default}" in
   private) dirs=(MJ_CONFIG_DIR="$B/config" MJ_DATA_DIR="$B/data") ;;
   *) echo "mjx: REVIEW_ARMS_INSTANCE must be default or private" >&2; exit 2 ;;
 esac
+mj=/home/jonathan/.cargo/bin/mj
+if [ -n "${REVIEW_ARMS_MJ:-}" ]; then
+  mj=$REVIEW_ARMS_MJ
+  [ -n "${REVIEW_ARMS_MJ_WORKER:-}" ] || { echo "mjx: REVIEW_ARMS_MJ needs REVIEW_ARMS_MJ_WORKER" >&2; exit 2; }
+  dirs+=(MJ_WORKER_BINARY="$REVIEW_ARMS_MJ_WORKER")
+fi
 exec env -i HOME="$HOME" USER="${USER:-jonathan}" LOGNAME="${LOGNAME:-jonathan}" \
   LANG="${LANG:-C.UTF-8}" SHELL=/bin/bash TERM=dumb \
   PATH="/home/jonathan/.cargo/bin:/home/jonathan/.local/bin:/home/jonathan/.nvm/versions/node/v24.15.0/bin:/usr/local/bin:/usr/bin:/bin" \
   XDG_RUNTIME_DIR="/run/user/$(id -u)" \
   "${dirs[@]}" \
-  /home/jonathan/.cargo/bin/mj "$@"
+  "$mj" "$@"

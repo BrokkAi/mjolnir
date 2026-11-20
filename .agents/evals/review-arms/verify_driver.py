@@ -408,15 +408,8 @@ def run_sealed_judge(batch_path):
         command = f"judge-{tag}-{sid[:12]}"
         if not settings_path.is_file():
             attest_judge(attempt, sid)
-            while True:
-                try:
-                    save(settings_path, brief_driver.configure_pilot_model(sid, a.model, "high"))
-                    break
-                except RuntimeError as error:
-                    if "initialization is still running" not in str(error):
-                        raise
-                    pilot_driver.wait_idle(sid)
-                    time.sleep(5)
+            save(settings_path, brief_driver.configure_pilot_model_ready(
+                sid, a.model, "high", wait_idle=pilot_driver.wait_idle))
         if not request_path.is_file():
             upload_inputs(sid, batch_path)
             save(request_path, pilot_driver.mj("message", "--session", sid, "--command-id", command,

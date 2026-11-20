@@ -180,15 +180,21 @@ def require_fidelity(root, raw, manifest, groups):
         raise ValueError("R and R-loc require a manifest with served_steps")
     path = root / "fidelity/gate-report.json"
     try:
+        from rql_mock.engine import load_engine
+        identity = load_engine().identity
         report = read_json(path)
-        if report["manifest_sha256"] != digest(raw) or report["served_steps"] != steps:
-            raise ValueError("report is for another manifest or step list")
+        if (report["manifest_sha256"] != digest(raw)
+                or report["manifest_sha256"] != identity["manifest_sha256"]
+                or report["engine_inputs_sha256"] != identity["engine_inputs_sha256"]
+                or report["served_steps"] != steps):
+            raise ValueError("report is for another manifest, engine identity, or step list")
         evidence = report["steps"]
         if not isinstance(evidence, dict):
             raise ValueError("report has no per-step evidence")
         failed = [step for step in steps if evidence.get(step, {}).get("pass") is not True]
         if failed:
             raise ValueError(f"no passing result for {', '.join(failed)}")
+        return identity
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         raise ValueError(f"R and R-loc require a passing fidelity gate at {path}: {error}") from error
 
@@ -258,15 +264,17 @@ def expected_tools(arm):
     return [] if arm == "none" else ["rql_query"]
 
 
-def publish_tool_assignment(path, args, job, diff, sid):
+def publish_tool_assignment(path, args, job, diff, sid, *, engine_identity):
     marker = path / "tool-endpoint.json"
     arm = tool_arm(job)
+    if arm != "none" and not engine_identity:
+        raise ValueError("an RQL writer assignment requires an admitted engine identity")
     if not marker.exists():
         assignment = path / "tool-assignment.json"
         record = {"session_id": sid, "arm": arm, "manifest": str(args.manifest)}
         if arm != "none":
-            log = path / "queries.jsonl"
-            record.update(diff=job["diff"], intro=diff["intro"], log=str(log))
+            log = path / f"queries-{sid}.jsonl"
+            record.update(diff=job["diff"], intro=diff["intro"], log=str(log), **engine_identity)
         driver.save(assignment, record)
         # The installer binds the credential to this session and publishes it
         # only after the host assignment is ready. It must be idempotent.
@@ -278,8 +286,9 @@ def publish_tool_assignment(path, args, job, diff, sid):
 
 
 class Pilot:
-    def __init__(self, args, config, manifest, raw, image, reference, steps):
+    def __init__(self, args, config, manifest, raw, image, reference, steps, *, engine_identity=None):
         self.args, self.config = args, config
+        self.engine_identity = engine_identity
         self.diffs = {row["key"]: row for row in manifest["diffs"]}
         self.writer_model = tuple(manifest["models"]["writer"].rsplit("/", 1))
         self.reviewer_model = tuple(manifest["models"]["reviewer"].rsplit("/", 1))
@@ -302,6 +311,10 @@ class Pilot:
         bug = {"id": row["id"], "intro_commit": row["intro"], "base_commit": row["base"]}
         params = {"path": job_path(self.args.run_root, job), "bug": bug, "profile": self.args.profile}
         inputs = dict(self.common, rql_tools=expected_tools(tool_arm(job)))
+        if tool_arm(job) != "none":
+            if not self.engine_identity:
+                raise ValueError("an RQL writer requires an admitted engine identity")
+            inputs.update(self.engine_identity)
         if job["kind"] == "writer":
             if row["key"] not in self.messages:
                 self.messages[row["key"]] = driver.commit_message(bug)
@@ -338,7 +351,7 @@ class Pilot:
             return None
         params = self.render(job)
         if params is not None and params["inputs"] == record.get("inputs"):
-            if tool_arm(job) != "none" and not (path / "queries.jsonl").is_file():
+            if tool_arm(job) != "none" and not (path / f"queries-{record['session_id']}.jsonl").is_file():
                 return None
             try:
                 proof = (path / "mcp-reconnect-result.json").read_bytes()
@@ -370,10 +383,23 @@ class Pilot:
         # partial check, so the mounted cache cutoff is verified structurally in each session.
         params["attest_cache"] = True
         params["publish_tool_assignment"] = lambda sid: publish_tool_assignment(
-            path, self.args, job, self.diffs[job["diff"]], sid)
+            path, self.args, job, self.diffs[job["diff"]], sid, engine_identity=self.engine_identity)
+        params["revoke_tool_assignment"] = lambda sid: subprocess.run(
+            [str(self.args.rql_hook), "--revoke", str(path / "tool-assignment.json")],
+            check=True, stdout=subprocess.PIPE)
         try:
             if job["kind"] == "writer":
                 params["model"] = self.writer_model
+                if tool_arm(job) != "none":
+                    def writer_interruption(directory, sid):
+                        with (directory / f"queries-{sid}.jsonl").open() as log:
+                            for line in log:
+                                delivery = json.loads(line)
+                                if (delivery.get("session") == sid and delivery.get("delivered") is True
+                                        and delivery.get("status") == "quota_hold"):
+                                    return "RQL engine weekly quota held a writer query"
+
+                    params["writer_interruption"] = writer_interruption
                 state = brief_driver.run(params["bug"]["id"], self.gate, pilot=params)
             else:
                 params["model"] = self.reviewer_model
@@ -429,7 +455,7 @@ def main():
             parser.error(f"{key} differs from the frozen manifest")
     if uses_rql and manifest["inputs"].get("steps_sha256") is None:
         parser.error("freeze the menu semantics in the manifest before running R or R-loc")
-    require_fidelity(args.run_root, raw, manifest, groups)
+    engine_identity = require_fidelity(args.run_root, raw, manifest, groups)
     # mjx strips inherited MJ_* and XDG settings, then passes the explicit named instance.
     config = tomllib.loads((config_dir / "config.toml").read_text())
     image = preflight(config, args.profile)
@@ -441,7 +467,7 @@ def main():
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as e:
                 raise RuntimeError("another pilot owns the study instance or run root") from e
-        runner = Pilot(args, config, manifest, raw, image, reference, steps)
+        runner = Pilot(args, config, manifest, raw, image, reference, steps, engine_identity=engine_identity)
         try:
             return run_matrix(args.run_root, groups, args.profile, runner.complete, runner.execute)
         finally:
