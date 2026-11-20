@@ -1,7 +1,7 @@
 // Instance names, configuration directories and atomic file writes.
 // Port of mj-core/src/config/loading.rs.
 
-package config
+package core
 
 import (
 	"crypto/rand"
@@ -14,8 +14,6 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
-
-	"github.com/BrokkAi/mjolnir/go/internal/core/hex"
 )
 
 // ConfigVersion is the config.toml schema version this build reads and writes.
@@ -293,7 +291,7 @@ func InstanceIdentityFor(instance, dataDir string) string {
 		return instance
 	}
 	digest := sha256.Sum256([]byte(dataDir))
-	return hex.LowerHex(digest[:])[:16]
+	return LowerHex(digest[:])[:16]
 }
 
 // SessionsDir is where per-session files live.
