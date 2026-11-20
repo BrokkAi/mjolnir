@@ -127,8 +127,7 @@ pub(super) struct RuntimeStateOwner {
     pub(super) transcripts:
         mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionTail>,
     /// Sessions the session manager is told to run a relay actor for. Only
-    /// these hold a view in `sessions`: a retired actor publishes no final
-    /// view, so without this a stopped session kept its last live one.
+    /// these hold a live view: a retired actor publishes no final view.
     relay_sessions: BTreeSet<String>,
     pub(super) background_policies: BTreeMap<String, snapshot::BackgroundPolicyState>,
     completed: VecDeque<(String, String)>,
@@ -259,19 +258,40 @@ impl RuntimeStateOwner {
     /// Record the sessions the manager now runs actors for and drop the view
     /// of every other one. Returns whether a published view went away.
     pub(super) fn install_relay_sessions(&mut self, sessions: BTreeSet<String>) -> bool {
-        let before = self.sessions.len();
-        self.sessions.retain(|id, _| sessions.contains(id));
-        self.transcripts.retain(|id, _| sessions.contains(id));
-        self.background_policies
-            .retain(|id, _| sessions.contains(id));
+        let mut changed = false;
+        for id in self.relay_sessions.difference(&sessions) {
+            if let Some(view) = self.sessions.get(id).filter(|view| !view.materialized_only) {
+                let durable = view.materialized.clone();
+                self.sessions.remove(id);
+                if let Some(durable) = durable {
+                    self.sessions
+                        .insert(id.clone(), materialized_only(id, durable));
+                }
+                changed = true;
+            }
+            self.transcripts.remove(id);
+            self.background_policies.remove(id);
+        }
         self.relay_sessions = sessions;
-        self.sessions.len() != before
+        changed
     }
 
     /// Whether a view for `session_id` comes from an actor the manager is
     /// still meant to run. A late view from a retired actor does not.
     pub(super) fn runs_relay_actor(&self, session_id: &str) -> bool {
         self.relay_sessions.contains(session_id)
+    }
+
+    pub(super) fn seed_materialized(
+        &mut self,
+        seed: BTreeMap<String, mj_client::daemon::RuntimeMaterializedSession>,
+    ) {
+        for (id, materialized) in seed {
+            if self.controller.state.sessions.contains_key(&id) {
+                self.sessions
+                    .insert(id.clone(), materialized_only(&id, materialized.into()));
+            }
+        }
     }
 
     /// Record the view a relay actor published, and bring the session's
@@ -299,7 +319,30 @@ impl RuntimeStateOwner {
                 self.transcripts.remove(&session_id);
             }
         }
+        use mj_client::daemon::RuntimeMaterializedSession;
+        let previous = self
+            .sessions
+            .get(&session_id)
+            .and_then(|view| view.materialized.as_ref());
+        let materialized = view
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                let session = &snapshot.materialized;
+                let next = RuntimeMaterializedSession {
+                    execution: session.execution,
+                    last_activity_at_ms: session.last_activity_at_ms,
+                    queued_prompts: crate::pollers::queued_prompt_projection(session),
+                    pending_elicitations: session.pending_elicitations.clone(),
+                };
+                match previous {
+                    Some(previous) if **previous == next => previous.clone(),
+                    _ => next.into(),
+                }
+            })
+            .or_else(|| previous.cloned());
         let mut runtime = RuntimeSessionView::from_managed(session_id.clone(), view);
+        runtime.materialized = materialized;
         if let Some(record) = self.controller.state.sessions.get(&session_id) {
             let config = &self.controller.config;
             runtime.policy_config_keys = record
@@ -688,6 +731,41 @@ impl mj_controller::worker_client::CredentialSyncRuntime for RuntimeState {
     ) -> Vec<(String, &'static str)> {
         RuntimeState::credential_sync_skips(self, profile_id, fanout, caused_by, present)
     }
+}
+
+fn materialized_only(
+    session_id: &str,
+    materialized: mj_core::snapshot_map::SharedSnapshot<
+        mj_client::daemon::RuntimeMaterializedSession,
+    >,
+) -> RuntimeSessionView {
+    let mut view =
+        RuntimeSessionView::from_managed(session_id.to_owned(), ManagedSessionView::default());
+    view.materialized = Some(materialized);
+    view.materialized_only = true;
+    view
+}
+
+pub(super) fn load_materialized_seed()
+-> Result<BTreeMap<String, mj_client::daemon::RuntimeMaterializedSession>> {
+    use mj_client::daemon::RuntimeMaterializedSession;
+    let mut seed: BTreeMap<_, _> = mj_controller::database::load_materialized_activity()?
+        .into_iter()
+        .map(|(id, (last_activity_at_ms, execution))| {
+            (
+                id,
+                RuntimeMaterializedSession {
+                    last_activity_at_ms,
+                    execution,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    for (id, queue) in mj_controller::database::load_materialized_queued_prompts_for_startup()? {
+        seed.entry(id).or_default().queued_prompts = crate::pollers::queued_prompt_entries(&queue);
+    }
+    Ok(seed)
 }
 
 #[cfg(test)]

@@ -7,8 +7,10 @@ from pathlib import Path
 import re
 from statistics import mean, median
 
-from pilot_judge import (DEFAULT_MANIFEST, DEFAULT_ROOT, HAND_PATH, INPUT_PATH, JUDGMENT_FIELDS, KEY_PATH, artifact,
-                         brief_binding, group_jobs, load, load_snapshot, records, run_artifact, save, sha)
+from pilot_judge import (DEFAULT_MANIFEST, DEFAULT_ROOT, JUDGMENT_FIELDS, KEY_PATH, artifact, brief_binding,
+                         group_jobs, isolation_evidence, isolation_report, load, load_snapshot, read_egress, records,
+                         run_artifact, save, sha)
+from pilot_lock import pilot_lock
 
 ARMS = ("N", "G", "R", "R-loc")
 CONTRASTS = (("R", "G"), ("R-loc", "R"))
@@ -350,66 +352,18 @@ def load_deliveries(runs, key, *, stale_diffs=()):
     return deliveries
 
 
-def isolation_report(egress=(), evidence=()):
-    kinds = ("writer", "reviewer", "engine", "judge")
-    void, screened = defaultdict(set), defaultdict(set)
-    for kind, directory, launch_name in evidence:
-        if not (directory / launch_name).is_file():
-            continue
-        sid = load(directory / launch_name)["session_id"]
-        if (directory / "void.json").is_file():
-            void[kind].add(sid)
-        failed = directory / "failed.json"
-        if failed.is_file() and load(failed).get("void_reason"):
-            void[kind].add(sid)
-        for path in sorted(directory.glob("*audit.json")):
-            report = load(path)
-            if report["passed"] is False:
-                void[kind].add(sid)
-            for hit in report.get("hits", ()):
-                if hit["kind"] == "interpreter-screened":
-                    # Turn and retirement audits may cover the same transcript.
-                    screened[kind].add((sid, hit["seq"]))
-    return {
-        "egress_measurements": list(egress),
-        "void_sessions": {kind: len(void[kind]) for kind in kinds},
-        "interpreter_screened": {kind: len(screened[kind]) for kind in kinds},
-        "enforcement_gap": "Podman does not restrict pilot egress to providers. The engine's probes "
-                           "measure reachability of selected non-provider hosts. Stored transcript audits "
-                           "screen observed commands and output and cannot establish unobserved activity.",
-        "scope": "Counts cover stored current and superseded attempts. Engine counts include fidelity "
-                 "enumerators. Judge counts include fidelity adjudicators and blind hand checks.",
-    }
-
-
-def isolation_evidence(root, runs):
-    for kind, pattern in (("writer", "**/writer*"), ("reviewer", "**/reviewers/*")):
-        for directory in runs.glob(pattern):
-            yield kind, directory, "launch.json"
-    for pattern in ("*/active", "*/retired/*"):
-        for directory in (root / "engine-cache").glob(pattern):
-            yield "engine", directory, "session.json"
-    for role, kind in (("terra", "engine"), ("adjudicator", "judge")):
-        for directory in (root / "fidelity").glob(f"**/{role}"):
-            yield kind, directory, "session.json"
-    retired = root / KEY_PATH.parent / "retired"
-    retired_batches = sorted(retired.iterdir()) if retired.is_dir() else ()
-    for base in (root, *retired_batches):
-        for phase in (INPUT_PATH, HAND_PATH):
-            for directory in (base / phase).glob("sessions/*/*"):
-                yield "judge", directory, "launch.json"
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="root containing stored judgments")
     parser.add_argument("--runs", type=Path, help="writer delivery logs under this runs directory")
-    parser.add_argument("--egress-log", type=Path, help="stored record_egress.py JSONL (default: egress.jsonl in the run root)")
+    parser.add_argument("--egress-log", type=Path, help="live probe JSONL (default: path recorded in the judge key)")
     parser.add_argument("--archived", action="store_true",
                         help="reproduce frozen judgments and deliveries without checking live run artifacts")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.archived and args.egress_log is not None:
+        parser.error("--archived uses the egress records frozen in the judge key")
     raw_manifest = args.manifest.read_bytes()
     manifest = json.loads(raw_manifest)
     key = load(args.root / KEY_PATH)
@@ -427,13 +381,22 @@ def main():
     judgments = {"key": key, "judge": records(args.root, key, "judge"),
                  "hand_check": records(args.root, key, "hand-check")}
     runs = args.runs or args.root / "runs"
-    egress_path = args.egress_log or args.root / "egress.jsonl"
-    egress = ([json.loads(line) for line in egress_path.read_bytes().splitlines() if line.strip()]
-              if args.egress_log is not None or egress_path.is_file() else ())
-    isolation = isolation_report(egress, isolation_evidence(args.root, runs))
-    stale = set() if args.archived else stale_judged_diffs(runs, key)
-    result = readout(manifest, judgments, load_deliveries(runs, key, stale_diffs=stale), snapshot,
-                     isolation=isolation, stale_diffs=stale)
+    if args.archived:
+        isolation = key.get("isolation")
+        if isolation is None:
+            raise ValueError("archived readout requires isolation evidence frozen by judge preparation")
+        stale, deliveries = set(), load_deliveries(runs, key)
+    else:
+        source = key.get("egress_source", {})
+        default_egress = Path(source.get("path", args.root / "egress.jsonl"))
+        egress_path = args.egress_log.resolve() if args.egress_log is not None else default_egress
+        expected_egress = source.get("sha256") if str(egress_path) == source.get("path") else None
+        with pilot_lock(runs.parent):
+            _, egress = read_egress(egress_path, required=args.egress_log is not None, expected_sha256=expected_egress)
+            isolation = isolation_report(egress, isolation_evidence(args.root, runs))
+            stale = stale_judged_diffs(runs, key)
+            deliveries = load_deliveries(runs, key, stale_diffs=stale)
+    result = readout(manifest, judgments, deliveries, snapshot, isolation=isolation, stale_diffs=stale)
     if args.output:
         save(args.output, result)
     else:

@@ -1525,42 +1525,58 @@ pub fn load_materialized_queued_prompts() -> Result<BTreeMap<String, Vec<Materia
 pub(super) fn load_materialized_queued_prompts_from(
     path: &Path,
 ) -> Result<BTreeMap<String, Vec<MaterializedQueuedPrompt>>> {
+    read_all_materialized_queued_prompts(path, |_, error| Err(error))
+}
+
+/// Seed independent browser queues at daemon startup. A malformed queue
+/// stays in SQLite for recovery and does not hide the other sessions' queues.
+pub fn load_materialized_queued_prompts_for_startup()
+-> Result<BTreeMap<String, Vec<MaterializedQueuedPrompt>>> {
+    read_all_materialized_queued_prompts(&database_path(), |session_id, error| {
+        tracing::warn!(%session_id, %error, "could not seed the session's stored prompt queue");
+        Ok(())
+    })
+}
+
+pub(super) fn read_all_materialized_queued_prompts(
+    path: &Path,
+    mut invalid_queue: impl FnMut(&str, anyhow::Error) -> Result<()>,
+) -> Result<BTreeMap<String, Vec<MaterializedQueuedPrompt>>> {
     let connection = open_reader(path)?;
     let mut statement = connection.prepare(
         "SELECT session_id, command_id, kind_json, content_json, queued_at_ms, accepted_ordinal
          FROM materialized_queued_prompts
          ORDER BY session_id, ordinal",
     )?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, Option<u64>>(5)?,
-        ))
-    })?;
+    let mut rows = statement.query([])?;
     let mut queues = BTreeMap::<String, Vec<MaterializedQueuedPrompt>>::new();
-    for row in rows {
-        let (session_id, command_id, kind_json, content_json, queued_at_ms, accepted_ordinal) =
-            row?;
-        let content = serde_json::from_str(&content_json).with_context(|| {
-            format!("parse materialized queued prompt for session {session_id}")
-        })?;
-        let kind = serde_json::from_str(&kind_json).with_context(|| {
-            format!("parse materialized queue entry kind for session {session_id}")
-        })?;
-        queues
-            .entry(session_id)
-            .or_default()
-            .push(MaterializedQueuedPrompt {
-                command_id,
-                kind,
-                content,
-                queued_at_ms,
-                accepted_ordinal,
-            });
+    let mut invalid_session = None;
+    while let Some(row) = rows.next()? {
+        let session_id = row.get::<_, String>(0)?;
+        if invalid_session.as_ref() == Some(&session_id) {
+            continue;
+        }
+        let decode = || -> Result<MaterializedQueuedPrompt> {
+            Ok(MaterializedQueuedPrompt {
+                command_id: row.get(1)?,
+                kind: serde_json::from_str(&row.get::<_, String>(2)?).with_context(|| {
+                    format!("parse materialized queue entry kind for session {session_id}")
+                })?,
+                content: serde_json::from_str(&row.get::<_, String>(3)?).with_context(|| {
+                    format!("parse materialized queued prompt for session {session_id}")
+                })?,
+                queued_at_ms: row.get(4)?,
+                accepted_ordinal: row.get(5)?,
+            })
+        };
+        match decode() {
+            Ok(prompt) => queues.entry(session_id).or_default().push(prompt),
+            Err(error) => {
+                invalid_queue(&session_id, error)?;
+                queues.remove(&session_id);
+                invalid_session = Some(session_id);
+            }
+        }
     }
     Ok(queues)
 }
@@ -2218,6 +2234,17 @@ impl ProjectionPage<'_> {
         event_digest.clone_into(&mut self.applied_digest);
         self.dirty = true;
         Ok(ProjectionApplyOutcome::Applied)
+    }
+
+    /// Publish a session title with the same SQLite commit as its relay page.
+    /// A checkpoint can retire the actor immediately after this commit.
+    pub fn set_resolved_title(&self, title: Option<&str>) -> Result<()> {
+        self.transaction.execute(
+            "UPDATE sessions SET acp_session_title = ?2
+             WHERE session_id = ?1 AND acp_session_title IS NOT ?2",
+            params![self.session_id, title],
+        )?;
+        Ok(())
     }
 
     /// Persist the coalesced final state of this page. Intermediate event

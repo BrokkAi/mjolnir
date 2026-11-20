@@ -165,12 +165,9 @@ pub(super) async fn run_daemon_runtime(
     let workspaces = mj_core::runtime::spawn_blocking(mj_controller::database::list_workspaces)
         .await
         .context("daemon workspace load task panicked")??;
-    let mut remote = if config.phone.enabled {
-        Some(spawn_remote_session_manager()?)
-    } else {
-        None
-    };
-
+    let materialized_seed = mj_core::runtime::spawn_blocking(super::owner::load_materialized_seed)
+        .await
+        .context("daemon materialized session seed task panicked")??;
     // Start the primary manager after store preparation. Bootstrap failures
     // below have an awaited epilogue just like failures in the serving loop.
     let (delegation_tx, delegation_updates) = mj_controller::session_manager::delegation_channel();
@@ -199,6 +196,7 @@ pub(super) async fn run_daemon_runtime(
         worker_upgrades.observer(),
         workspaces,
     ));
+    state.owner().seed_materialized(materialized_seed);
     let failure_runtime = Arc::downgrade(&state);
     manager_control.install_harness_failure_handler(Arc::new(move |id, failure| {
         let runtime = failure_runtime.clone();
@@ -336,13 +334,6 @@ pub(super) async fn run_daemon_runtime(
                 "drain bootstrap startup deliveries",
                 state.cancel_and_join_startup_prompts().await,
             );
-            if let Some(remote) = remote.take() {
-                record_daemon_cleanup(
-                    &mut outcome,
-                    "shut down bootstrap remote session manager",
-                    remote.shutdown.shutdown().await,
-                );
-            }
             record_daemon_cleanup(
                 &mut outcome,
                 "shut down bootstrap session manager",
@@ -637,38 +628,19 @@ pub(super) async fn run_daemon_runtime(
             })
         })
     };
-    let mut phone_publisher: Option<RemoteSessionPublisher> = None;
-    let mut phone_targets = None;
-    let mut prepared_targets = manager_targets.subscribe();
-    let mut phone_task = None;
-    let mut remote_request_bridge = None;
-    if let Some(remote) = remote.take() {
-        remote
-            .targets
-            .send_replace(prepared_targets.borrow_and_update().clone());
-        phone_targets = Some(remote.targets.clone());
-        phone_publisher = Some(remote.publisher.clone());
-        remote_request_bridge = Some(spawn_remote_request_bridge(
-            remote.requests,
-            manager_control.clone(),
-        ));
-        phone_task = Some(spawn_phone_server(
+    let phone_task = if config.phone.enabled {
+        Some(spawn_phone_server(
             config.phone,
             cancellation.clone(),
             state.clone(),
-            SessionManagerChannels {
-                session_cpu: remote.control.session_cpu.clone(),
-                targets: remote.targets,
-                control: remote.control,
-                updates: remote.updates,
-                shutdown: remote.shutdown,
-            },
+            manager_control.clone(),
             delegation_services,
-        ));
+        ))
     } else {
         state.set_phone_status(WebViewerStatus::Disabled);
         state.web_viewer.publish(crate::server::WebViewerAccess::Unavailable("Web access is disabled. Enable [phone].enabled in your configuration, then restart the daemon.".into()));
-    }
+        None
+    };
     let daemon_metadata_path = metadata_path();
     let mut client_tasks = tokio::task::JoinSet::new();
     let mut delegation_outcome = None;
@@ -715,13 +687,6 @@ pub(super) async fn run_daemon_runtime(
             tokio::select! {
                 _ = cancellation.cancelled() => break,
                 _ = progress_tick.tick() => {},
-                changed = prepared_targets.changed(), if phone_targets.is_some() => {
-                    progress.phase(ServingPhase::Targets);
-                    changed.context("daemon worker target publication stopped")?;
-                    if let Some(targets) = &phone_targets {
-                        targets.send_replace(prepared_targets.borrow_and_update().clone());
-                    }
-                }
                 result = supervise_service(&mut auto_afk, &mut auto_afk_outcome, &cancellation, "auto AFK service") => {
                     result?;
                     break;
@@ -863,15 +828,6 @@ pub(super) async fn run_daemon_runtime(
                                 &session_id, detail, observed_updated_at,
                             ).await;
                         });
-                    }
-                    if let Some(publisher) = phone_publisher.as_ref()
-                        && let Err(error) = publisher.try_publish(
-                            update.session_id.clone(),
-                            update.view.clone(),
-                        )
-                    {
-                        tracing::warn!(%error, "phone session view bridge stopped");
-                        phone_publisher = None;
                     }
                     // Every session's view passes here whether or not anything is
                     // attached, which is exactly what an automatic review needs to
@@ -1073,13 +1029,7 @@ pub(super) async fn run_daemon_runtime(
             phone_task.await.map_err(anyhow::Error::new),
         );
     }
-    if let Some(remote_request_bridge) = remote_request_bridge {
-        epilogue.record(
-            &mut outcome,
-            "join phone session request bridge",
-            remote_request_bridge.await.map_err(anyhow::Error::new),
-        );
-    }
+
     client_tasks.abort_all();
     while let Some(result) = client_tasks.join_next().await {
         if let Err(error) = result

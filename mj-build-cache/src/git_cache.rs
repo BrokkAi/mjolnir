@@ -18,6 +18,64 @@ const CACHE_CONTAINER_ROOT: &str = "/run/hel/git-cache";
 const CACHE_RELATIVE_ROOT: &str = ".cache/mjolnir/git";
 const CACHE_MAX_KIB: u64 = 20 * 1024 * 1024;
 
+// A successful redirection creates the lock file exclusively. Some mkdir
+// implementations report success after the mkdir syscall loses to a peer.
+const CACHE_LOCK_FUNCTIONS: &str = r#"
+cache_lock_signal() {
+    if [ "$changing_cache_lock" = 0 ]; then
+        exit "$1"
+    fi
+    pending_cache_lock_signal=$1
+}
+track_cache_locks() {
+    held_cache_lock=
+    gc_lock=
+    changing_cache_lock=0
+    pending_cache_lock_signal=
+    trap 'cache_lock_signal 129' HUP
+    trap 'cache_lock_signal 130' INT
+    trap 'cache_lock_signal 143' TERM
+}
+finish_cache_lock_change() {
+    changing_cache_lock=0
+    [ -z "$pending_cache_lock_signal" ] || exit "$pending_cache_lock_signal"
+}
+try_cache_lock() {
+    # Defer exit until the recorded owner agrees with the filesystem.
+    changing_cache_lock=1
+    lock_status=1
+    set -C
+    if command : 2>/dev/null > "$1"; then
+        if [ "${2:-}" = gc ]; then
+            gc_lock=$1
+        else
+            held_cache_lock=$1
+        fi
+        lock_status=0
+    fi
+    set +C
+    finish_cache_lock_change
+    return "$lock_status"
+}
+release_cache_lock() {
+    changing_cache_lock=1
+    # The child must finish unlinking and reporting success even when the
+    # same signal hits both the shell and its children.
+    (trap '' HUP INT TERM; exec rm -- "$held_cache_lock")
+    held_cache_lock=
+    finish_cache_lock_change
+}
+cleanup_cache_locks() {
+    trap '' HUP INT TERM
+    set --
+    [ -z "$held_cache_lock" ] || set -- "$held_cache_lock"
+    [ -z "$gc_lock" ] || set -- "$@" "$gc_lock"
+    if [ "$#" -gt 0 ]; then
+        rm -f -- "$@"
+    fi
+}
+"#;
+
 use super::cache_host::CacheHost;
 
 impl CacheHost {
@@ -29,8 +87,13 @@ impl CacheHost {
         arguments: impl IntoIterator<Item = String>,
         purpose: impl Into<String>,
     ) -> CommandSpec {
-        self.shell_command(script, "hel-git-cache", arguments, purpose)
-            .stage(ProvisionStage::Cloning)
+        self.shell_command(
+            &format!("{CACHE_LOCK_FUNCTIONS}\n{script}"),
+            "hel-git-cache",
+            arguments,
+            purpose,
+        )
+        .stage(ProvisionStage::Cloning)
     }
 
     /// The sessions `engine` still has containers for on this host. The
@@ -350,19 +413,14 @@ snapshot_partial="$snapshot.partial-$$"
 # Full history must never enter a session's mounted subtree, even temporarily.
 pinned="$preparation/pinned.git"
 cutoff_repository="$snapshot.cutoff-$$"
-locked=0
 cleanup() {
-    if [ "$locked" -eq 1 ]; then
-        rmdir "$lock"
-    fi
+    cleanup_cache_locks
     rm -rf -- "$preparation" "$snapshot_partial" "$cutoff_repository"
 }
+track_cache_locks
 trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 attempt=0
-while ! mkdir "$lock" 2>/dev/null; do
+while ! try_cache_lock "$lock"; do
     attempt=$((attempt + 1))
     if [ "$attempt" -ge 1500 ]; then
         echo "timed out waiting for clone-cache lock $key" >&2
@@ -370,7 +428,6 @@ while ! mkdir "$lock" 2>/dev/null; do
     fi
     sleep 0.2
 done
-locked=1
 if [ "$has_token" = 1 ]; then
     IFS= read -r GH_TOKEN || exit 1
     export GH_TOKEN
@@ -419,8 +476,7 @@ fi
 # Git hardlinks immutable objects; this private repository needs no shared lock
 # while packing a cutoff bundle or making the mounted snapshot readable.
 git clone --mirror --local -- "$mirror" "$pinned"
-locked=0
-rmdir "$lock"
+release_cache_lock
 rm -rf -- "$snapshot" "$snapshot_partial"
 if [ "$#" -eq 0 ]; then
     if [ -n "$exact_ref" ]; then
@@ -539,11 +595,27 @@ marker="$root/last-gc"
 if [ -f "$marker" ] && find "$marker" -mmin -1440 -print | grep -q .; then
     exit 0
 fi
-find "$root/locks" -mindepth 1 -maxdepth 1 -type d -mmin +1440 -exec rm -rf {} \;
-gc_lock="$root/locks/gc"
-mkdir "$gc_lock" 2>/dev/null || exit 0
+# Reap old lock files and stale lock directories from earlier builds.
+find "$root/locks" -mindepth 1 -maxdepth 1 \( -type f -o -type d \) -mmin +1440 -exec rm -rf {} \;
 candidates="$root/gc-candidates-$$"
-trap 'rm -f -- "$candidates"; rm -rf -- "$gc_lock"' EXIT HUP INT TERM
+track_cache_locks
+trap 'cleanup_cache_locks; rm -f -- "$candidates"' EXIT
+try_cache_lock "$root/locks/gc" gc || exit 0
+# An interrupted eviction may leave an unpublished mirror behind.
+rm -rf -- "$root"/mirrors/.trash-*
+evict_cache_mirror() {
+    trash=
+    if [ -d "$1" ]; then
+        trash=$(mktemp -d "$root/mirrors/.trash-$$-XXXXXX")
+        # Rename within mirrors so a reader sees either the whole entry or no
+        # entry, even if deleting the unpublished directory is interrupted.
+        mv -- "$1" "$trash/mirror"
+    fi
+    release_cache_lock
+    if [ -n "$trash" ]; then
+        rm -rf -- "$trash"
+    fi
+}
 for snapshot in "$root"/sessions/*; do
     [ -d "$snapshot" ] || continue
     session=${snapshot##*/}
@@ -565,8 +637,8 @@ for entry in "$root"/mirrors/*; do
     [ -d "$entry" ] || continue
     key=${entry##*/}
     [ -f "$entry/last-used" ] || continue
-    if find "$entry/last-used" -mmin +43200 -print | grep -q . && mkdir "$root/locks/$key" 2>/dev/null; then
-        rm -rf -- "$entry" "$root/locks/$key"
+    if find "$entry/last-used" -mmin +43200 -print | grep -q . && try_cache_lock "$root/locks/$key"; then
+        evict_cache_mirror "$entry"
     fi
 done
 size=$(du -sk "$root/mirrors" | awk '{print $1}')
@@ -576,8 +648,8 @@ if [ "$size" -gt "$limit_kib" ]; then
         [ -n "$used" ] || continue
         entry=${used%/last-used}
         key=${entry##*/}
-        if mkdir "$root/locks/$key" 2>/dev/null; then
-            rm -rf -- "$entry" "$root/locks/$key"
+        if try_cache_lock "$root/locks/$key"; then
+            evict_cache_mirror "$entry"
             size=$(du -sk "$root/mirrors" | awk '{print $1}')
             [ "$size" -le "$limit_kib" ] && break
         fi
@@ -1328,6 +1400,7 @@ mod tests {
     }
 
     // Hard-won: #1388: packing one session's history blocked every clone of the same repository.
+    // Hard-won: 1bd051d40: a mkdir lock was acquired twice under uutils.
     #[cfg(unix)]
     #[test]
     fn concurrent_snapshots_share_a_refresh_and_survive_mirror_eviction() {
@@ -1374,6 +1447,7 @@ mod tests {
         };
         let real_git = executable("git");
         let real_mkdir = executable("mkdir");
+        let real_sleep = executable("sleep");
         let git_wrapper = r#"#!/bin/sh
 set -eu
 wait_for() {
@@ -1408,12 +1482,25 @@ exec "$CACHE_TEST_GIT" "$@"
         let mkdir_wrapper = r#"#!/bin/sh
 set -eu
 if [ "$#" -eq 1 ] && [ "$1" = "$CACHE_TEST_ROOT/cache/locks/repository" ] &&
-   [ "${CACHE_TEST_WAITER:-0}" = 1 ]; then
+   [ "${CACHE_TEST_WAITER:-0}" = 1 ] && [ -d "$1" ]; then
+    # Simulate uutils treating a competing mkdir's EEXIST as success.
     : > "$CACHE_TEST_ROOT/waiter-started"
+    exit 0
 fi
 exec "$CACHE_TEST_MKDIR" "$@"
 "#;
-        for (name, script) in [("git", git_wrapper), ("mkdir", mkdir_wrapper)] {
+        let sleep_wrapper = r#"#!/bin/sh
+set -eu
+if [ "${CACHE_TEST_WAITER:-0}" = 1 ] && [ "$1" = "0.2" ]; then
+    : > "$CACHE_TEST_ROOT/waiter-started"
+fi
+exec "$CACHE_TEST_SLEEP" "$@"
+"#;
+        for (name, script) in [
+            ("git", git_wrapper),
+            ("mkdir", mkdir_wrapper),
+            ("sleep", sleep_wrapper),
+        ] {
             let path = wrappers.join(name);
             std::fs::write(&path, script).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1426,6 +1513,7 @@ exec "$CACHE_TEST_MKDIR" "$@"
             ("CACHE_TEST_ROOT".into(), root.display().to_string()),
             ("CACHE_TEST_GIT".into(), real_git),
             ("CACHE_TEST_MKDIR".into(), real_mkdir),
+            ("CACHE_TEST_SLEEP".into(), real_sleep),
         ]);
         let mut first = GitExecutor(environment.clone());
         first.0.insert("CACHE_TEST_PAUSE_FETCH".into(), "1".into());
@@ -1575,6 +1663,8 @@ exec "$CACHE_TEST_MKDIR" "$@"
         );
     }
 
+    // Hard-won: 932a8969f: interrupted GC left its eviction lock.
+    // Hard-won: 13c4fc559: interrupted eviction left a partial mirror.
     #[test]
     #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
     fn cache_gc_evicts_the_oldest_mirror_to_meet_its_soft_cap() {
@@ -1605,6 +1695,112 @@ exec "$CACHE_TEST_MKDIR" "$@"
 
         assert!(!old.exists());
         assert!(recent.exists());
+
+        #[cfg(unix)]
+        {
+            // Interrupt GC after deletion removes Git metadata from a mirror.
+            std::fs::remove_file(cache_root.join("last-gc")).unwrap();
+            let source = temporary.path().join("source");
+            for repository in [&source, &recent.join("repo.git")] {
+                let git = CommandSpec::new("git", ["init", "--bare", repository.to_str().unwrap()]);
+                checked(ProcessExecutor.execute(&git).unwrap(), &git).unwrap();
+            }
+            let wrappers = temporary.path().join("bin");
+            std::fs::create_dir(&wrappers).unwrap();
+            let eviction_lock = cache_root.join("locks/recent");
+            mj_core::test_hooks::install_fake_command(
+                &wrappers,
+                "rm",
+                r#"#!/bin/sh
+set -eu
+if [ "$1" = -rf ] && [ -d "${3:-}" ]; then
+    case "$3" in
+        "$CACHE_TEST_EVICTION") entry=$3 ;;
+        "$CACHE_TEST_MIRRORS"/.trash-*)
+            test ! -e "$CACHE_TEST_EVICTION_LOCK"
+            entry="$3/mirror"
+            ;;
+        *) exec /bin/rm "$@" ;;
+    esac
+    /bin/rm -- "$entry/repo.git/HEAD"
+    kill -TERM "$PPID"
+    exit 0
+fi
+exec /bin/rm "$@"
+"#,
+            );
+            let executor = GitExecutor(BTreeMap::from([
+                (
+                    "PATH".into(),
+                    format!("{}:{}", wrappers.display(), std::env::var("PATH").unwrap()),
+                ),
+                ("CACHE_TEST_EVICTION".into(), recent.display().to_string()),
+                ("CACHE_TEST_MIRRORS".into(), mirrors.display().to_string()),
+                (
+                    "CACHE_TEST_EVICTION_LOCK".into(),
+                    eviction_lock.display().to_string(),
+                ),
+            ]));
+            let error =
+                collect_garbage_with_limit(&CacheHost::Local, &cache_root, &[], 0, &executor)
+                    .unwrap_err();
+            assert!(error.to_string().contains("status 143"), "{error:#}");
+            assert!(
+                !recent.exists(),
+                "an interrupted delete left a published mirror"
+            );
+            let trash = std::fs::read_dir(&mirrors)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".trash-")
+                })
+                .unwrap();
+            assert!(trash.join("mirror/repo.git").is_dir());
+            assert!(!trash.join("mirror/repo.git/HEAD").exists());
+            assert!(!eviction_lock.exists());
+            assert!(!cache_root.join("locks/gc").exists());
+            assert!(std::fs::read_dir(&cache_root).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("gc-candidates-")
+            }));
+
+            std::fs::remove_file(wrappers.join("rm")).unwrap();
+            mj_core::test_hooks::install_fake_command(
+                &wrappers,
+                "sleep",
+                "#!/bin/sh\necho 'preparation unexpectedly waited for the eviction lock' >&2\nexit 99\n",
+            );
+            let snapshot = cache_root.join("sessions/new/recent.git");
+            prepare_repository(
+                &CacheHost::Local,
+                &cache_root,
+                "recent",
+                source.to_str().unwrap(),
+                &snapshot,
+                None,
+                None,
+                None,
+                &executor,
+            )
+            .unwrap();
+            assert!(snapshot.join("HEAD").is_file());
+            assert!(recent.join("repo.git/HEAD").is_file());
+            assert!(!eviction_lock.exists());
+
+            collect_garbage(&CacheHost::Local, &cache_root, &[], &ProcessExecutor).unwrap();
+            assert!(
+                !trash.exists(),
+                "the next GC did not reap the interrupted eviction"
+            );
+            assert!(recent.exists());
+        }
     }
 
     #[test]

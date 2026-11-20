@@ -756,20 +756,17 @@ impl ProjectionWindow {
     }
 }
 
-impl ManagedSessionSnapshot {
-    /// The session's title, using the same precedence as
-    /// [`MaterializedSession::resolved_title`] but taking the provisional
-    /// title from the window rather than from a transcript head that a polled
-    /// projection does not carry.
+impl ProjectionWindow {
+    /// The resolved session title when earlier messages are outside the tail.
     #[must_use]
-    pub fn resolved_title(&self) -> Option<String> {
-        self.materialized
+    pub fn resolved_title(&self, materialized: &MaterializedSession) -> Option<String> {
+        materialized
             .session_title
             .as_deref()
             .and_then(normalize_session_title)
-            .or_else(|| self.window.provisional_title.clone())
+            .or_else(|| self.provisional_title.clone())
             .or_else(|| {
-                self.materialized
+                materialized
                     .queued_prompts
                     .iter()
                     .filter(|prompt| prompt.kind.is_prompt())
@@ -779,6 +776,13 @@ impl ManagedSessionSnapshot {
                         ))
                     })
             })
+    }
+}
+
+impl ManagedSessionSnapshot {
+    #[must_use]
+    pub fn resolved_title(&self) -> Option<String> {
+        self.window.resolved_title(&self.materialized)
     }
 
     /// The position of the turn this session most recently finished, or `None`

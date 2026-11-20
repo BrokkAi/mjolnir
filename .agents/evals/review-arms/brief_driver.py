@@ -398,11 +398,7 @@ def run(bug_id, gate, *, pilot=None):
     except (WriterTurnFailed, WriterBriefMissing) as error:
         if not pilot:
             raise
-        save(d / "transcript.json", driver.transcript(sid))
-        save(d / "usage.json", mj("usage", "--session", sid))
-        verdict = pilot_audit(d, sid, bool(pilot["inputs"]["rql_tools"]))
-        return driver.retain_pilot_session(d, sid, str(error),
-                                           **({"void_reason": verdict["hits"]} if not verdict["passed"] else {}))
+        return retain_pilot_writer_failure(pilot, sid, error)
     # brief.md is where the oracle builder and the blind arms read; it is written only on success.
     (d / "brief-candidate.md").write_text(text)
     if not (d / "inventory-check.json").exists():
@@ -453,9 +449,21 @@ def pilot_audit(d, sid, allow_rql):
     return verdict
 
 
+def retain_pilot_writer_failure(pilot, sid, error):
+    d = pilot["path"]
+    save(d / "transcript.json", driver.transcript(sid))
+    save(d / "usage.json", mj("usage", "--session", sid))
+    verdict = pilot_audit(d, sid, bool(pilot["inputs"]["rql_tools"]))
+    return driver.retain_pilot_session(d, sid, str(error),
+                                       **({"void_reason": verdict["hits"]} if not verdict["passed"] else {}))
+
+
 def write_brief(d, sid, tag, prompt, bug, limit=1800):
     send(d, sid, "prompt", "brief-" + tag[:32], prompt, limit)
     for rounds in range(FIX_ROUNDS + 1):
+        # The workspace is already past this lint result after a resolved repair.
+        if (d / f"fix-{rounds + 1}-completion.json").exists():
+            continue
         text = fetch_brief(sid)
         problems = lint(text, bug)
         save(d / f"lint-{rounds}.json", problems)

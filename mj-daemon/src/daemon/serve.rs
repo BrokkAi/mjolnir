@@ -33,11 +33,10 @@ pub(super) fn spawn_phone_server(
     config: mj_core::config::PhoneConfig,
     cancellation: CancellationToken,
     state: Arc<RuntimeState>,
-    worker: SessionManagerChannels,
+    worker: SessionManagerControl,
     services: super::delegation::Services,
 ) -> tokio::task::JoinHandle<()> {
     state.set_phone_status(WebViewerStatus::Starting);
-    let workspaces = state.workspaces();
     mj_core::runtime::spawn(async move {
         let push = crate::daemon::push_delivery::run(state.clone());
         let server = crate::server_runtime::run_server(
@@ -45,7 +44,6 @@ pub(super) fn spawn_phone_server(
             cancellation.clone(),
             worker,
             state.clone(),
-            workspaces,
             services,
         );
         tokio::pin!(server);
@@ -72,142 +70,6 @@ pub(super) fn spawn_phone_server(
             }
         }
     })
-}
-
-pub(super) fn spawn_remote_request_bridge(
-    mut requests: mj_controller::session_manager::RemoteSessionRequests,
-    manager: SessionManagerControl,
-) -> tokio::task::JoinHandle<()> {
-    mj_core::runtime::spawn(async move {
-        // One session's requests reach its relay actor in the order they were
-        // made; different sessions still overlap.
-        let mut request_order = mj_controller::session_manager::SessionRequestOrder::new();
-        while let Some(request) = requests.recv().await {
-            dispatch_in_process_request(
-                &mut request_order,
-                request,
-                manager.clone(),
-                mj_controller::upgrade::gate(),
-            );
-        }
-        if let Err(error) = request_order.drain().await {
-            tracing::error!(%error, "remote request bridge drain failed");
-        }
-    })
-}
-
-/// Only daemon-owned mutations hold replacement admission. Reviewer operations
-/// live in workers, and synchronization is a repeatable read of their journals.
-fn dispatch_in_process_request(
-    order: &mut mj_controller::session_manager::SessionRequestOrder,
-    request: RemoteSessionRequest,
-    manager: SessionManagerControl,
-    gate: &Arc<mj_controller::upgrade::Gate>,
-) {
-    let label = match &request {
-        RemoteSessionRequest::Submit { .. } => Some("web relay submit"),
-        RemoteSessionRequest::RespondElicitation { .. } => Some("web elicitation response"),
-        RemoteSessionRequest::StopBackgroundTask { .. } => Some("web background task stop"),
-        RemoteSessionRequest::Sync { .. } | RemoteSessionRequest::Reviewer { .. } => None,
-    };
-    let work = match label.map(|label| gate.enter(label)).transpose() {
-        Ok(work) => work,
-        Err(error) => {
-            request.reject(&format!("request was not accepted: {error:#}"));
-            return;
-        }
-    };
-    order.dispatch(request, move |request| async move {
-        // Queue ownership includes the reply, even if its receiver disconnects.
-        let _work = work;
-        forward_in_process_session_request(request, manager).await;
-    });
-}
-
-pub(super) async fn forward_in_process_session_request(
-    request: RemoteSessionRequest,
-    manager: SessionManagerControl,
-) {
-    match request {
-        RemoteSessionRequest::Submit {
-            session_id,
-            command_id,
-            command,
-            reply,
-        } => {
-            let result = async {
-                manager
-                    .wait_for_session(&session_id, Duration::from_secs(5))
-                    .await?
-                    .submit(command_id, command)
-                    .await
-            }
-            .await
-            .map_err(|error| mj_client::session::SubmitFailure {
-                unconfirmed: error.is::<mj_client::session::DeliveryUnconfirmed>(),
-                refused: error.is::<mj_client::session::Refused>(),
-                message: format!("{error:#}"),
-            });
-            let _ = reply.send(result);
-        }
-        RemoteSessionRequest::Sync { session_id, reply } => {
-            let result = async { manager.session(session_id).await?.sync_now().await }
-                .await
-                .map_err(|error| anyhow::anyhow!("{error:#}"));
-            let _ = reply.send(result);
-        }
-        RemoteSessionRequest::RespondElicitation {
-            session_id,
-            elicitation_id,
-            response,
-            reply,
-        } => {
-            let result = async {
-                manager
-                    .session(session_id)
-                    .await?
-                    .respond_elicitation(elicitation_id, response)
-                    .await
-            }
-            .await
-            .map_err(|error| format!("{error:#}"));
-            let _ = reply.send(result);
-        }
-        RemoteSessionRequest::StopBackgroundTask {
-            session_id,
-            background_task_id,
-            reply,
-        } => {
-            let result = async {
-                manager
-                    .session(session_id)
-                    .await?
-                    .stop_background_task(background_task_id)
-                    .await
-            }
-            .await
-            .map_err(|error| format!("{error:#}"));
-            let _ = reply.send(result);
-        }
-        RemoteSessionRequest::Reviewer {
-            session_id,
-            role: _,
-            action,
-            mut reply,
-        } => {
-            let result = tokio::select! {
-                _ = reply.closed() => return,
-                result = async {
-                    manager
-                        .session(session_id)
-                        .await?
-                        .reviewer(action)
-                        .await
-                } => result,
-            };
-            let _ = reply.send(result);
-        }
-    }
 }
 
 pub(super) async fn serve_client(
@@ -1008,66 +870,5 @@ mod bridge_admission_tests {
             "{error:#}"
         );
         server.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn queued_web_mutations_hold_handoff_until_reply_and_late_requests_are_refused() {
-        let mut remote = mj_controller::session_manager::spawn_remote_session_manager().unwrap();
-        remote.targets.send_replace(vec![RelaySessionTarget {
-            session_id: "bridge-test".into(),
-            spec: CommandSpec::new("true", Vec::<String>::new()),
-            worker_recovery: None,
-            project_memory: None,
-        }]);
-        remote
-            .publisher
-            .publish("bridge-test".into(), ManagedSessionView::default())
-            .await
-            .unwrap();
-        remote
-            .control
-            .wait_for_session("bridge-test", Duration::from_secs(5))
-            .await
-            .unwrap();
-        let gate = Arc::new(mj_controller::upgrade::Gate::default());
-        let mut order = mj_controller::session_manager::SessionRequestOrder::new();
-        let request = |id: &str| {
-            let (reply, response) = tokio::sync::oneshot::channel();
-            (
-                RemoteSessionRequest::Submit {
-                    session_id: "bridge-test".into(),
-                    command_id: id.into(),
-                    command: mj_core::relay::RelayCommand::Cancel,
-                    reply,
-                },
-                response,
-            )
-        };
-        let (first, disconnected) = request("first");
-        dispatch_in_process_request(&mut order, first, remote.control.clone(), &gate);
-        let (second, completed) = request("second");
-        dispatch_in_process_request(&mut order, second, remote.control.clone(), &gate);
-        assert_eq!(gate.active_labels(), ["web relay submit x2"]);
-        assert!(!gate.try_close());
-        drop(disconnected);
-        for ordinal in 1..=2 {
-            let RemoteSessionRequest::Submit { reply, .. } = remote.requests.recv().await.unwrap()
-            else {
-                panic!("expected submit");
-            };
-            assert!(!gate.try_close());
-            reply.send(Ok(ordinal)).unwrap();
-        }
-        assert_eq!(completed.await.unwrap().unwrap(), 2);
-        order.drain().await.unwrap();
-        assert!(gate.try_close());
-        let mut order = mj_controller::session_manager::SessionRequestOrder::new();
-        let (late, refused) = request("late");
-        dispatch_in_process_request(&mut order, late, remote.control.clone(), &gate);
-        let refused = refused.await.unwrap().unwrap_err();
-        assert!(!refused.unconfirmed);
-        assert!(refused.message.contains("not accepted"));
-        order.drain().await.unwrap();
-        remote.shutdown.shutdown().await.unwrap();
     }
 }

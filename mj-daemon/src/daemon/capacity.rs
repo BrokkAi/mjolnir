@@ -215,6 +215,10 @@ fn project_host_rows(
             RuntimeHostCapacity {
                 reading: HostCapacityRow::new(target, state, storage),
                 refreshing: inputs.refreshing(state),
+                disk_total_bytes: state
+                    .usage
+                    .as_ref()
+                    .and_then(|usage| usage.disk_total_bytes),
             }
         })
         .collect()

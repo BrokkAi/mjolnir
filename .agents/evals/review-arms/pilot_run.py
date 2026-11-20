@@ -13,6 +13,7 @@ import tomllib
 
 import brief_driver
 import driver
+from pilot_lock import pilot_lock
 import pilot_review
 
 PILOT = Path(__file__).resolve().parent / "brief/rql-census/pilot"
@@ -409,10 +410,13 @@ class Pilot:
             except brief_driver.WriterNeedsInput as error:
                 return hold_for_input(sid, error)
             except brief_driver.WriterTurnFailed as error:
-                state = driver.retain_pilot_session(path, sid, str(error))
-                if job["kind"] == "writer":
-                    state = brief_driver.interrupt_on_rql_quota(params, sid) or state
-                return state
+                if job["kind"] != "writer":
+                    return driver.retain_pilot_session(path, sid, str(error))
+                try:
+                    state = brief_driver.retain_pilot_writer_failure(params, sid, error)
+                except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as capture:
+                    return f"interrupted: {sid} could not capture the failed writer ({capture})"
+                return brief_driver.interrupt_on_rql_quota(params, sid) or state
             except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
                 return f"interrupted: {sid} {pending['reason']} ({error})"
             else:
@@ -522,17 +526,17 @@ def main():
     image = preflight(config, args.profile)
     driver.workspace_id()  # discover a missing workspace before touching quota
     args.run_root.mkdir(parents=True, exist_ok=True)
-    with (config_dir / "pilot.lock").open("a") as instance_lock, (args.run_root / "pilot.lock").open("a") as run_lock:
-        for lock in (instance_lock, run_lock):
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as e:
-                raise RuntimeError("another pilot owns the study instance or run root") from e
-        runner = Pilot(args, config, manifest, raw, image, reference, steps, engine_identity=engine_identity)
+    with (config_dir / "pilot.lock").open("a") as instance_lock:
         try:
-            return run_matrix(args.run_root, groups, args.profile, runner.complete, runner.execute)
-        finally:
-            subprocess.run(driver.mj_invocation("daemon", "stop"), check=True)
+            fcntl.flock(instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as e:
+            raise RuntimeError("another pilot owns the study instance") from e
+        with pilot_lock(args.run_root):
+            runner = Pilot(args, config, manifest, raw, image, reference, steps, engine_identity=engine_identity)
+            try:
+                return run_matrix(args.run_root, groups, args.profile, runner.complete, runner.execute)
+            finally:
+                subprocess.run(driver.mj_invocation("daemon", "stop"), check=True)
 
 
 if __name__ == "__main__":

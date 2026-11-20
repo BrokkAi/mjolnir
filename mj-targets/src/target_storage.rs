@@ -388,15 +388,21 @@ pub fn worker_restart_problem(
 }
 
 /// The sentence a session shows instead of "unreachable" while one of its
-/// own filesystems is full.
-pub fn session_problem(session: &mj_core::state::SessionRecord) -> Option<String> {
+/// own filesystems is full. Use the same captured board as the host rows.
+pub fn session_problem_in(
+    storage: &[TargetStorageView],
+    session: &mj_core::state::SessionRecord,
+) -> Option<String> {
     let checkout = session.checkout();
-    worker_restart_problem(
+    let paths = mj_core::targets::storage::session_storage_paths(
         session.target.as_ref()?,
         &session.id,
         checkout.project_directory(),
-    )
-    .map(|(_, problem)| problem)
+    );
+    storage
+        .iter()
+        .find(|view| view.host == paths.host)?
+        .problem_for(paths.all())
 }
 
 #[cfg(any(test, feature = "test-support"))]

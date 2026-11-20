@@ -78,35 +78,3 @@ pub fn unowned_interrupted_lifecycles(
         })
         .collect()
 }
-
-pub fn project_worker_title(
-    controller: &mut Controller,
-    update: &WorkerPollUpdate,
-) -> Option<Option<String>> {
-    let snapshot = update.view.snapshot.as_ref()?;
-    let session = controller.state.sessions.get_mut(&update.session_id)?;
-    let title = snapshot.resolved_title();
-    if session.acp_session_title == title {
-        return None;
-    }
-    session.acp_session_title = title.clone();
-    Some(title)
-}
-
-pub fn apply_worker_record_update(controller: &mut Controller, update: &WorkerPollUpdate) {
-    let Some(title) = project_worker_title(controller, update) else {
-        return;
-    };
-    let session_id = update.session_id.clone();
-    mj_core::runtime::spawn(async move {
-        let result = mj_core::runtime::spawn_blocking(move || {
-            mj_controller::database::set_session_acp_title(&session_id, title.as_deref())
-        })
-        .await;
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(%error, "could not persist relay title"),
-            Err(error) => tracing::warn!(%error, "relay title persistence task failed"),
-        }
-    });
-}

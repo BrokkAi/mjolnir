@@ -180,7 +180,7 @@ impl ScopedProjection {
             .retain(|id, _| keeps_relation(full, id, kept.contains_key(id)));
         result.sessions = full
             .sessions
-            .filtered(|id, _| result.records.contains_key(id));
+            .filtered(|id, view| result.records.contains_key(id) && !view.materialized_only);
         result.moves = full.moves.filtered(|id, _| result.records.contains_key(id));
         result.session_cpu = full
             .session_cpu
@@ -240,13 +240,19 @@ impl ScopedProjection {
         }
 
         let records = &result.records;
-        follow_records(
-            &mut result.sessions,
-            &before.sessions,
-            &after.sessions,
-            records,
-            &moved,
-        );
+        for id in before
+            .sessions
+            .changes(&after.sessions)
+            .map(|(id, _)| id)
+            .chain(&moved)
+        {
+            let keep = records.contains_key(id)
+                && after
+                    .sessions
+                    .get(id)
+                    .is_some_and(|view| !view.materialized_only);
+            result.sessions.copy_entry(&after.sessions, id, keep);
+        }
         follow_records(
             &mut result.moves,
             &before.moves,
@@ -329,6 +335,8 @@ pub struct RuntimeContainerCapacity {
 pub struct RuntimeHostCapacity {
     pub reading: mj_core::targets::HostCapacityRow,
     pub refreshing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,6 +539,16 @@ pub struct RuntimeMetadata {
     )]
     pub last_subagent_policies: BTreeMap<String, SubagentPolicy>,
     pub workspace_names: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
+    #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
+    pub container_sizes: SnapshotMap<String, mj_core::state::HostContainerSize>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_oracle_choices: BTreeMap<String, bool>,
+    /// The browser reads this directly from the capture. Native paths may
+    /// contain bytes JSON cannot represent.
+    #[serde(skip)]
+    pub mount_history: SnapshotMap<String, Vec<std::path::PathBuf>>,
     pub lifecycles: Vec<RuntimeLifecycleView>,
     pub reviews: Vec<RuntimeReviewView>,
     pub notices: Vec<RuntimeNotice>,
@@ -1157,6 +1175,8 @@ mod tests {
 
     fn session(id: &str) -> RuntimeSessionView {
         RuntimeSessionView {
+            materialized: None,
+            materialized_only: false,
             attention: Default::default(),
             policy_config_keys: Vec::new(),
             session_id: id.into(),
@@ -1167,6 +1187,59 @@ mod tests {
             connected: false,
             error: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_browser_project_paths_do_not_break_control_frames() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::path::PathBuf;
+
+        let before = RuntimeProjection::default();
+        let mut after = before.clone();
+        let directory = PathBuf::from(OsString::from_vec(b"/project-\xff".to_vec()));
+        after
+            .metadata
+            .mount_history
+            .insert("local".into(), vec![directory.clone()]);
+        let delta = RuntimeDelta::between(&before, &after);
+        assert_eq!(
+            delta.metadata.as_ref().unwrap().mount_history["local"],
+            [directory]
+        );
+        let encoded = serde_json::to_vec(&delta).unwrap();
+        let decoded: RuntimeDelta = serde_json::from_slice(&encoded).unwrap();
+        assert!(decoded.metadata.unwrap().mount_history.is_empty());
+    }
+
+    #[test]
+    fn browser_prompt_bodies_cannot_exhaust_the_control_frame() {
+        let mut first = RuntimeProjection::default();
+        let mut view = session("queued");
+        view.materialized = Some(
+            crate::daemon::RuntimeMaterializedSession {
+                queued_prompts: vec![mj_core::relay::QueuedPrompt {
+                    id: "large".into(),
+                    kind: Default::default(),
+                    text: "x".repeat(crate::daemon::MAX_FRAME_BYTES + 1),
+                    attachments: Vec::new(),
+                    created_at_ms: 8,
+                }],
+                ..Default::default()
+            }
+            .into(),
+        );
+        first.sessions.insert("queued".into(), view);
+        let mut second = first.clone();
+        second.sessions.get_mut("queued").unwrap().connected = true;
+        let replacement = RuntimeDelta::between(&first, &second);
+        let encoded = serde_json::to_vec(&replacement).unwrap();
+        assert!(encoded.len() < crate::daemon::MAX_FRAME_BYTES);
+        let delivered: RuntimeDelta = serde_json::from_slice(&encoded).unwrap();
+        let view = delivered.sessions[0].1.as_ref().unwrap();
+        assert!(view.materialized.is_none());
+        assert!(view.connected);
     }
 
     // Hard-won: AFK review #3: a coalesced feed hid transitions with equal availability.

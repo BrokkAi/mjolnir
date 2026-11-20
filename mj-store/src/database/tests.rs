@@ -1721,6 +1721,90 @@ fn display_updates_cannot_restore_a_stale_checkpoint() {
 }
 
 #[test]
+fn a_relay_title_commits_and_rolls_back_with_its_projection_page() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay-title-page.sqlite3");
+    let record = session("session-1", "project");
+    save_session_to(&path, &record).unwrap();
+    save_materialized_session_to(
+        &path,
+        &mj_core::state::MaterializedSession::empty("session-1"),
+    )
+    .unwrap();
+
+    let rejected: anyhow::Result<()> = apply_projection_page_to(&path, "session-1", |page| {
+        page.set_resolved_title(Some("Rejected title"))?;
+        anyhow::bail!("fail after changing the title");
+    });
+    assert!(rejected.is_err());
+    assert_eq!(
+        load_state_from(&path).unwrap().sessions["session-1"].acp_session_title,
+        record.acp_session_title
+    );
+
+    apply_projection_page_to(&path, "session-1", |page| {
+        page.apply(
+            1,
+            RELAY_EVENT_GENESIS_DIGEST,
+            &event_digest(1),
+            &Default::default(),
+        )?;
+        page.set_resolved_title(Some("Committed title"))
+    })
+    .unwrap();
+    let stored = load_state_from(&path).unwrap();
+    assert_eq!(
+        stored.sessions["session-1"].acp_session_title.as_deref(),
+        Some("Committed title")
+    );
+    assert_eq!(
+        load_materialized_session_from(&path, "session-1")
+            .unwrap()
+            .unwrap()
+            .applied_event_ordinal,
+        1
+    );
+}
+
+#[test]
+fn a_delayed_relay_title_cannot_replace_the_title_of_a_newer_projection() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay-title.sqlite3");
+    save_session_to(&path, &session("session-1", "project")).unwrap();
+    let previous_digest = "a".repeat(64);
+    let current_digest = "b".repeat(64);
+    let mut materialized = mj_core::state::MaterializedSession::empty("session-1");
+    materialized.applied_event_ordinal = 2;
+    materialized.applied_event_digest = current_digest.clone();
+    save_materialized_session_to(&path, &materialized).unwrap();
+
+    let connection = open(&path).unwrap();
+    set_session_acp_title_at_projection_with(
+        &connection,
+        "session-1",
+        2,
+        &current_digest,
+        Some("New title"),
+    )
+    .unwrap();
+    set_session_acp_title_at_projection_with(
+        &connection,
+        "session-1",
+        1,
+        &previous_digest,
+        Some("Old title"),
+    )
+    .unwrap();
+    set_session_acp_title_at_projection_with(&connection, "session-1", 2, &previous_digest, None)
+        .unwrap();
+    let stored = load_state_from(&path).unwrap();
+    assert_eq!(
+        stored.sessions["session-1"].acp_session_title.as_deref(),
+        Some("New title")
+    );
+}
+
+#[test]
 fn harness_title_write_caps_large_titles_in_storage() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("title-write.sqlite3");
@@ -2265,6 +2349,53 @@ fn materialized_summary_loads_messages_without_deserializing_full_history() {
     assert_eq!(summary.last_user_message, None);
     assert_eq!(summary.last_agent_message, None);
     assert!(!summary.last_agent_message_follows_last_user);
+}
+
+#[test]
+fn a_damaged_prompt_queue_does_not_hide_other_sessions_queues_at_startup() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("queued-prompts.sqlite3");
+    for id in ["damaged", "healthy"] {
+        save_session_to(&path, &session(id, "project")).unwrap();
+        let mut materialized = mj_core::state::MaterializedSession::empty(id);
+        for command_id in ["first", "second", "third"] {
+            materialized
+                .queued_prompts
+                .push(mj_core::state::MaterializedQueuedPrompt {
+                    command_id: command_id.into(),
+                    kind: Default::default(),
+                    content: vec![serde_json::json!({"type": "text", "text": command_id})],
+                    queued_at_ms: 1_000,
+                    accepted_ordinal: None,
+                });
+        }
+        save_materialized_session_to(&path, &materialized).unwrap();
+    }
+    open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE materialized_queued_prompts SET content_json = 'null'
+         WHERE session_id = 'damaged' AND command_id = 'second'",
+            [],
+        )
+        .unwrap();
+
+    let mut damaged = Vec::new();
+    let queues = read_all_materialized_queued_prompts(&path, |id, _| {
+        damaged.push(id.to_owned());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(damaged, ["damaged"]);
+    assert!(!queues.contains_key("damaged"));
+    assert_eq!(
+        queues["healthy"]
+            .iter()
+            .map(|prompt| prompt.command_id.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+    assert!(load_materialized_queued_prompts_from(&path).is_err());
 }
 
 #[test]

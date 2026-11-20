@@ -27,9 +27,7 @@ use crate::server::{
 };
 use mj_controller::controller::Controller;
 use mj_controller::quota::ProfileQuota;
-use mj_controller::session_manager::{
-    SessionManagerChannels, SessionManagerControl, new_command_id,
-};
+use mj_controller::session_manager::{SessionManagerControl, new_command_id};
 use mj_controller::tailscale::TailscaleTls;
 #[cfg(test)]
 use mj_controller::targets::ProcessExecutor;
@@ -38,10 +36,7 @@ use mj_core::relay::RelayCommand;
 use mj_core::workspace::WorkspaceRecord;
 
 use crate::daemon::{CreateSessionRequest, LifecycleControl, ResumeSessionRequest, RuntimeState};
-use crate::pollers::{
-    QUOTA_STALE_AFTER, apply_worker_record_update, projected_queued_prompts,
-    queued_prompt_projection,
-};
+use crate::pollers::QUOTA_STALE_AFTER;
 use mj_controller::controller::config_only_controller;
 
 #[derive(Debug, Clone)]

@@ -92,6 +92,9 @@
       "state": "running"
     }
   ],
+  "native_subagent_attention": {
+    "provider-session-1": "unknown"
+  },
   "retry_assessment_pending": false,
   "id": "session-1",
   "publication_state": "unknown",
@@ -200,6 +203,9 @@
         }
       }
     ],
+    "native_subagent_attention": {
+      "provider-session-1": "unknown"
+    },
     "retry_assessment_pending": false,
     "id": "session-1",
     "publication_state": "unknown",
@@ -895,6 +901,9 @@
       "state": "completed"
     }
   ],
+  "native_subagent_attention": {
+    "provider-session-1": "unknown"
+  },
   "retry_assessment_pending": false,
   "id": "session-1",
   "publication_state": "unknown",

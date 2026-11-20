@@ -1,4 +1,5 @@
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import copy
 import io
 import hashlib
@@ -6,15 +7,19 @@ import json
 import os
 from pathlib import Path
 import runpy
+from shutil import copytree
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from threading import Event
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import pilot_judge as j
+from pilot_lock import pilot_lock
 import pilot_readout as r
+import pilot_run
 
 
 def fixture(n_diffs=1, replicate_first=True):
@@ -132,6 +137,107 @@ class PilotFixture(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
 
+    # Hard-won: 7088aaa: an isolation scan could pair a retired session with its replacement's audit.
+    def test_retirement_waits_for_judge_isolation_snapshot(self):
+        manifest, labels, defects = fixture()
+        initial = setup(self.root, manifest, labels, defects)
+        manifest_path = self.root / "pilot/manifest.json"
+        snapshot_labels = j.load_snapshot(manifest_path, manifest)
+        oid, entry = next((oid, row) for oid, row in initial["outputs"].items()
+                          if row["kind"] == "writer" and row["arm"] == "G")
+        brief = self.root / entry["artifact"]
+        original = brief.read_bytes().decode()
+        sid = entry["session_id"]
+        current = brief.parent
+        retired = current.with_name("writer.superseded-1")
+        launch = current / "launch.json"
+        old_hit = {"kind": "github-or-web", "snippet": "original", "seq": 1}
+        new_hit = {**old_hit, "snippet": "replacement"}
+        j.save(launch, {"session_id": sid})
+        j.save(current / "audit.json", {"passed": False, "hits": [old_hit]})
+        read_launch, continue_snapshot, noticed = Event(), Event(), Event()
+        original_load = j.load
+
+        class LockNotices(io.StringIO):
+            def write(self, message):
+                written = super().write(message)
+                if message.endswith("\n"):
+                    noticed.set()
+                return written
+
+        def load_and_pause(path):
+            result = original_load(path)
+            if path == current / "done.json":
+                read_launch.set()
+                self.assertTrue(continue_snapshot.wait(5))
+            return result
+
+        def retire():
+            with pilot_lock(self.root):
+                pilot_run.archive(current)
+                j.save(launch, {"session_id": "replacement"})
+                j.save(current / "audit.json", {"passed": False, "hits": [new_hit]})
+                brief.write_text("replacement brief")
+
+        notices = LockNotices()
+        with (patch.object(j, "load", load_and_pause),
+              contextlib.redirect_stderr(notices),
+              ThreadPoolExecutor(2) as workers):
+            snapshot = workers.submit(j.prepare, self.root, manifest, snapshot_labels, defects)
+            try:
+                self.assertTrue(read_launch.wait(5))
+                retirement = workers.submit(retire)
+                self.assertTrue(noticed.wait(5))
+                self.assertEqual(notices.getvalue().splitlines(), [
+                    f"waiting for the pilot run on {self.root} (PID {os.getpid()}) to release pilot.lock "
+                    "(pilot runs exit at quota holds or completion)",
+                ])
+                self.assertFalse(retirement.done())
+            finally:
+                continue_snapshot.set()
+            prepared = snapshot.result(timeout=5)
+            retirement.result(timeout=5)
+        isolated = prepared["isolation"]
+        self.assertEqual(isolated["void_reasons"]["writer"], {sid: [old_hit]})
+        self.assertEqual([entry["session_id"] for entry in isolated["attempts"]], [sid])
+        self.assertEqual(prepared["outputs"][oid], entry)
+        items = j.load(self.root / j.INPUT_PATH / entry["batch"] / "items.json")["items"]
+        self.assertEqual(next(item["text"] for item in items if item["output_id"] == oid), original)
+        self.assertEqual(j.load(retired / "launch.json")["session_id"], sid)
+        self.assertEqual(j.load(launch)["session_id"], "replacement")
+        self.assertEqual((self.root / "pilot.lock").read_bytes(), b"")
+
+    # Hard-won: 7088aaa: a later judge command could silently switch its frozen egress evidence.
+    def test_only_a_different_explicit_egress_source_replaces_the_frozen_copy(self):
+        manifest, _, defects = fixture()
+        arguments = (self.root, manifest, {}, defects, [])
+        custom = self.root / "custom-egress.jsonl"
+        uncaptured = j.prepare(*arguments, egress_log=custom)
+        self.assertEqual(uncaptured["egress_source"],
+                         {"path": str(custom), "sha256": None, "status": "uncaptured"})
+        self.assertEqual(uncaptured["isolation"]["egress_measurements"], [])
+        original = {"container": "first"}
+        raw = (json.dumps(original) + "\n").encode()
+        custom.write_bytes(raw)
+        initial = j.prepare(*arguments)
+        self.assertEqual(initial["egress_source"], {"path": str(custom), "sha256": j.sha(raw)})
+        self.assertNotIn("egress_source_history", initial)
+
+        replacement = self.root / "egress.jsonl"
+        replacement.write_text('{"container":"new"}\n')
+        custom.write_text('{"container":"changed"}\n')
+        for flag in (None, custom):
+            later = j.prepare(*arguments, egress_log=flag)
+            self.assertEqual(later["egress_source"], initial["egress_source"])
+            self.assertEqual(later["isolation"]["egress_measurements"], [original])
+            self.assertNotIn("egress_source_history", later)
+
+        updated = j.prepare(*arguments, egress_log=replacement)
+        self.assertEqual(updated["egress_source"], {"path": str(replacement), "sha256": j.sha(replacement.read_bytes())})
+        self.assertEqual(updated["isolation"]["egress_measurements"], [{"container": "new"}])
+        self.assertEqual(updated["egress_source_history"], [initial["egress_source"]])
+        self.assertEqual(j.prepare(*arguments), updated)
+
     # Hard-won: 49e16b8: a retained writer's reconnect polluted its replacement's exposure.
     def test_retained_writer_log_record_is_not_credited_to_replacement(self):
         key = setup(self.root, *fixture())
@@ -240,7 +346,11 @@ class PilotFixture(unittest.TestCase):
         self.assertCountEqual(items, key["outputs"].keys())
 
     def test_readout_uses_only_complete_diffs_and_reports_corrections(self):
-        key = setup(self.root, *fixture(3))
+        manifest, labels, defects = fixture(3)
+        egress = {"time": "fixture", "container": "engine", "reachable": {"github.com": True}, "enforced": False}
+        egress_log = self.root / "egress.jsonl"
+        egress_log.write_text(json.dumps(egress) + "\n")
+        key = setup(self.root, manifest, labels, defects)
         judged = blank_judgments(key)
         caught(key, judged, "repo/d0", "R", rep=2)
         caught(key, judged, "repo/d0", "R-loc", slots=(1,))
@@ -258,17 +368,23 @@ class PilotFixture(unittest.TestCase):
         engine = self.root / "engine-cache" / "commit" / "retired" / "engine"
         judge = self.root / j.KEY_PATH.parent / "retired" / "batch" / j.HAND_PATH / "sessions" / "batch" / "void-judge"
         screened = {"kind": "interpreter-screened", "seq": 5}
+        rejected = {"kind": "github-or-web", "seq": 6}
+        isolation_files = []
         for kind, path, launch in (("writer", writer_path, "launch.json"),
                                    ("reviewer", reviewer_path, "launch.json"),
                                    ("engine", engine, "session.json"), ("judge", judge, "launch.json")):
             j.save(path / launch, {"session_id": kind})
-            j.save(path / "audit.json", {"passed": kind == "reviewer", "hits": [screened]})
-        j.save(engine / "turn-3-audit.json", {"passed": False, "hits": [screened]})
-        egress = {"time": "fixture", "container": "engine", "reachable": {"github.com": True}, "enforced": False}
-        (self.root / "egress.jsonl").write_text(json.dumps(egress) + "\n")
+            hits = [screened] if kind == "reviewer" else [screened, rejected]
+            j.save(path / "audit.json", {"passed": kind == "reviewer", "hits": hits})
+            isolation_files.extend((path / launch, path / "audit.json"))
+        j.save(engine / "turn-3-audit.json", {"passed": False, "hits": [screened, rejected]})
+        isolation_files.append(engine / "turn-3-audit.json")
+        isolation_files.append(egress_log)
         # The isolated study directory contains only the committed-style snapshot.
         self.assertFalse((self.root / "labels" / "development-primary.jsonl").exists())
         manifest_path = self.root / "pilot/manifest.json"
+        key = j.prepare(self.root, manifest, j.load_snapshot(manifest_path, manifest), defects,
+                        manifest_sha256=key["manifest_sha256"])
         readout_path = self.root / "readout.json"
         args = ["pilot_readout.py", "--root", str(self.root), "--manifest", str(manifest_path),
                 "--output", str(readout_path)]
@@ -282,6 +398,10 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(isolation["egress_measurements"], [egress])
         self.assertEqual(isolation["void_sessions"], {"writer": 1, "reviewer": 0, "engine": 1, "judge": 1})
         self.assertEqual(isolation["interpreter_screened"], {"writer": 1, "reviewer": 1, "engine": 1, "judge": 1})
+        self.assertEqual(isolation["void_reasons"]["engine"], {"engine": [rejected]})
+        self.assertEqual({attempt["session_id"] for attempt in isolation["attempts"]},
+                         {"writer", "reviewer", "engine", "judge"})
+        self.assertEqual(isolation, key["isolation"])
         self.assertIn("does not restrict", isolation["enforcement_gap"])
         self.assertEqual(result["unfinished_diffs"], ["repo/d2"])
         self.assertEqual(result["as_judged"]["arms"]["R"]["catch_rate"], 0.25)
@@ -297,6 +417,8 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(agreement["reviewer"]["recovered_facts"]["rate"], 39 / 40)
         self.assertEqual(agreement["writer"]["whole_record"]["rate"], 1)
         self.assertEqual(result["stale_diffs"], [])
+        alternate_runs = self.root / "alternate" / "runs"
+        copytree(self.root / "runs", alternate_runs)
 
         # Supersede one G writer without changing the bytes. Its old reviews
         # still refer to the old session. Also change one N review's text.
@@ -314,12 +436,48 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(stale["unfinished_diffs"], ["repo/d2"])
         self.assertEqual(stale["paired_contrasts"]["R - G"]["catch"]["hand_checked"]["by_diff"], {})
 
+        late = writer_path.with_name("writer.superseded-2")
+        j.save(late / "launch.json", {"session_id": "later-writer"})
+        j.save(late / "audit.json", {"passed": False, "hits": [screened, rejected]})
+        with egress_log.open("a") as stream:
+            stream.write(json.dumps({**egress, "container": "later"}) + "\n")
+        archive_args = [*args, "--archived"]
+        with patch.object(sys, "argv", archive_args):
+            r.main()
+            self.assertEqual(readout_path.read_bytes(), first)
+        with patch.object(sys, "argv", args):
+            r.main()
+        self.assertIn("later-writer", j.load(readout_path)["isolation"]["void_reasons"]["writer"])
+
+        alternate_late = alternate_runs / late.relative_to(self.root / "runs")
+        j.save(alternate_late / "launch.json", {"session_id": "alternate-later-writer"})
+        j.save(alternate_late / "audit.json", {"passed": False, "hits": [screened, rejected]})
+        with patch.object(sys, "argv", [*args, "--runs", str(alternate_runs)]):
+            r.main()
+        live = j.load(readout_path)
+        self.assertEqual(live["stale_diffs"], [])
+        self.assertEqual(live["complete_diffs"], result["complete_diffs"])
+        self.assertEqual(live["isolation"]["void_reasons"]["writer"],
+                         {"writer": [rejected], "alternate-later-writer": [rejected]})
+        self.assertEqual(live["isolation"]["interpreter_screened"]["writer"], 2)
+        self.assertEqual(live["isolation"]["egress_source"], "missing")
+        self.assertNotIn("egress_measurements", live["isolation"])
+        with patch.object(sys, "argv", args):
+            egress_log.write_bytes(b"changed bytes")
+            r.main()
+            self.assertEqual(j.load(readout_path)["isolation"]["egress_source"], "missing")
+            egress_log.unlink()
+            r.main()
+            self.assertEqual(j.load(readout_path)["isolation"]["egress_source"], "missing")
+        isolation_files.remove(egress_log)
+
         for entry in key["outputs"].values():
             artifact = self.root / entry["artifact"]
             artifact.unlink()
             (artifact.parent / "done.json").unlink()
             (artifact.parent / "usage.json").unlink()
-        archive_args = [*args, "--archived"]
+        for path in [*isolation_files, late / "launch.json", late / "audit.json"]:
+            path.unlink()
         with patch.object(sys, "argv", archive_args):
             r.main()
             self.assertEqual(readout_path.read_bytes(), first)
