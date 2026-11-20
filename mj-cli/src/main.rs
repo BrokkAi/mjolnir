@@ -1004,6 +1004,28 @@ async fn run_command(
     update_notice: Option<StartupUpdateNotice>,
     no_splash: bool,
 ) -> Result<DashboardExit> {
+    // A computer that has never run a daemon is asked where it runs before
+    // anything connects to one. `go` and `simple` prepare their project
+    // against the daemon, so the answer has to come before they do.
+    // `go` and `simple` refuse `--workspace` below; that usage error comes
+    // before a question whose answer would be saved.
+    let refused_workspace = requested_workspace.is_some()
+        && matches!(command, Some(Command::Go(_) | Command::Simple(_)));
+    if !refused_workspace
+        && matches!(
+            command,
+            None | Some(Command::Go(_) | Command::Simple(_))
+                | Some(Command::Workspaces(WorkspacesArgs { command: None }))
+        )
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && matches!(
+            daemon::choice::ask_where_daemon_runs().await?,
+            daemon::choice::PlacementChoice::Cancelled
+        )
+    {
+        return Ok(DashboardExit::Interrupted);
+    }
     match command {
         None => {
             run_workspace_dashboard(
