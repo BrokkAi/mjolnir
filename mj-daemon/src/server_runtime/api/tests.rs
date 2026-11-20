@@ -177,12 +177,19 @@ fn models_probe(offers: &[(&str, &[&str])]) -> Arc<mj_controller::profile_catalo
     })
 }
 
+/// The session, the declined findings and the path of an `override_review`.
+type OverrideCall = (
+    String,
+    Vec<mj_core::subagent::ReviewOverride>,
+    Option<String>,
+);
+
 /// The parent's durable record, and the registration a spawn asks for, which
 /// it keeps and then refuses so a test can read what the spawn chose.
 struct RecordingExports {
     parent: SessionRecord,
     registered: std::sync::Mutex<Option<mj_controller::controller::RegisterSubagentRequest>>,
-    override_call: std::sync::Mutex<Option<(String, Vec<mj_core::subagent::ReviewOverride>)>>,
+    override_call: std::sync::Mutex<Option<OverrideCall>>,
     base_call: std::sync::Mutex<Option<(String, String, Option<String>)>>,
     quota_publications: tokio::sync::watch::Sender<mj_controller::quota::QuotaReportMap>,
     quota_refreshes:
@@ -204,8 +211,9 @@ impl ExportRuntime for RecordingExports {
         &self,
         session_id: String,
         overrides: Vec<mj_core::subagent::ReviewOverride>,
+        path: Option<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
-        *self.override_call.lock().unwrap() = Some((session_id, overrides));
+        *self.override_call.lock().unwrap() = Some((session_id, overrides, path));
         Box::pin(async { Ok(serde_json::json!({"accepted": true})) })
     }
 
@@ -256,7 +264,7 @@ impl RecordingExports {
         self.base_call.lock().unwrap().clone()
     }
 
-    fn override_call(&self) -> Option<(String, Vec<mj_core::subagent::ReviewOverride>)> {
+    fn override_call(&self) -> Option<OverrideCall> {
         self.override_call.lock().unwrap().clone()
     }
 }
@@ -537,6 +545,7 @@ async fn override_review_dispatch_forwards_parent_and_pairs_to_export() {
                         finding: "F".into(),
                         reason: "finding is unreasonable".into(),
                     }],
+                    path: Some("/worktree".into()),
                 },
             },
         )
@@ -549,7 +558,8 @@ async fn override_review_dispatch_forwards_parent_and_pairs_to_export() {
             vec![mj_core::subagent::ReviewOverride {
                 finding: "F".into(),
                 reason: "finding is unreasonable".into(),
-            }]
+            }],
+            Some("/worktree".into())
         ))
     );
 }

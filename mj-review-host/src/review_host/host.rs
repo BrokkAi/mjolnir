@@ -117,13 +117,13 @@ impl TurnReviewHost {
     pub async fn begin_push(
         &self,
         session_id: &str,
-        path: Option<String>,
+        paths: Vec<std::path::PathBuf>,
     ) -> Result<serde_json::Value, StartRefusal> {
         let (reply, answer) = oneshot::channel();
         self.events
             .send(HostEvent::StartPush {
                 session_id: session_id.to_owned(),
-                path,
+                paths,
                 reply,
             })
             .map_err(|_| StartRefusal("the review host stopped".into()))?;
@@ -135,12 +135,14 @@ impl TurnReviewHost {
     pub async fn override_push(
         &self,
         session_id: &str,
+        path: Option<std::path::PathBuf>,
         overrides: Vec<ReviewOverride>,
     ) -> Result<serde_json::Value, StartRefusal> {
         let (reply, answer) = oneshot::channel();
         self.events
             .send(HostEvent::OverridePush {
                 session_id: session_id.to_owned(),
+                path,
                 overrides,
                 reply,
             })
@@ -172,7 +174,7 @@ impl TurnReviewHost {
 
     /// Reviews committed work through the request_review gate.
     pub async fn start(&self, session_id: &str) -> Result<(), StartRefusal> {
-        self.begin_push(session_id, None).await.map(|_| ())
+        self.begin_push(session_id, Vec::new()).await.map(|_| ())
     }
 
     /// Whether `session_id` has a review open. The host's own slots answer, so

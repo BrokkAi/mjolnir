@@ -64,7 +64,7 @@ pub trait ExportRuntime: Send + Sync {
     fn request_review(
         &self,
         _session_id: String,
-        _path: Option<String>,
+        _paths: Vec<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async { bail!("push review is unavailable") })
     }
@@ -73,6 +73,7 @@ pub trait ExportRuntime: Send + Sync {
         &self,
         _session_id: String,
         _overrides: Vec<mj_core::subagent::ReviewOverride>,
+        _path: Option<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async { bail!("push review is unavailable") })
     }
@@ -304,11 +305,11 @@ impl ExportRuntime for RuntimeState {
     fn request_review(
         &self,
         session_id: String,
-        path: Option<String>,
+        paths: Vec<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .begin_push(&session_id, path)
+                .begin_push(&session_id, paths.into_iter().map(PathBuf::from).collect())
                 .await
                 .map_err(|error| anyhow!("request_review refused: {}", error.0))
         })
@@ -318,10 +319,11 @@ impl ExportRuntime for RuntimeState {
         &self,
         session_id: String,
         overrides: Vec<mj_core::subagent::ReviewOverride>,
+        path: Option<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .override_push(&session_id, overrides)
+                .override_push(&session_id, path.map(PathBuf::from), overrides)
                 .await
                 .map_err(|error| anyhow!("override_review refused: {}", error.0))
         })
@@ -1005,6 +1007,21 @@ impl ApiBackend {
             .await
     }
 
+    /// Whether the child's worker still queues a handback the daemon has not
+    /// executed, by the rule child completion uses. A child that is not live
+    /// has published no queue, so nothing of its is pending here.
+    async fn child_handback_pending(&self, child_id: &str) -> Result<bool> {
+        let Ok(handle) = self.sessions.session(child_id.to_owned()).await else {
+            return Ok(false);
+        };
+        let Some(observation) =
+            mj_controller::session_manager::DelegationObservation::from_view(&handle.view())
+        else {
+            return Ok(false);
+        };
+        crate::daemon::delegation::handback_pending(child_id, &observation).await
+    }
+
     /// For an ordinary worker child's handback, whether its review is open,
     /// asked once so the decision rests on one answer. `None` for any other
     /// action and for reviewers and oracles, which have no review of their
@@ -1164,18 +1181,22 @@ impl ApiBackend {
                     serde_json::from_slice(&output).context("decode the saved fetch")?;
                 Ok(serde_json::to_value(saved)?)
             }
-            SubagentToolAction::RequestReview { path } => {
+            SubagentToolAction::RequestReview { paths } => {
                 self.exports
-                    .request_review(parent_session_id.to_owned(), path.clone())
+                    .request_review(parent_session_id.to_owned(), paths.clone())
                     .await
             }
             SubagentToolAction::AskOracle { message } => {
                 self.ask_oracle(parent_session_id, request, prepared, message)
                     .await
             }
-            SubagentToolAction::OverrideReview { overrides } => {
+            SubagentToolAction::OverrideReview { overrides, path } => {
                 self.exports
-                    .override_review(parent_session_id.to_owned(), overrides.clone())
+                    .override_review(
+                        parent_session_id.to_owned(),
+                        overrides.clone(),
+                        path.clone(),
+                    )
                     .await
             }
             SubagentToolAction::SetReviewBaseline { commit, path } => {
@@ -2139,6 +2160,9 @@ impl ApiBackend {
                 // A child whose review is open is still pending: it may end
                 // turns while it waits, and handback refuses until the verdict.
                 ChildDisposition::NotNews("the child awaits its review's verdict")
+            } else if self.child_handback_pending(&id).await? {
+                // Child completion waits for the same queued handback.
+                ChildDisposition::NotNews("the child's handback is still queued")
             } else {
                 if inputs.queue_known() {
                     for failed in inputs.failed_deliveries(&id) {

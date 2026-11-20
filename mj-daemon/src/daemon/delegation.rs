@@ -554,23 +554,7 @@ async fn complete_child(
     // handoff admission: during startup the host defers the answer until its
     // interrupted-review sweep ends, and a handoff must not wait on reviews.
     let review_open = state.child_review(&child_id).await.holds();
-    // A handback the daemon already executed is no longer the queue's: its
-    // durable result says what happened (a rejected one recorded no report),
-    // even while the worker still lists it until the result is delivered.
-    let handback_queued = {
-        let child = child_id.clone();
-        let queued = observation.queued_handbacks();
-        mj_core::runtime::spawn_blocking(move || -> Result<bool> {
-            for request in queued {
-                match mj_controller::database::load_delegation(&child, &request)? {
-                    Some((_, Some(_))) => {}
-                    _ => return Ok(true),
-                }
-            }
-            Ok(false)
-        })
-        .await??
-    };
+    let handback_queued = handback_pending(&child_id, &observation).await?;
     let Ok(work) = mj_controller::upgrade::activity_unless_draining("delegation child completion")
     else {
         return Ok(ChildCompletion::Draining);
@@ -589,6 +573,31 @@ async fn complete_child(
         review_open,
     )
     .await
+}
+
+/// Whether `child_id`'s worker queue holds a handback the daemon has not
+/// executed yet. The queue owns a handback until then, so neither the child's
+/// completion nor its parent's report sweep may judge the ended turn first;
+/// both ask here. A handback the daemon already executed is no longer the
+/// queue's: its durable result says what happened (a rejected one recorded no
+/// report), even while the worker still lists it until the result is
+/// delivered.
+pub(crate) async fn handback_pending(
+    child_id: &str,
+    observation: &DelegationObservation,
+) -> Result<bool> {
+    let child = child_id.to_owned();
+    let queued = observation.queued_handbacks();
+    mj_core::runtime::spawn_blocking(move || -> Result<bool> {
+        for request in queued {
+            match mj_controller::database::load_delegation(&child, &request)? {
+                Some((_, Some(_))) => {}
+                _ => return Ok(true),
+            }
+        }
+        Ok(false)
+    })
+    .await?
 }
 
 /// What the worker published beside a child's ended turn.

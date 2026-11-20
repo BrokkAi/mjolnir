@@ -489,7 +489,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
         originating_command_id: None,
         request_id: "review-acceptance".into(),
         created_at_ms: 2,
-        action: mj_core::subagent::SubagentToolAction::RequestReview { path: None },
+        action: mj_core::subagent::SubagentToolAction::RequestReview { paths: Vec::new() },
     };
     let legacy_request = mj_core::subagent::SubagentToolRequest {
         originating_command_id: None,

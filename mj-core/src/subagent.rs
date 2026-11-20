@@ -443,15 +443,21 @@ pub enum SubagentToolAction {
         ls: bool,
     },
     ListProfiles,
+    /// Review the worktrees in `paths` together. Empty means the repository
+    /// that contains the session's working directory.
     RequestReview {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        paths: Vec<String>,
     },
     AskOracle {
         message: String,
     },
+    /// Decline findings of the verdict that covers `path`. `None` means the
+    /// only verdict waiting for an answer.
     OverrideReview {
         overrides: Vec<ReviewOverride>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     /// Mark commits through `commit` as reviewed, so later reviews start there.
     SetReviewBaseline {
@@ -526,7 +532,10 @@ enum SubagentToolActionWire {
     },
     ListProfiles,
     RequestReview {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        paths: Vec<String>,
+        /// A queued request from an older worker, which named one worktree.
+        #[serde(default)]
         path: Option<String>,
     },
     AskOracle {
@@ -535,6 +544,8 @@ enum SubagentToolActionWire {
     OverrideReview {
         #[serde(default)]
         overrides: Vec<ReviewOverride>,
+        #[serde(default)]
+        path: Option<String>,
         /// A queued request from an older worker, which overrode the whole
         /// verdict with one reason.
         #[serde(default)]
@@ -655,10 +666,14 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 ls,
             },
             SubagentToolActionWire::ListProfiles => Self::ListProfiles,
-            SubagentToolActionWire::RequestReview { path } => Self::RequestReview { path },
+            SubagentToolActionWire::RequestReview { mut paths, path } => {
+                paths.extend(path);
+                Self::RequestReview { paths }
+            }
             SubagentToolActionWire::AskOracle { message } => Self::AskOracle { message },
             SubagentToolActionWire::OverrideReview {
                 mut overrides,
+                path,
                 reason,
             } => {
                 if let Some(reason) = reason {
@@ -667,7 +682,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                         reason,
                     });
                 }
-                Self::OverrideReview { overrides }
+                Self::OverrideReview { overrides, path }
             }
             SubagentToolActionWire::SetReviewBaseline { commit, path } => {
                 Self::SetReviewBaseline { commit, path }
@@ -2008,13 +2023,21 @@ mod tests {
     fn request_review_path_preserves_legacy_encoding() {
         let old = r#"{"action":"request_review","params":{}}"#;
         let action: SubagentToolAction = serde_json::from_str(old).unwrap();
-        assert!(matches!(
+        assert_eq!(
             action,
-            SubagentToolAction::RequestReview { path: None }
-        ));
+            SubagentToolAction::RequestReview { paths: Vec::new() }
+        );
         assert_eq!(serde_json::to_string(&action).unwrap(), old);
+        // A request an older worker queued named one worktree.
+        let queued = r#"{"action":"request_review","params":{"path":"/worktree"}}"#;
+        assert_eq!(
+            serde_json::from_str::<SubagentToolAction>(queued).unwrap(),
+            SubagentToolAction::RequestReview {
+                paths: vec!["/worktree".into()]
+            }
+        );
         let scoped = SubagentToolAction::RequestReview {
-            path: Some("/worktree".into()),
+            paths: vec!["/worktree".into(), "/other".into()],
         };
         assert_eq!(
             serde_json::from_str::<SubagentToolAction>(&serde_json::to_string(&scoped).unwrap())
@@ -2035,6 +2058,7 @@ mod tests {
                     finding: LEGACY_WHOLE_VERDICT_FINDING.into(),
                     reason: "wrong premise".into(),
                 }],
+                path: None,
             }
         );
         let pairs =
@@ -2079,6 +2103,7 @@ mod tests {
                     finding: "finding".into(),
                     reason: "reason".into(),
                 }],
+                path: None,
             },
             SubagentToolAction::SetReviewBaseline {
                 commit: "abc123".into(),

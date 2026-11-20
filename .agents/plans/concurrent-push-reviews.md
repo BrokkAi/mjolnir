@@ -17,10 +17,11 @@ To see it working: in a test instance, start a session in a workspace with two w
 - [x] (2026-11-20) Precursor, separate commit: sub-agents no longer get the review tools, and `set_review_baseline` is renamed `set_baseline`. (Not part of this plan's milestones, but it changes the same tool surface.)
 - [x] (2026-11-20) Review of the plan: added root reservation for override and set_baseline, and corrected the older-worker behavior.
 - [x] (2026-11-20) Second review of the plan: restart stale preparations, resolve roots without a capture, keep save-before-ref for overrides.
+- [x] (2026-11-20) Seventh review: the rule for workers below the concurrency gate is restated as today's single-review behavior, so a re-review after fixes still works.
 - [x] (2026-11-20) Fifth and sixth reviews: interrupted markers keep their own recovery path in Milestone 2 (see Milestone 2); one relay constant in Milestone 3 gates both ResolveRepositories and concurrency, and Milestone 1 no longer adds a relay version.
 - [x] (2026-11-20) Fourth review of the plan: the base generation counts every review close, because a failed review can have moved some bases.
 - [x] (2026-11-20) Third review of the plan: review-off joins root ownership, clean verdicts retire findings, pathless override selects by count, old override schemas stay at one outstanding verdict, legacy overrides bump the base generation; new action fields are deliberately not version-gated.
-- [ ] Milestone 1: tool API and default scope, still one review per session (completed: `paths` and `override_review(path)` through tool, durable action with legacy `path` decoding, daemon dispatch and host; `capture_scope` in `reviewer.rs` decides the scope once for preparation and the review-off path; worker refusal lists workspace repositories; instructions and docs. Remaining: test run, review, commit).
+- [x] (2026-11-20) Milestone 1: tool API and default scope, still one review per session. `paths` and `override_review(path)` run from the tool through the durable action (which still decodes an older worker's `path`), daemon dispatch and the review host; `capture_scope` in `reviewer.rs` decides the scope once for preparation and the review-off path; the worker's refusal lists the workspace repositories; instructions and docs updated. No relay version is added (see the Decision Log).
 - [ ] Milestone 2: store one row per open review (breaking migration).
 - [ ] Milestone 3: review host keyed by review, with the overlap decision at the open step.
 - [ ] Milestone 4: surfaces show several reviews per session.
@@ -96,7 +97,7 @@ To see it working: in a test instance, start a session in a workspace with two w
   Rationale: found by review. Resolving the omitted path to the working directory would refuse a call whose only verdict belongs to a linked worktree outside the working directory.
   Date/Author: 2026-11-20.
 
-- Decision: a session can have more than one outstanding findings record only when its worker's relay protocol is at least `RELAY_CONCURRENT_REVIEW_PROTOCOL`, the one constant Milestone 3 adds with `ResolveRepositories`. Below it, the overlap check treats an outstanding findings record as owning every root of the session, so such a session keeps at most one review and one verdict at a time.
+- Decision: a session can have more than one outstanding findings record only when its worker's relay protocol is at least `RELAY_CONCURRENT_REVIEW_PROTOCOL`, the one constant Milestone 3 adds with `ResolveRepositories`. Below it, the session keeps today's behavior exactly: at most one open review at a time, whatever its paths, and a new verdict replaces the stored findings record, as `push_findings` does now. A re-review of the same worktree after its findings were fixed therefore works as it does today, and the session never holds two findings records.
   Rationale: found by review, twice. A worker without `override_review(path)` cannot choose between two verdicts, and a worker that has the argument but no `ResolveRepositories` cannot have its path resolved to a root without a review capture. Gating on the single protocol that brings both removes both dead ends, and no separate Milestone 1 protocol is needed: Milestone 1 does not change what the daemon sends to the worker, and a worker that writes the new fields always runs under a daemon that reads them.
   Date/Author: 2026-11-20.
 
@@ -262,3 +263,5 @@ Revision note (2026-11-20, third): review found five more Milestone 3 gaps (revi
 Revision note (2026-11-20, fourth): review found that `RecordReviewed` can move some bases of a review that then fails, so the base generation now advances on every review close and on every override or `set_baseline`, not only on clean verdicts.
 
 Revision note (2026-11-20, fifth and sixth): Milestone 2 keeps interrupted markers out of group recovery; the relay gate for concurrency moves to the single Milestone 3 constant, because a worker with the new tool schema but no `ResolveRepositories` would still leave a verdict that cannot be selected.
+
+Revision note (2026-11-20, seventh): the compatibility rule for workers below the concurrency gate had made an outstanding findings record block every new review, including a re-review after fixes. It now keeps today's behavior: one open review at a time, and a new verdict replaces the record.

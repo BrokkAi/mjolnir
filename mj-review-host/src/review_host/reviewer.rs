@@ -121,6 +121,29 @@ impl Drop for PreparationStage<'_> {
     }
 }
 
+/// The repositories a review captures. No `paths` means the repository that
+/// contains the session's working directory; the worker resolves `.` against
+/// it. A worker older than worktree review cannot take a scope: it keeps its
+/// own unscoped capture for a request without `paths` and refuses any other.
+pub fn capture_scope(
+    paths: Vec<std::path::PathBuf>,
+    protocol: u32,
+) -> Result<Option<Vec<std::path::PathBuf>>, StartRefusal> {
+    if protocol >= mj_core::relay::RELAY_WORKTREE_REVIEW_PROTOCOL {
+        Ok(Some(if paths.is_empty() {
+            vec![std::path::PathBuf::from(".")]
+        } else {
+            paths
+        }))
+    } else if paths.is_empty() {
+        Ok(None)
+    } else {
+        Err(StartRefusal(
+            "the session's worker predates worktree review; restart the session".into(),
+        ))
+    }
+}
+
 /// Everything a review needs that only the database and the worker can answer.
 ///
 /// The caller cancels preparation by dropping this future.
@@ -130,7 +153,7 @@ pub async fn prepare(
     session_id: &str,
     config: ReviewConfig,
     stages: &PreparationStages,
-    repositories: Option<Vec<std::path::PathBuf>>,
+    paths: Vec<std::path::PathBuf>,
 ) -> Result<Prepared, StartRefusal> {
     let review_refusal = {
         let _stage = stages.enter(session_id, "checking the session's project source");
@@ -171,14 +194,10 @@ pub async fn prepare(
             "the session's worker predates push review; restart the session".into(),
         ));
     }
-    if repositories.is_some()
-        && snapshot.operational.relay_protocol_version.unwrap_or(0)
-            < mj_core::relay::RELAY_WORKTREE_REVIEW_PROTOCOL
-    {
-        return Err(StartRefusal(
-            "the session's worker predates worktree review; restart the session".into(),
-        ));
-    }
+    let repositories = capture_scope(
+        paths,
+        snapshot.operational.relay_protocol_version.unwrap_or(0),
+    )?;
     let state = {
         let _stage = stages.enter(session_id, "loading the review state");
         let session = session_id.to_owned();

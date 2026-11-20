@@ -2613,13 +2613,13 @@ async fn startup_restores_group_before_push_or_override_admission() {
     let push = {
         let host = host.clone();
         let session = session.clone();
-        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, Vec::new()).await })
     };
     let override_request = {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("old finding"))
+            host.override_push(&session, None, one_override("old finding"))
                 .await
         })
     };
@@ -3584,7 +3584,7 @@ async fn push_path_reaches_capture_and_old_worker_refuses_it() {
         .await
         .unwrap();
     assert!(
-        host.begin_push(&session, Some("../linked".into()))
+        host.begin_push(&session, vec!["../linked".into()])
             .await
             .unwrap_err()
             .0
@@ -3605,7 +3605,7 @@ async fn push_path_reaches_capture_and_old_worker_refuses_it() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(
-            async move { host.begin_push(&session, Some("../linked".into())).await },
+            async move { host.begin_push(&session, vec!["../linked".into()]).await },
         )
     };
     let (_, action, reply) = manager
@@ -3668,7 +3668,7 @@ async fn a_review_request_with_review_off_records_the_tree_and_chooses_no_review
     let request = {
         let host = host.clone();
         let session = session.clone();
-        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, Vec::new()).await })
     };
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -3767,7 +3767,7 @@ async fn open_commit_review_with_delta(
                     .await
                     .map(|_| serde_json::json!({"accepted":true}))
             } else {
-                host.begin_push(&session, None).await
+                host.begin_push(&session, Vec::new()).await
             }
         })
     };
@@ -3854,7 +3854,7 @@ async fn review_starts_report_child_registration_refusal_to_their_callers() {
             let session = manager.session.clone();
             mj_core::runtime::spawn(async move {
                 if push {
-                    host.begin_push(&session, None).await.map(|_| ())
+                    host.begin_push(&session, Vec::new()).await.map(|_| ())
                 } else {
                     host.start(&session).await
                 }
@@ -3924,7 +3924,7 @@ async fn empty_push_delta_records_clean_tree_without_a_reviewer() {
     let request = {
         let host = host.clone();
         let session = session.clone();
-        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, Vec::new()).await })
     };
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -3999,7 +3999,7 @@ async fn old_git_push_delta_records_warning_and_clean_tree_without_reviewer() {
     let request = {
         let host = host.clone();
         let session = session.clone();
-        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, Vec::new()).await })
     };
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -4120,7 +4120,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             );
         }
         assert_eq!(
-            host.begin_push(&session, None).await.unwrap_err().0,
+            host.begin_push(&session, Vec::new()).await.unwrap_err().0,
             "a review is already open; wait for its verdict or cancel it before starting another"
         );
         let finished = {
@@ -4427,7 +4427,10 @@ async fn push_override_rejects_empty_or_blank_entries_before_any_capture() {
             "at most 32",
         ),
     ] {
-        let error = host.override_push(&session, overrides).await.unwrap_err();
+        let error = host
+            .override_push(&session, None, overrides)
+            .await
+            .unwrap_err();
         assert!(error.0.contains(expected), "{}", error.0);
     }
     assert!(
@@ -4482,7 +4485,8 @@ async fn push_override_rejects_missing_or_changed_findings_without_unlocking_a_t
             let host = host.clone();
             let session = session.clone();
             mj_core::runtime::spawn(async move {
-                host.override_push(&session, one_override("disagree")).await
+                host.override_push(&session, None, one_override("disagree"))
+                    .await
             })
         };
         if pending {
@@ -4512,7 +4516,7 @@ async fn push_override_audit_refusal_keeps_findings_and_never_records_a_ref() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override(&"🔥".repeat(4000)))
+            host.override_push(&session, None, one_override(&"🔥".repeat(4000)))
                 .await
         })
     };
@@ -4560,7 +4564,7 @@ async fn push_override_keeps_reservation_and_drains_accepted_saves_on_shutdown()
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("incorrect"))
+            host.override_push(&session, None, one_override("incorrect"))
                 .await
         })
     };
@@ -4568,14 +4572,14 @@ async fn push_override_keeps_reservation_and_drains_accepted_saves_on_shutdown()
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
     assert!(
-        host.override_push(&session, one_override("again"))
+        host.override_push(&session, None, one_override("again"))
             .await
             .unwrap_err()
             .0
             .contains("review is open")
     );
     assert!(
-        host.begin_push(&session, None)
+        host.begin_push(&session, Vec::new())
             .await
             .unwrap_err()
             .0
@@ -4595,7 +4599,7 @@ async fn push_override_keeps_reservation_and_drains_accepted_saves_on_shutdown()
     gate.entered().await;
     assert!(!request.is_finished());
     assert!(
-        host.override_push(&session, one_override("again"))
+        host.override_push(&session, None, one_override("again"))
             .await
             .unwrap_err()
             .0
@@ -4650,7 +4654,7 @@ async fn push_override_retries_after_initial_save_or_ref_failure() {
                 let host = host.clone();
                 let session = session.clone();
                 mj_core::runtime::spawn(async move {
-                    host.override_push(&session, one_override("false positive"))
+                    host.override_push(&session, None, one_override("false positive"))
                         .await
                 })
             };
@@ -4699,7 +4703,7 @@ async fn push_override_retries_after_reviewed_ref_was_recorded_but_state_save_fa
             let host = host.clone();
             let session = session.clone();
             mj_core::runtime::spawn(async move {
-                host.override_push(&session, one_override("false positive"))
+                host.override_push(&session, None, one_override("false positive"))
                     .await
             })
         };
@@ -4771,7 +4775,7 @@ async fn push_override_on_an_old_worker_records_reviewed_and_says_the_base_moved
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("false positive"))
+            host.override_push(&session, None, one_override("false positive"))
                 .await
         })
     };
@@ -4799,7 +4803,7 @@ async fn push_override_on_a_current_worker_says_the_base_is_unchanged() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("false positive"))
+            host.override_push(&session, None, one_override("false positive"))
                 .await
         })
     };
@@ -4964,7 +4968,7 @@ async fn set_review_baseline_refuses_an_old_worker_and_a_running_review() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("false positive"))
+            host.override_push(&session, None, one_override("false positive"))
                 .await
         })
     };
@@ -5038,7 +5042,7 @@ async fn push_override_load_waits_for_cancelled_review_open_clear_save() {
     let review = {
         let host = host.clone();
         let session = session.clone();
-        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, Vec::new()).await })
     };
     let (_, _, capture) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -5058,7 +5062,7 @@ async fn push_override_load_waits_for_cancelled_review_open_clear_save() {
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("incorrect"))
+            host.override_push(&session, None, one_override("incorrect"))
                 .await
         })
     };
@@ -5089,7 +5093,7 @@ async fn shutdown_cancels_unadmitted_push_override_without_marking_a_review_inte
         let host = host.clone();
         let session = session.clone();
         mj_core::runtime::spawn(async move {
-            host.override_push(&session, one_override("incorrect"))
+            host.override_push(&session, None, one_override("incorrect"))
                 .await
         })
     };
@@ -5131,7 +5135,7 @@ async fn explicit_commit_review_refuses_unsupported_workers() {
         .await
         .unwrap();
     assert_eq!(
-        host.begin_push(&session, None).await.unwrap_err().0,
+        host.begin_push(&session, Vec::new()).await.unwrap_err().0,
         "the session's worker predates push review; restart the session"
     );
     host.shutdown().await.unwrap();
@@ -5187,7 +5191,7 @@ async fn push_review_refusals_leave_no_prompt_hold_or_reviewer_child() {
         mj_session_runtime::session_manager::move_ownership::MoveMutationGuard::reserve(&session)
             .unwrap();
     assert_eq!(
-        host.begin_push(&session, None).await.unwrap_err().0,
+        host.begin_push(&session, Vec::new()).await.unwrap_err().0,
         "session is moving"
     );
     drop(moving);
@@ -5219,7 +5223,7 @@ async fn push_review_refusals_leave_no_prompt_hold_or_reviewer_child() {
                     if manual {
                         host.start(&session).await
                     } else {
-                        host.begin_push(&session, None).await.map(|_| ())
+                        host.begin_push(&session, Vec::new()).await.map(|_| ())
                     }
                 })
             };
@@ -5394,7 +5398,7 @@ async fn slow_review_preparation_waits_until_cancelled_and_names_the_stopped_ste
     let request = {
         let host = host.clone();
         let session = session.clone();
-        mj_core::runtime::spawn(async move { host.begin_push(&session, None).await })
+        mj_core::runtime::spawn(async move { host.begin_push(&session, Vec::new()).await })
     };
     let (_, _, capture) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
@@ -5751,7 +5755,7 @@ async fn push_state_changes_do_not_block_daemon_handoff() {
             if baseline {
                 host.set_push_base(&session, "abc1234".into(), None).await
             } else {
-                host.override_push(&session, one_override("incorrect"))
+                host.override_push(&session, None, one_override("incorrect"))
                     .await
             }
         })
@@ -5844,7 +5848,7 @@ async fn a_review_off_request_waits_for_background_work_before_reaching_the_work
     let request = mj_core::runtime::spawn({
         let host = host.clone();
         let session = session.clone();
-        async move { host.begin_push(&session, None).await }
+        async move { host.begin_push(&session, Vec::new()).await }
     });
     // A copy that never ends: the request must be waiting on the hold, having
     // sent the worker nothing.
@@ -5897,7 +5901,7 @@ async fn review_admission_deadline_reports_refusal_and_releases_its_hold() {
     let request = mj_core::runtime::spawn({
         let host = host.clone();
         let session = session.clone();
-        async move { host.begin_push(&session, None).await }
+        async move { host.begin_push(&session, Vec::new()).await }
     });
     while environment.background_holds() == 0 {
         tokio::task::yield_now().await;
