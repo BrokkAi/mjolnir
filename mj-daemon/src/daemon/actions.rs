@@ -832,6 +832,15 @@ pub(super) async fn handle_action(
                 .context("the daemon capacity service is not running")?
                 .host_rows(),
         )),
+        DaemonAction::RefreshCapacity => {
+            anyhow::ensure!(
+                state
+                    .capacity_feed()
+                    .is_some_and(|feed| feed.request_refresh()),
+                "the daemon capacity service is not running"
+            );
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::RefreshQuota => {
             state.request_quota_refresh()?;
             Ok(DaemonReply::Done)

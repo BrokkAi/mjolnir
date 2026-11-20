@@ -3411,9 +3411,8 @@ pub(crate) struct HostsArgs {
     json: bool,
 }
 
-/// Read the daemon capacity service's latest readings; this never samples a
-/// host itself. The TUI dashboard still samples hosts with its own poller, so
-/// its numbers come from separate samples and can differ by up to one round.
+/// Read the daemon capacity service's latest readings, shared with the
+/// terminal dashboard and the web viewer.
 pub(crate) async fn hosts(args: HostsArgs) -> Result<()> {
     let mut daemon = crate::daemon::connect_or_start().await?;
     let rows = daemon.host_capacity().await?;

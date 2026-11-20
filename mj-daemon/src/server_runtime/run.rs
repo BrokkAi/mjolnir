@@ -94,11 +94,6 @@ pub(crate) async fn run_server(
         .map(|view| (view.session_id.clone(), viewer_operation(view)))
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut launch_failures = Vec::new();
-    // What the capacity poller last said, per probe target. The projection is
-    // built from this on every publish rather than being accumulated, so a
-    // target that disappears from the configuration disappears from the page.
-    let mut capacity_state: std::collections::BTreeMap<String, PhoneCapacity> =
-        std::collections::BTreeMap::new();
     // The daemon's capacity service probes each host once per interval; the
     // page shows its readings rather than probing again.
     let capacity_feed = daemon_runtime
@@ -106,10 +101,6 @@ pub(crate) async fn run_server(
         .context("the daemon capacity service is not running")?;
     let mut capacity_targets_rx = capacity_feed.targets.clone();
     let mut capacity_states_rx = capacity_feed.states.clone();
-    track_capacity_targets(
-        &capacity_targets_rx.borrow_and_update(),
-        &mut capacity_state,
-    );
     let container_capacities = initial.metadata.container_capacities.clone();
     let mut first_snapshot = publication.snapshot(
         &controller,
@@ -128,8 +119,8 @@ pub(crate) async fn run_server(
             operations: &operations,
             move_recoveries: &move_recoveries,
             capacity: &viewer_capacity(
-                &capacity_state,
                 &capacity_states_rx.borrow(),
+                &capacity_targets_rx.borrow(),
                 &container_capacities,
             ),
             launch_failures: &launch_failures,
@@ -396,8 +387,8 @@ pub(crate) async fn run_server(
                         operations: &operations,
                         move_recoveries: &move_recoveries,
                         capacity: &viewer_capacity(
-                            &capacity_state,
                             &capacity_states_rx.borrow(),
+                            &capacity_targets_rx.borrow(),
                             &container_capacities,
                         ),
                         launch_failures: &launch_failures,
@@ -513,7 +504,6 @@ pub(crate) async fn run_server(
                         failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
                         break;
                     }
-                    track_capacity_targets(&capacity_targets_rx.borrow_and_update(), &mut capacity_state);
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }
@@ -1169,23 +1159,10 @@ pub(crate) async fn run_server(
                             continue;
                         }
                         ControllerAction::RefreshCapacity { target_id } => {
-                            let known = capacity_state.contains_key(target_id);
-                            // One queued nudge refreshes every target. Do not
-                            // block the consumer while readings wait for it.
-                            let generation = known.then(|| capacity_feed.request_refresh()).flatten();
-                            let accepted = generation.is_some();
+                            let known = capacity_targets_rx.borrow().targets.iter().any(|target| &target.id == target_id);
+                            let accepted = known && capacity_feed.request_refresh();
                             if known && !accepted {
                                 tracing::warn!("phone capacity refresh rejected: poller stopped");
-                            }
-                            if known {
-                                if let Some(entry) = capacity_state.get_mut(target_id) {
-                                    entry.refresh = match generation {
-                                        Some(generation) => PhoneRefresh::Waiting { generation },
-                                        None => PhoneRefresh::Rejected,
-                                    };
-                                }
-                                revision = daemon_runtime.allocate_revision();
-                                publish_snapshot!('control, revision);
                             }
                             let outcome = match (known, accepted) {
                                 (_, true) => ActionOutcome::accepted(),

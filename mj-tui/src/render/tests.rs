@@ -1501,7 +1501,13 @@ fn the_minimized_rows_stay_explicit_about_readings_they_do_not_have() {
     assert!(targets(&lines).contains("local unavailable"));
 
     // A probe in flight.
-    dashboard.begin_capacity_refresh();
+    let mut capacities = dashboard
+        .capacity_details
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    capacities[0].refreshing = true;
+    dashboard.set_host_capacities(capacities);
     assert!(targets(&drawn(&mut dashboard, 120, 44)).contains("local refreshing…"));
 
     // A sample too old to trust.
@@ -1708,7 +1714,7 @@ fn targets_row_collapses_when_every_target_is_unavailable() {
         Ok(Some(host_capacity_usage())),
         now_epoch_seconds(),
     );
-    dashboard.set_target_storage(vec![precision_storage(40 << 30, 40 << 30)]);
+    dashboard.set_test_capacity_storage(vec![precision_storage(40 << 30, 40 << 30)]);
 
     // While the target is available the row has a Disks button.
     let before = drawn_dashboard(&mut dashboard, 120);
@@ -1844,12 +1850,12 @@ fn an_unreachable_session_on_a_full_disk_says_disk_full() {
     let mut elsewhere = precision_storage(40 << 30, 40 << 30);
     elsewhere.filesystems[1].space.paths = vec!["/srv".into()];
     elsewhere.filesystems[1].condition = mj_core::targets::storage::StorageCondition::Full;
-    dashboard.set_target_storage(vec![elsewhere]);
+    dashboard.set_test_capacity_storage(vec![elsewhere]);
     assert!(!draw(&mut dashboard).contains("Disk full"));
 
     // Its managed clone's filesystem is full: the row and the Targets pane
     // say so.
-    dashboard.set_target_storage(vec![precision_storage(40 << 30, 0)]);
+    dashboard.set_test_capacity_storage(vec![precision_storage(40 << 30, 0)]);
     let rendered = draw(&mut dashboard);
     assert!(rendered.contains("Disk full"), "{rendered}");
     assert!(
@@ -1874,7 +1880,7 @@ fn ascii_symbols_reach_the_capacity_row() {
         Ok(Some(host_capacity_usage())),
         now_epoch_seconds(),
     );
-    dashboard.set_target_storage(vec![precision_storage(40 << 30, 40 << 30)]);
+    dashboard.set_test_capacity_storage(vec![precision_storage(40 << 30, 40 << 30)]);
     let rendered = drawn_dashboard(&mut dashboard, 200);
     let row = rendered
         .lines()
@@ -1907,13 +1913,13 @@ fn precision_capacity_target() -> mj_core::targets::DeploymentCapacityTarget {
 fn capacity_disks_cell_opens_a_dropdown_and_keeps_the_table_one_line_per_target() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.set_deployment_capacity_targets(vec![precision_capacity_target()]);
-    dashboard.set_target_storage(vec![precision_storage(40 << 30, 40 << 30)]);
+    dashboard.set_test_capacity_storage(vec![precision_storage(40 << 30, 40 << 30)]);
     let rendered = drawn_dashboard(&mut dashboard, 160);
     assert!(rendered.contains("Disks ▾"), "{rendered}");
     assert!(!rendered.contains("free"), "{rendered}");
 
     // ~/Projects drops below the low-space line, and `/` is fine.
-    dashboard.set_target_storage(vec![precision_storage(40 << 30, 3 << 30)]);
+    dashboard.set_test_capacity_storage(vec![precision_storage(40 << 30, 3 << 30)]);
     let rendered = drawn_dashboard(&mut dashboard, 160);
     let summary = "/home/jonathan/Projects low ▾";
     let (row, line) = rendered
@@ -4052,6 +4058,19 @@ fn golden_dashboard_resource_panels() {
         Err("probe timed out after twenty seconds".into()),
         now_epoch_seconds(),
     );
+    let sent = mj_client::runtime_feed::RuntimeMetadata {
+        host_capacities: dashboard
+            .capacity_details
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
+        ..Default::default()
+    };
+    let received: mj_client::runtime_feed::RuntimeMetadata =
+        serde_json::from_slice(&serde_json::to_vec(&sent).unwrap()).unwrap();
+    dashboard.set_host_capacities(Vec::new());
+    dashboard.set_host_capacities(received.host_capacities.into_inner());
     append_dashboard_golden(
         &mut output,
         "stale reading notice under the Targets column",
@@ -4431,7 +4450,7 @@ fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
             quota_limited: false,
         })
         .collect::<Vec<_>>();
-    dashboard.set_target_storage(vec![TargetStorageView::evaluate(
+    dashboard.set_test_capacity_storage(vec![TargetStorageView::evaluate(
         "precision-3260",
         Some("/home/jonathan".into()),
         &filesystems,

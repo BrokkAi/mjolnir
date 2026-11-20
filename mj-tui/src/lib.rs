@@ -35,11 +35,12 @@ use crate::dialogs::{
     ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
     RepositoryOriginDialog, TargetActionsDialog, WebDialog,
 };
-use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
+use crate::ingest::{SessionDetail, SessionOperationDisplay};
 use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
 use crate::wizards::{NewWizard, PickerCell, PickerChoice, ResumeWizard};
 use crate::workspaces::{WorkspaceControlFocus, WorkspaceManager};
+use mj_client::runtime_feed::RuntimeHostCapacity;
 
 mod actions;
 mod combined;
@@ -1039,7 +1040,7 @@ pub struct DashboardState {
     /// Durable move intents retained by the daemon, including failed and
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: mj_core::snapshot_map::SnapshotMap<String, MoveOperation>,
-    pub(crate) capacity_details: BTreeMap<String, CapacityDetail>,
+    pub(crate) capacity_details: BTreeMap<String, RuntimeHostCapacity>,
     /// The daemon's hard container budget, including in-flight resume and
     /// move reservations. Raw host utilization remains in `capacity_details`.
     pub(crate) container_capacities:

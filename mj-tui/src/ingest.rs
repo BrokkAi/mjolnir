@@ -13,7 +13,8 @@ use mj_core::state::{
 
 use mj_chat::chat::{Notices, TranscriptSnapshot};
 use mj_client::quota::ProfileQuota;
-use mj_core::targets::{DeploymentCapacityTarget, DeploymentCapacityUsage, ProvisionStage};
+use mj_client::runtime_feed::RuntimeHostCapacity;
+use mj_core::targets::ProvisionStage;
 use mj_transcript::transcript::{materialized_content_text, materialized_tool_diffstats};
 
 use crate::{DashboardState, SessionOperationKind};
@@ -537,16 +538,6 @@ pub(crate) enum TranscriptHydration {
     Ready,
     #[default]
     Unavailable,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CapacityDetail {
-    pub(crate) target: DeploymentCapacityTarget,
-    /// The reading, its clock, the latest failure and the empty-fleet answer,
-    /// folded by the one reducer the daemon uses. The last good reading stays
-    /// on screen beside a failed probe rather than vanishing.
-    pub(crate) state: mj_core::targets::TargetCapacityState,
-    pub(crate) refreshing: bool,
 }
 
 impl DashboardState {
@@ -1174,68 +1165,24 @@ impl DashboardState {
             .problem_for(paths.all())
     }
 
-    /// The storage verdicts a Targets row shows: its host's, or each fleet
-    /// instance's.
-    pub(crate) fn capacity_storage(
-        &self,
-        detail: &CapacityDetail,
-    ) -> Vec<&mj_core::targets::storage::TargetStorageView> {
-        let hosts = mj_core::targets::storage::capacity_storage_hosts(
-            &detail.target,
-            detail.state.usage.as_ref(),
-        );
-        mj_core::targets::storage::views_for(&self.target_storage, &hosts)
-    }
-
-    pub fn set_deployment_capacity_targets(&mut self, targets: Vec<DeploymentCapacityTarget>) {
-        let mut previous = std::mem::take(&mut self.capacity_details);
-        self.capacity_details = targets
+    pub fn set_host_capacities(&mut self, capacities: Vec<RuntimeHostCapacity>) {
+        if self.capacity_details.values().eq(&capacities) {
+            return;
+        }
+        let affected = self
+            .capacity_details
+            .values()
+            .chain(&capacities)
+            .flat_map(|detail| detail.reading.target_ids.iter().cloned())
+            .collect::<Vec<_>>();
+        self.capacity_details = capacities
             .into_iter()
-            .map(|target| {
-                let id = target.id.clone();
-                let detail = previous.remove(&id).map_or(
-                    CapacityDetail {
-                        target: target.clone(),
-                        state: Default::default(),
-                        refreshing: false,
-                    },
-                    |mut detail| {
-                        detail.target = target;
-                        detail
-                    },
-                );
-                (id, detail)
-            })
+            .map(|detail| (detail.reading.id.clone(), detail))
             .collect();
         self.capacity_index = self
             .capacity_index
             .min(self.capacity_details.len().saturating_sub(1));
-    }
-
-    /// Folds in one capacity sample. A failed probe keeps the last reading and
-    /// records why the probe failed, so the pane can mark the row stale instead
-    /// of showing an hours-old sample as if it were current.
-    pub fn apply_deployment_capacity(
-        &mut self,
-        target_id: &str,
-        result: std::result::Result<Option<DeploymentCapacityUsage>, String>,
-        sampled_at_epoch_seconds: u64,
-    ) {
-        let affected_targets = {
-            let Some(detail) = self.capacity_details.get_mut(target_id) else {
-                return;
-            };
-            detail.refreshing = false;
-            detail.state.apply(&result, sampled_at_epoch_seconds, 0);
-            detail.target.target_ids.clone()
-        };
-        self.refresh_wizard_resource_limits(&affected_targets);
-    }
-
-    pub fn begin_capacity_refresh(&mut self) {
-        for detail in self.capacity_details.values_mut() {
-            detail.refreshing = true;
-        }
+        self.refresh_wizard_resource_limits(&affected);
     }
 
     /// Replace dashboard detail with the controller's durable logical-session
