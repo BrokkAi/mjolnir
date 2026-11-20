@@ -18,6 +18,7 @@ Usage (from the repository root):
   python3 go/port/portmap.py file <path.rs>       # one file's needs and names
   python3 go/port/portmap.py names <crate-dir>    # Rust path -> Go identifier
   python3 go/port/portmap.py tests <crate-dir>    # every Rust test and its Go name
+  python3 go/port/portmap.py declarations <path.rs>   # the Go declarations for a Rust file
   python3 go/port/portmap.py json                 # the whole resolved map
 """
 
@@ -623,6 +624,12 @@ def main(argv: list[str]) -> int:
         cmd_names(ws, argv[2].rstrip("/"))
     elif command == "tests":
         cmd_tests(ws, argv[2].rstrip("/"))
+    elif command == "declarations":
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import declgen
+        text, notes = declgen.declarations(ws, os.path.relpath(os.path.abspath(argv[2]), ROOT))
+        sys.stdout.write(text)
+        print(f"{argv[2]}: {notes} places marked PORT:", file=sys.stderr)
     elif command == "json":
         cmd_json(ws)
     else:

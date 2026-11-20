@@ -66,6 +66,11 @@ struct ItemIndex {
     generics: usize,
     /// For functions and methods: the signature as written.
     signature: Option<String>,
+    /// Doc comment lines.
+    docs: Vec<String>,
+    /// The declaration in structured form: fields, variants, signature types.
+    /// `go/port/portmap.py declarations` turns it into Go.
+    decl: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Clone)]
@@ -116,6 +121,9 @@ struct Attrs {
     derives: Vec<String>,
     serde: Vec<String>,
     path: Option<String>,
+    docs: Vec<String>,
+    repr: Option<String>,
+    is_default: bool,
 }
 
 fn read_attrs(attrs: &[syn::Attribute]) -> Attrs {
@@ -135,6 +143,19 @@ fn read_attrs(attrs: &[syn::Attribute]) -> Attrs {
                     out.cfg.push(text);
                 }
             }
+            "doc" => {
+                if let syn::Meta::NameValue(pair) = &attr.meta {
+                    if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(text), .. }) = &pair.value {
+                        out.docs.push(text.value());
+                    }
+                }
+            }
+            "repr" => {
+                if let syn::Meta::List(list) = &attr.meta {
+                    out.repr = Some(tokens_text(&list.tokens));
+                }
+            }
+            "default" => out.is_default = true,
             "test" => out.test_attr = Some("test".to_owned()),
             "ignore" => out.ignore = true,
             "should_panic" => out.should_panic = true,
@@ -254,6 +275,7 @@ impl Collector {
             derives: attrs.derives.clone(),
             serde: attrs.serde.clone(),
             owner: self.owner.last().cloned(),
+            docs: attrs.docs.clone(),
             ..ItemIndex::default()
         });
         self.items.len() - 1
@@ -301,34 +323,211 @@ impl Collector {
     }
 }
 
+fn text_of<T: quote::ToTokens>(value: &T) -> String {
+    tokens_text(&value.to_token_stream())
+}
+
+fn generic_args_json(arguments: &syn::PathArguments) -> (Vec<serde_json::Value>, Vec<serde_json::Value>, Option<serde_json::Value>) {
+    let mut args = Vec::new();
+    let mut assoc = Vec::new();
+    let mut paren = None;
+    match arguments {
+        syn::PathArguments::None => {}
+        syn::PathArguments::AngleBracketed(list) => {
+            for arg in &list.args {
+                match arg {
+                    syn::GenericArgument::Type(ty) => args.push(type_json(ty)),
+                    syn::GenericArgument::AssocType(binding) => {
+                        assoc.push(serde_json::json!([binding.ident.to_string(), type_json(&binding.ty)]));
+                    }
+                    syn::GenericArgument::Const(expr) => {
+                        args.push(serde_json::json!({"k": "const", "text": text_of(expr)}));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        syn::PathArguments::Parenthesized(list) => {
+            let inputs: Vec<_> = list.inputs.iter().map(type_json).collect();
+            let output = match &list.output {
+                syn::ReturnType::Default => serde_json::Value::Null,
+                syn::ReturnType::Type(_, ty) => type_json(ty),
+            };
+            paren = Some(serde_json::json!({"inputs": inputs, "output": output}));
+        }
+    }
+    (args, assoc, paren)
+}
+
+fn path_json(path: &syn::Path) -> serde_json::Value {
+    let mut all_args = Vec::new();
+    let mut all_assoc = Vec::new();
+    let mut paren = None;
+    for segment in &path.segments {
+        let (args, assoc, segment_paren) = generic_args_json(&segment.arguments);
+        all_args.extend(args);
+        all_assoc.extend(assoc);
+        if segment_paren.is_some() {
+            paren = segment_paren;
+        }
+    }
+    serde_json::json!({"path": path_text(path), "args": all_args, "assoc": all_assoc, "paren": paren})
+}
+
+fn bounds_json<'a>(bounds: impl Iterator<Item = &'a syn::TypeParamBound>) -> Vec<serde_json::Value> {
+    bounds
+        .filter_map(|bound| match bound {
+            syn::TypeParamBound::Trait(bound) => Some(path_json(&bound.path)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A type as a tree `portmap.py` can translate; every node keeps its source text.
+fn type_json(ty: &syn::Type) -> serde_json::Value {
+    let text = text_of(ty);
+    let mut node = match ty {
+        syn::Type::Path(path) => {
+            let mut node = path_json(&path.path);
+            node["k"] = "path".into();
+            if let Some(qself) = &path.qself {
+                node["qself"] = type_json(&qself.ty);
+            }
+            node
+        }
+        syn::Type::Reference(reference) => serde_json::json!({
+            "k": "ref", "mut": reference.mutability.is_some(), "t": type_json(&reference.elem),
+        }),
+        syn::Type::Slice(slice) => serde_json::json!({"k": "slice", "t": type_json(&slice.elem)}),
+        syn::Type::Array(array) => serde_json::json!({
+            "k": "array", "t": type_json(&array.elem), "len": text_of(&array.len),
+        }),
+        syn::Type::Tuple(tuple) => {
+            let elems: Vec<_> = tuple.elems.iter().map(type_json).collect();
+            serde_json::json!({"k": "tuple", "elems": elems})
+        }
+        syn::Type::BareFn(function) => {
+            let inputs: Vec<_> = function.inputs.iter().map(|input| type_json(&input.ty)).collect();
+            let output = match &function.output {
+                syn::ReturnType::Default => serde_json::Value::Null,
+                syn::ReturnType::Type(_, ty) => type_json(ty),
+            };
+            serde_json::json!({"k": "fn", "inputs": inputs, "output": output})
+        }
+        syn::Type::TraitObject(object) => serde_json::json!({"k": "dyn", "bounds": bounds_json(object.bounds.iter())}),
+        syn::Type::ImplTrait(object) => serde_json::json!({"k": "impl", "bounds": bounds_json(object.bounds.iter())}),
+        syn::Type::Never(_) => serde_json::json!({"k": "never"}),
+        syn::Type::Ptr(pointer) => serde_json::json!({
+            "k": "ptr", "mut": pointer.mutability.is_some(), "t": type_json(&pointer.elem),
+        }),
+        syn::Type::Paren(inner) => return type_json(&inner.elem),
+        syn::Type::Group(inner) => return type_json(&inner.elem),
+        syn::Type::Infer(_) => serde_json::json!({"k": "infer"}),
+        _ => serde_json::json!({"k": "other"}),
+    };
+    node["text"] = text.into();
+    node
+}
+
+fn generics_json(generics: &syn::Generics) -> serde_json::Value {
+    let params: Vec<_> = generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Type(param) => Some(serde_json::json!({
+                "name": param.ident.to_string(),
+                "bounds": bounds_json(param.bounds.iter()),
+                "bounds_text": param.bounds.iter().map(text_of).collect::<Vec<_>>().join(" + "),
+            })),
+            syn::GenericParam::Const(param) => Some(serde_json::json!({
+                "name": param.ident.to_string(), "const": text_of(&param.ty),
+            })),
+            syn::GenericParam::Lifetime(_) => None,
+        })
+        .collect();
+    let where_text = generics.where_clause.as_ref().map(text_of);
+    // `where F: Bound` says the same as `<F: Bound>`; list both the same way.
+    let mut where_bounds = Vec::new();
+    if let Some(clause) = &generics.where_clause {
+        for predicate in &clause.predicates {
+            if let syn::WherePredicate::Type(predicate) = predicate {
+                where_bounds.push(serde_json::json!({
+                    "ty": type_json(&predicate.bounded_ty),
+                    "bounds": bounds_json(predicate.bounds.iter()),
+                }));
+            }
+        }
+    }
+    serde_json::json!({"params": params, "where": where_text, "where_bounds": where_bounds})
+}
+
+fn fields_json(fields: &syn::Fields) -> (String, Vec<serde_json::Value>) {
+    let kind = match fields {
+        syn::Fields::Named(_) => "named",
+        syn::Fields::Unnamed(_) => "tuple",
+        syn::Fields::Unit => "unit",
+    };
+    let list = fields
+        .iter()
+        .map(|field| {
+            let attrs = read_attrs(&field.attrs);
+            serde_json::json!({
+                "name": field.ident.as_ref().map(ToString::to_string),
+                "vis": vis_text(&field.vis),
+                "ty": type_json(&field.ty),
+                "docs": attrs.docs,
+                "serde": attrs.serde,
+                "cfg": attrs.cfg,
+            })
+        })
+        .collect();
+    (kind.to_owned(), list)
+}
+
+fn signature_json(signature: &syn::Signature, has_body: bool) -> serde_json::Value {
+    let mut receiver = serde_json::Value::Null;
+    let mut inputs = Vec::new();
+    for input in &signature.inputs {
+        match input {
+            syn::FnArg::Receiver(this) => {
+                let kind = if this.colon_token.is_some() {
+                    "typed"
+                } else if this.reference.is_some() {
+                    if this.mutability.is_some() { "mut" } else { "ref" }
+                } else {
+                    "value"
+                };
+                receiver = serde_json::json!({"kind": kind, "ty": type_json(&this.ty)});
+            }
+            syn::FnArg::Typed(typed) => {
+                inputs.push(serde_json::json!({"name": text_of(&typed.pat), "ty": type_json(&typed.ty)}));
+            }
+        }
+    }
+    let output = match &signature.output {
+        syn::ReturnType::Default => serde_json::Value::Null,
+        syn::ReturnType::Type(_, ty) => type_json(ty),
+    };
+    serde_json::json!({
+        "generics": generics_json(&signature.generics),
+        "async": signature.asyncness.is_some(),
+        "unsafe": signature.unsafety.is_some(),
+        "receiver": receiver,
+        "inputs": inputs,
+        "output": output,
+        "has_body": has_body,
+    })
+}
+
 fn signature_text(signature: &syn::Signature) -> String {
-    use syn::__private::ToTokens;
-    tokens_text(&signature.to_token_stream())
+    text_of(signature)
 }
 
 fn type_name(ty: &syn::Type) -> String {
     match ty {
         syn::Type::Path(path) => path_text(&path.path),
         syn::Type::Reference(reference) => type_name(&reference.elem),
-        other => tokens_text(&quote_tokens(other)),
-    }
-}
-
-fn quote_tokens<T: Spanned + quote_free::ToTokensLite>(value: &T) -> TokenStream {
-    value.tokens()
-}
-
-/// `quote` is not a dependency; syn's own `ToTokens` comes through `syn::__private`.
-mod quote_free {
-    use proc_macro2::TokenStream;
-    pub trait ToTokensLite {
-        fn tokens(&self) -> TokenStream;
-    }
-    impl ToTokensLite for syn::Type {
-        fn tokens(&self) -> TokenStream {
-            use syn::__private::ToTokens;
-            self.to_token_stream()
-        }
+        other => text_of(other),
     }
 }
 
@@ -398,6 +597,7 @@ impl<'ast> Visit<'ast> for Collector {
         self.items[index].is_unsafe = item.sig.unsafety.is_some();
         self.items[index].generics = item.sig.generics.params.len();
         self.items[index].signature = Some(signature_text(&item.sig));
+        self.items[index].decl = Some(signature_json(&item.sig, true));
         let test_item = attrs.cfg_test || attrs.test_attr.is_some();
         if test_item {
             self.test_depth += 1;
@@ -412,6 +612,11 @@ impl<'ast> Visit<'ast> for Collector {
         let attrs = read_attrs(&item.attrs);
         let index = self.push("struct", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
         self.items[index].generics = item.generics.params.len();
+        let (fields_kind, fields) = fields_json(&item.fields);
+        self.items[index].decl = Some(serde_json::json!({
+            "generics": generics_json(&item.generics), "fields_kind": fields_kind, "fields": fields,
+            "repr": attrs.repr,
+        }));
         for field in &item.fields {
             let field_attrs = read_attrs(&field.attrs);
             self.items[index].serde.extend(field_attrs.serde.into_iter().map(|text| {
@@ -432,6 +637,27 @@ impl<'ast> Visit<'ast> for Collector {
         let attrs = read_attrs(&item.attrs);
         let index = self.push("enum", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
         self.items[index].generics = item.generics.params.len();
+        let variants: Vec<_> = item
+            .variants
+            .iter()
+            .map(|variant| {
+                let variant_attrs = read_attrs(&variant.attrs);
+                let (kind, fields) = fields_json(&variant.fields);
+                serde_json::json!({
+                    "name": variant.ident.to_string(),
+                    "docs": variant_attrs.docs,
+                    "kind": kind,
+                    "fields": fields,
+                    "discriminant": variant.discriminant.as_ref().map(|(_, expr)| text_of(expr)),
+                    "serde": variant_attrs.serde,
+                    "cfg": variant_attrs.cfg,
+                    "default": variant_attrs.is_default,
+                })
+            })
+            .collect();
+        self.items[index].decl = Some(serde_json::json!({
+            "generics": generics_json(&item.generics), "variants": variants, "repr": attrs.repr,
+        }));
         for variant in &item.variants {
             let variant_attrs = read_attrs(&variant.attrs);
             self.items[index]
@@ -459,6 +685,19 @@ impl<'ast> Visit<'ast> for Collector {
         let name = item.ident.to_string();
         let index = self.push("trait", name.clone(), vis_text(&item.vis), item.span(), &attrs);
         self.items[index].generics = item.generics.params.len();
+        let assoc_types: Vec<String> = item
+            .items
+            .iter()
+            .filter_map(|member| match member {
+                syn::TraitItem::Type(member) => Some(member.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        self.items[index].decl = Some(serde_json::json!({
+            "generics": generics_json(&item.generics),
+            "supertraits": bounds_json(item.supertraits.iter()),
+            "assoc_types": assoc_types,
+        }));
         self.owner.push(name);
         syn::visit::visit_item_trait(self, item);
         self.owner.pop();
@@ -469,6 +708,8 @@ impl<'ast> Visit<'ast> for Collector {
         let index = self.push("trait_fn", item.sig.ident.to_string(), String::new(), item.span(), &attrs);
         self.items[index].is_async = item.sig.asyncness.is_some();
         self.items[index].has_self = item.sig.receiver().is_some();
+        self.items[index].signature = Some(signature_text(&item.sig));
+        self.items[index].decl = Some(signature_json(&item.sig, item.default.is_some()));
         syn::visit::visit_trait_item_fn(self, item);
     }
 
@@ -478,6 +719,12 @@ impl<'ast> Visit<'ast> for Collector {
         let index = self.push("impl", name.clone(), String::new(), item.span(), &attrs);
         self.items[index].trait_ = item.trait_.as_ref().map(|(_, path, _)| path_text(path));
         self.items[index].generics = item.generics.params.len();
+        self.items[index].decl = Some(serde_json::json!({
+            "generics": generics_json(&item.generics),
+            "self_ty": type_json(&item.self_ty),
+            "trait": item.trait_.as_ref().map(|(_, path, _)| path_json(path)),
+            "negative": item.trait_.as_ref().is_some_and(|(bang, _, _)| bang.is_some()),
+        }));
         self.owner.push(name);
         let cfg_test = attrs.cfg_test;
         if cfg_test {
@@ -498,6 +745,7 @@ impl<'ast> Visit<'ast> for Collector {
         self.items[index].has_self = item.sig.receiver().is_some();
         self.items[index].generics = item.sig.generics.params.len();
         self.items[index].signature = Some(signature_text(&item.sig));
+        self.items[index].decl = Some(signature_json(&item.sig, true));
         let test_item = attrs.cfg_test || attrs.test_attr.is_some();
         if test_item {
             self.test_depth += 1;
@@ -510,13 +758,15 @@ impl<'ast> Visit<'ast> for Collector {
 
     fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
         let attrs = read_attrs(&item.attrs);
-        self.push("assoc_const", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
+        let index = self.push("assoc_const", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
+        self.items[index].decl = Some(serde_json::json!({"ty": type_json(&item.ty), "expr": text_of(&item.expr)}));
         syn::visit::visit_impl_item_const(self, item);
     }
 
     fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
         let attrs = read_attrs(&item.attrs);
-        self.push("const", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
+        let index = self.push("const", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
+        self.items[index].decl = Some(serde_json::json!({"ty": type_json(&item.ty), "expr": text_of(&item.expr)}));
         let test_item = attrs.cfg_test || attrs.test_attr.is_some();
         if test_item {
             self.test_depth += 1;
@@ -529,7 +779,11 @@ impl<'ast> Visit<'ast> for Collector {
 
     fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
         let attrs = read_attrs(&item.attrs);
-        self.push("static", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
+        let index = self.push("static", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
+        self.items[index].decl = Some(serde_json::json!({
+            "ty": type_json(&item.ty), "expr": text_of(&item.expr),
+            "mutable": matches!(item.mutability, syn::StaticMutability::Mut(_)),
+        }));
         let test_item = attrs.cfg_test || attrs.test_attr.is_some();
         if test_item {
             self.test_depth += 1;
@@ -542,7 +796,10 @@ impl<'ast> Visit<'ast> for Collector {
 
     fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
         let attrs = read_attrs(&item.attrs);
-        self.push("type", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
+        let index = self.push("type", item.ident.to_string(), vis_text(&item.vis), item.span(), &attrs);
+        self.items[index].decl = Some(serde_json::json!({
+            "generics": generics_json(&item.generics), "ty": type_json(&item.ty),
+        }));
         let test_item = attrs.cfg_test || attrs.test_attr.is_some();
         if test_item {
             self.test_depth += 1;

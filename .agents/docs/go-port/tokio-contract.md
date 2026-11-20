@@ -90,13 +90,18 @@ panics with tokio's message on the current-thread flavour.
 
 ### The runtime context of a goroutine
 
-Rust finds "the current runtime" in a thread-local. Async functions here get
-it from `ctx`. Synchronous code that tokio lets reach the runtime through the
-thread-local (`Handle::current()`, `Handle::try_current()`, `tokio::spawn`
-from a non-async function, `time::pause`, a `Drop` that spawns) uses
-`tokio.RuntimeHandleCurrent()` and `tokio.RuntimeHandleTryCurrent()`, which
-look the calling goroutine up in a table the runtime keeps of the goroutines
-it started (keyed by goroutine id, read from `runtime.Stack`). The same table
+Rust finds "the current runtime" in a thread-local. The rule here is exact
+and mechanical: **a function takes `ctx` if and only if it is `async` in
+Rust.** `tokio::spawn`, `spawn_blocking`, `Handle::current()`,
+`Handle::try_current()`, `Instant::now()`, `time::pause()`, `JoinSet::spawn`,
+`interval()`, channel constructors, `try_recv`, `abort` and every other
+function that is synchronous in Rust take no `ctx` in Go, even though some of
+them need the runtime. They find it the way tokio does: by looking the
+calling goroutine up in a table the runtime keeps of the goroutines it
+started (keyed by goroutine id, read from `runtime.Stack`), and they panic
+with tokio's "there is no reactor running" message where tokio would. So a
+synchronous function that spawns, or a `Drop` that spawns, translates without
+growing a parameter. The same table
 backs `tokio.TaskLocalKey` (`task_local!`), `rsthread.LocalKey`
 (`thread_local!`) and the tracing span stack. `Runtime.Enter()` registers the
 calling goroutine for the life of its guard.
@@ -146,7 +151,7 @@ Core:
     type Fn[T any] func(ctx context.Context) T
     type Future[T any] interface{ ... }            // something Select can poll
     func Await[T any](ctx context.Context, f Future[T]) T
-    func Start[T any](ctx context.Context, fn Fn[T]) *Started[T]   // a pinned, running future; Started[T] is a Future[T]; Drop() cancels and waits
+    func Start[T any](fn Fn[T]) *Started[T]   // a pinned future (tokio::pin!); polled when awaited or selected; Started[T] is a Future[T]; Drop() drops it
     func Ready[T any](value T) Future[T]
     func Pending[T any]() Future[T]
 
@@ -173,8 +178,8 @@ that did not win are dropped in declaration order before `Select` returns. A
 Join: `Join2`..`Join5`, `TryJoin2`..`TryJoin5` (`join!`, `try_join!`: all
 operands polled on the calling task, in order).
 
-Tasks: `Spawn[T](ctx, fn) *TaskJoinHandle[T]`, `TaskSpawnBlocking[T](ctx, f
-func() T)`, `TaskBlockInPlace`, `TaskYieldNow(ctx)`, `TaskJoinHandle[T]`
+Tasks: `Spawn[T](fn) *TaskJoinHandle[T]`, `TaskSpawnBlocking[T](f func() T)`,
+`TaskBlockInPlace[T](f func() T) T`, `TaskYieldNow(ctx)`, `TaskJoinHandle[T]`
 (`Await(ctx) (T, *TaskJoinError)`, `Future()`, `Abort()`, `AbortHandle()`,
 `IsFinished()`, `Id()`; dropping a handle detaches the task), `TaskJoinError`,
 `TaskJoinSet[T]` (dropping it aborts its tasks), `TaskAbortHandle`, `TaskId`,
@@ -199,8 +204,9 @@ cleanup as a safety net, and reported when `MJ_RS_LEAK_CHECK=1`.
 
 Time (`tokio::time`): `TimeSleep(ctx, d)`, `TimeSleepFuture(d)`,
 `TimeSleepUntil`, `TimeTimeout[T](ctx, d, fn) (T, error)`, `TimeTimeoutAt`,
-`TimeInterval`, `TimeIntervalAt` with `MissedTickBehavior`, `TimeInstant`,
-`TimePause`, `TimeAdvance(ctx, d)`, `TimeResume`, `TimeErrorElapsed`.
+`TimeInterval(d)`, `TimeIntervalAt` with `MissedTickBehavior` and
+`Tick(ctx)`, `TimeInstant`, `TimeInstantNow()`, `TimePause()`,
+`TimeAdvance(ctx, d)`, `TimeResume()`, `TimeErrorElapsed`.
 
 Tests:
 

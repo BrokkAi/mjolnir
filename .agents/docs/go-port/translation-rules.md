@@ -371,12 +371,13 @@ translate what the task does.
 
 Functions.
 
-- An `async fn` takes `ctx context.Context` as its first parameter and returns
-  its result directly. `.await` on a call is the call with `ctx` passed.
-- A synchronous function that Rust lets reach the runtime through its
-  thread-local (`Handle::current()`, `tokio::spawn` from a non-async function,
-  a `Drop` that spawns) uses `tokio.RuntimeHandleCurrent()`; it does not grow a
-  `ctx` parameter. The model is in `.agents/docs/go-port/tokio-contract.md`.
+- A function takes `ctx context.Context` as its first parameter if and only if
+  it is `async` in Rust, and returns its result directly. `.await` on a call
+  is the call with `ctx` passed. Functions that are synchronous in Rust never
+  take `ctx`, including the ones that reach the runtime through its
+  thread-local (`tokio::spawn`, `spawn_blocking`, `Handle::current()`,
+  `Instant::now()`); the Go runtime finds the calling goroutine's runtime the
+  same way. The model is in `.agents/docs/go-port/tokio-contract.md`.
 - `ctx` is the identity of the running task, not a deadline to check. Never
   test `ctx.Err()`, never select on `ctx.Done()`, and never wrap it with
   `context.WithTimeout` or `WithCancel`. Use `tokio.TimeTimeout`,
@@ -401,10 +402,10 @@ Tasks.
 
 | Rust | Go |
 | --- | --- |
-| `mj_core::runtime::spawn(fut)`, `tokio::spawn(fut)` | `mjcore.RuntimeSpawn(ctx, fn)`, `tokio.Spawn(ctx, fn)` returning `*tokio.TaskJoinHandle[T]` |
+| `mj_core::runtime::spawn(fut)`, `tokio::spawn(fut)` | `mjcore.RuntimeSpawn(fn)`, `tokio.Spawn(fn)` returning `*tokio.TaskJoinHandle[T]` |
 | `handle.await` | `handle.Await(ctx)` returning `(T, *tokio.TaskJoinError)` |
 | `handle.abort()` | `handle.Abort()` |
-| `tokio::task::spawn_blocking(f)` | `tokio.TaskSpawnBlocking(ctx, f)` |
+| `tokio::task::spawn_blocking(f)` | `tokio.TaskSpawnBlocking(f)` |
 | `tokio::task::yield_now().await` | `tokio.TaskYieldNow(ctx)` |
 | `JoinSet`, `AbortHandle` | `tokio.TaskJoinSet[T]`, `tokio.TaskAbortHandle` |
 | `std::thread::spawn(f)` | `rsthread.Spawn(f)` |
@@ -442,7 +443,7 @@ a `switch` on the index holds the arm bodies, so `break`, `continue` and
   another arm wins.
 - A future pinned outside a loop and polled by reference
   (`tokio::pin!(fut); loop { select! { r = &mut fut => .. } }`) is
-  `fut := tokio.Start(ctx, fn)` before the loop, `defer fut.Drop()`, and
+  `fut := tokio.Start(fn)` before the loop, `defer fut.Drop()`, and
   `tokio.Arm[T](fut, &r)` in the select.
 - `tokio::join!`, `try_join!`, `futures::future::join_all` are `tokio.Join2`,
   `tokio.TryJoin2`, `futures.FutureJoinAll`. They run their futures on the same
