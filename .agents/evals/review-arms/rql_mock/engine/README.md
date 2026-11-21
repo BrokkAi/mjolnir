@@ -9,7 +9,7 @@ and copied bytes against the frozen tree and runs the verifier for added steps.
 ## Private study instance
 
 The host entry point reads `/mnt/optane/review-arms-pilot/engine.json`. Fill in
-the study's named instance, profile, source clones and manifest. The engine
+the study's named instance, profiles, source clones and manifest. The engine
 keeps its cache beside this file. For an isolated smoke, set
 `REVIEW_ARMS_ENGINE_ROOT=/mnt/optane/review-arms-pilot-smoke` for the host
 answer function and lifecycle commands and put the smoke's `engine.json`
@@ -24,7 +24,8 @@ The sample port is shared with the bundle configuration.
 ```json
 {
   "instance": "rql-census-pilot",
-  "profile": "<allotted Claude profile>",
+  "profile": "claude5",
+  "engine_profile": "claude5-engine",
   "manifest": "/absolute/path/to/review-arms/brief/rql-census/pilot/manifest.json",
   "repos": {
     "mjolnir": "/absolute/path/to/mjolnir",
@@ -38,6 +39,37 @@ The sample port is shared with the bundle configuration.
   "seal_probe": ["python3", "-B", "/absolute/path/to/rql_mock/engine/record_egress.py", "--out", "/mnt/optane/review-arms-pilot/egress.jsonl"]
 }
 ```
+
+Use `claude5` for the existing login, quota checks and fidelity adjudicator.
+Add `claude5-engine` only to the private instance's
+`~/.config/mjolnir/instances/rql-census-pilot/config.toml`:
+
+```toml
+[profiles.claude5-engine]
+kind = "claude"
+home = "/home/jonathan/.config/mjolnir/instances/rql-census-pilot/claude-engine"
+```
+
+From the review-arms directory, create the private profile with the engine
+settings:
+
+```sh
+engine_home="$HOME/.config/mjolnir/instances/rql-census-pilot/claude-engine"
+install -d -m 700 "$engine_home"
+python3 -B -m rql_mock.engine.verify_tools --settings > "$engine_home/settings.json"
+```
+
+At every engine launch the runner copies the current claude5 access credential
+into the private profile without its refresh token. It requires enough
+validity for a full turn and uses the original claude5 five-hour and weekly
+windows for all engine admission checks. The frozen worker stages the settings
+for that engine session. The runner verifies the staged tool policy before
+prompting and checks every recorded tool call before accepting an answer.
+
+The SDK verification uses a loopback-only network namespace and dummy
+credentials. Pass the pinned SDK's `sdk.mjs` path to
+`python3 -B -m rql_mock.engine.verify_tools` to check outbound tool schemas
+and outside-checkout file-tool rejection.
 
 Use the same named instance and local Podman target as the pilot writers.
 Create a controller-side Git source descriptor and configure its remote:

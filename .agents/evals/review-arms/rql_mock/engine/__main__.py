@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 
 from . import CONFIG, frozen_inputs, load, save, teardown
-from .runner import SealedRunner
+from .runner import EngineRunner
 from .snapshot import git_output, manifest_sources, orphan_ref, parentless_snapshot, prepared_snapshot
 
 
@@ -37,7 +37,7 @@ def main():
         manifest = load(Path(config["manifest"]))
         version = manifest["model_versions"]["claude_provider_id"]
         accepted, failures = teardown(args.config.parent / "engine-cache",
-                                      SealedRunner({**config, "model_version": version}))
+                                      EngineRunner({**config, "model_version": version}))
         print(f"Engine session destroy requests accepted: {accepted}")
         for message in failures:
             print(message, file=sys.stderr)

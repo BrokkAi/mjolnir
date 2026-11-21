@@ -1,20 +1,26 @@
 """Host adapter for the writer's sealed Podman launcher and distinct engine turns."""
+import fcntl
 import json
-from pathlib import PurePosixPath
+import os
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
+from tempfile import NamedTemporaryFile
 import time
+import tomllib
 from uuid import uuid4
 from driver import PILOT_CLAUDE_EFFORT as EFFORT, PILOT_CLAUDE_MODEL as MODEL
 from driver import provider_model, verify_session_selection
+from rql_engine_tools import ENGINE_SETTINGS
 
-from .evidence import file_digests, save_bytes, save_json
+from .evidence import file_digests, save_bytes, save_json, sync_directory
 from .prompt import assert_blind, semantics_only, turn_prompt
 from .snapshot import PRIVATE_PATHS
 
 
 SESSION_ID = re.compile(r"[a-f0-9]{32}")
 QUERY_SESSION_PROTOCOL = "sealed-session-per-query-v1"
+TURN_TIMEOUT = 1800
 RUN_ERRORS = (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError)
 
 # Runs via Podman admin before the first prompt, outside the model's transcript.
@@ -121,11 +127,17 @@ class DestroyUncertain(RuntimeError):
     pass
 
 
-class LaunchHeld(RuntimeError):
+class LaunchPreflightFailure(RuntimeError):
+    """Local preparation failed before mj accepted a session launch."""
+
+
+class LaunchHeld(LaunchPreflightFailure):
     """Quota admission refused before a session launch or paid turn was attempted."""
 
 
 class SealedRunner:
+    engine_only = False
+
     def __init__(self, config, manifest=None):
         import driver
         import brief_driver
@@ -136,7 +148,7 @@ class SealedRunner:
         self.manifest = {"diffs": manifest["eligible_diffs"]} if manifest is not None else None
         self.served_steps = manifest["served_steps"] if manifest is not None else None
         self.instance = config["instance"]
-        self.driver.use_named_instance(self.instance)
+        self.instance_dir = self.driver.use_named_instance(self.instance)
 
     def command(self, *args, data=None, timeout=300):
         argv = self.driver.mj_invocation(*args)
@@ -210,6 +222,9 @@ class SealedRunner:
 
     def start(self, snapshot, record_id):
         self.check_quota()
+        return SealedRunner.launch_session(self, snapshot, record_id)
+
+    def launch_session(self, snapshot, record_id):
         sid = self.launch(self.config["bundle"], snapshot["orphan"], self.config["profile"],
                           f"RQL pilot engine {record_id[:12]}", base=snapshot["orphan"], effort=EFFORT)
         if not SESSION_ID.fullmatch(sid):
@@ -259,7 +274,7 @@ class SealedRunner:
                   "context_id": context_id}
         try:
             waited = self.driver.mj("wait", "--session", sid, "--turn", turn,
-                                    "--return-on-input", "--timeout", 1800, timeout=1830)
+                                    "--return-on-input", "--timeout", TURN_TIMEOUT, timeout=TURN_TIMEOUT + 30)
             if waited.get("turn_id") != turn:
                 raise RuntimeError(f"engine turn {turn} ended with {waited['outcome']}")
             if waited["outcome"] != "finished":
@@ -369,7 +384,8 @@ class SealedRunner:
             transcript = directory / "transcript.json"
             save_json(transcript, pages)
             save_json(directory / "usage.json", self.capture_usage(sid, expected_model))
-            result = audit_pilot(transcript, sid, commits=(record["orphan"],), single_commit=True)
+            result = audit_pilot(transcript, sid, commits=(record["orphan"],), single_commit=True,
+                                 engine=self.engine_only)
             save_json(directory / "audit.json", result)
             if any(hit["kind"] == "missing-or-unreadable-transcript" for hit in result["hits"]):
                 raise RuntimeError("the audit could not read the captured transcript")
@@ -447,6 +463,99 @@ class SealedRunner:
         self.driver.save(path, self.driver.transcript(sid))
         s = self.driver.session(sid)
         snapshot = s["at"]
-        result = audit_pilot(path, sid, commits=(snapshot,), single_commit=True)
+        result = audit_pilot(path, sid, commits=(snapshot,), single_commit=True, engine=self.engine_only)
         self.driver.save(directory / f"turn-{turn}-audit.json", result)
         return result["passed"]
+
+
+class EngineRunner(SealedRunner):
+    engine_only = True
+
+    def __init__(self, config, manifest=None):
+        self.login_profile = config.get("profile")
+        super().__init__({**config, "profile": config.get("engine_profile")}, manifest)
+        self.login_expiry = None
+
+    def check_quota(self):
+        if hold := self.driver.pilot_claude_hold(self.login_profile):
+            raise LaunchHeld(hold)
+        if self.login_expiry is not None:
+            self.check_login_expiry(self.login_expiry)
+
+    def check_login_expiry(self, expires_at):
+        # Leave enough time for Claude to finish one turn at the runner's timeout.
+        if type(expires_at) is not int or expires_at <= (time.time() + TURN_TIMEOUT) * 1000:
+            raise RuntimeError(
+                f"{self.login_profile} access credentials must stay valid for the next {TURN_TIMEOUT // 60} minutes"
+            )
+
+    def seed_login(self):
+        alias = self.config["profile"]
+        if not alias or alias == self.login_profile:
+            raise ValueError("the engine requires its own engine_profile and the original claude5 profile")
+        with (self.instance_dir / "config.toml").open("rb") as source:
+            profiles = tomllib.load(source)["profiles"]
+        owner, engine = profiles[self.login_profile], profiles[alias]
+        login_home = Path(owner["home"]).expanduser().resolve(strict=True)
+        home = Path(engine["home"]).expanduser().resolve(strict=True)
+        if (owner["kind"] != "claude" or login_home != (Path.home() / ".claude5").resolve(strict=True)
+                or engine["kind"] != "claude" or engine.get("environment") or engine.get("aws")
+                or home.parent != self.instance_dir.resolve() or home == login_home):
+            raise ValueError("use the claude5 login and an auth-override-free engine home in the private instance")
+        if json.loads((home / "settings.json").read_bytes()) != ENGINE_SETTINGS:
+            raise ValueError(f"engine settings do not match the tool policy at {home / 'settings.json'}")
+
+        # Serialize alias publishers so an older snapshot cannot replace a
+        # newer one. The owner writes credentials atomically in its own home.
+        with (home / ".engine-login.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            credential_file = login_home / ".credentials.json"
+            if credential_file.is_symlink():
+                raise RuntimeError("claude5 credentials must be stored in its own login file")
+            credentials = json.loads(credential_file.read_bytes())
+            oauth = credentials.get("claudeAiOauth") if isinstance(credentials, dict) else None
+            if not isinstance(oauth, dict) or not oauth.get("accessToken"):
+                raise RuntimeError(f"{self.login_profile} has no access credentials")
+            expires_at = oauth.get("expiresAt")
+            self.check_login_expiry(expires_at)
+            oauth.pop("refreshToken", None)
+            destination = home / ".credentials.json"
+            with NamedTemporaryFile(dir=home, prefix=".engine-login-", delete=False) as copy:
+                temporary = Path(copy.name)
+                try:
+                    copy.write(json.dumps({"claudeAiOauth": oauth}).encode("utf-8"))
+                    copy.flush()
+                    os.fsync(copy.fileno())
+                    temporary.replace(destination)
+                    sync_directory(home)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            self.login_expiry = expires_at
+
+    def start(self, snapshot, record_id):
+        try:
+            if self.login_profile != "claude5":
+                raise ValueError("the engine quota profile must be claude5")
+            self.login_expiry = None
+            self.check_quota()
+            self.seed_login()
+        except LaunchHeld:
+            raise
+        except RUN_ERRORS as error:
+            raise LaunchPreflightFailure(str(error)) from error
+        return self.launch_session(snapshot, record_id)
+
+    def prepare(self, sid, snapshot, directory):
+        super().prepare(sid, snapshot, directory)
+        container = self.driver.container(sid)["container"]
+        proc = subprocess.run(
+            ["podman", "exec", container, "cat", f"/var/lib/hel/profiles/{sid}/settings.json"],
+            capture_output=True, check=True, timeout=300,
+        )
+        settings = json.loads(proc.stdout)
+        # Frozen mj adds its own mailbox hook to this document. Attest the
+        # policy fields without recording unrelated settings.
+        policy = {key: settings.get(key) for key in ENGINE_SETTINGS} if isinstance(settings, dict) else None
+        if policy != ENGINE_SETTINGS:
+            raise RuntimeError("staged Claude engine settings differ from the frozen tool policy")
+        save_json(directory / "engine-tool-settings.json", policy)

@@ -8,13 +8,15 @@ import os
 from pathlib import Path
 import subprocess
 from driver import expected_provider_model, repair_progress
+from rql_engine_tools import ENGINE_SETTINGS
 
 from . import normalization
 from .evidence import save_json, sync_directory
 from .grammar import MENU, parse
 from .prompt import ANSWER_SCHEMA, CLAUDE_TOOLS, PROMPT, REPAIR, semantics_only
 from .runner import (EFFORT, MODEL, QUERY_SESSION_PROTOCOL, RUN_ERRORS, SESSION_ID, DestroyUncertain,
-                     IsolationFailure, LaunchHeld, QuotaTurnFailure, SealedRunner, TurnFailure)
+                     EngineRunner, IsolationFailure, LaunchHeld, LaunchPreflightFailure,
+                     QuotaTurnFailure, TurnFailure)
 from .snapshot import OID, blob_reader, eligible_diffs, manifest_sources, prepared_snapshot, verifier_snapshot
 from .validation import SourceEvidence, canonical, decode, ordered_rows, validate_answer
 from .verifier import verify
@@ -69,7 +71,7 @@ def input_hash(catalogue, menu, model_version, served_steps, menu_sha256, verifi
     return digest(catalogue, menu, semantics_only(menu, served_steps), menu_sha256,
                   canonical(served_steps), MODEL, model_version, EFFORT, PROMPT, CLAUDE_TOOLS, ANSWER_SCHEMA, REPAIR,
                   QUERY_SESSION_PROTOCOL, verifier_sha256,
-                  file_sha256(Path(normalization.__file__)))
+                  file_sha256(Path(normalization.__file__)), canonical(ENGINE_SETTINGS))
 
 
 def file_sha256(path):
@@ -176,7 +178,7 @@ class Engine:
         save_json(record_path, identity)
         try:
             sid = runner.start(snapshot, commit)
-        except LaunchHeld:
+        except LaunchPreflightFailure:
             record_path.unlink()
             try:
                 record_path.parent.rmdir()
@@ -332,8 +334,8 @@ def load_engine(config_path=None, *, manifest_path=None):
         return blob_reader(repo, revision), prepared_snapshot(repo, config["snapshot_repo"], revision)
 
     engine = Engine(config_path.parent / "engine-cache", documents, source,
-                    lambda: SealedRunner({**config, "model_version": version,
-                                          "model_display": manifest["model_versions"]["claude"]}, manifest), version,
+                    lambda: EngineRunner({**config, "model_version": version,
+                                           "model_display": manifest["model_versions"]["claude"]}, manifest), version,
                     served_steps=manifest["served_steps"], menu_sha256=manifest["inputs"]["menu_sha256"],
                     manifest_sha256=hashlib.sha256(raw).hexdigest(), verifier=verifier,
                     verifier_source=lambda snapshot: verifier_snapshot(config["snapshot_repo"], snapshot["orphan"]))

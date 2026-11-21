@@ -862,3 +862,49 @@ def test_in_place_edit_requires_root_and_tracked_link_inventory(tmp_path, tracke
                          allow_in_place_edits=True)
     assert report["passed"] is allowed
     assert {hit["kind"] for hit in report["hits"]} == ({"in-place-edit"} if allowed else {"needs-inspection"})
+
+
+ENGINE_CWD = f"/workspace/{OWN}/engine-trees"
+
+
+@pytest.mark.parametrize("name", [
+    "Bash", "PowerShell", "Agent", "TaskStop", "mcp__rql__rql_query", "ListMcpResourcesTool",
+    "NotebookEdit", "WebFetch", "read", "FutureTool", None,
+])
+def test_engine_audit_requires_the_native_tool_name(tmp_path, name):
+    # Neither a plausible title nor a safe-looking input can authorize a tool.
+    call = {"title": "Read file 'README.md'", "kind": "read",
+            "rawInput": {"file_path": "README.md"}}
+    if name is not None:
+        call["name"] = name
+    assert audit_call(tmp_path, call, cwd=ENGINE_CWD)["passed"]
+    report = audit_call(tmp_path, call, cwd=ENGINE_CWD, engine=True)
+    assert not report["passed"]
+    assert any(hit["kind"] == "needs-inspection" for hit in report["hits"])
+
+
+@pytest.mark.parametrize("name,key,escape", [
+    ("Glob", "pattern", "../../*.rs"),
+    ("Glob", "pattern", "/etc/*"),
+    ("Grep", "pattern", "../secret"),
+    ("Grep", "pattern", "/etc/passwd"),
+    ("Grep", "glob", "safe/../../*.rs"),
+    ("Grep", "glob", "/etc/*"),
+])
+def test_engine_audit_inspects_search_pattern_escapes(tmp_path, name, key, escape):
+    call = {"name": name, "kind": "search", "rawInput": {"pattern": "*.rs", key: escape}}
+    assert audit_call(tmp_path, call, cwd=ENGINE_CWD)["passed"]
+    report = audit_call(tmp_path, call, cwd=ENGINE_CWD, engine=True)
+    assert not report["passed"]
+    assert report["hits"] == [{"seq": 1, "kind": "needs-inspection", "where": "input",
+                               "snippet": f"unverified {name} {key}: {escape!r}"}]
+
+
+@pytest.mark.parametrize("name", ["Glob", "Grep"])
+def test_engine_audit_resolves_search_without_path_from_recorded_cwd(tmp_path, name):
+    call = {"name": name, "kind": "search", "rawInput": {"pattern": "main"}}
+    assert not audit_call(tmp_path, call, engine=True)["passed"]
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({"cwd": ENGINE_CWD}))
+    assert audit_call(tmp_path, call, engine=True)["passed"]
+    call["locations"] = [{"path": f"/workspace/{OWN}/another-checkout/README.md"}]
+    assert not audit_call(tmp_path, call, engine=True)["passed"]

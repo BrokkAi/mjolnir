@@ -16,6 +16,8 @@ import sys
 
 from urllib.parse import unquote, urlsplit
 
+from rql_engine_tools import ENGINE_TOOLS
+
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 
 # Where a command word can start. Inputs are matched as serialized JSON, so a
@@ -125,7 +127,7 @@ def tool_succeeded(call, body, rollout_exit):
 
 
 def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None,
-         rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None):
+         rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None, engine=False):
     first_page = pages[0] if pages else {}
     execution = first_page.get("execution")
     checkout = cwd or first_page.get("cwd") or (execution.get("cwd") if isinstance(execution, dict) else None)
@@ -142,6 +144,11 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                 continue
             body = item.get("body") or {}
             call = body.get("call") or {}
+            if engine:
+                calls += 1
+                hits.extend({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
+                            for name, snippet in engine_hits(call, own_workspace, page_cwd, checkout))
+                continue
             if commits is not None and not call:
                 # Standalone terminal_output rows contain output only. The
                 # originating command is recorded as its own tool call.
@@ -1993,6 +2000,46 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
 PATH_KEYS = {"cwd", "path", "paths", "file_path", "filePath", "directory", "workdir", "target_file"}
 
 
+def engine_hits(call, own_workspace, cwd, checkout):
+    name = call.get("name") if isinstance(call, dict) else None
+    if not isinstance(name, str) or name not in ENGINE_TOOLS or call.get("kind") == "execute":
+        yield "needs-inspection", f"tool outside the engine allowlist: {name!r}"
+        return
+
+    raw = call.get("rawInput")
+    if not isinstance(raw, dict):
+        yield "needs-inspection", f"missing or invalid {name} input"
+        return
+    if name in {"Grep", "Glob"}:
+        for key in ("pattern", "glob") if "glob" in raw else ("pattern",):
+            value = raw.get(key)
+            if not isinstance(value, str) or posixpath.isabs(value) or ".." in value:
+                yield "needs-inspection", f"unverified {name} {key}: {value!r}"
+        paths = [raw.get("path", cwd)]
+    else:
+        paths = [raw.get("file_path")]
+    locations = call.get("locations")
+    if locations is not None:
+        if not isinstance(locations, list) or any(not isinstance(location, dict) for location in locations):
+            yield "needs-inspection", f"invalid {name} locations"
+            return
+        paths.extend(location.get("path") for location in locations)
+    root = recorded_path(checkout, None) if checkout else None
+    seen = set()
+    for path in paths:
+        if not isinstance(path, str) or not path:
+            yield "needs-inspection", f"missing or invalid {name} path or recorded working directory"
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        yield from path_hits(path, own_workspace, cwd)
+        resolved = recorded_path(path, cwd)
+        if (not root or not resolved or not posixpath.isabs(resolved)
+                or posixpath.commonpath((root, resolved)) != root):
+            yield "outside-workspace", path
+
+
 def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written, cwd, home,
                edit_paths, succeeded=False):
     title = call.get("title") or ""
@@ -2085,7 +2132,7 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
 
 
 def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, single_commit=False,
-                cwd=None, home=None, allow_in_place_edits=False):
+                cwd=None, home=None, allow_in_place_edits=False, engine=False):
     """Screen pilot inputs; a needs-inspection hit prevents automatic acceptance."""
     try:
         pages = json.loads(transcript_path.read_text())
@@ -2100,7 +2147,7 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
         before = json.loads(inventory.read_text()) if inventory.is_file() else {}
         cwd = cwd or before.get("cwd")
         result = scan(pages, own_workspace, commits=commits, allow_rql=allow_rql, single_commit=single_commit,
-                      cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits,
+                      cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits, engine=engine,
                       tracked_symlinks=before.get("tracked_symlinks"),
                       tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
                       rollout=rollout_commands(
