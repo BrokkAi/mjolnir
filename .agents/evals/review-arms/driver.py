@@ -418,9 +418,19 @@ PILOT_CLAUDE_EFFORT = "high"
 PILOT_CLAUDE_AUXILIARY_PROVIDER_ID = "claude-haiku-5-5"
 
 
+# Weekly and five-hour floors (percent remaining, which must stay strictly above them)
+# for each Claude login the pilot uses. The study's floors are 25% weekly and 20%
+# five-hour, leaving room for other sessions on a shared login. User decision,
+# 2026-11-21: nothing else uses claude5, so its quota is used to the provider's limit
+# rather than left unspent at its reset.
+PILOT_CLAUDE_FLOORS = {"claude5": (0, 0)}
+PILOT_CLAUDE_DEFAULT_FLOORS = (25, 20)
+
+
 def pilot_claude_quota(profile):
     """Return the study's usable overall weekly and five-hour balances or why they are held."""
-    return _quota_status(profile, 25, weekly=True, strict=True, short_floor=20, unscoped=True)
+    weekly, short = PILOT_CLAUDE_FLOORS.get(profile, PILOT_CLAUDE_DEFAULT_FLOORS)
+    return _quota_status(profile, weekly, weekly=True, strict=True, short_floor=short, unscoped=True)
 
 
 def pilot_claude_hold(profile):
