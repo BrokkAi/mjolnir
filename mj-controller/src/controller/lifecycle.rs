@@ -471,16 +471,59 @@ impl Controller {
                 }
             }
             if !attempt.request_recorded() && !attempt.worker_capable()? {
-                let upgrade_result = if let Some(manager) = manager {
-                    self.upgrade_session_worker_for_suspend(admission, session_id, executor, manager)
+                let mut already_recovered_worker = false;
+                let recovery_result: Result<()> = if let Some(pending) =
+                    crate::database::load_worker_restart(session_id)?
+                    && self.state.sessions[session_id].target.as_deref() == Some(&pending.target)
+                {
+                    // A prior suspend worker swap crashed mid-flight. Finish or
+                    // recover it through `start_worker` (reattaching a live
+                    // replacement or spawning the installed binary if the old
+                    // worker was stopped) before checking whether an upgrade is
+                    // still needed.
+                    match attempt
+                        .start_worker(
+                            self,
+                            admission,
+                            session_id,
+                            executor,
+                            manager,
+                            mj_core::worker_launch::WorkerRunMode::Harness,
+                        )
                         .await
+                    {
+                        Ok(relay) => {
+                            relay.release();
+                            retire_worker_restart_intent(session_id)
+                        }
+                        Err(error) => {
+                            already_recovered_worker = true;
+                            Err(error)
+                        }
+                    }
                 } else {
-                    Err(anyhow::anyhow!(
-                        "older worker cannot be upgraded for origin-delta suspend without a session manager"
-                    ))
+                    Ok(())
+                };
+                let upgrade_result = match recovery_result {
+                    Err(error) => Err(error),
+                    Ok(()) if attempt.worker_capable()? => Ok(()),
+                    Ok(()) => {
+                        if let Some(manager) = manager {
+                            self.upgrade_session_worker_for_suspend(
+                                admission, session_id, executor, manager,
+                            )
+                            .await
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "older worker cannot be upgraded for origin-delta suspend without a session manager"
+                            ))
+                        }
+                    }
                 };
                 if let Err(error) = upgrade_result {
-                    let final_error = if WorkerRestartLeftNoWorker::marks(&error) {
+                    let final_error = if !already_recovered_worker
+                        && WorkerRestartLeftNoWorker::marks(&error)
+                    {
                         // Swap failed after stopping the old worker: attempt ONE
                         // in-place recovery restart with the installed binary.
                         match attempt
