@@ -1,6 +1,7 @@
 """Sealed model adapters and the host entry point for the pilot gate."""
 import argparse
 from dataclasses import asdict
+from functools import partial
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -234,6 +235,46 @@ def checkpoint_directory(directory, engine):
     return directory / engine.identity["manifest_sha256"] / engine.identity["engine_inputs_sha256"]
 
 
+class EngineQuotaHold(RuntimeError):
+    pass
+
+
+def checkpointed_answer(engine, directory, commit, text, *, fresh=False):
+    receipt = directory / ("fresh-engine.json" if fresh else "engine.json")
+    if receipt.exists():
+        return json.loads(receipt.read_bytes())
+    response = engine.answer(commit, text, fresh=fresh)
+    status = response["status"]
+    if status != "ok":
+        error = EngineQuotaHold if status == "quota_hold" else RuntimeError
+        raise error(f"{directory.name}: engine {status}: {response.get('message', '')}")
+    driver.save(receipt, response)
+    return response
+
+
+def run_sample(run, queries, fresh, engine, models):
+    """Checkpoint engine answers for both phases and measure only with gold models."""
+    records = {}
+    for query in queries:
+        directory = run / query.key
+        path = directory / "measurement.json"
+        if path.exists():
+            if models is not None:
+                records[query.key] = json.loads(path.read_bytes())
+            continue
+        answer = partial(checkpointed_answer, engine, directory)
+        reask = query.key in fresh
+        if models is None:
+            answer(query.commit, query.text)
+            if reask:
+                answer(query.commit, query.text, fresh=True)
+            continue
+        result = measure(query, reask, answer, models.enumerate_rows, models.adjudicate)
+        driver.save(path, result)
+        records[query.key] = result
+    return records
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=CENSUS / "pilot/manifest.json")
@@ -245,11 +286,17 @@ def main(argv=None):
     parser.add_argument("--js-grammar", type=Path, default=Path.home() / "Projects/tree-sitter-javascript")
     parser.add_argument("--sample-only", action="store_true")
     parser.add_argument("--live", action="store_true", help="Launch sealed fidelity sessions.")
+    parser.add_argument("--phase", choices=("full", "engine"), default="full",
+                        help="Run only the engine and stability re-asks, or measure the complete gate.")
     args = parser.parse_args(argv)
     if args.live == args.sample_only:
         parser.error("choose exactly one of --sample-only and --live")
-    if args.live and (args.engine_config.resolve() != CONFIG.resolve() or not args.terra_profile):
-        parser.error("--live requires the engine's default configuration and an allotted --terra-profile")
+    if args.sample_only and args.phase == "engine":
+        parser.error("--phase engine requires --live")
+    if args.live and args.engine_config.resolve() != CONFIG.resolve():
+        parser.error("--live requires the engine's default configuration")
+    if args.live and args.phase == "full" and not args.terra_profile:
+        parser.error("the full live gate requires an allotted --terra-profile")
     manifest_path = args.manifest.resolve()
     digest, _, served, documents, eligible = load_inputs(manifest_path)
     engine = load_engine(args.engine_config, manifest_path=manifest_path if args.sample_only else None)
@@ -293,26 +340,15 @@ def main(argv=None):
             return 0
         for commit in sorted({query.commit for query in queries}):
             prepared_snapshot(repos[commit], config["snapshot_repo"], commit)
-        adapter = LiveModels(config, manifest, documents, run, args.terra_profile, claude_version)
-        records = {}
-        for query in queries:
-            path = run / query.key / "measurement.json"
-            if path.exists():
-                records[query.key] = json.loads(path.read_bytes())
-                continue
-            def checkpointed_answer(commit, text, *, fresh=False):
-                receipt = path.parent / ("fresh-engine.json" if fresh else "engine.json")
-                if receipt.exists():
-                    return json.loads(receipt.read_bytes())
-                response = engine.answer(commit, text, fresh=fresh)
-                if response["status"] == "ok":
-                    driver.save(receipt, response)
-                return response
-
-            result = measure(query, query.key in fresh, checkpointed_answer,
-                             adapter.enumerate_rows, adapter.adjudicate)
-            driver.save(path, result)
-            records[query.key] = result
+        adapter = None if args.phase == "engine" else LiveModels(
+            config, manifest, documents, run, args.terra_profile, claude_version)
+        try:
+            records = run_sample(run, queries, fresh, engine, adapter)
+        except EngineQuotaHold as hold:
+            print(json.dumps({"status": "quota_hold", "phase": args.phase, "reason": str(hold)}), flush=True)
+            return 1
+        if args.phase == "engine":
+            return 0
         report = gate_report(digest, served, queries, records, manifest["seed"])
         report.update(engine.identity)
         report["sample"] = str(blueprint.relative_to(directory))

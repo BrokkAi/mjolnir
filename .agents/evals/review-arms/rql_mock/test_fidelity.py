@@ -1,9 +1,16 @@
 """Offline fidelity gate fixtures. No session tools are invoked."""
 from collections import Counter
+from contextlib import redirect_stdout
+from io import StringIO
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 
 from driver import expected_provider_model, verify_session_selection
 
+from . import fidelity_live
 from .fidelity import (BARS, CENSUS, Query, accuracy, bar_failures, gate_report, load_inputs,
                        measure, pooled_prescience, prescience_metrics, sample, step_result, stratum_metrics)
 from .engine.grammar import MENU
@@ -220,6 +227,117 @@ class Pool(unittest.TestCase):
                          {"a": {"src.rs:2-3": ["second", "third"]}})
         with self.assertRaisesRegex(ValueError, "out-of-range"):
             candidate_lines(candidate, lambda path: b"first\nsecond\n")
+
+
+class EnginePhase(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.manifest_path = CENSUS / "pilot/manifest.json"
+        digest, manifest, served, documents, _ = load_inputs(self.manifest_path)
+        step = served[0]
+        commit = "a" * 40
+        self.rows = [{"name": name, "sites": []} for name in ("decisive", "other")]
+        self.queries = [
+            Query(step, "random", "mjolnir", commit, f'(function :name "fixture_{i}")')
+            for i in range(10)
+        ] + [
+            Query(step, "decisive", "mjolnir", commit, '(function :name "fixture_decisive")', (self.rows[0],)),
+            Query("documented", "random", "mjolnir", commit, '(function :name "fixture_documented")'),
+        ]
+        self.fresh = {self.queries[1].key, self.queries[-1].key}
+        self.expected = [(query.text, fresh) for query in self.queries
+                         for fresh in ([False, True] if query.key in self.fresh else [False])]
+        self.calls = []
+        self.gold_calls = []
+        self.hold_at = None
+        self.identity = {"manifest_sha256": digest, "engine_inputs_sha256": "b" * 64}
+        engine = SimpleNamespace(
+            identity=self.identity, model_version="claude-sonnet-5-5", answer=self.answer,
+            config={"repos": dict.fromkeys((row["repo"] for row in manifest["diffs"]), self.root),
+                    "snapshot_repo": self.root},
+            manifest={**manifest, "eligible_diffs": [{"intro": commit, "repo": "mjolnir"}]},
+        )
+        # The real phase selection, checkpoints, measurement and reporting run offline.
+        for name, fake in {
+            "load_inputs": lambda path: (digest, None, [step], documents, None),
+            "load_engine": lambda *args, **kwargs: engine,
+            "touched_symbols": lambda *args: [],
+            "sample": lambda *args: (self.queries, self.fresh),
+            "prepared_snapshot": lambda *args: None,
+            "LiveModels": self.gold_models,
+        }.items():
+            self.addCleanup(setattr, fidelity_live, name, getattr(fidelity_live, name))
+            setattr(fidelity_live, name, fake)
+        self.grammar = self.root / "grammar"
+        (self.grammar / "src").mkdir(parents=True)
+        (self.grammar / "src/parser.c").write_text("fixture")
+
+    def answer(self, commit, text, *, fresh=False):
+        call = (text, fresh)
+        self.calls.append(call)
+        if call == self.hold_at:
+            return {"status": "quota_hold", "message": "fixture hold"}
+        return {"status": "ok", "rows": self.rows}
+
+    def gold_models(self, *args):
+        self.gold_calls.append("started")
+
+        def enumerate_rows(repo, commit, text):
+            self.gold_calls.append(("terra", text))
+            return {"rows": self.rows}
+
+        def adjudicate(query, candidates):
+            self.gold_calls.append(("sonnet", query.text))
+            return {key: {"in_scope": True, "key": row["name"], "reason": "fixture evidence"}
+                    for key, row in candidates.items()}
+
+        return SimpleNamespace(enumerate_rows=enumerate_rows, adjudicate=adjudicate)
+
+    def run_phase(self, root, *options):
+        output = StringIO()
+        with redirect_stdout(output):
+            status = fidelity_live.main(["--live", "--run-root", str(root), "--manifest", str(self.manifest_path),
+                                         "--rust-grammar", str(self.grammar), "--js-grammar", str(self.grammar),
+                                         *options])
+        return status, [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def test_engine_phase_and_full_run_match_a_single_full_run(self):
+        split = self.root / "split"
+        self.assertEqual(self.run_phase(split, "--phase", "engine")[0], 0)
+        gate = split / "fidelity/gate-report.json"
+        self.assertFalse(gate.exists())
+        self.assertFalse(list(split.rglob("measurement.json")))
+        self.assertEqual(self.calls, self.expected)
+        self.assertEqual(self.gold_calls, [])
+        self.assertEqual(self.run_phase(split, "--terra-profile", "fixture")[0], 0)
+        self.assertEqual(self.calls, self.expected)
+        split_gold = self.gold_calls.copy()
+        self.gold_calls.clear()
+        self.calls.clear()
+        combined = self.root / "combined"
+        self.assertEqual(self.run_phase(combined, "--terra-profile", "fixture")[0], 0)
+        self.assertEqual(self.calls, self.expected)
+        self.assertEqual(self.gold_calls, split_gold)
+        reports = [json.loads(path.read_text()) for path in (gate, combined / "fidelity/gate-report.json")]
+        for report in reports:
+            report.pop("created_at")
+        self.assertEqual(*reports)
+
+    def test_quota_hold_resumes_the_unanswered_stability_reask(self):
+        held = self.expected.index((self.queries[1].text, True))
+        self.hold_at = self.expected[held]
+        status, output = self.run_phase(self.root, "--phase", "engine")
+        self.assertEqual(status, 1)
+        self.assertEqual(output[-1]["status"], "quota_hold")
+        self.assertEqual(self.calls, self.expected[:held + 1])
+        self.calls.clear()
+        self.hold_at = None
+        self.assertEqual(self.run_phase(self.root, "--phase", "engine")[0], 0)
+        self.assertEqual(self.calls, self.expected[held:])
+        self.assertEqual(self.gold_calls, [])
+        self.assertFalse((self.root / "fidelity/gate-report.json").exists())
 
 
 class ModelIdentity(unittest.TestCase):
