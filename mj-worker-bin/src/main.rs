@@ -258,9 +258,10 @@ enum WorkerCommand {
         path: PathBuf,
         #[arg(long)]
         overwrite: bool,
-        /// Expected input length; premature EOF must not publish a partial file.
+        /// Expected input length; when present, premature EOF or trailing bytes
+        /// must not publish a partial file.
         #[arg(long)]
-        length: usize,
+        length: Option<u64>,
     },
     /// Push the repository's current HEAD to a branch on its push remote.
     PushBranch {
@@ -857,16 +858,12 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             overwrite,
             length,
         } => {
-            let bytes = mj_checkpoint::archive::read_session_file_input(std::io::stdin().lock())
-                .map_err(export_error)?;
-            if bytes.len() != length {
-                return Err(export_error(SessionExportError::Refused(format!(
-                    "incomplete file upload: expected {length} bytes, received {}",
-                    bytes.len()
-                ))));
-            }
-            mj_checkpoint::archive::write_session_file(&root, &path, &bytes, overwrite)
-                .map_err(export_error)
+            let mut stdin = std::io::stdin().lock();
+            mj_checkpoint::archive::write_session_file_from_reader(
+                &root, &path, &mut stdin, length, overwrite,
+            )
+            .map(|_| ())
+            .map_err(export_error)
         }
         WorkerCommand::PushBranch {
             repository, branch, ..
@@ -1149,7 +1146,7 @@ mod tests {
                             root: root.into(),
                             path: PathBuf::from("nested/input.bin"),
                             overwrite: false,
-                            length: 512 * 1024,
+                            length: Some(512 * 1024),
                         },
                     }),
                     None,

@@ -466,9 +466,10 @@ pub trait SubagentBackend: Send + Sync {
         &self,
         _session_id: String,
         _path: PathBuf,
-        _bytes: Vec<u8>,
+        _reader: Box<dyn std::io::Read + Send>,
+        _expected_len: Option<u64>,
         _overwrite: bool,
-    ) -> BoxFuture<'_, Result<(), ExportError>> {
+    ) -> BoxFuture<'_, Result<u64, ExportError>> {
         Box::pin(async { Err(ExportError::Refused("file injection is unavailable".into())) })
     }
 

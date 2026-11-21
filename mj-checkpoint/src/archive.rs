@@ -2786,7 +2786,7 @@ pub use fetch::{
     create_fetch_spool, fetch_session_path,
 };
 mod file_input;
-pub use file_input::{read_session_file_input, write_session_file};
+pub use file_input::{write_session_file, write_session_file_from_reader};
 
 pub(crate) mod git;
 

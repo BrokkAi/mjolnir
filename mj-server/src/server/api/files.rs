@@ -54,16 +54,90 @@ pub struct WriteFileQuery {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteFileResponse {
     pub path: PathBuf,
-    pub bytes: usize,
+    pub bytes: u64,
+}
+
+enum UploadChunk {
+    Data(axum::body::Bytes),
+    Eof,
+    Error(String),
+}
+
+struct UploadChannelReader {
+    rx: tokio::sync::mpsc::Receiver<UploadChunk>,
+    current: axum::body::Bytes,
+    finished: bool,
+}
+
+impl UploadChannelReader {
+    fn new(rx: tokio::sync::mpsc::Receiver<UploadChunk>) -> Self {
+        Self {
+            rx,
+            current: axum::body::Bytes::new(),
+            finished: false,
+        }
+    }
+}
+
+impl std::io::Read for UploadChannelReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use tokio_util::bytes::Buf as _;
+        if buf.is_empty() || self.finished {
+            return Ok(0);
+        }
+        while self.current.is_empty() {
+            match self.rx.blocking_recv() {
+                Some(UploadChunk::Data(chunk)) => {
+                    if !chunk.is_empty() {
+                        self.current = chunk;
+                    }
+                }
+                Some(UploadChunk::Eof) => {
+                    self.finished = true;
+                    return Ok(0);
+                }
+                Some(UploadChunk::Error(message)) => {
+                    self.finished = true;
+                    return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, message));
+                }
+                None => {
+                    self.finished = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "upload stream closed before EOF",
+                    ));
+                }
+            }
+        }
+        let count = buf.len().min(self.current.len());
+        buf[..count].copy_from_slice(&self.current[..count]);
+        self.current.advance(count);
+        Ok(count)
+    }
 }
 
 pub(super) async fn write_file(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
     Query(query): Query<WriteFileQuery>,
-    bytes: axum::body::Bytes,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Body,
 ) -> Result<Json<WriteFileResponse>, ApiFailure> {
+    use futures::StreamExt as _;
     validate_session_file_path(&query.path)?;
+    let expected_len = match headers.get(axum::http::header::CONTENT_LENGTH) {
+        Some(value) => {
+            let text = value
+                .to_str()
+                .map_err(|_| ApiFailure::bad_request("invalid Content-Length header"))?;
+            let len = text
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| ApiFailure::bad_request("invalid Content-Length header"))?;
+            Some(len)
+        }
+        None => None,
+    };
     {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
@@ -73,18 +147,43 @@ pub(super) async fn write_file(
             ));
         }
     }
-    let count = bytes.len();
-    backend(&state)?
-        .write_file(
-            session_id,
-            query.path.clone(),
-            bytes.to_vec(),
-            query.overwrite,
-        )
-        .await?;
+    let backend = backend(&state)?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<UploadChunk>(8);
+    let reader: Box<dyn std::io::Read + Send> = Box::new(UploadChannelReader::new(rx));
+    let pump = async move {
+        let mut stream = body.into_data_stream();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) if chunk.is_empty() => continue,
+                Ok(chunk) => {
+                    if tx.send(UploadChunk::Data(chunk)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = tx
+                        .send(UploadChunk::Error(format!("read upload body: {error}")))
+                        .await;
+                    return;
+                }
+            }
+        }
+        let _ = tx.send(UploadChunk::Eof).await;
+    };
+    let mut write_fut = std::pin::pin!(backend.write_file(
+        session_id,
+        query.path.clone(),
+        reader,
+        expected_len,
+        query.overwrite,
+    ));
+    let written = tokio::select! {
+        result = &mut write_fut => result?,
+        () = pump => write_fut.await?,
+    };
     Ok(Json(WriteFileResponse {
         path: query.path,
-        bytes: count,
+        bytes: written,
     }))
 }
 

@@ -3738,14 +3738,28 @@ fn fetch_arguments(
     Ok(arguments)
 }
 
+struct CountingReader<R> {
+    inner: R,
+    bytes: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        self.bytes = self.bytes.saturating_add(count as u64);
+        Ok(count)
+    }
+}
+
 async fn write_workspace_file(
     exports: Arc<dyn ExportRuntime>,
     session_id: String,
     path: PathBuf,
-    bytes: Vec<u8>,
+    reader: Box<dyn std::io::Read + Send>,
+    expected_len: Option<u64>,
     overwrite: bool,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<(), ExportError> {
+) -> Result<u64, ExportError> {
     use std::sync::atomic::Ordering;
     let session_admission = exports
         .workspace_admission(session_id.clone(), cancelled.clone())
@@ -3785,13 +3799,15 @@ async fn write_workspace_file(
             binary,
             "worker".into(),
             "write-file".into(),
-            "--length".into(),
-            bytes.len().to_string(),
             "--root".into(),
             root,
             "--path".into(),
             relative,
         ];
+        if let Some(len) = expected_len {
+            argv.push("--length".into());
+            argv.push(len.to_string());
+        }
         if overwrite {
             argv.push("--overwrite".into());
         }
@@ -3801,13 +3817,16 @@ async fn write_workspace_file(
             &session_id,
             argv,
             "session file write",
-        )?
-        .with_sensitive_stdin(bytes);
-        CancellableProcessExecutor::new(worker_cancelled)
-            .with_deadline(EXPORT_TIMEOUT)
-            .execute(&command)
+        )?;
+        let mut counting = CountingReader {
+            inner: reader,
+            bytes: 0,
+        };
+        let output = CancellableProcessExecutor::new(worker_cancelled)
+            .execute_with_stdin(&command, &mut counting)?;
+        Ok::<_, anyhow::Error>((output, counting.bytes))
     });
-    let output = loop {
+    let (output, bytes_written) = loop {
         tokio::select! {
             output = &mut transfer => break output.map_err(|e| ExportError::Failed(e.into()))?.map_err(ExportError::Failed)?,
             () = tokio::time::sleep(Duration::from_millis(250)) => {
@@ -3824,7 +3843,7 @@ async fn write_workspace_file(
             }
         }
     };
-    let result = worker_output(output, "session file write").map(|_| ());
+    let result = worker_output(output, "session file write").map(|_| bytes_written);
     lease.release().await.map_err(|e| {
         ExportError::Failed(
             e.context("file transfer ended but the workspace barrier could not be released"),
@@ -4619,9 +4638,10 @@ impl SubagentBackend for ApiBackend {
         &self,
         session_id: String,
         path: PathBuf,
-        bytes: Vec<u8>,
+        reader: Box<dyn std::io::Read + Send>,
+        expected_len: Option<u64>,
         overwrite: bool,
-    ) -> BoxFuture<'_, Result<(), ExportError>> {
+    ) -> BoxFuture<'_, Result<u64, ExportError>> {
         let exports = self.exports.clone();
         Box::pin(async move {
             if matches!(
@@ -4639,7 +4659,13 @@ impl SubagentBackend for ApiBackend {
             let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let _cancel_on_drop = super::ProcessCancellationGuard(cancelled.clone());
             let task = mj_core::runtime::spawn(write_workspace_file(
-                exports, session_id, path, bytes, overwrite, cancelled,
+                exports,
+                session_id,
+                path,
+                reader,
+                expected_len,
+                overwrite,
+                cancelled,
             ));
             mj_core::runtime::spawn(async move {
                 let result = task

@@ -669,17 +669,37 @@ pub(crate) struct RespondArgs {
 }
 
 pub(crate) async fn put_file(args: PutFileArgs) -> Result<()> {
-    let bytes = if args.source == std::path::Path::new("-") {
-        mj_checkpoint::archive::read_session_file_input(std::io::stdin().lock())?
+    let (body, content_length) = if args.source == std::path::Path::new("-") {
+        (
+            reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(tokio::io::stdin())),
+            None,
+        )
     } else {
-        mj_checkpoint::archive::read_session_file_input(
-            std::fs::File::open(&args.source)
-                .with_context(|| format!("open {}", args.source.display()))?,
-        )?
+        let file = tokio::fs::File::open(&args.source)
+            .await
+            .with_context(|| format!("open {}", args.source.display()))?;
+        let metadata = file
+            .metadata()
+            .await
+            .with_context(|| format!("inspect {}", args.source.display()))?;
+        if metadata.is_file() {
+            (reqwest::Body::from(file), Some(metadata.len()))
+        } else {
+            (
+                reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file)),
+                None,
+            )
+        }
     };
     let written = ApiClient::connect()
         .await?
-        .put_file(&args.session, &args.path, bytes, args.overwrite)
+        .put_file(
+            &args.session,
+            &args.path,
+            body,
+            content_length,
+            args.overwrite,
+        )
         .await?;
     if args.json {
         print_json(&written)

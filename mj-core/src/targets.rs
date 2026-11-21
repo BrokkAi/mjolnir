@@ -1520,6 +1520,14 @@ fn stream_command_with_stdin(
     );
     let mut stderr_reader = PipeCollector::spawn_observed(stderr, None, None, observer);
     let process_result = std::thread::scope(|scope| -> Result<_> {
+        // When `input.read` fails, keep `stdin` open until the supervisor has
+        // terminated the child process group. Otherwise dropping `stdin` would
+        // deliver a clean EOF and let a length-less child (such as chunked
+        // `hel worker write-file`) publish a truncated file.
+        let input_failed = Arc::new(AtomicBool::new(false));
+        let child_done = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let input_failed_writer = input_failed.clone();
+        let child_done_writer = child_done.clone();
         // Pipe writes can block forever when a remote helper stops reading.
         // Keep the writer off the supervising thread so cancellation can kill
         // the process group and thereby close the blocked pipe.
@@ -1556,7 +1564,18 @@ fn stream_command_with_stdin(
                 if is_cancelled() {
                     bail!("operation cancelled");
                 }
-                let count = input.read(&mut buffer).context("read command input")?;
+                let count = match input.read(&mut buffer) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        input_failed_writer.store(true, Ordering::Release);
+                        let (lock, cvar) = &*child_done_writer;
+                        let mut done = lock.lock().unwrap();
+                        while !*done {
+                            done = cvar.wait(done).unwrap();
+                        }
+                        return Err(error).context("read command input");
+                    }
+                };
                 if count == 0 {
                     break;
                 }
@@ -1567,6 +1586,20 @@ fn stream_command_with_stdin(
             stdin.flush().context("flush command input")?;
             Ok(true)
         });
+        struct ChildDoneGuard<'a>(&'a (std::sync::Mutex<bool>, std::sync::Condvar));
+        impl Drop for ChildDoneGuard<'_> {
+            fn drop(&mut self) {
+                let mut done = self.0.0.lock().unwrap();
+                *done = true;
+                self.0.1.notify_all();
+            }
+        }
+        let child_done_guard = ChildDoneGuard(&child_done);
+        let mark_child_done = || {
+            let mut done = child_done.0.lock().unwrap();
+            *done = true;
+            child_done.1.notify_all();
+        };
         let mut status = None;
         let mut exited_at = None;
         let mut group_killed = false;
@@ -1579,6 +1612,7 @@ fn stream_command_with_stdin(
             }
             if is_cancelled() {
                 terminate_cancellable_child(&mut child, false);
+                mark_child_done();
                 end_reply();
                 if let Err(error) = input_writer.join() {
                     tracing::warn!(
@@ -1587,6 +1621,16 @@ fn stream_command_with_stdin(
                     );
                 }
                 bail!("operation cancelled while {}", command.purpose);
+            }
+            if input_failed.load(Ordering::Acquire) {
+                terminate_cancellable_child(&mut child, false);
+                mark_child_done();
+                end_reply();
+                let input_result = input_writer
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("streamed command input writer panicked"))?;
+                input_result?;
+                bail!("streamed command input failed while {}", command.purpose);
             }
             if stdout_reader.is_finished() {
                 end_reply();
@@ -1599,6 +1643,7 @@ fn stream_command_with_stdin(
                 Ok(observed) => status = observed,
                 Err(error) => {
                     terminate_cancellable_child(&mut child, false);
+                    mark_child_done();
                     end_reply();
                     if let Err(join_error) = input_writer.join() {
                         tracing::warn!(
@@ -1614,6 +1659,7 @@ fn stream_command_with_stdin(
             // then the owned group is terminated, which also releases a
             // writer blocked on a pipe a descendant holds.
             if let Some(status) = status {
+                mark_child_done();
                 let exited_at = *exited_at.get_or_insert_with(Instant::now);
                 let drained = (stdout_reader.is_finished() && stderr_reader.is_finished())
                     || exited_at.elapsed() >= IO_DRAIN_TIMEOUT;
@@ -1636,6 +1682,7 @@ fn stream_command_with_stdin(
                 exit_watch.wait(Duration::from_millis(25))
             };
         };
+        drop(child_done_guard);
         let input_result = input_writer
             .join()
             .map_err(|_| anyhow::anyhow!("streamed command input writer panicked"))?;
@@ -4718,5 +4765,44 @@ exit 0
         assert_eq!(output.stdout, b"secret\n");
         assert_eq!(fake.attempts(), 2);
         set_ssh_connection_sharing_for_test(None);
+    }
+
+    // Hard-won: #1613: a mid-stream stdin read error must kill the child before closing stdin so a length-less writer never publishes a truncated file on EOF.
+    #[cfg(unix)]
+    #[test]
+    fn streamed_stdin_read_error_terminates_child_before_eof() {
+        struct FailAfter {
+            remaining: usize,
+        }
+        impl Read for FailAfter {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.remaining == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "simulated upstream disconnect",
+                    ));
+                }
+                let n = buf.len().min(self.remaining);
+                buf[..n].fill(b'x');
+                self.remaining -= n;
+                Ok(n)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let published = dir.path().join("published.bin");
+        // Child reads stdin to EOF and only creates `published.bin` if it sees EOF.
+        let script = format!("cat >/dev/null && printf done > '{}'", published.display());
+        let command = CommandSpec::new("sh", vec!["-c".into(), script]);
+        let mut reader = FailAfter {
+            remaining: 128 * 1024,
+        };
+        let executor = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)));
+        let result = executor.execute_with_stdin(&command, &mut reader);
+        assert!(result.is_err(), "expected stdin read error to fail command");
+        assert!(
+            !published.exists(),
+            "child must be killed before seeing EOF on stdin read error"
+        );
     }
 }
