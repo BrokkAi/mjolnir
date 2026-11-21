@@ -137,6 +137,7 @@ Sessions and workspaces:
   `--session` to show one session.
 - `mj new` — create a session with a first prompt and print its id.
 - `mj suspend` — save a recovery copy and release the environment for Resume.
+- `mj purge-untracked` — remove legacy untracked checkpoint payloads from stopped sessions. Name one session with `--session <id>` or every session with `--all`. `--dry-run` reports the bytes without rewriting archives.
 - `mj destroy` — permanently remove a session, its environment, and recovery archive; `--delete-branch` also removes its managed branch.
 - `mj resume` — continue a session that was suspended. It keeps its id, its
   transcript, and its work.

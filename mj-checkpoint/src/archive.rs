@@ -516,6 +516,35 @@ fn copy_payload_from_archive(
     Ok(())
 }
 
+/// Shared probe for a legacy untracked purge.
+///
+/// Returning true stops verification and rewriting. The daemon's probe is
+/// true when the HTTP client has disconnected or the upgrade gate has closed.
+pub type ArchivePurgeCancel = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// A read stopped because [`ArchivePurgeCancel`] asked it to.
+#[derive(Debug)]
+pub struct ArchiveReadCancelled;
+
+impl std::fmt::Display for ArchiveReadCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("archive verification cancelled")
+    }
+}
+
+impl std::error::Error for ArchiveReadCancelled {}
+
+/// Whether `error` is a read that [`ArchiveReadCancelled`] stopped.
+pub fn archive_verification_cancelled(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<ArchiveReadCancelled>().is_some()
+            || cause
+                .downcast_ref::<std::io::Error>()
+                .and_then(|io| io.get_ref())
+                .is_some_and(|inner| inner.downcast_ref::<ArchiveReadCancelled>().is_some())
+    })
+}
+
 /// Verify an archive without materializing repository or native payloads.
 /// Every ZIP entry is still fully read, hashed, and checked; the Git tar
 /// payloads (untracked files, and an unfinished operation's files) are parsed
@@ -536,10 +565,30 @@ pub fn verify_archive_streaming_cancellable(
     path: &Path,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<VerifiedArchiveMetadata> {
+    verify_archive_streaming_probed(path, Some(cancelled), None)
+}
+
+/// Like [`verify_archive_streaming`], stopping when `cancelled` returns true.
+///
+/// The probe runs on every physical archive read, including parallel payload
+/// readers.
+pub fn verify_archive_streaming_unless(
+    path: &Path,
+    cancelled: &ArchivePurgeCancel,
+) -> Result<VerifiedArchiveMetadata> {
+    verify_archive_streaming_probed(path, None, Some(std::sync::Arc::clone(cancelled)))
+}
+
+fn verify_archive_streaming_probed(
+    path: &Path,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    probe: Option<ArchivePurgeCancel>,
+) -> Result<VerifiedArchiveMetadata> {
     let contents = read_verified_zip_cancellable(
         path,
         PayloadRetention::CanonicalOnly,
-        Some(cancelled.clone()),
+        cancelled.clone(),
+        probe.clone(),
     )?;
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut reader = ArchiveFile {
@@ -547,7 +596,8 @@ pub fn verify_archive_streaming_cancellable(
         file: std::sync::Arc::new(file),
         position: 0,
         start: 0,
-        cancelled: Some(cancelled),
+        cancelled,
+        probe,
     };
     Ok(VerifiedArchiveMetadata {
         manifest: contents.manifest,
@@ -1609,12 +1659,17 @@ type Archive = zip::ZipArchive<ArchiveFile>;
 /// its own read position, not its own parse: clone the opened [`Archive`],
 /// which shares the parsed directory and this file.
 fn open_archive(path: &Path) -> Result<Archive> {
-    open_archive_cancellable(path, None)
+    open_archive_cancellable(path, None, None)
+}
+
+fn open_archive_probed(path: &Path, probe: &ArchivePurgeCancel) -> Result<Archive> {
+    open_archive_cancellable(path, None, Some(std::sync::Arc::clone(probe)))
 }
 
 fn open_archive_cancellable(
     path: &Path,
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    probe: Option<ArchivePurgeCancel>,
 ) -> Result<Archive> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let len = file
@@ -1627,6 +1682,7 @@ fn open_archive_cancellable(
         position: 0,
         start: 0,
         cancelled,
+        probe,
     })
     .context("open Mjolnir archive ZIP")
 }
@@ -1636,6 +1692,7 @@ fn open_archive_cancellable(
 #[derive(Clone)]
 struct ArchiveFile {
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    probe: Option<ArchivePurgeCancel>,
     file: std::sync::Arc<File>,
     len: u64,
     position: u64,
@@ -1648,8 +1705,9 @@ impl Read for ArchiveFile {
             .cancelled
             .as_ref()
             .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+            || self.probe.as_ref().is_some_and(|probe| probe())
         {
-            return Err(std::io::Error::other("archive verification cancelled"));
+            return Err(std::io::Error::other(ArchiveReadCancelled));
         }
         let count = usize::try_from(self.len.saturating_sub(self.position))
             .unwrap_or(usize::MAX)
@@ -1719,15 +1777,16 @@ fn retains_parts(retention: PayloadRetention, role: &PayloadRole) -> bool {
 }
 
 fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<VerifiedZipContents> {
-    read_verified_zip_cancellable(path, retention, None)
+    read_verified_zip_cancellable(path, retention, None, None)
 }
 
 fn read_verified_zip_cancellable(
     path: &Path,
     retention: PayloadRetention,
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    probe: Option<ArchivePurgeCancel>,
 ) -> Result<VerifiedZipContents> {
-    let mut archive = open_archive_cancellable(path, cancelled)?;
+    let mut archive = open_archive_cancellable(path, cancelled, probe)?;
     let mut entries = Vec::with_capacity(archive.len());
     let mut actual_paths = BTreeSet::<String>::new();
     let mut manifest_count = 0_usize;
@@ -2894,8 +2953,9 @@ use git::{
 
 mod purge;
 pub use purge::{
-    ArchiveUntrackedPurgeKind, ArchiveUntrackedPurgeReport, StashUntrackedNote,
-    purge_untracked_from_archive,
+    ArchiveUntrackedPurgeKind, ArchiveUntrackedPurgeReport, PreparedUntrackedPurge,
+    StagedUntrackedPurge, StashUntrackedNote, archive_purge_not_cancelled,
+    prepare_untracked_purge, purge_untracked_from_archive, purge_was_cancelled,
 };
 
 #[cfg(test)]

@@ -194,6 +194,8 @@ enum Command {
     Sessions(api_commands::SessionsArgs),
     /// Save a recovery copy and release the environment for later Resume.
     Suspend(api_commands::SuspendArgs),
+    /// Remove legacy untracked checkpoint payloads from stopped sessions.
+    PurgeUntracked(api_commands::PurgeUntrackedArgs),
     /// Permanently destroy a session, its environment, and recovery archive.
     Destroy(api_commands::DestroyArgs),
     /// Read recent cleanup notices, including after a session was destroyed.
@@ -940,6 +942,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Sessions(_)) => "sessions",
         Some(Command::Suspend(_)) => "suspend",
         Some(Command::Restart(_)) => "restart",
+        Some(Command::PurgeUntracked(_)) => "purge-untracked",
         Some(Command::Destroy(_)) => "destroy",
         Some(Command::Notices(_)) => "notices",
         Some(Command::Resume(_)) => "resume",
@@ -1286,6 +1289,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Restart(args)) => api_commands::restart_session(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::PurgeUntracked(args)) => api_commands::purge_untracked(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Destroy(args)) => api_commands::destroy(args)

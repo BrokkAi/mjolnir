@@ -1200,7 +1200,7 @@ pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeStat
 }
 
 #[cfg(unix)]
-fn test_runtime_state_loading_the_store_with_live_recovery() -> (
+pub(super) fn test_runtime_state_loading_the_store_with_live_recovery() -> (
     Arc<RuntimeState>,
     Arc<RecoveryGate>,
     crate::worker_upgrade::WorkerUpgradeCoordinator,
