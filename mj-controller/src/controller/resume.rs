@@ -2095,6 +2095,26 @@ impl Controller {
                 .targets
                 .get(&previous.target_template_id)
                 .is_some_and(mj_core::config::is_container_target);
+        let upgraded_origin_delta_clone = if origin_delta && plan == ResumePlan::InPlace {
+            if let Some(worktree) = previous_managed_worktree.as_ref().filter(|worktree| {
+                worktree.kind == mj_core::state::ManagedCheckoutKind::Worktree
+                    && matches!(worktree.target, mj_core::state::ManagedWorktreeTarget::Local)
+            }) {
+                let mut upgraded = worktree.clone();
+                upgraded.kind = mj_core::state::ManagedCheckoutKind::Clone;
+                upgraded.worktree_root = mj_core::target_path::join(
+                    &worktree.source_repository,
+                    &Path::new(".mj").join("clones").join(session_id),
+                );
+                upgraded.base_commit = None;
+                super::worktree::ensure_managed_worktree_available(executor, &upgraded)?;
+                Some(upgraded)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let record = self.state.sessions.get_mut(session_id).unwrap();
         if record.container_workspace.is_none() && moving_into_first_container {
             record.container_workspace = Some(targets::new_container_workspace(session_id)?);
@@ -2126,7 +2146,23 @@ impl Controller {
                 apply_workspace_to_raw(record, conversion);
             }
             None => {
-                if let (Some(worktree), Some(refreshed)) = (
+                if let Some(upgraded) = upgraded_origin_delta_clone.as_ref() {
+                    let old_root = previous_managed_worktree
+                        .as_ref()
+                        .map(|worktree| worktree.worktree_root.as_path());
+                    let new_project_directory = match (record.project_directory.as_deref(), old_root)
+                    {
+                        (Some(project_dir), Some(old_root)) => project_dir
+                            .strip_prefix(old_root)
+                            .ok()
+                            .filter(|sub| !sub.as_os_str().is_empty())
+                            .map(|sub| mj_core::target_path::join(&upgraded.worktree_root, sub))
+                            .unwrap_or_else(|| upgraded.worktree_root.clone()),
+                        _ => upgraded.worktree_root.clone(),
+                    };
+                    record.managed_worktree = Some(Box::new(upgraded.clone()));
+                    record.project_directory = Some(new_project_directory);
+                } else if let (Some(worktree), Some(refreshed)) = (
                     record.managed_worktree.as_mut(),
                     previous_managed_worktree.as_ref(),
                 ) {
@@ -2167,6 +2203,10 @@ impl Controller {
                     // then applies the origin-delta snapshot into the workspace.
                 } else if plan == ResumePlan::WorkspaceToRaw {
                     // Handled in the WorkspaceToRaw conversion block below.
+                } else if let Some(upgraded) = upgraded_origin_delta_clone.as_ref() {
+                    resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
+                        executor, upgraded, &archive_path, archive_manifest,
+                    )?);
                 } else if let Some(worktree) = previous_managed_worktree.as_ref() {
                     resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
                         executor, worktree, &archive_path, archive_manifest,
