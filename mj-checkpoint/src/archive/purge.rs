@@ -453,12 +453,10 @@ fn stash_untracked_notes(
         {
             continue;
         }
-        let (repo_notes, repo_warning) =
+        let (repo_notes, repo_warnings) =
             notes_for_repository(source_archive, manifest, repository);
         notes.extend(repo_notes);
-        if let Some(warning) = repo_warning {
-            warnings.push(warning);
-        }
+        warnings.extend(repo_warnings);
     }
     (notes, warnings)
 }
@@ -467,7 +465,7 @@ fn notes_for_repository(
     source_archive: &std::path::Path,
     manifest: &ArchiveManifest,
     repository: &RepositoryManifest,
-) -> (Vec<StashUntrackedNote>, Option<String>) {
+) -> (Vec<StashUntrackedNote>, Vec<String>) {
     let Some(descriptor) = manifest
         .payloads
         .iter()
@@ -479,14 +477,14 @@ fn notes_for_repository(
         );
         return (
             Vec::new(),
-            Some(format!(
+            vec![format!(
                 "repository {}: could not inspect stash entries (bundle payload missing); stash entries may still contain untracked files",
                 repository.metadata.id
-            )),
+            )],
         );
     };
     if descriptor.size == 0 {
-        return (Vec::new(), None);
+        return (Vec::new(), Vec::new());
     }
     // Shards are concatenated in manifest order onto a temporary file. The
     // pack walker streams that file and keeps only commits, so a repository
@@ -501,16 +499,16 @@ fn notes_for_repository(
             );
             return (
                 Vec::new(),
-                Some(format!(
+                vec![format!(
                     "repository {}: could not read bundle to inspect stash entries ({error}); stash entries may still contain untracked files",
                     repository.metadata.id
-                )),
+                )],
             );
         }
     };
     let mut reader = BufReader::new(spool);
     match bundle_prefix_is_git(&mut reader) {
-        Ok(false) => return (Vec::new(), None),
+        Ok(false) => return (Vec::new(), Vec::new()),
         Ok(true) => {}
         Err(error) => {
             tracing::warn!(
@@ -520,15 +518,15 @@ fn notes_for_repository(
             );
             return (
                 Vec::new(),
-                Some(format!(
+                vec![format!(
                     "repository {}: could not read bundle prefix to inspect stash entries ({error}); stash entries may still contain untracked files",
                     repository.metadata.id
-                )),
+                )],
             );
         }
     }
     match inspect_bundle_stashes_reader(&mut reader, repository) {
-        Ok(notes) => (notes, None),
+        Ok(result) => result,
         Err(error) => {
             tracing::warn!(
                 repository_id = %repository.metadata.id,
@@ -537,10 +535,10 @@ fn notes_for_repository(
             );
             (
                 Vec::new(),
-                Some(format!(
+                vec![format!(
                     "repository {}: could not inspect stash entries for untracked files ({error}); stash entries may still contain untracked files",
                     repository.metadata.id
-                )),
+                )],
             )
         }
     }
@@ -672,22 +670,24 @@ fn copy_bundle_entry(
 fn inspect_bundle_stashes(
     bytes: &[u8],
     repository: &RepositoryManifest,
-) -> Result<Vec<StashUntrackedNote>> {
+) -> Result<(Vec<StashUntrackedNote>, Vec<String>)> {
     inspect_bundle_stashes_reader(&mut Cursor::new(bytes), repository)
 }
 
 fn inspect_bundle_stashes_reader(
     reader: &mut impl BufRead,
     repository: &RepositoryManifest,
-) -> Result<Vec<StashUntrackedNote>> {
+) -> Result<(Vec<StashUntrackedNote>, Vec<String>)> {
     // Clone bundles are thin: `git bundle unbundle` refuses to run until the
     // prerequisite commits exist, and purge does not have that checkout.
     // Stash parents are stored on the commit object, so read the pack directly.
     // A delta whose base is the missing prerequisite is skipped; that still
-    // must not fail the purge.
+    // must not fail the purge, but is reported as a warning so the caller knows
+    // that stash commit could not be verified.
     let parents =
         commit_parent_counts_reader(reader).context("read stash commits from the bundle pack")?;
     let mut notes = Vec::new();
+    let mut warnings = Vec::new();
     for entry in &repository.metadata.stash_stack {
         let Some(parent_count) = parents.get(&entry.commit.to_ascii_lowercase()) else {
             tracing::warn!(
@@ -695,6 +695,10 @@ fn inspect_bundle_stashes_reader(
                 commit = %entry.commit,
                 "stash commit is not in the archived bundle"
             );
+            warnings.push(format!(
+                "repository {}: could not inspect stash commit {} ({}) in the archived bundle; it may still contain untracked files",
+                repository.metadata.id, entry.commit, entry.message
+            ));
             continue;
         };
         // `git rev-list --parents` prints the commit and then each parent.
@@ -707,7 +711,7 @@ fn inspect_bundle_stashes_reader(
             });
         }
     }
-    Ok(notes)
+    Ok((notes, warnings))
 }
 
 const MAX_BUNDLE_HEADER_BYTES: usize = 16 * 1024 * 1024;
@@ -1277,7 +1281,7 @@ note\n";
         assert_eq!(parents.get(&chained_id).copied(), Some(3));
         assert_eq!(parents.len(), 4);
 
-        let notes = inspect_bundle_stashes(
+        let (notes, warnings) = inspect_bundle_stashes(
             &bundle(&pack),
             &stash_manifest(&[
                 (three_id.to_ascii_uppercase(), "holds untracked"),
@@ -1290,6 +1294,8 @@ note\n";
         assert_eq!(notes[0].repository_id, "repo");
         assert_eq!(notes[0].commit, three_id.to_ascii_uppercase());
         assert_eq!(notes[0].message, "holds untracked");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains(&"ab".repeat(20)));
     }
 
     #[test]
