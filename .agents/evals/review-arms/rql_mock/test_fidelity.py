@@ -284,7 +284,9 @@ class EnginePhase(unittest.TestCase):
                 request.touch()
         if call == self.hold_at:
             return {"status": "quota_hold", "message": "fixture hold"}
-        return {"status": "ok", "rows": self.rows}
+        login = "claude4" if fresh else "claude5"
+        return {"status": "ok", "rows": self.rows,
+                "provenance": {"login_profile": login, "engine_profile": f"{login}-engine"}}
 
     def gold_models(self, *args):
         self.gold_calls.append("started")
@@ -341,6 +343,10 @@ class EnginePhase(unittest.TestCase):
         self.hold_at = None
         self.assertEqual(self.run_phase(self.root, "--phase", "engine")[0], 0)
         self.assertEqual(self.calls, self.expected[held:])
+        directory = next(self.root.rglob(f"{self.queries[1].key}/fresh-engine.json")).parent
+        for name, login in (("engine.json", "claude5"), ("fresh-engine.json", "claude4")):
+            provenance = json.loads((directory / name).read_bytes())["provenance"]
+            self.assertEqual(provenance, {"login_profile": login, "engine_profile": f"{login}-engine"})
         self.assertEqual(self.gold_calls, [])
         self.assertFalse((self.root / "fidelity/gate-report.json").exists())
 

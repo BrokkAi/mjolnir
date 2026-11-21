@@ -24,8 +24,9 @@ The sample port is shared with the bundle configuration.
 ```json
 {
   "instance": "rql-census-pilot",
-  "profile": "claude5",
-  "engine_profile": "claude5-engine",
+  "logins": [
+    {"profile": "claude5", "engine_profile": "claude5-engine"}
+  ],
   "manifest": "/absolute/path/to/review-arms/brief/rql-census/pilot/manifest.json",
   "repos": {
     "mjolnir": "/absolute/path/to/mjolnir",
@@ -40,8 +41,9 @@ The sample port is shared with the bundle configuration.
 }
 ```
 
-Use `claude5` for the existing login, quota checks and fidelity adjudicator.
-Add `claude5-engine` only to the private instance's
+List each allotted engine login and its dedicated alias in `logins`. The
+fidelity adjudicator uses `claude5`. For example, add `claude5-engine` to the
+private instance's
 `~/.config/mjolnir/instances/rql-census-pilot/config.toml`:
 
 ```toml
@@ -59,12 +61,29 @@ install -d -m 700 "$engine_home"
 python3 -B -m rql_mock.engine.verify_tools --settings > "$engine_home/settings.json"
 ```
 
-At every engine launch the runner copies the current claude5 access credential
-into the private profile without its refresh token. It requires enough
-validity for a full turn and uses the original claude5 five-hour and weekly
-windows for all engine admission checks. The frozen worker stages the settings
-for that engine session. The runner verifies the staged tool policy before
+At each launch, the runner reads all listed logins' daemon quota reports. It
+chooses the greatest remaining weekly percentage among logins above both
+floors, using the five-hour percentage and then list order for ties. An
+unavailable report holds its login. The runner records its choice before
+launch, then copies that login's access credential into its dedicated alias
+without the refresh token. The same login supplies quota and refreshed access
+credentials for every subsequent turn and auth retry in that session. The
+credential must remain valid for more than 30 minutes. The frozen worker
+stages the alias settings. The runner verifies the staged tool policy before
 prompting and checks every recorded tool call before accepting an answer.
+
+The fidelity phase checkpoints each full engine response as `engine.json` or
+`fresh-engine.json` in the query directory. For each login's first ten paid
+answers, group these receipts by `provenance.login_profile`, deduplicate by
+`provenance.session`, and order by completion time of the accepted turn in
+`engine-cache/<commit>/retired/<session>/usage.json`
+(`pages[].turns[].completed_at_ms` for the matching `provenance.turn` and
+`accepted_ordinal`). Each session's USD cost is
+`pages[-1].provider_session_cost.amount` when the reported currency is USD.
+Report a missing cost as unknown. To include spend on voided or stalled
+attempts, include each session in `provenance.retired_sessions` once and group
+its own usage by that entry's `login_profile`. Older receipts can lack login
+provenance and should be counted separately as unattributed.
 
 The SDK verification uses a loopback-only network namespace and dummy
 credentials. Pass the pinned SDK's `sdk.mjs` path to

@@ -440,13 +440,14 @@ class Pilot:
             if read_json(failure).get("status") != "quota_hold":
                 brief_driver.interrupt_on_rql_quota(params, read_json(launch)["session_id"])
         if failure.exists() and read_json(failure).get("status") == "quota_hold":
-            from rql_mock.engine import load_engine
+            from rql_mock.engine import LaunchHeld, load_engine
             try:
                 engine = load_engine()
                 if engine.identity != self.engine_identity:
                     raise ValueError("the RQL engine differs from the admitted identity")
-                if hold := driver.pilot_claude_hold(engine.config["profile"]):
-                    return f"interrupted: {hold}"
+                engine.runner().select_login()
+            except LaunchHeld as hold:
+                return f"interrupted: {hold}"
             except (OSError, ValueError, KeyError, TypeError) as error:
                 return f"needs-recovery: cannot check the interrupted writer's engine quota ({error})"
         if (path / "done.json").exists() or failure.exists():

@@ -21,7 +21,7 @@ from .__main__ import audit
 from .grammar import parse
 from .normalization import validate
 from .prompt import assert_blind, semantics_only, turn_prompt
-from .runner import CHECKOUT_CLEAN, IsolationFailure, LaunchHeld, SealedRunner, usage_delta
+from .runner import CHECKOUT_CLEAN, EngineLogin, EngineRunner, IsolationFailure, LaunchHeld, SealedRunner, usage_delta
 from .snapshot import blob_reader, git_output, manifest_sources, parentless_snapshot, verifier_snapshot
 from .validation import canonical
 
@@ -216,7 +216,8 @@ class FrozenInputTests(unittest.TestCase):
             raw["page_rows"] = 50
             manifest.write_text(json.dumps(raw))
             config = root / "engine.json"
-            config.write_text(json.dumps({"manifest": str(manifest), "verifier": str(fixture_verifier(root))}))
+            config.write_text(json.dumps({"manifest": str(manifest), "verifier": str(fixture_verifier(root)),
+                                         "logins": [{"profile": "claude5", "engine_profile": "claude5-engine"}]}))
             engine = live_engine.load_engine(config)
             query, _ = parse(QUERY, engine.catalogue, engine.served_steps)
             key = live_engine.cache_key(COMMIT, query, engine.identity["engine_inputs_sha256"])
@@ -273,7 +274,10 @@ class FrozenInputTests(unittest.TestCase):
             for failure in ("missing_config", "unreadable_input", "wrong_digest"):
                 with self.subTest(failure=failure):
                     if failure != "missing_config":
-                        config.write_text(json.dumps({"manifest": str(manifest), "verifier": str(fixture_verifier(root))}))
+                        config.write_text(json.dumps({
+                            "manifest": str(manifest), "verifier": str(fixture_verifier(root)),
+                            "logins": [{"profile": "claude5", "engine_profile": "claude5-engine"}],
+                        }))
                     if failure == "unreadable_input":
                         catalogue.unlink()
                     elif failure == "wrong_digest":
@@ -296,8 +300,13 @@ class FrozenInputTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "engine.json"
-            config.write_text(json.dumps({"manifest": str(self.fixture(root)), "verifier": str(fixture_verifier(root))}))
+            config.write_text(json.dumps({"manifest": str(self.fixture(root)), "verifier": str(fixture_verifier(root)),
+                                         "logins": [{"profile": "claude5", "engine_profile": "claude5-engine"}]}))
             initial = live_engine.load_engine(config)
+            changed_logins = json.loads(config.read_bytes())
+            changed_logins["logins"].append({"profile": "claude7", "engine_profile": "claude7-engine"})
+            config.write_text(json.dumps(changed_logins))
+            self.assertEqual(live_engine.load_engine(config).identity, initial.identity)
             before = fidelity_live.checkpoint_directory(root / "fidelity", initial) / "test-query"
             before.mkdir(parents=True)
             for name in ("measurement.json", "engine.json", "fresh-engine.json"):
@@ -477,6 +486,10 @@ class ValidationTests(unittest.TestCase):
 
 class FakeRunner:
     instance = INSTANCE
+    login = EngineLogin("claude-test", "claude-test-engine")
+
+    def for_launch(self):
+        return self
 
     def __init__(self, outputs):
         self.outputs = iter(outputs)
@@ -622,6 +635,7 @@ class EngineTests(unittest.TestCase):
         result = self.engine(runner).answer(COMMIT, QUERY)
         self.assertEqual(result["status"], "ok", result)
         self.assertEqual(result["provenance"]["session"], REPLACEMENT)
+        self.assertEqual(result["provenance"]["login_profile"], runner.login.login_profile)
         self.assertEqual(runner.retired, SESSION)
         self.assertEqual(result["provenance"]["retired_sessions"][0]["session"], SESSION)
         retired = self.cache / COMMIT / "retired" / SESSION
@@ -794,6 +808,15 @@ class FakeAcpRunner(SealedRunner):
     """Tests the production prompt sequence against an in-memory mj adapter."""
 
     instance = INSTANCE
+    login = FakeRunner.login
+
+    def for_launch(self):
+        return self
+
+    def select_login(self):
+        if hold := self.pilot_claude_hold(self.login.login_profile):
+            raise LaunchHeld(hold)
+        return self.login
 
     def __init__(self):
         self.driver = self
@@ -1095,7 +1118,8 @@ class RetirementTests(unittest.TestCase):
                 # An unconfirmed launch elicits a diagnostic without calling mj.
                 (active / "session.json").write_text(json.dumps({"commit": commit}))
                 (instance_root / "engine.json").write_text(json.dumps(
-                    {"instance": INSTANCE, "manifest": str(manifest)}))
+                    {"instance": INSTANCE, "manifest": str(manifest),
+                     "logins": [{"profile": "claude5", "engine_profile": "claude5-engine"}]}))
             result = subprocess.run(
                 [sys.executable, "-B", "-m", "rql_mock.engine", "teardown",
                  "--config", str(selected / "engine.json")],
@@ -1116,7 +1140,8 @@ class RetirementTests(unittest.TestCase):
         (answers / "pending.json").write_text(json.dumps({"path": f".rql-engine-{SESSION}/answer.json"}))
         if not pending:
             (answers / "answer.raw").write_bytes(b"previous answer")
-        runner = SealedRunner.__new__(SealedRunner)
+        # No login binding or credential files are needed to retire an old active record.
+        runner = EngineRunner.__new__(EngineRunner)
         runner.config = {"instance": INSTANCE, "model_version": VERSION}
         retired = cache / COMMIT / "retired" / SESSION
         runner.driver = CaptureDriver(retired, fail)
@@ -1143,7 +1168,7 @@ class RetirementTests(unittest.TestCase):
             self.assertEqual((retired / "answers/context-test/answer.raw").read_bytes(), b"late answer\n")
             usage = json.loads((retired / "usage.json").read_text())
             self.assertEqual(usage["reported_provider_models"], [VERSION])
-            self.assertIn("github-or-web", {hit["kind"] for hit in json.loads((retired / "audit.json").read_text())["hits"]})
+            self.assertIn("needs-inspection", {hit["kind"] for hit in json.loads((retired / "audit.json").read_text())["hits"]})
             self.assertEqual(teardown(cache, runner), (0, []))
 
     def test_capture_or_identity_failure_preserves_session_and_reports_failure(self):
