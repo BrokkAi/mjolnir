@@ -514,6 +514,10 @@ def shell_commands(command, cwd, home):
                     cwd = merge_cwds(changed, skipped)
                 elif token == "||":
                     alternate_cwds = merge_cwds(alternate_cwds, changed)
+                elif (isinstance(cwd, str) and cwd and target and ".." not in cwd.split("/")
+                      and ".." not in target.split("/") and changed == recorded_path(".", cwd)):
+                    # Failed and successful cd leave the same directory.
+                    cwd = changed
                 else:
                     cwd = merge_cwds(cwd, changed)
             if isinstance(cwd, str) and cwd:

@@ -222,6 +222,36 @@ def test_engine_correlates_a_relative_scratch_script_and_screens_its_argument(tm
     assert {hit["kind"] for hit in report["hits"]} == {"interpreter-screened"} | extra_hits
 
 
+def engine_scratch_script_calls(tmp_path, *, edit="", argument=""):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({"cwd": checkout, "tracked_paths": ["README.md"]}))
+    setup = f"cd {checkout}; D=.rql-engine-{OWN}"
+    write = (f"{setup}; cat > $D/build.py <<'EOF'\n"
+             f"import json\njson.dump(['old'], open('.rql-engine-{OWN}/answer.json', 'w'))\nEOF")
+    preview = """python3 -c "import json; print(json.load(open('$D/answer.json')))" """
+    run = f"{setup}\n{edit}python3 -I $D/build.py{argument} && {preview}"
+    return checkout, [shell(write), shell(run)]
+
+
+def test_engine_checkout_cd_does_not_attest_a_script_edited_in_place(tmp_path):
+    _, calls = engine_scratch_script_calls(tmp_path, edit="sed -i 's/old/new/' $D/build.py\n")
+    report = audit_calls(tmp_path, calls)
+    assert not report["passed"]
+    hit, = [hit for hit in report["hits"] if hit["kind"] == "needs-inspection"]
+    assert hit["seq"] == 2
+    assert hit["snippet"] == f"unsupported command python3: python3 -I .rql-engine-{OWN}/build.py"
+
+
+@pytest.mark.parametrize("suffix", ["", "/."])
+def test_engine_cd_to_same_checkout_resolves_a_visibly_written_scratch_script(tmp_path, suffix):
+    checkout, calls = engine_scratch_script_calls(tmp_path, argument=' "$PWD"')
+    report = audit_calls(tmp_path, calls, cwd=checkout + suffix)
+    assert report["passed"], report["hits"]
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [
+        (1, "interpreter-screened"), (2, "interpreter-screened"),
+    ]
+
+
 def test_engine_runs_a_visible_script_in_the_same_success_chain(tmp_path):
     checkout = f"/workspace/{OWN}/engine-trees"
     scratch = f"{checkout}/.rql-engine-{OWN}"

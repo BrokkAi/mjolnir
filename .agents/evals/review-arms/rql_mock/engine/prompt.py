@@ -13,8 +13,9 @@ commands for source inspection. Do not inspect harness transcripts, agent state
 or other turn artifacts. Do not run repository code, access Git, or seek any
 information about changes, bugs, study labels, or subsequent revisions.
 Keep temporary files beside the output file in the provided scratch directory.
-Write a scratch script in one command (for example `cat > /abs/path/build.py <<'EOF' … EOF`),
-then run it in the next command with the same path; rewrite it whole instead of editing it in place.
+Never edit a file in place (no `sed -i`, `perl -i` or similar). An in-place edit makes your
+answer unusable. Rewrite a scratch script in full with `cat > /abs/path/build.py <<'EOF' … EOF`
+in one command, then run it in the next with the same path.
 
 Write a single JSON object to the specified output path. Use this schema:
 {"rows": [{"kind": "row_kind", "sites": [{"path": "repo/relative", "start_line": 1,
