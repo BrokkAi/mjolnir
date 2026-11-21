@@ -2237,8 +2237,25 @@ fn create_managed_clone_with_snapshot(
         .purpose("create managed clone parent"),
     )?;
     let mut published = false;
-    let seed_from_source = snapshot.is_none()
-        || path_exists_on_managed_target(executor, &checkout.target, &checkout.source_repository)?;
+    let seed_from_source = match snapshot {
+        None => true,
+        Some(snapshot) => {
+            path_exists_on_managed_target(executor, &checkout.target, &checkout.source_repository)?
+                && executor
+                    .execute(&managed_git_command(
+                        SshTrafficClass::Control,
+                        &checkout.target,
+                        &checkout.source_repository,
+                        ["rev-parse", "--show-object-format"],
+                        "check source repository object format before seeding clone",
+                    ))
+                    .is_ok_and(|output| {
+                        output.status == 0
+                            && String::from_utf8_lossy(&output.stdout).trim()
+                                == snapshot.metadata.object_format
+                    })
+        }
+    };
     let create = (|| -> Result<Vec<String>> {
         if seed_from_source {
             execute_checked(
@@ -2299,26 +2316,7 @@ fn create_managed_clone_with_snapshot(
                 ),
             }
             copy_clone_local_git_preferences(executor, checkout, &staging)?;
-            execute_checked(
-                executor,
-                managed_git_command(
-                    SshTrafficClass::Control,
-                    &checkout.target,
-                    &staging,
-                    [
-                        "switch",
-                        "--no-track",
-                        "-C",
-                        &checkout.branch,
-                        checkout
-                            .base_commit
-                            .as_deref()
-                            .context("managed clone has no launch commit")?,
-                    ],
-                    "select managed clone starting branch",
-                ),
-            )?;
-            if origin.status == 0 {
+            if snapshot.is_none() {
                 execute_checked(
                     executor,
                     managed_git_command(
@@ -2326,29 +2324,50 @@ fn create_managed_clone_with_snapshot(
                         &checkout.target,
                         &staging,
                         [
-                            "config",
-                            "--local",
-                            &format!("branch.{}.remote", checkout.branch),
-                            "origin",
+                            "switch",
+                            "--no-track",
+                            "-C",
+                            &checkout.branch,
+                            checkout
+                                .base_commit
+                                .as_deref()
+                                .context("managed clone has no launch commit")?,
                         ],
-                        "set clone branch push remote",
+                        "select managed clone starting branch",
                     ),
                 )?;
-                execute_checked(
-                    executor,
-                    managed_git_command(
-                        SshTrafficClass::Control,
-                        &checkout.target,
-                        &staging,
-                        [
-                            "config",
-                            "--local",
-                            &format!("branch.{}.merge", checkout.branch),
-                            &format!("refs/heads/{}", checkout.branch),
-                        ],
-                        "set clone branch tracking name",
-                    ),
-                )?;
+                if origin.status == 0 {
+                    execute_checked(
+                        executor,
+                        managed_git_command(
+                            SshTrafficClass::Control,
+                            &checkout.target,
+                            &staging,
+                            [
+                                "config",
+                                "--local",
+                                &format!("branch.{}.remote", checkout.branch),
+                                "origin",
+                            ],
+                            "set clone branch push remote",
+                        ),
+                    )?;
+                    execute_checked(
+                        executor,
+                        managed_git_command(
+                            SshTrafficClass::Control,
+                            &checkout.target,
+                            &staging,
+                            [
+                                "config",
+                                "--local",
+                                &format!("branch.{}.merge", checkout.branch),
+                                &format!("refs/heads/{}", checkout.branch),
+                            ],
+                            "set clone branch tracking name",
+                        ),
+                    )?;
+                }
             }
         } else {
             let origin = snapshot
@@ -2651,7 +2670,17 @@ pub(super) fn restore_managed_clone_origin_delta(
         metadata,
         pack: pack.as_ref().map(|pack| pack.path().to_owned()),
     };
-    if path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)? {
+    if path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)?
+        && executor
+            .execute(&managed_git_command(
+                SshTrafficClass::Control,
+                &worktree.target,
+                &worktree.source_repository,
+                ["rev-parse", "--git-dir"],
+                "check whether source repository is a Git repository",
+            ))
+            .is_ok_and(|output| output.status == 0)
+    {
         ensure_managed_worktree_excluded(
             executor,
             &worktree.target,

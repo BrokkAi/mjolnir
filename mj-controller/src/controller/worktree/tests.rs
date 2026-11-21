@@ -2917,6 +2917,29 @@ fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
     .unwrap();
     let verified = mj_checkpoint::archive::verify_archive_streaming(&archive_path).unwrap();
 
+    // First prove that when source_repository still exists but worktree.base_commit
+    // is no longer reachable there, OriginDelta restore still succeeds without
+    // requiring the legacy launch commit.
+    std::fs::remove_dir_all(&worktree_root).unwrap();
+    let mut worktree_missing_base = worktree.clone();
+    worktree_missing_base.base_commit = Some("0000000000000000000000000000000000000001".into());
+    restore_managed_clone_origin_delta(
+        &ProcessExecutor,
+        &worktree_missing_base,
+        &archive_path,
+        &verified.manifest,
+    )
+    .unwrap();
+    assert_eq!(
+        test_git(&worktree_root, &["symbolic-ref", "--short", "HEAD"]),
+        "feature/origin-seed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree_root.join("feature.txt")).unwrap(),
+        "staged\n"
+    );
+    test_git(&worktree_root, &["fsck", "--full"]);
+
     // Retire the clone and completely delete the source repository!
     std::fs::remove_dir_all(&worktree_root).unwrap();
     std::fs::remove_dir_all(&source).unwrap();
