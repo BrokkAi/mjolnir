@@ -1386,7 +1386,13 @@ impl Controller {
             has_nothing_to_checkpoint(&session, self.state.subagents.contains_key(session_id)),
             "session {session_id} has a workspace to checkpoint; suspend it instead"
         );
-        self.stop_target_and_settle(session_id, &session, executor, &persist)
+        self.stop_target_and_settle(
+            session_id,
+            &session,
+            executor,
+            super::worktree::CloneRetirementPrerequisite::None,
+            &persist,
+        )
     }
 
     fn record_interrupted_close(&mut self, session_id: &str, error: &anyhow::Error) -> Result<()> {
@@ -1480,7 +1486,9 @@ impl Controller {
                     )?;
                     true
                 } else {
-                    execute_target_cleanup(&destroying, &self.config, executor)?;
+                    let clone_prerequisite =
+                        super::worktree::clone_retirement_prerequisite_for_checkpoint(verified);
+                    execute_target_cleanup(&destroying, &self.config, executor, clone_prerequisite)?;
                     false
                 };
                 let record = self.state.sessions.get_mut(session_id).unwrap();
@@ -1546,7 +1554,13 @@ impl Controller {
                     targets::quiesce_plan(&backend, session_id)?.is_some(),
                     "session {session_id} retained a non-Podman target after stopping"
                 );
-                if let Err(error) = execute_target_cleanup(&previous, &self.config, executor) {
+                let clone_prerequisite = previous.checkpoint.as_deref().map_or(
+                    super::worktree::CloneRetirementPrerequisite::None,
+                    super::worktree::clone_retirement_prerequisite_for_checkpoint,
+                );
+                if let Err(error) =
+                    execute_target_cleanup(&previous, &self.config, executor, clone_prerequisite)
+                {
                     let record = self.state.sessions.get_mut(session_id).unwrap();
                     record.updated_at = now();
                     record.last_error = Some(format!("deferred target cleanup failed: {error:#}"));
@@ -1663,7 +1677,15 @@ impl Controller {
             verify_installed_checkpoint_gate(session_id, checkpoint)
                 .context("verify the recovery archive before force stopping")?;
         }
-        self.stop_target_and_settle(session_id, &session, executor, &persist)
+        let clone_prerequisite =
+            super::worktree::clone_retirement_prerequisite_for_checkpoint(checkpoint);
+        self.stop_target_and_settle(
+            session_id,
+            &session,
+            executor,
+            clone_prerequisite,
+            &persist,
+        )
     }
 
     /// Tear down whatever target the session holds and settle its record in
@@ -1675,6 +1697,7 @@ impl Controller {
         session_id: &str,
         session: &SessionRecord,
         executor: &(impl CommandExecutor + Sync),
+        clone_prerequisite: super::worktree::CloneRetirementPrerequisite,
         persist: &impl Fn(&SessionRecord) -> Result<()>,
     ) -> Result<bool> {
         crate::worker_lifecycle::run_blocking(
@@ -1699,7 +1722,7 @@ impl Controller {
                         )?;
                         deferred = true;
                     } else {
-                        execute_target_cleanup(session, &self.config, executor)?;
+                        execute_target_cleanup(session, &self.config, executor, clone_prerequisite)?;
                     }
                 }
                 let record = self.state.sessions.get_mut(session_id).unwrap();
@@ -2158,12 +2181,14 @@ fn execute_target_cleanup(
     session: &SessionRecord,
     config: &mj_core::config::Config,
     executor: &(impl CommandExecutor + Sync),
+    clone_prerequisite: super::worktree::CloneRetirementPrerequisite,
 ) -> Result<()> {
-    super::environment::retire_session_environment(
+    super::environment::retire_session_environment_with_clone_prerequisite(
         session,
         config,
         executor,
         BranchDisposition::Keep,
+        clone_prerequisite,
     )
 }
 

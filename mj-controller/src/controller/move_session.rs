@@ -876,13 +876,16 @@ impl Controller {
             return Ok(false);
         }
         let retained_source = operation.retains_source_environment();
-        if !retained_source {
+        let clone_prerequisite = if !retained_source {
             let verified = operation
                 .checkpoint
                 .as_ref()
                 .context("superseded Move has no full source checkpoint")?;
             super::checkpoint::verify_installed_checkpoint_gate(session_id, verified)?;
-        }
+            super::worktree::clone_retirement_prerequisite_for_checkpoint(verified)
+        } else {
+            super::worktree::CloneRetirementPrerequisite::None
+        };
         if let Some(before_close) = before_close {
             before_close.await?;
         }
@@ -918,21 +921,23 @@ impl Controller {
                 crate::database::move_source_environment(&operation.operation_id)?;
             let current = self.state.sessions[session_id].clone();
             if current.target.is_some() {
-                super::environment::retire_session_environment(
+                super::environment::retire_session_environment_with_clone_prerequisite(
                     &current,
                     &self.config,
                     executor,
                     super::BranchDisposition::Keep,
+                    clone_prerequisite,
                 )
                 .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
             }
             if let Some(environment) = &source_environment {
-                super::environment::retire_owned_environment(
+                super::environment::retire_owned_environment_with_clone_prerequisite(
                     environment.clone(),
                     &self.config,
                     executor,
                     super::BranchDisposition::Keep,
                     super::CheckoutDisposition::Remove,
+                    clone_prerequisite,
                 )
                 .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
             }

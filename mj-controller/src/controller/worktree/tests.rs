@@ -2943,7 +2943,49 @@ fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
     );
     test_git(&worktree_root, &["fsck", "--full"]);
 
-    // Removing the managed clone must also succeed with source_repository absent.
-    assert!(remove_managed_worktree_checkout(&ProcessExecutor, &worktree).unwrap());
+    // Legacy checkpoints still require base_commit in source_repository before
+    // deleting a managed clone, so retiring with LegacySourceCommit must refuse
+    // and leave the clone intact when source_repository is absent.
+    let origin_delta_checkpoint = mj_core::state::CheckpointMetadata {
+        created_at: "2026-11-21T00:00:00Z".into(),
+        archive_path: archive_path.clone(),
+        sha256: verified.archive_sha256.clone(),
+        event_frontier: 0,
+    };
+    assert_eq!(
+        clone_retirement_prerequisite_for_checkpoint(&origin_delta_checkpoint),
+        CloneRetirementPrerequisite::None
+    );
+    let legacy_checkpoint = mj_core::state::CheckpointMetadata {
+        archive_path: temp.path().join("legacy-or-unreadable.hel.zip"),
+        ..origin_delta_checkpoint.clone()
+    };
+    assert_eq!(
+        clone_retirement_prerequisite_for_checkpoint(&legacy_checkpoint),
+        CloneRetirementPrerequisite::LegacySourceCommit
+    );
+    let legacy_error = super::super::environment::retire_checkout_for_test(
+        &ProcessExecutor,
+        &worktree,
+        CloneRetirementPrerequisite::LegacySourceCommit,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{legacy_error:#}").contains("verify clone recovery prerequisite"),
+        "expected legacy source prerequisite failure, got: {legacy_error:#}"
+    );
+    assert!(
+        worktree_root.exists(),
+        "failed legacy prerequisite check must leave the clone intact"
+    );
+
+    // Retiring after an OriginDelta checkpoint skips the source_repository
+    // check and removes the managed clone even with source_repository absent.
+    super::super::environment::retire_checkout_for_test(
+        &ProcessExecutor,
+        &worktree,
+        clone_retirement_prerequisite_for_checkpoint(&origin_delta_checkpoint),
+    )
+    .unwrap();
     assert!(!worktree_root.exists());
 }

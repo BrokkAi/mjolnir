@@ -329,23 +329,22 @@ pub(super) fn retire_session_environment(
     executor: &(impl CommandExecutor + Sync),
     branch: BranchDisposition,
 ) -> Result<()> {
-    retire_session_environment_with_checkout(
+    retire_session_environment_with_clone_prerequisite(
         session,
         config,
         executor,
         branch,
-        super::lifecycle::CheckoutDisposition::Remove,
+        super::worktree::CloneRetirementPrerequisite::None,
     )
-    .map(|_| ())
 }
 
-pub(super) fn retire_session_environment_with_checkout(
+pub(super) fn retire_session_environment_with_clone_prerequisite(
     session: &SessionRecord,
     config: &Config,
     executor: &(impl CommandExecutor + Sync),
     branch: BranchDisposition,
-    checkout: super::lifecycle::CheckoutDisposition,
-) -> Result<Option<std::path::PathBuf>> {
+    clone_prerequisite: super::worktree::CloneRetirementPrerequisite,
+) -> Result<()> {
     let environment = database::session_environment(&session.id)?
         .context("session has no durable environment ownership")?;
     ensure!(
@@ -362,7 +361,15 @@ pub(super) fn retire_session_environment_with_checkout(
             "session placement changed before environment cleanup"
         );
     }
-    retire_owned_environment(environment, config, executor, branch, checkout)
+    retire_owned_environment_with_clone_prerequisite(
+        environment,
+        config,
+        executor,
+        branch,
+        super::lifecycle::CheckoutDisposition::Remove,
+        clone_prerequisite,
+    )
+    .map(|_| ())
 }
 
 pub(super) fn retire_owned_environment(
@@ -371,6 +378,24 @@ pub(super) fn retire_owned_environment(
     executor: &(impl CommandExecutor + Sync),
     branch: BranchDisposition,
     checkout: super::lifecycle::CheckoutDisposition,
+) -> Result<Option<std::path::PathBuf>> {
+    retire_owned_environment_with_clone_prerequisite(
+        environment,
+        config,
+        executor,
+        branch,
+        checkout,
+        super::worktree::CloneRetirementPrerequisite::None,
+    )
+}
+
+pub(super) fn retire_owned_environment_with_clone_prerequisite(
+    environment: EnvironmentRecord,
+    config: &Config,
+    executor: &(impl CommandExecutor + Sync),
+    branch: BranchDisposition,
+    checkout: super::lifecycle::CheckoutDisposition,
+    clone_prerequisite: super::worktree::CloneRetirementPrerequisite,
 ) -> Result<Option<std::path::PathBuf>> {
     let session_id = environment.owner_session_id.clone();
     let mut retained = None;
@@ -401,6 +426,7 @@ pub(super) fn retire_owned_environment(
                     &authority.checkout_removal()?,
                     executor,
                     worktree,
+                    clone_prerequisite,
                 )?;
             } else {
                 super::worktree::cleanup_managed_worktree(
@@ -529,6 +555,19 @@ pub(super) fn cleanup_unstarted_checkout(
         _retirement: None,
     };
     super::worktree::cleanup_managed_worktree(&authority, executor, checkout, branch)
+}
+
+#[cfg(test)]
+pub(super) fn retire_checkout_for_test(
+    executor: &impl CommandExecutor,
+    checkout: &ManagedWorktree,
+    prerequisite: super::worktree::CloneRetirementPrerequisite,
+) -> Result<()> {
+    let authority = CheckoutRemoval {
+        checkout,
+        _retirement: None,
+    };
+    super::worktree::retire_managed_worktree(&authority, executor, checkout, prerequisite)
 }
 
 /// Replace execution while retaining the owned workspace and its identity.

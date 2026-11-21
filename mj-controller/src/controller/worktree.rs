@@ -2892,6 +2892,37 @@ pub(super) fn preserve_retained_managed_worktree_branch(
     }
 }
 
+/// Whether retiring a managed clone still depends on its launch commit in
+/// `source_repository`.
+///
+/// Legacy checkpoints resume a clone by re-cloning `source_repository` and
+/// selecting `base_commit`, so retiring the clone requires that commit to
+/// remain reachable there. `OriginDelta` checkpoints seed from `origin` and
+/// carry every other required object in their pack, and permanent destroys or
+/// rollbacks do not retain a legacy recovery checkpoint, so they do not depend
+/// on `source_repository`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CloneRetirementPrerequisite {
+    LegacySourceCommit,
+    None,
+}
+
+pub(super) fn clone_retirement_prerequisite_for_checkpoint(
+    checkpoint: &mj_core::state::CheckpointMetadata,
+) -> CloneRetirementPrerequisite {
+    match mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path) {
+        Ok(manifest)
+            if manifest
+                .repositories
+                .iter()
+                .any(|repository| repository.metadata.origin_delta.is_some()) =>
+        {
+            CloneRetirementPrerequisite::None
+        }
+        _ => CloneRetirementPrerequisite::LegacySourceCommit,
+    }
+}
+
 /// Remove a managed worktree's checkout and keep its branch.
 ///
 /// A session that moved into a target still checkpoints as a delta against
@@ -2902,7 +2933,27 @@ pub(super) fn retire_managed_worktree(
     authority: &super::environment::CheckoutRemoval<'_>,
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
+    prerequisite: CloneRetirementPrerequisite,
 ) -> Result<()> {
+    if worktree.kind == ManagedCheckoutKind::Clone
+        && prerequisite == CloneRetirementPrerequisite::LegacySourceCommit
+    {
+        let base = worktree
+            .base_commit
+            .as_deref()
+            .context("managed clone has no source commit")?;
+        execute_checked(
+            executor,
+            managed_git_command(
+                SshTrafficClass::Control,
+                &worktree.target,
+                &worktree.source_repository,
+                ["cat-file", "-e", &format!("{base}^{{commit}}")],
+                "verify clone recovery prerequisite in source repository",
+            ),
+        )
+        .context("verify clone recovery prerequisite in source repository")?;
+    }
     cleanup_managed_worktree(authority, executor, worktree, BranchDisposition::Keep)
 }
 
