@@ -530,9 +530,12 @@ class EngineRunner(SealedRunner):
         return tuple(logins)
 
     def select_login(self):
+        # One eligibility decision per launch: quota floors and usable owner
+        # credentials. A login the owner failed to refresh is skipped, not chosen.
         eligible, holds = [], []
         for login in self.logins:
             balances, hold = self.driver.pilot_claude_quota(login.login_profile)
+            hold = hold or self.credential_hold(login)
             if hold:
                 holds.append(hold)
             else:
@@ -553,12 +556,28 @@ class EngineRunner(SealedRunner):
         if hold := self.driver.pilot_claude_hold(self.login.login_profile):
             raise LaunchHeld(hold)
 
-    def check_login_expiry(self, expires_at):
+    @staticmethod
+    def expiry_hold(profile, expires_at):
         # Leave enough time for Claude to finish one turn at the runner's timeout.
         if type(expires_at) is not int or expires_at <= (time.time() + TURN_TIMEOUT) * 1000:
-            raise RuntimeError(
-                f"{self.login.login_profile} access credentials must stay valid for the next {TURN_TIMEOUT // 60} minutes"
-            )
+            return f"{profile} access credentials must stay valid for the next {TURN_TIMEOUT // 60} minutes"
+        return None
+
+    def credential_hold(self, login):
+        """Why the owner's current credentials can't start a session now, or None."""
+        try:
+            with (self.instance_dir / "config.toml").open("rb") as source:
+                home = Path(tomllib.load(source)["profiles"][login.login_profile]["home"]).expanduser()
+            oauth = json.loads((home / ".credentials.json").read_bytes()).get("claudeAiOauth")
+        except (OSError, KeyError, ValueError, AttributeError) as error:
+            return f"{login.login_profile} access credentials are unreadable: {error}"
+        if not isinstance(oauth, dict) or not isinstance(oauth.get("accessToken"), str) or not oauth["accessToken"]:
+            return f"{login.login_profile} has no access credentials"
+        return self.expiry_hold(login.login_profile, oauth.get("expiresAt"))
+
+    def check_login_expiry(self, expires_at):
+        if reason := self.expiry_hold(self.login.login_profile, expires_at):
+            raise RuntimeError(reason)
 
     def seed_login(self):
         self.sync_login()

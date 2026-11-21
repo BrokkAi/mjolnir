@@ -93,25 +93,33 @@ class TestEngineProfile:
         launches = []
 
         def launch(_bundle, _commit, profile, _title, **_options):
-            assert profile == "claude5-engine"
             launches.append(profile)
             return SID
 
         runner.launch = launch
         with patch("time.time", return_value=NOW):
-            if seconds_left > TURN_TIMEOUT:
-                runner.for_launch().start({"orphan": "ref"}, "query")
-            else:
-                with pytest.raises(LaunchPreflightFailure, match=r"claude5 access credentials.*30 minutes"):
-                    runner.for_launch().start({"orphan": "ref"}, "query")
+            runner.for_launch().start({"orphan": "ref"}, "query")
         assert owner.read_text() == raw
         staged = json.loads(alias.read_text())["claudeAiOauth"]
-        if launches:
+        if seconds_left > TURN_TIMEOUT:
+            assert launches == ["claude5-engine"]
             assert staged == oauth("current", seconds_left)
             assert alias.stat().st_mode & 0o777 == 0o600
         else:
-            assert seconds_left <= TURN_TIMEOUT
+            # A stale owner is passed over at admission; the next login launches.
+            assert launches == ["claude4-engine"]
             assert staged["accessToken"] == "previous"
+
+    def test_seeding_still_refuses_credentials_that_went_stale_after_admission(self, engine_profiles):
+        runner, paths, _, _ = engine_profiles
+        bound = None
+        with patch("time.time", return_value=NOW):
+            bound = runner.for_launch()
+        assert bound.login.login_profile == "claude5"
+        rotate(paths["claude5"][0], "stale", seconds_left=60)
+        with patch("time.time", return_value=NOW), \
+                pytest.raises(LaunchPreflightFailure, match=r"claude5 access credentials.*30 minutes"):
+            bound.start({"orphan": "ref"}, "query")
 
 
 @pytest.fixture
@@ -313,3 +321,18 @@ def test_quota_and_auth_retry_stay_with_each_session_while_logins_rotate(engine_
 def test_configured_logins_refuse_the_reserved_claude_login(row):
     with pytest.raises(ValueError, match="reserved for owner sessions"):
         EngineRunner.configured_logins({"logins": [{"profile": "claude4", "engine_profile": "claude4-engine"}, row]})
+
+
+# Hard-won: a3b312cf1: admission chose the login with the most quota even when its owner had not refreshed
+def test_admission_skips_a_login_whose_owner_credentials_cannot_start_a_session(engine_profiles):
+    runner, paths, scores, _ = engine_profiles
+    best, *others = list(scores)
+    scores.update({best: (90, 90), **{profile: (40, 40) for profile in others}})
+    rotate(paths[best][0], f"{best}-stale", seconds_left=60)
+    with patch("time.time", return_value=NOW):
+        assert runner.select_login().login_profile == others[0]
+        for profile in others:
+            rotate(paths[profile][0], f"{profile}-stale", seconds_left=60)
+        with pytest.raises(LaunchHeld) as held:
+            runner.select_login()
+    assert all(f"{profile} access credentials must stay valid" in str(held.value) for profile in scores)
