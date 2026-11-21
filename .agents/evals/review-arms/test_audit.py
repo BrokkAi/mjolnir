@@ -393,8 +393,12 @@ def test_list_with_recorded_target_or_visible_default_passes(tmp_path, evidence)
 
 
 # Hard-won: 23e9afc: wrapped file writers left a stale recorded script
-@pytest.mark.parametrize("overwrite", ["env cp incoming.py script.py", "timeout 2 env tee script.py"])
-def test_wrapped_writes_invalidate_recorded_scripts(tmp_path, overwrite):
+@pytest.mark.parametrize("overwrite", [
+    "env cp incoming.py script.py", "timeout 2 env tee script.py",
+    # Hard-won: f0beee63: xxd left overwritten script evidence active.
+    "xxd bytes.bin script.py", "xxd -r -c 16 hex.txt script.py",
+])
+def test_writes_invalidate_recorded_scripts(tmp_path, overwrite):
     report = audit_calls(tmp_path, [
         shell("cat > script.py <<'PY'\nprint('recorded content')\nPY"),
         shell(overwrite),
@@ -419,16 +423,18 @@ def test_relative_link_with_unknown_destination_directory_requires_inspection(tm
 
 
 # Hard-won: 23e9afc: dash-prefixed file operands were skipped after --
-@pytest.mark.parametrize("command", ["cat -- -state.db", "sort -- --compress-state.db"])
+@pytest.mark.parametrize("command", ["cat -- -state.db", "sort -- --compress-state.db", "xxd input -state.db"])
 def test_dash_prefixed_path_after_end_of_options_is_screened(tmp_path, command):
     report = audit_call(tmp_path, shell(command))
     assert not report["passed"]
     assert {hit["kind"] for hit in report["hits"]} == {"memory-or-sessions"}
 
 
-def summarized_ls(tmp_path, cwd, *, command="ls", title="List files", rollout=True):
+def summarized_ls(tmp_path, cwd, *, command="ls", title="List files", rollout=True, raw=None):
     transcript = {"toolCallId": "exec-terminal-1", "name": "exec_command", "title": title,
                   "kind": "read", "status": "completed"}
+    if raw is not None:
+        transcript["rawInput"] = raw
     if rollout:
         directory = tmp_path / "codex-rollout"
         directory.mkdir()
@@ -466,3 +472,16 @@ def test_summarized_exec_without_rollout_needs_inspection(tmp_path, title):
     report = summarized_ls(tmp_path, f"/workspace/{OWN}/repo", title=title, rollout=False)
     assert not report["passed"]
     assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+# Hard-won: f0beee63: visible argv suppressed the rollout working directory.
+@pytest.mark.parametrize(("directory", "expected"), [
+    ({}, "git-history-escape"),
+    ({"workdir": f"/workspace/{OWN}"}, "needs-inspection"),
+])
+def test_visible_command_uses_matching_rollout_directory(tmp_path, directory, expected):
+    command = "cat config"
+    report = summarized_ls(tmp_path, "/run/hel/git-cache", command=command,
+                           raw={"command": command, **directory})
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {expected}

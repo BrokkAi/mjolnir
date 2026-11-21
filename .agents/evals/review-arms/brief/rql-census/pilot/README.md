@@ -18,14 +18,14 @@ publishing the output.
 
 The pilot runs on a development build of mj, because the installed build
 can't serve the engine's host-only Git source to a container (fixed in
-`020257d9f`). Frozen copies live outside the checkout, so a later build can't
-replace them mid-run: `/mnt/optane/review-arms-pilot/bin/mj-020257d9f` and its
-matching worker `mj-worker-020257d9f`. Export both for every pilot command;
+`020257d9f`, narrowed in `a90bd7e75`; frozen at merged master `f0beee634`). Frozen copies live outside the checkout, so a later build can't
+replace them mid-run: `/mnt/optane/review-arms-pilot/bin/mj-f0beee634` and its
+matching worker `mj-worker-f0beee634`. Export both for every pilot command;
 `mjx` then runs that binary and passes the worker to any daemon it starts:
 
 ```sh
-export REVIEW_ARMS_MJ=/mnt/optane/review-arms-pilot/bin/mj-020257d9f
-export REVIEW_ARMS_MJ_WORKER=/mnt/optane/review-arms-pilot/bin/mj-worker-020257d9f
+export REVIEW_ARMS_MJ=/mnt/optane/review-arms-pilot/bin/mj-f0beee634
+export REVIEW_ARMS_MJ_WORKER=/mnt/optane/review-arms-pilot/bin/mj-worker-f0beee634
 ```
 
 Use a dedicated `mj --instance rql-census-pilot` configuration at

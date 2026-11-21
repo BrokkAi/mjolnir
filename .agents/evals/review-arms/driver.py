@@ -212,11 +212,11 @@ def capture_pilot_rollouts(d, sid):
 
     destination = d / ROLLOUT_DIRECTORY
     placement = d / "placement.json"
-    if destination.exists() or (d / "receipt.json").exists() or not placement.is_file():
-        return
-    if not re.fullmatch(r"[0-9a-f]{32}", sid):
-        raise ValueError("pilot rollout capture requires an exact session ID")
+    if any(destination.glob("rollout-*.jsonl")):
+        return True
     try:
+        if not re.fullmatch(r"[0-9a-f]{32}", sid):
+            raise ValueError("pilot rollout capture requires an exact session ID")
         place = json.loads(placement.read_text())
         source = f"/var/lib/hel/profiles/{sid}/sessions"
         with tempfile.TemporaryFile() as archive, tempfile.TemporaryDirectory(prefix=".rollouts-", dir=d) as staging:
@@ -237,6 +237,8 @@ def capture_pilot_rollouts(d, sid):
             private.rename(destination)
     except (OSError, KeyError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
         save(d / "rollout-capture-error.json", {"session_id": sid, "error": str(error)})
+        return False
+    return True
 
 
 def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allow_rql=False):
@@ -246,7 +248,14 @@ def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allo
     launch = json.loads((d / "launch.json").read_text())
     if MJ_INSTANCE_ARGS != ("--instance", launch["instance"]) or launch["session_id"] != sid:
         raise ValueError("pilot teardown requires the recorded launch in a named instance")
-    capture_pilot_rollouts(d, sid)
+    if not capture_pilot_rollouts(d, sid):
+        try:
+            sessions = mj("sessions", "--all")["sessions"]
+            gone = all(row["id"] != sid or row.get("lifecycle") == "destroyed" for row in sessions)
+        except (OSError, KeyError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError):
+            gone = False
+        if not gone:
+            return "needs-recovery: retry Codex rollout capture for the recorded session"
     rollout_dir = d / audit.ROLLOUT_DIRECTORY
     rollouts = sorted(rollout_dir.glob("rollout-*.jsonl"))
     names = ("transcript.json", "usage.json", output, "cache-attestation.json", "mcp-reconnect-result.json",
@@ -277,8 +286,17 @@ def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allo
         raise ValueError(f"pilot usage does not identify every model prompt as {model}/{effort}")
     receipt = d / "receipt.json"
     if receipt.exists():
-        if json.loads(receipt.read_text()) != record:
-            raise ValueError(f"pilot capture changed since it was recorded: {receipt}")
+        previous = json.loads(receipt.read_text())
+        if previous != record:
+            # A previous build could freeze a receipt after rollout export
+            # failed. Permit only adding rollouts to unchanged evidence.
+            original = {**record, "evidence_sha256": {
+                name: digest for name, digest in record["evidence_sha256"].items()
+                if not name.startswith(audit.ROLLOUT_DIRECTORY + "/")
+            }}
+            if not rollouts or previous != original:
+                raise ValueError(f"pilot capture changed since it was recorded: {receipt}")
+            save(receipt, record)
     else:
         save(receipt, record)
     durable_pilot_files(root, d, [*paths, *([rollout_dir] if rollouts else []), receipt])

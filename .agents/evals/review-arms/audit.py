@@ -122,11 +122,20 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                 continue
             if commits is not None:
                 if rollout is not None and call.get("name") == "exec_command":
+                    match = rollout.get(call.get("toolCallId"))
                     if command := call_command(call):
                         raw = call.get("rawInput")
                         directory = (raw.get("cwd") or raw.get("workdir")) if isinstance(raw, dict) else None
+                        if match:
+                            recorded = match[1]
+                            if directory and (not isinstance(directory, str) or
+                                    resolve_paths(directory, page_cwd or "") != resolve_paths(recorded, "")):
+                                hits.append({"seq": item["seq"], "kind": "needs-inspection", "where": "input",
+                                             "snippet": "Codex transcript and rollout working directories disagree"})
+                                continue
+                            directory = recorded
                         call = {**call, "kind": "execute", "rawInput": {"command": command, "cwd": directory}}
-                    elif match := rollout.get(call.get("toolCallId")):
+                    elif match:
                         argv, directory = match
                         call = {**call, "kind": "execute", "rawInput": {"argv": argv, "cwd": directory}}
                     else:
@@ -1188,7 +1197,10 @@ def jq_paths(args):
         raise InspectionRequired("jq program is missing or can load external code")
 
 
-def file_operands(args, value_options=()):
+XXD_VALUE_OPTIONS = {"-c", "-cols", "-g", "-groupsize", "-l", "-len", "-n", "-name", "-o", "-offset", "-s", "-seek"}
+
+
+def file_operands(args, value_options=(), *, options_first=False):
     options = True
     words = iter(args)
     for arg in words:
@@ -1209,6 +1221,8 @@ def file_operands(args, value_options=()):
                 yield arg
         else:
             yield arg
+            if options_first:
+                options = False
 
 
 def link_hits(args, own_workspace, cwd):
@@ -1335,8 +1349,8 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
             end = args.index("--") if "--" in args else len(args)
             if any(arg.startswith("--compress") for arg in args[:end]):
                 raise InspectionRequired("sort may start an external program")
-        value_options = {"-I", "--ignore", "--hide"} if program == "ls" else ()
-        for path in file_operands(args, value_options):
+        value_options = {"ls": {"-I", "--ignore", "--hide"}, "xxd": XXD_VALUE_OPTIONS}.get(program, ())
+        for path in file_operands(args, value_options, options_first=program == "xxd"):
             yield from path_hits(path, own_workspace, cwd)
     else:
         raise InspectionRequired(f"unsupported command {program}")
@@ -1401,6 +1415,11 @@ def record_script_write(scripts, written, words, redirections, source, cwd):
         for path in file_operands(words[1:]):
             written.add(posixpath.basename(path))
             forget_script(scripts, path, cwd)
+    elif program == "xxd":
+        paths = list(file_operands(words[1:], XXD_VALUE_OPTIONS, options_first=True))
+        if len(paths) == 2 and paths[1] != "-":
+            written.add(posixpath.basename(paths[1]))
+            forget_script(scripts, paths[1], cwd)
     stdout = [(mode, path) for mode, path in redirections if mode in {">", ">>"}]
     target = stdout[0][1] if len(stdout) == 1 and stdout[0][0] == ">" else None
     if source is not None and words == ["cat"] and target is not None:

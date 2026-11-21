@@ -571,12 +571,16 @@ class PilotTest(unittest.TestCase):
         seen = []
         paths = {}
         rollout_name = "rollout-test.jsonl"
+        failed_export = set()
 
         def run(argv, **kwargs):
             seen.append(argv)
             if argv[:2] == ["podman", "exec"]:
                 sid = argv[2]
                 self.assertEqual(argv[-1], f"/var/lib/hel/profiles/{sid}/sessions")
+                if sid not in failed_export:
+                    failed_export.add(sid)
+                    raise subprocess.CalledProcessError(125, argv)
                 data = (json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "item": {
                     "type": "CommandExecution", "id": "exec-captured", "command": ["/bin/bash", "-lc", "ls"],
                     "cwd": f"file:///workspace/{sid}/repo",
@@ -616,12 +620,33 @@ class PilotTest(unittest.TestCase):
             if kind == "writer":
                 (path / "brief-candidate.md").write_bytes(b"Captured")
                 pilot.driver.save(path / "accepted.json", {"brief_sha256": sha, "fix_rounds": 0})
-                state = brief_driver.finish_pilot_writer(params, sid, "bug", "pinned")
+                def finish():
+                    return brief_driver.finish_pilot_writer(params, sid, "bug", "pinned")
             else:
                 params.update(bug={}, profile="pinned", tag="reviewer")
                 pilot.driver.save(path / "captured.json", {"output_sha256": sha, "session_id": sid})
-                state = pilot_review.run(params)
-            self.assertEqual(state, "done")
+                # An earlier build could freeze the receipt without a rollout.
+                names = ("transcript.json", "usage.json", output, "cache-attestation.json",
+                         "mcp-reconnect-result.json", "pre-inventory.json", "settings.json",
+                         "launch.json", "prompt-completion.json")
+                driver.save(path / "receipt.json", {
+                    "session_id": sid, "instance": "test-pilot", "profile": "pinned",
+                    "model": model, "effort": "high", "output": output,
+                    "evidence_sha256": {name: pilot.digest((path / name).read_bytes()) for name in names},
+                })
+
+                def finish():
+                    return pilot_review.run(params)
+
+            receipt = path / "receipt.json"
+            before = receipt.read_bytes() if receipt.exists() else None
+            # Hard-won: f0beee63: a failed export froze audit evidence before a retry.
+            self.assertIn("retry Codex rollout capture", finish())
+            self.assertTrue((path / "rollout-capture-error.json").exists())
+            self.assertFalse((path / "audit.json").exists())
+            self.assertFalse((path / "failed.json").exists())
+            self.assertEqual(receipt.read_bytes() if receipt.exists() else None, before)
+            self.assertEqual(finish(), "done")
             self.assertEqual(pilot.read_json(path / "receipt.json")["model"], model)
             self.assertTrue((path / "destroy.json").exists())
         self.assertNotIn("--acknowledge-unpublished-work", [word for argv in seen for word in argv])
@@ -641,6 +666,9 @@ class PilotTest(unittest.TestCase):
         driver.mj = unexpected
         model = "gpt-6.1-terra"
         path = self.captured_job("forbidden", "forbidden-id", model, "output.md", forbidden=True)
+        rollouts = path / "codex-rollout"
+        rollouts.mkdir()
+        (rollouts / "rollout-test.jsonl").write_text('{"type": "session_meta"}\n')
         args = (self.root, path, "forbidden-id", "pinned", model, "high", "output.md")
         self.assertEqual(driver.destroy_captured_pilot(*args), "retained-failure")
         self.assertEqual(pilot.read_json(path / "failed.json")["retained_session"], "forbidden-id")
