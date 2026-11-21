@@ -5340,7 +5340,7 @@ mod tests {
 
         let system_temp = std::env::temp_dir();
         let system_dev = fs::metadata(&system_temp).unwrap().dev();
-        let other = ["/dev/shm", "/var/tmp"]
+        let Some(other) = ["/dev/shm", "/var/tmp", "/tmp"]
             .into_iter()
             .find_map(|candidate| {
                 let metadata = fs::metadata(candidate).ok()?;
@@ -5352,7 +5352,13 @@ mod tests {
                     .tempdir_in(candidate)
                     .ok()
             })
-            .expect("a writable filesystem distinct from the system temp directory");
+        else {
+            eprintln!(
+                "skipping cross-filesystem snapshot test: no writable mount distinct from {}",
+                system_temp.display()
+            );
+            return;
+        };
         assert_ne!(fs::metadata(other.path()).unwrap().dev(), system_dev);
 
         let origin = other.path().join("origin.git");
