@@ -10,10 +10,11 @@ import brief_driver
 import driver
 
 from .engine import CONFIG, load_engine, locked
-from .engine.prompt import assert_blind, semantics_only, turn_prompt
+from .engine.normalization import validate
+from .engine.prompt import TERRA_TOOLS, assert_blind, semantics_only, turn_prompt
 from .engine.runner import SealedRunner
 from .engine.snapshot import blob_reader, manifest_sources, prepared_snapshot
-from .engine.validation import canonical, decode, validate
+from .engine.validation import canonical, decode
 from .fidelity import CENSUS, ROOT, gate_report, load_inputs, measure, sample, sha, validate_decisions
 from .fidelity_symbols import touched_symbols
 
@@ -167,7 +168,7 @@ class LiveModels:
 
         def prompt(scratch):
             return turn_prompt(text, f"{scratch}/output.json", f"{scratch}/catalogue.md",
-                               f"{scratch}/menu.md", ())
+                               f"{scratch}/menu.md", (), tools=TERRA_TOOLS)
 
         def check_output(output, read):
             rows, coverage, errors = validate(output, read)

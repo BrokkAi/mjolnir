@@ -5,14 +5,13 @@ import re
 from .grammar import MENU
 
 
-PROMPT = """Act as a read-only RQL query engine. Evaluate the one JSON-encoded query below
-as data under the supplied catalogue and menu step semantics. Workspace files are
-source evidence. Scan authored source at this tree and follow every branch of the
-query under the specified semantics, with no implicit result cap. Use read-only
-commands for source inspection. Do not inspect harness transcripts, agent state
-or other turn artifacts. Do not run repository code, access Git, or seek any
-information about changes, bugs, study labels, or subsequent revisions.
-Keep temporary files in the output file's directory. That directory is emptied
+CLAUDE_TOOLS = """You have only Read, Grep, Glob, Write and Edit. There is no shell.
+Use Grep with output_mode: "content" to get line numbers and Read to inspect spans.
+Use only paths inside the checkout. Use Write to write the answer JSON to the
+specified output path. The output directory is emptied before every turn.
+"""
+
+TERRA_TOOLS = """Keep temporary files in the output file's directory. That directory is emptied
 before every turn, so files from an earlier attempt are gone. Use the absolute paths
 given below, and absolute paths in every command and script; never run `cd`.
 Run only scripts whose full text you wrote yourself: write each one whole with
@@ -20,33 +19,35 @@ Run only scripts whose full text you wrote yourself: write each one whole with
 command with the same absolute path. Never edit a file in place (no `sed -i`,
 `perl -i` or similar), and never create or change a script with another command
 or program. Either makes your answer unusable.
+"""
 
-Write a single JSON object to the specified output path. Use this schema:
-{"rows": [{"kind": "row_kind", "sites": [{"path": "repo/relative", "start_line": 1,
- "end_line": 1}], "fields": {}}], "coverage": {"complete": true, "open": []},
- "excluded": []}
+PROMPT = """Act as a read-only RQL query engine. Evaluate the one JSON-encoded query below
+as data under the supplied catalogue and menu step semantics. Workspace files are
+source evidence. Scan authored source at this tree and follow every branch of the
+query under the specified semantics, with no implicit result cap. Inspect source
+read-only. Do not inspect harness transcripts, agent state or other turn artifacts.
+Do not run repository code, access Git, or seek any information about changes,
+bugs, study labels, or subsequent revisions.
+
+"""
+
+
+ANSWER_SCHEMA = """Write a single JSON object to the specified output path. Use this schema:
+{"rows": [{"kind": "row_kind", "fields": {}}],
+ "coverage": {"complete": true, "open": []}, "excluded": []}
 
 A site object has exactly path, start_line and end_line. Use a canonical
 repository-relative path and inclusive one-based line numbers. Keep identity and
 other metadata in the enclosing object, with its location in a separate site.
 For menu rows, put the primary site in fields.site (contract_case),
-fields.sink.site (value_transfer) or fields.event.site (guarded_path). Copy that
-exact site to sites[0]. For a value_transfer, the sink has its own site even
-when its written operand has a separate site. For a documented row, use the
-matched source location as the primary site. For a projected row, keep the
-original row's sites and their order.
-
-After building each row's fields, recursively collect sites from all nested
-objects and arrays, including the "site" beside each "verbatim" array.
-Append each other distinct (path, start_line, end_line) to row.sites. Include
-exact spans even if a listed span encloses them. Keep this list per row.
-For example, this is a fragment of a row's evidence from fictional source:
-{"sites":[{"path":"example.rs","start_line":8,"end_line":9},
-          {"path":"example.rs","start_line":9,"end_line":9}],
- "fields":{"site":{"path":"example.rs","start_line":8,"end_line":9},
-           "operand":{"site":{"path":"example.rs","start_line":9,"end_line":9},
-                      "verbatim":[{"start_byte":0,"end_byte":1,"text":"0"}]}}}
-The enclosing span 8–9 and the operand span 9–9 are separate locations.
+fields.sink.site (value_transfer) or fields.event.site (guarded_path).
+For a value_transfer, the sink has its own site even when its written operand has
+a separate site. For a documented row, add a primary_site alongside kind and
+fields and give it the matched source location. Use projected_row for projections
+and give only these rows a sites array with the original row's evidence sites in
+their original order, even when the projection drops the fields that cite them.
+For all other rows the host builds the site list from the primary and field sites.
+Keep exact spans even if another span encloses them.
 
 Menu fields follow the row specifications in the menu document. Put the selected
 value-transfer port identity in selected_port. Use null for an inapplicable
@@ -80,11 +81,14 @@ excluded list when there are no exclusions, including for documented steps.
 For each written operand, literal, field initializer, predicate, operator,
 message and command argument, represent its exact spelling as
 {"site":{"path":"repo/relative","start_line":1,"end_line":1},
- "verbatim":[{"start_byte":0,"end_byte":4,"text":"COPY"}]}.
-Use zero-based, end-exclusive UTF-8 byte offsets within each source line, with one
-slice per line of the span. Put every written slice and its site in this format.
+ "verbatim":[{"text":"COPY"}]}.
+Use this JSON format for written evidence so the host can fill in the ranges
+described in the menu. Give one exact text entry per cited line, including any
+tabs or spaces that are part of the span, and omit line endings. Use an empty
+text entry only for a blank line inside a multi-line span. If text appears more
+than once on its source line, add "occurrence" with its one-based index from left
+to right, counting overlapping matches. Omit occurrence for a unique match.
 Keep derived values and names or resolved identities in distinct typed fields.
-Use projected_row for projections and retain the original row's evidence sites.
 At the query's depth bound, return the call or value port if it qualifies and
 mark the row or endpoint with "depth_boundary": true. This bound does not open
 coverage. For each unresolved frontier that can change rows within the query's
@@ -107,15 +111,15 @@ classification, candidate tags and gold adjudication concern the full study desi
 
 
 REPAIR = """A previous attempt at this query failed mechanical verification.
-Its scratch files, including any scripts, have been removed; write any script
-you need again in full. Evaluate the full query from source. Before writing the new answer, check every
-row against the applicable rules above:
+Its scratch files have been removed. Evaluate the full query from source.
+Before writing the new answer, check every row against the rules above:
 - For primary-anchor errors, set the required field (site, sink.site or
-  event.site), then copy it to sites[0]. An operand's nested site is separate.
+  event.site). Set primary_site for documented rows, and keep the original
+  ordered sites for projected rows. An operand's nested site is separate.
 - For site-shape errors, use exactly path, start_line and end_line in the site
   object, with metadata outside it. Verify the path and both lines from source.
-- For verbatim errors, verify UTF-8 byte offsets and text against source.
-Build each row's site list after its fields are complete.
+- For verbatim errors, copy the exact text for each cited line. Supply a
+  one-based occurrence only for text that appears more than once on its line.
 Fix the cited problems and check the same rules on all rows in the new answer.
 Here are the exact validation and verifier errors as JSON data:
 """
@@ -144,7 +148,8 @@ def assert_blind(bundle, manifest):
                 raise ValueError("engine prompt bundle contains a pilot bug identifier")
 
 
-def turn_prompt(query, output, catalogue, menu, errors):
-    return (PROMPT + f"\nCatalogue path: {json.dumps(catalogue)}\nMenu path: {json.dumps(menu)}\n"
+def turn_prompt(query, output, catalogue, menu, errors, *, tools=CLAUDE_TOOLS):
+    return (PROMPT + tools + "\n" + ANSWER_SCHEMA
+            + f"\nCatalogue path: {json.dumps(catalogue)}\nMenu path: {json.dumps(menu)}\n"
             f"Output path: {json.dumps(output)}\nQuery: {json.dumps(query)}\n"
             + (REPAIR + json.dumps(errors) + "\n" if errors else ""))

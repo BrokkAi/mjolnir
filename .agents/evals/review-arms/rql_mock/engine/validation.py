@@ -53,29 +53,28 @@ class ValidationIssue(str):
         return issue
 
 
-def validate(output, read_blob):
-    """Return rows, coverage and errors. Each blob lookup uses a fixed source revision."""
-    try:
-        answer = decode(output)
-    except (ValueError, RecursionError) as error:
-        return [], {}, [f"invalid JSON: {error}"]
-    return validate_answer(answer, read_blob)
+class SourceEvidence:
+    """Share pinned source lines between normalization and validation."""
 
+    def __init__(self, read_blob):
+        self.read_blob = read_blob
+        self.source = {}
 
-def validate_answer(answer, read_blob):
-    if (not isinstance(answer, dict) or set(answer) != {"rows", "coverage", "excluded"}
-            or not isinstance(answer["rows"], list) or not isinstance(answer["excluded"], list)):
-        return [], {}, [ValidationIssue("answer-shape", "expected an object containing rows, coverage and an excluded array")]
-    coverage = answer["coverage"]
-    if (not isinstance(coverage, dict) or set(coverage) != {"complete", "open"}
-            or type(coverage["complete"]) is not bool or not isinstance(coverage["open"], list)):
-        return [], {}, [ValidationIssue("coverage-shape", "expected a complete boolean and open frontier array", "coverage")]
-    errors, source = [], {}
+    def lines(self, path):
+        if path not in self.source:
+            raw = self.read_blob(path)
+            lines = None
+            if raw is not None:
+                parts = raw.split(b"\n")
+                # Only CR before LF is part of a line ending.
+                last = parts.pop()
+                lines = [part.removesuffix(b"\r") for part in parts]
+                if last:
+                    lines.append(last)
+            self.source[path] = lines
+        return self.source[path]
 
-    def report(code, label, message, location=None):
-        errors.append(ValidationIssue(code, message, label, location))
-
-    def site(value, label):
+    def site(self, value, label, report):
         if not isinstance(value, dict) or set(value) != {"path", "start_line", "end_line"}:
             report("site-shape", label, "expected path, start_line and end_line")
             return None
@@ -85,16 +84,7 @@ def validate_answer(answer, read_blob):
                 any(part in {"", ".", "..", ".git"} for part in path.split("/"))):
             report("site-path", label, "expected a canonical repository-relative path")
             return None
-        if path not in source:
-            raw = read_blob(path)
-            if raw is None:
-                source[path] = None
-            else:
-                lines = raw.split(b"\n")
-                if not lines[-1]:
-                    lines.pop()
-                source[path] = lines
-        lines = source[path]
+        lines = self.lines(path)
         coordinates = (path, start if type(start) is int else None, end if type(end) is int else None)
         if lines is None:
             report("missing-path", label, f"path {path!r} does not exist in the introducing tree", coordinates)
@@ -104,10 +94,21 @@ def validate_answer(answer, read_blob):
             return None
         return path, start, end
 
-    def include_cited(sites, cited):
-        if cited is not None:
-            path, start, end = cited
-            sites.setdefault(cited, {"path": path, "start_line": start, "end_line": end})
+def validate_answer(answer, source):
+    if (not isinstance(answer, dict) or set(answer) != {"rows", "coverage", "excluded"}
+            or not isinstance(answer["rows"], list) or not isinstance(answer["excluded"], list)):
+        return [], {}, [ValidationIssue("answer-shape", "expected an object containing rows, coverage and an excluded array")]
+    coverage = answer["coverage"]
+    if (not isinstance(coverage, dict) or set(coverage) != {"complete", "open"}
+            or type(coverage["complete"]) is not bool or not isinstance(coverage["open"], list)):
+        return [], {}, [ValidationIssue("coverage-shape", "expected a complete boolean and open frontier array", "coverage")]
+    errors = []
+
+    def report(code, label, message, location=None):
+        errors.append(ValidationIssue(code, message, label, location))
+
+    def site(value, label):
+        return source.site(value, label, report)
 
     def evidence(value, label, cited_sites):
         if isinstance(value, list):
@@ -122,7 +123,8 @@ def validate_answer(answer, read_blob):
         elif isinstance(value, dict):
             if {"start_line", "end_line"} & value.keys():
                 cited = site(value, label)
-                include_cited(cited_sites, cited)
+                if cited is not None:
+                    cited_sites.add(cited)
                 return
             if "verbatim" in value:
                 if set(value) != {"site", "verbatim"}:
@@ -132,7 +134,7 @@ def validate_answer(answer, read_blob):
                 if not cited:
                     return
                 path, start, end = cited
-                include_cited(cited_sites, cited)
+                cited_sites.add(cited)
                 if not isinstance(written, list) or len(written) != end - start + 1:
                     report("verbatim-length", f"{label}.verbatim", "expected one byte slice per cited line", cited)
                     return
@@ -141,7 +143,7 @@ def validate_answer(answer, read_blob):
                         report("verbatim-shape", f"{label}.verbatim", f"expected start_byte, end_byte and text for line {line}", (path, line))
                         continue
                     begin, finish, copy = part["start_byte"], part["end_byte"], part["text"]
-                    actual = source[path][line - 1]
+                    actual = source.lines(path)[line - 1]
                     try:
                         correct = (type(begin) is int and type(finish) is int
                                    and 0 <= begin <= finish <= len(actual)
@@ -160,10 +162,11 @@ def validate_answer(answer, read_blob):
                     report("open-contradiction", f"{label}.{key}", "an open frontier contradicts coverage.complete")
                 if key == "site" and part is not None:
                     cited = site(part, f"{label}.site")
-                    include_cited(cited_sites, cited)
+                    if cited is not None:
+                        cited_sites.add(cited)
                     if any(isinstance(value.get(field), str)
                            for field in ("text", "snippet", "source_text", "written")):
-                        report("copied-text", label, "use verbatim byte slices for copied source text")
+                        report("copied-text", label, "use verbatim evidence for copied source text")
                 else:
                     evidence(part, f"{label}.{key}", cited_sites)
 
@@ -194,12 +197,11 @@ def validate_answer(answer, read_blob):
                     report("missing-primary", anchor_label, "expected the semantic primary site object")
                 elif anchor != sites[0]:
                     report("primary-mismatch", f"{label}.sites[0]", f"must equal {anchor_label}", locations[0])
-        cited_sites = {}
+        cited_sites = set()
         evidence(fields, label + ".fields", cited_sites)
-        # R-loc discards fields, so include every exact citation in its site list.
-        # Preserve the supplied primary and the order of all supplied sites.
-        listed = set(locations)
-        sites.extend(cited_sites[location] for location in sorted(cited_sites.keys() - listed))
+        for path, start, end in sorted(cited_sites - set(locations)):
+            report("missing-citation", f"{label}.sites", f"missing the field citation {path}:{start}-{end}",
+                   (path, start, end))
     if coverage["complete"] == bool(coverage["open"]):
         report("coverage-complete", "", "coverage.complete must be true exactly when coverage.open is empty")
     for index, frontier in enumerate(coverage["open"]):

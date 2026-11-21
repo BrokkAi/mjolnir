@@ -9,13 +9,14 @@ from pathlib import Path
 import subprocess
 from driver import expected_provider_model, repair_progress
 
+from . import normalization
 from .evidence import save_json, sync_directory
 from .grammar import MENU, parse
-from .prompt import PROMPT, REPAIR, semantics_only
+from .prompt import ANSWER_SCHEMA, CLAUDE_TOOLS, PROMPT, REPAIR, semantics_only
 from .runner import (EFFORT, MODEL, QUERY_SESSION_PROTOCOL, RUN_ERRORS, SESSION_ID, DestroyUncertain,
                      IsolationFailure, LaunchHeld, QuotaTurnFailure, SealedRunner, TurnFailure)
 from .snapshot import OID, blob_reader, eligible_diffs, manifest_sources, prepared_snapshot, verifier_snapshot
-from .validation import canonical, decode, ordered_rows, validate_answer
+from .validation import SourceEvidence, canonical, decode, ordered_rows, validate_answer
 from .verifier import verify
 
 
@@ -66,8 +67,9 @@ def cache_key(commit, query, inputs):
 
 def input_hash(catalogue, menu, model_version, served_steps, menu_sha256, verifier_sha256):
     return digest(catalogue, menu, semantics_only(menu, served_steps), menu_sha256,
-                  canonical(served_steps), MODEL, model_version, EFFORT, PROMPT, REPAIR,
-                  QUERY_SESSION_PROTOCOL, verifier_sha256)
+                  canonical(served_steps), MODEL, model_version, EFFORT, PROMPT, CLAUDE_TOOLS, ANSWER_SCHEMA, REPAIR,
+                  QUERY_SESSION_PROTOCOL, verifier_sha256,
+                  file_sha256(Path(normalization.__file__)))
 
 
 def file_sha256(path):
@@ -244,13 +246,14 @@ class Engine:
                     try:
                         runner.prepare(sid, snapshot, active)
                         errors = []
-                        previous_errors = None
+                        previous_errors = {}
                         while True:
                             output, record, errors = runner.turn(
                                 sid, query, self.catalogue, self.menu, errors, active)
                             add_turn(record)
                             evidence = active / "answers" / record["context_id"]
                             findings = {}
+                            stage = "model-answer"
                             if errors:
                                 normalized = {("answer-capture",)}
                             else:
@@ -260,17 +263,23 @@ class Engine:
                                     errors = [f"invalid JSON: {error}"]
                                     normalized = {("invalid-json",)}
                                 else:
-                                    rows, coverage, errors = validate_answer(answer, read_blob)
-                                    normalized = {("validation", *issue.key) for issue in errors}
-                                    if verifier_steps and file_sha256(self.verifier) != self.verifier_sha256:
-                                        raise RuntimeError("frozen RQL verifier digest changed")
-                                    for step in verifier_steps:
-                                        findings[step] = verify(self.verifier, root, step, query, answer)
-                                        for issue in findings[step]["errors"]:
-                                            site = issue["site"]
-                                            normalized.add((issue["code"], issue["row"],
-                                                            site if isinstance(site, str) else canonical(site)))
-                                            errors.append(canonical(issue))
+                                    source = SourceEvidence(read_blob)
+                                    errors = normalization.normalize_answer(answer, source)
+                                    if errors:
+                                        normalized = {("validation", *issue.key) for issue in errors}
+                                    else:
+                                        stage = "normalized-answer"
+                                        rows, coverage, errors = validate_answer(answer, source)
+                                        normalized = {("validation", *issue.key) for issue in errors}
+                                        if verifier_steps and file_sha256(self.verifier) != self.verifier_sha256:
+                                            raise RuntimeError("frozen RQL verifier digest changed")
+                                        for step in verifier_steps:
+                                            findings[step] = verify(self.verifier, root, step, query, answer)
+                                            for issue in findings[step]["errors"]:
+                                                site = issue["site"]
+                                                normalized.add((issue["code"], issue["row"],
+                                                                site if isinstance(site, str) else canonical(site)))
+                                                errors.append(canonical(issue))
                             if findings:
                                 save_json(evidence / "verifier.json", findings)
                             save_json(evidence / "validation.json", {"errors": errors})
@@ -280,9 +289,10 @@ class Engine:
                                 save_json(evidence / "result.json", result)
                                 valid = True
                                 break
-                            if not repair_progress(previous_errors, normalized):
+                            # The verifier first runs when normalization succeeds.
+                            if not repair_progress(previous_errors.get(stage), normalized):
                                 return response("engine_error", message="; ".join(errors))
-                            previous_errors = normalized
+                            previous_errors[stage] = normalized
                             provenance["validation_retries"] += 1
                     except IsolationFailure as error:
                         add_turn(error.record)

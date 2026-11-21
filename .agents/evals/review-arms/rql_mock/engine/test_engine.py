@@ -19,10 +19,11 @@ from rql_mock import engine as live_engine
 from . import Engine, frozen_inputs, teardown
 from .__main__ import audit
 from .grammar import parse
+from .normalization import validate
 from .prompt import assert_blind, semantics_only, turn_prompt
 from .runner import CHECKOUT_CLEAN, IsolationFailure, LaunchHeld, SealedRunner, usage_delta
 from .snapshot import blob_reader, git_output, manifest_sources, parentless_snapshot, verifier_snapshot
-from .validation import canonical, validate
+from .validation import canonical
 
 
 CATALOGUE = (CENSUS / "rql-documented-steps.md").read_text(encoding="utf-8")
@@ -48,11 +49,13 @@ def span(path="source.rs", line=2):
 ROWS = [{"kind": "structural_match", "sites": [span()],
          "fields": {"operand": {"site": span(),
                                 "verbatim": [{"start_byte": 8, "end_byte": 12, "text": "0x10"}]}}}]
+MODEL_ROWS = [{"kind": "structural_match", "primary_site": span(),
+               "fields": {"operand": {"site": span(), "verbatim": [{"text": "0x10"}]}}}]
 SOURCE = {"source.rs": b"fn evaluate() {\nlet n = 0x10;\n}\n"}
 EXCLUDED_FIXTURE = ({"candidate_site": span(), "reason": "duplicate", "detail": ""},)
 
 
-def payload(rows=ROWS, coverage=None, excluded=()):
+def payload(rows=MODEL_ROWS, coverage=None, excluded=()):
     return json.dumps({"rows": rows, "coverage": closed() if coverage is None else coverage,
                        "excluded": list(excluded)})
 
@@ -137,6 +140,9 @@ class GrammarTests(unittest.TestCase):
         manifest_path = staged if staged.is_file() else CENSUS / "pilot/manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         prompt = turn_prompt(QUERY, "output", "catalogue", "menu", [])
+        self.assertIn('output_mode: "content"', prompt)
+        self.assertIn("Use Write", prompt)
+        self.assertNotIn("build.py", prompt)
         bundle = (prompt, CATALOGUE, semantics_only(MENU))
         assert_blind(bundle, manifest)
         combined = "\n".join(bundle)
@@ -310,6 +316,14 @@ class FrozenInputTests(unittest.TestCase):
             changed = live_engine.load_engine(config)
             self.assertNotEqual(updated.identity, changed.identity)
             self.assertNotEqual(updated.verifier_sha256, changed.verifier_sha256)
+            normalizer = root / "normalization.py"
+            normalizer.write_bytes(Path(live_engine.normalization.__file__).read_bytes() + b"\n# revision\n")
+            self.addCleanup(setattr, live_engine.normalization, "__file__", live_engine.normalization.__file__)
+            live_engine.normalization.__file__ = str(normalizer)
+            changed_normalizer = live_engine.load_engine(config)
+            before_key = live_engine.cache_key(COMMIT, QUERY, changed.identity["engine_inputs_sha256"])
+            after_key = live_engine.cache_key(COMMIT, QUERY, changed_normalizer.identity["engine_inputs_sha256"])
+            self.assertNotEqual(before_key, after_key)
 
 
 class ValidationTests(unittest.TestCase):
@@ -317,12 +331,12 @@ class ValidationTests(unittest.TestCase):
         for bad_span, text, message in [
             (span("missing.rs"), "0x10", "does not exist"),
             (span(line=4), "0x10", "outside its 3 lines"),
-            (span(line=1), "0x10", "not the exact source slice"),
-            (span(), "0016", "not the exact source slice"),
+            (span(line=1), "0x10", "does not match the source line"),
+            (span(), "0016", "does not match the source line"),
         ]:
             with self.subTest(span=bad_span, text=text):
-                rows = deepcopy(ROWS)
-                rows[0]["sites"] = [bad_span]
+                rows = deepcopy(MODEL_ROWS)
+                rows[0]["primary_site"] = bad_span
                 operand = rows[0]["fields"]["operand"]
                 operand["site"] = bad_span
                 operand["verbatim"][0]["text"] = text
@@ -330,9 +344,9 @@ class ValidationTests(unittest.TestCase):
 
     # Hard-won: b9ceb96: exact nested citations were rejected unless copied to the row's site list.
     def test_row_sites_include_nested_citations_for_location_only_delivery(self):
-        rows = deepcopy(ROWS)
+        rows = deepcopy(MODEL_ROWS)
         enclosing_span = {**span(line=1), "end_line": 3}
-        rows[0]["sites"] = [enclosing_span]
+        rows[0]["primary_site"] = enclosing_span
         rows[0]["fields"]["nested"] = [{"context": {"site": span(line=3)}}]
         rows[0]["fields"]["duplicate"] = deepcopy(rows[0]["fields"]["operand"])
 
@@ -341,11 +355,11 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(result[0]["sites"], [enclosing_span, span(), span(line=3)])
 
         rows[0]["fields"]["operand"]["verbatim"][0]["text"] = "0016"
-        self.assertIn("not the exact source slice",
+        self.assertIn("does not match the source line",
                       "\n".join(validate(payload(rows), SOURCE.get)[2]))
 
     def test_synthesized_citations_are_independent_of_field_key_order(self):
-        rows = deepcopy(ROWS)
+        rows = deepcopy(MODEL_ROWS)
         fields = rows[0]["fields"]
         fields.update(z=span(line=3), a=span(line=1), middle={**span(line=1), "end_line": 2})
         reordered = [{**rows[0], "fields": dict(reversed(list(fields.items())))}]
@@ -357,7 +371,7 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(canonical(first), canonical(second))
 
     def test_open_coverage_and_false_complete(self):
-        rows = deepcopy(ROWS)
+        rows = deepcopy(MODEL_ROWS)
         rows[0]["fields"]["proof"] = "open"
         rows[0]["fields"]["boundary"] = "unresolved dispatch"
         errors = validate(payload(rows), SOURCE.get)[2]
@@ -369,9 +383,11 @@ class ValidationTests(unittest.TestCase):
 
     # Hard-won: a19cfbf: a query depth boundary invalidated a complete answer.
     def test_complete_coverage_allows_depth_boundary_but_rejects_unresolved_dispatch(self):
-        rows = deepcopy(ROWS)
+        rows = deepcopy(MODEL_ROWS)
         rows[0]["fields"].update(depth_boundary=True, endpoint={"boundary": "depth-boundary"})
-        self.assertEqual(validate(payload(rows), SOURCE.get), (rows, closed(), []))
+        expected = [{**ROWS[0], "fields": {**ROWS[0]["fields"], "depth_boundary": True,
+                                              "endpoint": {"boundary": "depth-boundary"}}}]
+        self.assertEqual(validate(payload(rows), SOURCE.get), (expected, closed(), []))
         rows[0]["fields"]["endpoint"]["boundary"] = "unresolved dispatch"
         self.assertIn("an open frontier contradicts coverage.complete",
                       "\n".join(validate(payload(rows), SOURCE.get)[2]))
@@ -383,22 +399,80 @@ class ValidationTests(unittest.TestCase):
                 self.assertIn("only semantic boundaries", " ".join(validate(payload([], coverage), SOURCE.get)[2]))
 
     def test_source_text_is_not_a_coverage_diagnostic(self):
-        rows = deepcopy(ROWS)
+        rows = deepcopy(MODEL_ROWS)
         operand = rows[0]["fields"]["operand"]
-        operand["verbatim"] = [{"start_byte": 0, "end_byte": 13, "text": "open frontier"}]
+        operand["verbatim"] = [{"text": "open frontier"}]
         self.assertFalse(validate(payload(rows), {"source.rs": b"\nopen frontier\n"}.get)[2])
 
-    def test_multiline_byte_slices_use_utf8_and_keep_internal_empty_lines(self):
+    def test_multiline_byte_slices_use_utf8_with_tabs_crlf_and_empty_lines(self):
         at = {"path": "source.rs", "start_line": 1, "end_line": 3}
-        rows = [{"kind": "structural_match", "sites": [at], "fields": {"operand": {
-            "site": at, "verbatim": [
-                {"start_byte": 3, "end_byte": 5, "text": "α"},
-                {"start_byte": 0, "end_byte": 0, "text": ""},
-                {"start_byte": 0, "end_byte": 5, "text": "omega"},
-            ]}}}]
-        self.assertFalse(validate(payload(rows), {"source.rs": "   α\n\nomega".encode()}.get)[2])
-        rows[0]["fields"]["operand"]["verbatim"][0]["end_byte"] = 4
-        self.assertTrue(validate(payload(rows), {"source.rs": "   α\n\nomega".encode()}.get)[2])
+        written = {"site": at, "verbatim": [{"text": "α"}, {"text": ""}, {"text": "\tomega"}]}
+        rows = [{"kind": "structural_match", "primary_site": at, "fields": {"operand": written}}]
+        source = {"source.rs": "é\tα\r\n\r\n\tomega".encode()}
+        result, _, errors = validate(payload(rows), source.get)
+        self.assertFalse(errors)
+        self.assertEqual(result[0]["fields"]["operand"]["verbatim"], [
+            {"start_byte": 3, "end_byte": 5, "text": "α"},
+            {"start_byte": 0, "end_byte": 0, "text": ""},
+            {"start_byte": 0, "end_byte": 6, "text": "\tomega"},
+        ])
+        written["verbatim"].pop()
+        self.assertIn("expected one text entry per cited line", "\n".join(validate(payload(rows), source.get)[2]))
+
+    def test_repeated_text_requires_one_based_occurrence_counting_overlaps(self):
+        rows = deepcopy(MODEL_ROWS)
+        written = {"text": "éé"}
+        rows[0]["fields"]["operand"]["verbatim"] = [written]
+        source = {"source.rs": "fn f() {\r\n\tééé;\r\n}\r\n".encode()}
+        self.assertIn("specify occurrence", "\n".join(validate(payload(rows), source.get)[2]))
+        for index, message in [(0, "positive one-based index"), (True, "positive one-based index"),
+                               (3, "exceeds the number of matches")]:
+            with self.subTest(index=index):
+                written["occurrence"] = index
+                self.assertIn(message, "\n".join(validate(payload(rows), source.get)[2]))
+        written["occurrence"] = 2
+        result, _, errors = validate(payload(rows), source.get)
+        self.assertFalse(errors)
+        self.assertEqual(result[0]["fields"]["operand"]["verbatim"],
+                         [{"start_byte": 3, "end_byte": 7, "text": "éé"}])
+        self.assertIn("omit occurrence", "\n".join(validate(payload(rows), {"source.rs": b"\n" + "éé".encode()}.get)[2]))
+
+    def test_documented_primary_and_projected_original_sites_survive_delivery(self):
+        documented = deepcopy(MODEL_ROWS[0])
+        documented["primary_site"] = span(line=3)
+        projection = {"kind": "projected_row", "fields": documented["fields"],
+                      "sites": [span(line=3), span(line=1), span()]}
+        result, _, errors = validate(payload([documented, projection]), SOURCE.get)
+        self.assertFalse(errors)
+        self.assertEqual(result, [
+            {**ROWS[0], "sites": [span(line=3), span()]},
+            {**projection, "fields": ROWS[0]["fields"]},
+        ])
+
+        del documented["primary_site"]
+        projection["sites"] = []
+        errors = validate(payload([documented, projection]), SOURCE.get)[2]
+        self.assertEqual([error.key[:2] for error in errors], [
+            ("missing-primary", "rows[0].primary_site"), ("missing-primary", "rows[1].sites[0]"),
+        ])
+
+    def test_menu_primary_uses_the_role_site_instead_of_nested_operand(self):
+        operand = MODEL_ROWS[0]["fields"]["operand"]
+        anchor = span(line=3)
+        for kind, role in [("contract_case", None), ("value_transfer", "sink"),
+                           ("guarded_path", "event")]:
+            with self.subTest(kind=kind):
+                spec = next(step for step in live_engine.MENU.values() if step.output == kind)
+                fields = dict.fromkeys(spec.fields)
+                fields.update({role: {"site": anchor, "operand": operand}} if role
+                              else {"site": anchor, "outcome": operand})
+                row = {"kind": kind, "fields": fields}
+                result, _, errors = validate(payload([row]), SOURCE.get)
+                self.assertFalse(errors)
+                self.assertEqual(result[0]["sites"], [anchor, span()])
+                owner = fields if role is None else fields[role]
+                del owner["site"]
+                self.assertIn("expected a primary site", "\n".join(validate(payload([row]), SOURCE.get)[2]))
 
 
 class FakeRunner:
@@ -596,7 +670,7 @@ class EngineTests(unittest.TestCase):
         runner = FakeRunner(["{\"", payload([{"kind": "broken"}]), payload()])
         result = self.engine(runner).answer(COMMIT, QUERY)
         self.assertEqual(result["status"], "engine_error")
-        self.assertIn("expected kind, sites and fields", result["message"])
+        self.assertIn("expected a row kind and a fields object", result["message"])
         self.assertIn("invalid JSON", runner.turns[1][2][0])
         self.assertEqual(result["provenance"]["validation_retries"], 1)
         self.assertEqual(result["provenance"]["tokens"]["total_tokens"], 30)
@@ -606,20 +680,20 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(runner.turns), 3)
 
     def test_retry_then_success_sorts_and_retains_open_coverage(self):
-        first = {"kind": "structural_match", "sites": [span(line=1)], "fields": {}}
+        first = {"kind": "structural_match", "primary_site": span(line=1), "fields": {}}
         coverage = {"complete": False, "open": [{"reason": "unresolved dispatch", "site": span(line=1)}]}
-        runner = FakeRunner(["{}", payload(ROWS + [first], coverage)])
+        runner = FakeRunner(["{}", payload(MODEL_ROWS + [first], coverage)])
         result = self.engine(runner).answer(COMMIT, QUERY)
         self.assertEqual(result["status"], "ok", result)
         self.assertEqual(result["coverage"], coverage)
-        self.assertEqual(result["rows"], [first, ROWS[0]])
+        self.assertEqual(result["rows"], [{"kind": first["kind"], "sites": [first["primary_site"]], "fields": {}}, ROWS[0]])
         self.assertEqual(result["provenance"]["validation_retries"], 1)
         self.assertEqual(len(runner.turns), 2)
         self.assertEqual(len(runner.launches), 1)
         self.assertEqual(runner.turns[0][0], runner.turns[1][0])
 
     @staticmethod
-    def verified_query(cache, round_errors):
+    def verified_query(cache, round_errors, *, initial_outputs=()):
         repo = cache / "repo"
         repo.mkdir(parents=True)
         git_output(repo, "init", "--template=")
@@ -639,6 +713,7 @@ assert (root / "source.rs").read_bytes() == {SOURCE["source.rs"]!r}
 assert not (root / ".git").exists()
 assert request["step"] == "contract-cases"
 assert isinstance(request["query"], list)
+assert request["answer"]["rows"] == {ROWS!r}
 assert request["answer"]["excluded"] == {list(EXCLUDED_FIXTURE)!r}
 cursor = Path(__file__).with_suffix(".round")
 index = int(cursor.read_text()) if cursor.exists() else 0
@@ -646,7 +721,8 @@ cursor.write_text(str(index + 1))
 errors = {round_errors!r}[index]
 print(json.dumps(dict(version=1, candidates=[], errors=errors, unchecked=[])))
 """)
-        runner = FakeRunner([payload(excluded=EXCLUDED_FIXTURE)] * len(round_errors))
+        verifier_outputs = [payload(excluded=EXCLUDED_FIXTURE)] * len(round_errors)
+        runner = FakeRunner([*initial_outputs, *verifier_outputs])
         engine = Engine(cache, (CATALOGUE, MENU), lambda _: (SOURCE.get, {"orphan": orphan}),
                         lambda: runner, VERSION, verifier=binary,
                         verifier_source=lambda snapshot: verifier_snapshot(repo, snapshot["orphan"]))
@@ -664,6 +740,18 @@ print(json.dumps(dict(version=1, candidates=[], errors=errors, unchecked=[])))
         self.assertIn("unaccounted-candidate", runner.turns[2][2][0])
         self.assertEqual(len(runner.launches), 1)
         self.assertEqual(len(list(self.cache.glob("*/retired/*/answers/*/verifier.json"))), 3)
+
+    def test_verbatim_error_repairs_before_verifier_has_its_own_findings(self):
+        rows = deepcopy(MODEL_ROWS)
+        rows[0]["fields"]["operand"]["verbatim"] = [{"text": "0x11"}]
+        issue = {"code": "anchor-kind", "message": "verifier finding", "row": 0,
+                 "site": span(), "candidate": None}
+        answer, runner = self.verified_query(self.cache, [[issue], []], initial_outputs=[payload(rows)])
+        self.assertEqual(answer["status"], "ok", answer)
+        self.assertIn("does not match the source line", runner.turns[1][2][0])
+        self.assertIn("verifier finding", runner.turns[2][2][0])
+        evidence = next(self.cache.glob("*/retired/*/answers"))
+        self.assertFalse((evidence / "query-context-1/verifier.json").exists())
 
     def test_verifier_repair_stops_when_normalized_error_set_does_not_shrink(self):
         issue = {"code": "anchor-kind", "message": "first diagnostic", "row": 0,

@@ -340,6 +340,34 @@ class EnginePhase(unittest.TestCase):
         self.assertFalse((self.root / "fidelity/gate-report.json").exists())
 
 
+class TerraOutput(unittest.TestCase):
+    def test_enumerator_translates_evidence_before_delivery(self):
+        model = fidelity_live.LiveModels.__new__(fidelity_live.LiveModels)
+        model.manifest = {"diffs": [], "served_steps": []}
+        model.catalogue = model.menu = ""
+        model.directory = Path("fixture")
+        model.terra_profile = "terra"
+        site = {"path": "source.rs", "start_line": 1, "end_line": 1}
+        written = {"site": site, "verbatim": [{"text": "α"}]}
+        answer = {"rows": [{"kind": "structural_match", "primary_site": site,
+                            "fields": {"operand": written}}],
+                  "coverage": {"complete": True, "open": []}, "excluded": []}
+
+        def sealed_task(commit, directory, name, profile, files, prompt, check_output):
+            self.assertIn("never run `cd`", prompt("/fixture/.scratch"))
+            self.assertNotIn("Use Write", prompt("/fixture/.scratch"))
+            return check_output(json.dumps(answer), {"source.rs": "α\tα\n".encode()}.get), {"model": name}
+
+        model.sealed_task = sealed_task
+        with self.assertRaisesRegex(ValueError, "invalid Terra evidence: .*specify occurrence"):
+            model.enumerate_rows("fixture", "a" * 40, '(function :name "f")')
+        written["verbatim"][0]["occurrence"] = 2
+        output = model.enumerate_rows("fixture", "a" * 40, '(function :name "f")')
+        self.assertEqual(output["rows"], [{"kind": "structural_match", "sites": [site], "fields": {
+            "operand": {"site": site, "verbatim": [{"start_byte": 3, "end_byte": 5, "text": "α"}]},
+        }}])
+
+
 class ModelIdentity(unittest.TestCase):
     def test_sonnet_alias_and_provider_usage_must_both_match(self):
         manifest = {"models": {"engine": "sonnet/high", "judge": "sonnet/high"},
