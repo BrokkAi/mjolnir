@@ -134,7 +134,7 @@ def tool_succeeded(call, body, rollout_exit):
 
 def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None,
          rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None, engine=False,
-         antigravity=False, tracked_head=None, tracked_symlink_targets=None):
+         antigravity=False, tracked_head=None, tracked_symlink_targets=None, claude_code_version=None):
     first_page = pages[0] if pages else {}
     execution = first_page.get("execution")
     checkout = cwd or first_page.get("cwd") or (execution.get("cwd") if isinstance(execution, dict) else None)
@@ -176,7 +176,8 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                     continue
             if engine:
                 seq = item["seq"]
-                findings = list(engine_hits(call, own_workspace, page_cwd, edit_paths, engine_calls, seq))
+                findings = list(engine_hits(call, own_workspace, page_cwd, edit_paths, engine_calls, seq,
+                                            claude_code_version))
                 hits.extend({"seq": seq, "kind": name, "where": "input", "snippet": snippet}
                             for name, snippet in findings)
                 identifier = call.get("toolCallId")
@@ -2402,7 +2403,21 @@ def engine_saved_result(path, workspace, audited_calls, seq):
     return bool(match and match[1] in audited_calls and audited_calls[match[1]] < seq)
 
 
-def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq):
+def known_engine_grep_input(raw):
+    text = {"pattern", "path", "glob", "type"}
+    counts = {"-A", "-B", "-C", "context", "head_limit", "offset"}
+    switches = {"-n", "-i", "-o", "multiline"}
+    return (
+        "pattern" in raw and raw.keys() <= text | counts | switches | {"output_mode"}
+        and all(isinstance(raw[key], str) and raw[key] and "\0" not in raw[key] for key in raw.keys() & text)
+        and all(type(raw[key]) is int and raw[key] >= 0 for key in raw.keys() & counts)
+        and all(isinstance(raw[key], bool) for key in raw.keys() & switches)
+        and raw.get("output_mode", "files_with_matches") in ("files_with_matches", "content", "count")
+        and ("glob" not in raw or re.fullmatch(r"(?:[^{}\[\]]|\{[^{}\[\]]+\})+", raw["glob"]))
+    )
+
+
+def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq, claude_code_version):
     name = call.get("name") if isinstance(call, dict) else None
     if not isinstance(name, str) or name not in ENGINE_TOOLS or call.get("kind") == "execute":
         yield "needs-inspection", f"tool outside the engine allowlist: {name!r}"
@@ -2414,6 +2429,17 @@ def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq):
     if not isinstance(raw, dict):
         yield "needs-inspection", f"missing or invalid {name} input"
         return
+    if name == "Grep":
+        # Claude Code 2.1.326 linux-x64: y2r starts at byte 317252666,
+        # sets --no-follow at 317252903, and calls ripgrep at 317255012.
+        # Filters do not make it descend through links. The explicit search
+        # path can follow them and must pass the same component check as Read.
+        if claude_code_version != "2.1.326":
+            yield "needs-inspection", f"unverified Claude Code version for engine Grep: {claude_code_version!r}"
+            return
+        if not known_engine_grep_input(raw):
+            yield "needs-inspection", "unrecognized engine Grep input"
+            return
     if name in {"Grep", "Glob"}:
         paths = [raw.get("path", cwd)]
     else:
@@ -2559,11 +2585,15 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
                 before = isolation["checkout"]
                 cwd = cwd or isolation["placement"].get("cwd")
         cwd = cwd or before.get("cwd")
+        runtime = read_record(transcript_path.with_name("engine-runtime.json")) if engine else {}
+        claude_code_version = (runtime.get("claude_code_version")
+                               if isinstance(runtime, dict) and runtime.get("session_id") == own_workspace else None)
         result = scan(pages, own_workspace, commits=commits, allow_rql=allow_rql, single_commit=single_commit,
                       cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits, engine=engine,
                       antigravity=captured_antigravity(transcript_path),
                       tracked_symlinks=clean_tracked_symlinks(before), tracked_head=before.get("head"),
                       tracked_symlink_targets=before.get("tracked_symlink_targets"),
+                      claude_code_version=claude_code_version,
                       tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
                       rollout=rollout_commands(
                           sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))))
