@@ -69,11 +69,12 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
 
     stage('snapshot-rendered');
-    // The select offers the Notifications inbox ahead of the lab's one real
-    // workspace. Nothing needs attention yet, so the dashboard opens on that
-    // workspace rather than the inbox, and the workspace is in the URL.
+    // The select lists only real workspaces (Notifications is a separate
+    // screen), so the dashboard opens on the lab's workspace and records it
+    // in the URL.
     const workspaceSelect = page.locator('#workspace-select');
-    await expect(workspaceSelect.locator('option')).toHaveText(['Notifications', /\S/]);
+    await expect(workspaceSelect.locator('option')).toHaveText([/\S/]);
+    await expect(workspaceSelect.locator('option').first()).not.toHaveText('Notifications');
     await expect(workspaceSelect).toHaveValue(/^(?!notifications$)./);
     const workspaceId = await workspaceSelect.inputValue();
     await expect(page).toHaveURL(new RegExp(`#workspace/${escapeForRegExp(workspaceId)}$`));

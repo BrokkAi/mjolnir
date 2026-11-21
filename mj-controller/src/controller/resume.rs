@@ -1828,7 +1828,9 @@ impl Controller {
             target_id,
         )
             .map_err(|reason| anyhow::anyhow!("{reason}"))?;
-        // An origin-delta checkpoint restores only into its own clone so far.
+        let is_attached_checkout =
+            matches!(checkout.effective(), mj_core::state::Checkout::Attached { .. });
+        // An origin-delta checkpoint restores only into its own target so far.
         // Refuse a move to another target here, before Resume is accepted.
         if (transferring_workspace || plan != ResumePlan::InPlace)
             && archive_manifest
@@ -1836,10 +1838,19 @@ impl Controller {
                 .iter()
                 .any(|repository| repository.metadata.origin_delta.is_some())
         {
-            return Err(mj_core::refusal::Refusal::precondition(
-                "This session's checkpoint can be resumed only on its original target for now. Resume it there; it can then be moved.",
-            )
-            .into());
+            let originless = archive_manifest.repositories.iter().any(|repository| {
+                repository
+                    .metadata
+                    .origin_delta
+                    .as_ref()
+                    .is_some_and(|delta| delta.origin_url.is_none())
+            });
+            let message = if originless {
+                "This raw session has no Git origin remote and can only be resumed on its original target."
+            } else {
+                "This session's checkpoint can be resumed only on its original target for now. Resume it there; it can then be moved."
+            };
+            return Err(mj_core::refusal::Refusal::precondition(message).into());
         }
         // A worktree that stays put is reached with the machine's current ssh
         // options; only its location had to match (J-21).
@@ -2102,12 +2113,17 @@ impl Controller {
         let mut conversion_checkpoint_written: Option<mj_core::state::CheckpointMetadata> = None;
         let result = async {
             if origin_delta {
-                let worktree = previous_managed_worktree.as_ref().context("origin delta requires a managed clone")?;
                 ensure!(!transferring_workspace && plan == ResumePlan::InPlace, "origin delta conversion is unavailable");
-                resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
-                    executor, worktree, &archive_path, archive_manifest,
-                )?);
-                recreated_managed_worktree = true;
+                if let Some(worktree) = previous_managed_worktree.as_ref() {
+                    resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
+                        executor, worktree, &archive_path, archive_manifest,
+                    )?);
+                    recreated_managed_worktree = true;
+                } else if is_attached_checkout {
+                    // Raw checkout resuming in place: the existing checkout is authoritative.
+                } else {
+                    anyhow::bail!("origin delta resume requires a managed clone or in-place raw checkout");
+                }
             } else if let Some(worktree) = previous_managed_worktree.as_ref() {
                 recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
                 if !transferring_workspace && recreated_managed_worktree && plan == ResumePlan::RawToWorkspace {

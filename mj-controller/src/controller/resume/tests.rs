@@ -3048,3 +3048,201 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         );
     }
 }
+
+#[test]
+fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_archives() {
+    const CHILD: &str = "MJ_TEST_RAW_ORIGIN_DELTA_CROSS_TARGET_RESUME_CHILD";
+    let temp = tempfile::tempdir().unwrap();
+    if std::env::var_os(CHILD).is_none() {
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            "cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_archives",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(temp.path())
+        .run();
+        return;
+    }
+
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_git(&["init", "--initial-branch=main"]);
+    std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+    run_git(&["add", "README.md"]);
+    run_git(&["commit", "-m", "initial"]);
+
+    let profile_home = temp.path().join("profile");
+    std::fs::create_dir_all(&profile_home).unwrap();
+
+    for (case_name, origin_url, expected_message) in [
+        ("originless", None, "no Git origin remote"),
+        (
+            "origin-backed",
+            Some("https://example.com/repo.git".to_owned()),
+            "original target for now",
+        ),
+    ] {
+        let session_id = format!("raw-resume-{case_name}");
+        let snapshot = mj_checkpoint::snapshot::capture_session_snapshot(
+            &mj_checkpoint::archive::SystemGit,
+            &[mj_checkpoint::checkpoint::raw_snapshot_input(
+                "project",
+                &repo,
+                None,
+                origin_url.clone(),
+                temp.path().join(format!("{case_name}.pack")),
+            )],
+            &mj_checkpoint::snapshot::SessionCaptureConsent::default(),
+        )
+        .unwrap()
+        .repositories
+        .remove("project")
+        .unwrap();
+
+        let archive_path = temp.path().join(format!("{session_id}.hel.zip"));
+        let mut session = checkpoint_test_session(&session_id);
+        session.target_template_id = "local-bare".into();
+        session.project_directory = Some(repo.clone());
+        session.state = SessionState::Stopped;
+        let canonical = mj_core::archive::CanonicalSessionSnapshot {
+            command_ledger: None,
+            assessment_state: None,
+            notification_stack: None,
+            event_frontier: 0,
+            event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
+            session: mj_core::archive::CanonicalSessionState {
+                execution: mj_core::archive::CanonicalExecutionState::Idle,
+                last_activity_at_ms: None,
+                session_title: None,
+                configuration: Default::default(),
+            },
+            transcript: Vec::new(),
+            queued_prompts: Vec::new(),
+            mailbox: Default::default(),
+        };
+        let sha256 = mj_checkpoint::archive::write_archive_hashed(
+            &archive_path,
+            &mj_checkpoint::archive::ArchiveInput {
+                session: mj_core::archive::SessionManifest {
+                    id: session_id.clone(),
+                    title: session.title.clone(),
+                    harness_kind: session.harness_kind,
+                    profile_id: session.last_profile.clone(),
+                    native_session_id: "native-1".into(),
+                    created_at: "2026-11-21T00:00:00Z".into(),
+                    checkpointed_at: "2026-11-21T00:00:00Z".into(),
+                    hel_version: env!("CARGO_PKG_VERSION").into(),
+                    relay_version: String::new(),
+                    adapter_version: String::new(),
+                },
+                target: mj_core::archive::TargetManifest {
+                    template_id: "local-bare".into(),
+                    target_kind: "local-bare".into(),
+                    details: Default::default(),
+                },
+                bundle: mj_core::archive::BundleManifest {
+                    id: "project".into(),
+                    primary_repository: "project".into(),
+                },
+                canonical_session: canonical,
+                native_artifacts: Vec::new(),
+                repositories: vec![mj_checkpoint::archive::RepositorySnapshot {
+                    metadata: mj_checkpoint::archive::RepositoryMetadata {
+                        id: "project".into(),
+                        relative_destination: std::path::PathBuf::from("project"),
+                        checkout_subdirectory: None,
+                        origin: snapshot.origin_url.clone().unwrap_or_default(),
+                        push_urls: Vec::new(),
+                        remote_workspace: false,
+                        plain_directory: false,
+                        base_commit: String::new(),
+                        head_commit: snapshot.head.commit().to_owned(),
+                        branch: Some("refs/heads/main".into()),
+                        review_refs_metadata_only: false,
+                        review_baseline_ref: None,
+                        saved_refs: Default::default(),
+                        stash_stack: Vec::new(),
+                        git_operation: None,
+                        origin_delta: Some(Box::new(snapshot.metadata)),
+                    },
+                    origin_delta_pack: snapshot.pack,
+                    committed_bundle: Vec::new(),
+                    staged_patch: Vec::new(),
+                    unstaged_patch: Vec::new(),
+                    untracked_tar: Vec::new(),
+                    operation_payloads: None,
+                    linked_worktrees: Vec::new(),
+                }],
+            },
+        )
+        .unwrap();
+        session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+            archive_path,
+            sha256,
+            event_frontier: 0,
+            created_at: "2026-11-21T00:00:00Z".into(),
+        }));
+
+        let mut config = resume_compatibility_config();
+        config.targets.insert(
+            "podman".into(),
+            serde_json::from_value(serde_json::json!({
+                "kind": "local-podman",
+                "image": "agent-dev:latest"
+            }))
+            .unwrap(),
+        );
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile::new(mj_core::config::HarnessKind::Codex, profile_home.clone()),
+        );
+        let mut controller = Controller {
+            config,
+            state: State {
+                sessions: [(session_id.clone(), session)].into_iter().collect(),
+                ..State::default()
+            },
+        };
+        let error = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(crate::controller::test_support::worker_test_scope_async(
+                &session_id,
+                controller.resume_session_controlled(
+                    &session_id,
+                    "codex",
+                    "podman",
+                    SessionResumeOptions {
+                        additional_mounts: None,
+                        resource_allocation: None,
+                        discard_queue: false,
+                    },
+                    &RefusingExecutor("resume before rejecting cross-target origin-delta"),
+                ),
+            ))
+            .expect_err("cross-target resume must be refused");
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains(expected_message),
+            "{case_name}: unexpected error: {detail}"
+        );
+    }
+}

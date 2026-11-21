@@ -89,9 +89,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         .route("/sessions/{session_id}/diff", get(diff))
         .route(
             "/sessions/{session_id}/files",
-            get(read_file).put(write_file).layer(named_body_limit(
-                mj_checkpoint::archive::MAX_SESSION_FILE_BYTES as usize,
-            )),
+            get(read_file).put(write_file),
         )
         .route("/sessions/{session_id}/elicitations", get(elicitations))
         .route(

@@ -32,7 +32,7 @@ def main():
     parser.add_argument("--mj", required=True, type=Path)
     parser.add_argument("--worker", required=True, type=Path)
     parser.add_argument("--instance", required=True)
-    parser.add_argument("--case", choices=["round-trip", "untracked", "detached", "late-file", "git-error"], required=True)
+    parser.add_argument("--case", choices=["round-trip", "untracked", "detached", "late-file", "git-error", "raw"], required=True)
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named instance")
@@ -73,7 +73,8 @@ def main():
         def record():
             reply = lab.daemon_request({"action": "session_record", "arguments": {"session_id": session}})
             assert reply["value"] is not None, reply
-            return reply["value"]
+            value = reply["value"]
+            return value["record"] if isinstance(value, dict) and "record" in value else value
 
         repos = lab.runtime_root / "origins"
         repos.mkdir()
@@ -103,7 +104,80 @@ def main():
         git(lab.project, "remote", "add", "origin", f"{base}/project.git")
         git(lab.project, "fetch", "origin")
 
-        run("workspaces", "create", "Origin delta")
+        created_ws = json.loads(run("workspaces", "create", "Origin delta", "--json").stdout)
+        workspace = created_ws.get("id") or created_ws.get("workspace_id") or created_ws["workspace"]["id"]
+        if args.case == "raw":
+            git(lab.project, "branch", "pre-launch-branch")
+            (lab.project / "README.md").write_text("pre-launch stash\n")
+            git(lab.project, "stash", "push", "-m", "pre-launch stash")
+
+            created = lab.daemon_request({
+                "action": "start_create_session",
+                "arguments": {
+                    "workspace_id": workspace,
+                    "profile_id": "fake",
+                    "bundle_id": "",
+                    "target_template_id": "localhost",
+                    "title": "raw-origin-delta",
+                    "project_directory": str(lab.project),
+                    "create_managed_worktree": False,
+                    "subagents": {"mode": "none"},
+                    "no_project_memory": False,
+                    "no_github_events": False,
+                    "remember_launch_choices": False,
+                    "remember_container_size": False,
+                    "additional_mounts": [],
+                },
+            })
+            session = created["value"]["session"]["id"]
+            wait_res = lab.daemon_request({
+                "action": "wait_create_session",
+                "arguments": {"session_id": session},
+            }, timeout=WAIT)
+            assert wait_res.get("reply") == "done", (created, wait_res)
+            before = wait_for(lambda: row if (row := record())["state"] == "running" else None,
+                              "raw session worker ready")
+            assert before.get("managed_worktree") is None, before
+            launch_file = lab.project / ".git/mj/sessions" / session / "launch"
+            assert launch_file.is_file(), f"missing launch record {launch_file}"
+
+            git(lab.project, "checkout", "-b", "post-launch-branch")
+            (lab.project / "post.txt").write_text("post-launch commit\n")
+            git(lab.project, "add", "post.txt")
+            git(lab.project, "commit", "-m", "post-launch commit")
+            (lab.project / "post.txt").write_text("post-launch stash\n")
+            git(lab.project, "stash", "push", "-m", "post-launch stash")
+            (lab.project / "staged.txt").write_text("staged edit\n")
+            git(lab.project, "add", "staged.txt")
+            (lab.project / "post.txt").write_text("unstaged edit\n")
+            untracked = lab.project / "untracked.txt"
+            untracked.write_text("keep untracked\n")
+
+            run("suspend", "--acknowledge-unpublished-work", "--session", session)
+            stopped = wait_for(lambda: row if (row := record())["state"] == "stopped" else None,
+                               "raw session to stop")
+            assert launch_file.is_file(), f"launch record disappeared on suspend: {launch_file}"
+            assert untracked.read_text() == "keep untracked\n"
+            with zipfile.ZipFile(stopped["checkpoint"]["archive_path"]) as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+                assert manifest["schema_version"] == 14, manifest
+                repository, = manifest["repositories"]
+                assert repository["origin_delta_pack_path"] in archive.namelist()
+                delta = repository["origin_delta"]
+                assert "refs/heads/post-launch-branch" in delta["refs"], delta["refs"]
+                assert "refs/heads/pre-launch-branch" not in delta["refs"], delta["refs"]
+                assert len(delta["stash"]) == 1, delta["stash"]
+
+            (lab.project / "README.md").write_text("edited while suspended\n")
+            run("resume", "--session", session, "--json")
+            wait_for(lambda: record()["state"] == "running", "resumed raw worker ready")
+            assert (lab.project / "README.md").read_text() == "edited while suspended\n"
+
+            run("destroy", "--session", session)
+            session = None
+            wait_for(lambda: not launch_file.exists(), f"launch record removed after destroy: {launch_file}")
+            return
+
         session = json.loads(run(
             "new", "--workspace", "Origin delta", "--profile", "fake", "--target", "localhost",
             "--project-directory", str(lab.project), "--subagents", "none", "--json",

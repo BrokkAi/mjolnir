@@ -1143,6 +1143,7 @@ fn move_queue_waiting_message() -> mj_core::mailbox::MailboxEvent {
     }
 }
 
+#[cfg(unix)]
 fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetadata {
     let archive_path = directory.join("move-queue.hel.zip");
     let image = ContentBlock::Image(ImageContent::new("x".repeat(70 * 1024), "image/png"));

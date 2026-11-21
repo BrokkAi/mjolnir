@@ -135,6 +135,9 @@ pub const SESSION_GIT_CONFIG_INCLUDE_PATH: &str = "MJ_SESSION_GIT_CONFIG_INCLUDE
 /// compatible while a new worker can distinguish a managed child whose
 /// historical handback tool is disabled.
 pub const SESSION_MANAGED_SUBAGENT_ENV: &str = "MJ_SESSION_MANAGED_SUBAGENT";
+/// Controller-authored environment marker: record a raw Git launch baseline
+/// (`mj/sessions/<session-id>/launch`) before starting the harness if absent.
+pub const SESSION_RAW_LAUNCH_RECORD_ENV: &str = "MJ_SESSION_RAW_LAUNCH_RECORD";
 /// Controller-authored environment marker: the controller staged the
 /// message-only `mj-agents` registration for this top-level session. A worker
 /// grants that role only with this marker, so a newer worker resuming a launch

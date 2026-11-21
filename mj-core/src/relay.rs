@@ -193,7 +193,9 @@ pub const RELAY_PERMISSION_TOOL_CALL_PROTOCOL: u32 = 76;
 /// open several reviews of disjoint repositories only when it can resolve a
 /// path to a root with no side effect.
 pub const RELAY_CONCURRENT_REVIEW_PROTOCOL: u32 = 77;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CONCURRENT_REVIEW_PROTOCOL;
+/// 78 supports `CheckpointRepositoryCapture::OriginDeltaRaw` for raw Git checkouts.
+pub const RELAY_RAW_ORIGIN_DELTA_PROTOCOL: u32 = 78;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_RAW_ORIGIN_DELTA_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

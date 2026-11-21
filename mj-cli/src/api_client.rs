@@ -718,24 +718,26 @@ impl ApiClient {
         &self,
         session_id: &str,
         path: &str,
-        bytes: Vec<u8>,
+        body: reqwest::Body,
+        content_length: Option<u64>,
         overwrite: bool,
     ) -> Result<mj_daemon::server::api::WriteFileResponse> {
-        self.send(
-            self.http
-                .put(self.url(&format!("/sessions/{session_id}/files")))
-                .query(&[
-                    ("path", path),
-                    ("overwrite", if overwrite { "true" } else { "false" }),
-                ])
-                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-                .body(bytes)
-                .timeout(EXPORT_TIMEOUT),
-        )
-        .await?
-        .json()
-        .await
-        .context("read file injection result")
+        let mut request = self
+            .http
+            .put(self.url(&format!("/sessions/{session_id}/files")))
+            .query(&[
+                ("path", path),
+                ("overwrite", if overwrite { "true" } else { "false" }),
+            ])
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream");
+        if let Some(len) = content_length {
+            request = request.header(reqwest::header::CONTENT_LENGTH, len);
+        }
+        self.send(request.body(body))
+            .await?
+            .json()
+            .await
+            .context("read file injection result")
     }
 
     pub(crate) async fn elicitations(

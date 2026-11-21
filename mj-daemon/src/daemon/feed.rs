@@ -29,6 +29,7 @@ pub(super) struct RuntimeHistory {
     native_owners: NativeOwners,
     full: RuntimeProjection,
     attention_source: RuntimeProjection,
+    committed: Option<Arc<mj_controller::database::CommittedState>>,
     /// Family-scoped views recently served, oldest first. A terminal's next
     /// poll finds its base here and scopes only the changes since.
     scoped: VecDeque<(u64, Arc<ScopedProjection>)>,
@@ -524,7 +525,12 @@ impl RuntimeState {
             }
         }
         full.sessions = sessions;
-        super::verdicts::project(&mut full, &history.full);
+        super::verdicts::project(
+            &mut full,
+            &history.full,
+            committed.as_deref(),
+            history.committed.as_deref(),
+        );
         history.retain(full.clone(), browser)?;
         source.metadata.unread_frontiers = full.metadata.unread_frontiers.clone();
         source.metadata.notification_dismissals = full.metadata.notification_dismissals.clone();
@@ -533,6 +539,7 @@ impl RuntimeState {
         source.metadata.session_attention = full.metadata.session_attention.clone();
         history.attention_source = source;
         history.native_owners = native_owners;
+        history.committed = committed;
         history.full = full;
         Ok(history.cursor())
     }

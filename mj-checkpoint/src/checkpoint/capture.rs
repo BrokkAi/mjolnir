@@ -859,13 +859,18 @@ pub fn export_checkpoint_with_native_state(
     }
     let native_ms = native_started.elapsed().as_millis() as u64;
     let repositories_started = std::time::Instant::now();
-    if protocol_version == CHECKPOINT_ORIGIN_DELTA_EXPORT_PROTOCOL_VERSION {
+    if spec
+        .repositories
+        .iter()
+        .any(|repository| repository.capture == CheckpointRepositoryCapture::OriginDelta)
+    {
         verify_origin_delta_quiescence(&relay_root, &workspace_root, &spec.repositories, git)?;
     }
     let repositories = collect_checkpoint_repositories_with_policy(
         &workspace_root,
         &spec.repositories,
         git,
+        Some(spec.session.id.as_str()),
         Some(native_snapshot.path()),
         if spec.ignore_nested_repositories {
             crate::archive::UntrackedFiles::IgnoreNestedRepositories
@@ -912,6 +917,7 @@ pub(super) fn collect_checkpoint_repositories(
         workspace_root,
         specifications,
         git,
+        None,
         None,
         crate::archive::UntrackedFiles::Include,
     )
@@ -1024,10 +1030,88 @@ fn collect_origin_delta(
     })
 }
 
+pub fn raw_snapshot_input(
+    id: &str,
+    path: &Path,
+    launch: Option<crate::snapshot::LaunchRecord>,
+    origin_override: Option<String>,
+    pack_path: PathBuf,
+) -> crate::snapshot::RepositoryInput {
+    use crate::snapshot::{CheckoutOwnership, ExclusionSource, RepositoryInput};
+
+    RepositoryInput {
+        id: id.to_owned(),
+        checkout: path.to_path_buf(),
+        ownership: CheckoutOwnership::Raw { launch },
+        origin_override,
+        pack_path,
+        exclusions: ExclusionSource::Origin,
+        keep_dir: None,
+    }
+}
+
+fn collect_origin_delta_raw(
+    git: &dyn GitCommandRunner,
+    path: &Path,
+    repository: &CheckpointRepositorySpec,
+    session_id: &str,
+    snapshot_directory: &Path,
+) -> Result<RepositorySnapshot> {
+    use crate::snapshot::{
+        LaunchRecord, SessionCaptureConsent, SnapshotHead, capture_session_snapshot,
+    };
+
+    let location = crate::archive::git::locate_checkout(git, path)?;
+    let launch = LaunchRecord::read(git, &location.top_level, session_id)?;
+    let input = raw_snapshot_input(
+        &repository.id,
+        &location.top_level,
+        launch,
+        repository.origin_override.clone(),
+        snapshot_directory.join(&repository.id),
+    );
+    let mut snapshot = capture_session_snapshot(git, &[input], &SessionCaptureConsent::default())?
+        .repositories
+        .remove(&repository.id)
+        .context("raw origin delta snapshot is missing")?;
+
+    Ok(RepositorySnapshot {
+        metadata: crate::archive::RepositoryMetadata {
+            id: repository.id.clone(),
+            relative_destination: repository.relative_destination.clone(),
+            checkout_subdirectory: location.subdirectory,
+            origin: snapshot.origin_url.clone().unwrap_or_default(),
+            push_urls: Vec::new(),
+            remote_workspace: false,
+            plain_directory: false,
+            base_commit: String::new(),
+            head_commit: snapshot.head.commit().to_owned(),
+            branch: match &snapshot.head {
+                SnapshotHead::Branch { name, .. } => Some(name.clone()),
+                SnapshotHead::Detached(_) => None,
+            },
+            review_refs_metadata_only: false,
+            review_baseline_ref: None,
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
+            git_operation: None,
+            origin_delta: Some(Box::new(snapshot.metadata)),
+        },
+        origin_delta_pack: snapshot.pack.take(),
+        committed_bundle: Vec::new(),
+        staged_patch: Vec::new(),
+        unstaged_patch: Vec::new(),
+        untracked_tar: Vec::new(),
+        operation_payloads: None,
+        linked_worktrees: Vec::new(),
+    })
+}
+
 fn collect_checkpoint_repositories_with_policy(
     workspace_root: &Path,
     specifications: &[CheckpointRepositorySpec],
     git: &dyn GitCommandRunner,
+    session_id: Option<&str>,
     snapshot_directory: Option<&Path>,
     untracked_files: crate::archive::UntrackedFiles,
 ) -> Result<Vec<RepositorySnapshot>> {
@@ -1046,6 +1130,16 @@ fn collect_checkpoint_repositories_with_policy(
                         repository,
                         snapshot_directory
                             .context("origin-delta suspend requires a single-shot export")?,
+                    );
+                }
+                CheckpointRepositoryCapture::OriginDeltaRaw => {
+                    return collect_origin_delta_raw(
+                        git,
+                        &path,
+                        repository,
+                        session_id.context("raw origin-delta export requires a session id")?,
+                        snapshot_directory
+                            .context("raw origin-delta export requires a single-shot export")?,
                     );
                 }
                 CheckpointRepositoryCapture::PlainDirectory => {

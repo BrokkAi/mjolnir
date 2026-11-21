@@ -104,6 +104,8 @@ pub enum CheckpointRepositoryCapture {
     ManagedClone { base_commit: String },
     /// A quiesced independent managed clone relative to origin.
     OriginDelta,
+    /// A raw Git checkout captured relative to origin and its launch baseline.
+    OriginDeltaRaw,
     /// Bundle the repository relative to an explicit commit.
     DeltaFrom { base_commit: String },
     /// Bundle a managed network workspace relative to its immutable launch
@@ -216,10 +218,9 @@ pub struct CapturedCheckpoint {
 
 impl CheckpointRepositoryCapture {
     pub fn export_protocol_version(repositories: &[CheckpointRepositorySpec]) -> u32 {
-        if repositories
-            .iter()
-            .any(|repository| repository.capture == Self::OriginDelta)
-        {
+        if repositories.iter().any(|repository| {
+            matches!(repository.capture, Self::OriginDelta | Self::OriginDeltaRaw)
+        }) {
             CHECKPOINT_ORIGIN_DELTA_EXPORT_PROTOCOL_VERSION
         } else {
             CHECKPOINT_EXPORT_PROTOCOL_VERSION

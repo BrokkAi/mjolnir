@@ -2936,3 +2936,125 @@ async fn closing_a_child_recovers_a_turn_that_never_settles_after_cancellation()
     drop(handle);
     channels.shutdown.shutdown().await.unwrap();
 }
+
+#[test]
+fn raw_git_session_uses_origin_delta_raw_policy_and_removes_launch_record_on_destroy() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_git(&["init", "--initial-branch=main"]);
+    std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+    run_git(&["add", "README.md"]);
+    run_git(&["commit", "-m", "initial"]);
+
+    mj_checkpoint::snapshot::record_launch_if_absent(
+        &mj_checkpoint::archive::SystemGit,
+        &repo,
+        "raw-session",
+    )
+    .unwrap();
+    mj_checkpoint::snapshot::record_launch_if_absent(
+        &mj_checkpoint::archive::SystemGit,
+        &repo,
+        "sibling-session",
+    )
+    .unwrap();
+
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local-bare".into(), TargetTemplate::LocalBare);
+
+    let mut raw_session = checkpoint_test_session("raw-session");
+    raw_session.target_template_id = "local-bare".into();
+    raw_session.project_directory = Some(repo.clone());
+    raw_session.state = SessionState::Running;
+
+    let mut plain_session = checkpoint_test_session("plain-session");
+    plain_session.target_template_id = "local-bare".into();
+    plain_session.project_directory = Some(temp.path().to_path_buf());
+    plain_session.project = Some(std::sync::Arc::new(
+        serde_json::from_value(serde_json::json!({
+            "bundle": {
+                "primary_repo": "plain",
+                "repositories": [{
+                    "id": "plain",
+                    "local": temp.path(),
+                    "destination": "plain"
+                }]
+            },
+            "identities": {
+                "plain": { "local": temp.path() }
+            },
+            "plain_directories": ["plain"],
+            "network_sources": {}
+        }))
+        .unwrap(),
+    ));
+    plain_session.state = SessionState::Running;
+
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [
+                ("raw-session".into(), raw_session.clone()),
+                ("plain-session".into(), plain_session),
+            ]
+            .into_iter()
+            .collect(),
+            ..State::default()
+        },
+    };
+
+    assert_eq!(
+        controller
+            .explicit_suspend_export_policy("raw-session", false)
+            .unwrap(),
+        CheckpointExportPolicy::OriginDeltaRaw
+    );
+    assert_eq!(
+        controller
+            .explicit_suspend_export_policy("plain-session", false)
+            .unwrap(),
+        CheckpointExportPolicy::ReuseUnchangedArchive
+    );
+
+    controller
+        .remove_raw_launch_record(&raw_session, &mj_core::targets::ProcessExecutor)
+        .unwrap();
+    assert!(
+        mj_checkpoint::snapshot::LaunchRecord::read(
+            &mj_checkpoint::archive::SystemGit,
+            &repo,
+            "raw-session",
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        mj_checkpoint::snapshot::LaunchRecord::read(
+            &mj_checkpoint::archive::SystemGit,
+            &repo,
+            "sibling-session",
+        )
+        .unwrap()
+        .is_some()
+    );
+}

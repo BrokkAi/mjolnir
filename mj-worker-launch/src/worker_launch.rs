@@ -746,6 +746,25 @@ pub fn session_launch_config(
             "1".into(),
         );
     }
+    if subagent.is_none()
+        && matches!(checkout, mj_core::state::Checkout::Attached { .. })
+        && !session
+            .project
+            .as_ref()
+            .is_some_and(|p| p.primary_is_plain_directory())
+        && matches!(history, LaunchHistory::Stored)
+        && session.checkpoint.is_none()
+        && session.native_session_id.is_none()
+    {
+        launch.environment.insert(
+            mj_core::worker_launch::SESSION_RAW_LAUNCH_RECORD_ENV.into(),
+            "1".into(),
+        );
+    } else {
+        launch
+            .environment
+            .remove(mj_core::worker_launch::SESSION_RAW_LAUNCH_RECORD_ENV);
+    }
     apply_jev_settings(&mut launch, &config.jev);
     launch.agent_mailboxes_enabled = true;
     launch.subagents = session

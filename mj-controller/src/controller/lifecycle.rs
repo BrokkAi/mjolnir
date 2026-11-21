@@ -115,6 +115,11 @@ impl Controller {
         session_id: &str,
         ignore_nested_repositories: bool,
     ) -> Result<CheckpointExportPolicy> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
         let checkout = self.state.checkout(session_id)?;
         let origin_delta = match checkout
             .managed_worktree()
@@ -125,6 +130,13 @@ impl Controller {
         };
         if origin_delta {
             Ok(CheckpointExportPolicy::OriginDelta)
+        } else if matches!(checkout, mj_core::state::Checkout::Attached { .. })
+            && !session
+                .project
+                .as_ref()
+                .is_some_and(|project| project.primary_is_plain_directory())
+        {
+            Ok(CheckpointExportPolicy::OriginDeltaRaw)
         } else if ignore_nested_repositories {
             Ok(CheckpointExportPolicy::IgnoreNestedRepositories)
         } else {
@@ -1034,10 +1046,11 @@ impl Controller {
                             SourceTargetDisposition::Destroy,
                             if accepted_origin_delta {
                                 CheckpointExportPolicy::OriginDelta
-                            } else if ignore_nested_repositories {
-                                CheckpointExportPolicy::IgnoreNestedRepositories
                             } else {
-                                CheckpointExportPolicy::ReuseUnchangedArchive
+                                self.explicit_suspend_export_policy(
+                                    session_id,
+                                    ignore_nested_repositories,
+                                )?
                             },
                             acknowledge_unpublished_work,
                             before_close,
@@ -1783,6 +1796,14 @@ impl Controller {
                 checkout,
             )?
         };
+        if let Err(error) = self.remove_raw_launch_record(&session, executor) {
+            tracing::warn!(
+                session_id = %session.id,
+                target_id = %session.target_template_id,
+                error = format!("{error:#}"),
+                "Failed to remove raw launch record during stopped session destroy; continuing"
+            );
+        }
         super::checkpoint::remove_session_checkpoint_archives(
             &mj_core::config::sessions_dir(),
             session_id,
@@ -1948,6 +1969,13 @@ impl Controller {
                     cleanup,
                     executor,
                 )?;
+                outcome.cleanup(
+                    self.remove_raw_launch_record(&session, executor),
+                    &session,
+                    "raw launch record",
+                    cleanup,
+                    executor,
+                )?;
                 retire_worker_restart_intent(session_id)?;
                 super::checkpoint::remove_session_checkpoint_archives(
                     &mj_core::config::sessions_dir(),
@@ -1963,6 +1991,84 @@ impl Controller {
                 Ok(outcome)
             },
         )
+    }
+
+    fn remove_raw_launch_record(
+        &self,
+        session: &SessionRecord,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        if self.state.subagents.contains_key(&session.id)
+            || session.managed_worktree.is_some()
+            || session
+                .project
+                .as_ref()
+                .is_some_and(|project| project.primary_is_plain_directory())
+        {
+            return Ok(());
+        }
+        let Some(project_directory) = session.project_directory.as_deref() else {
+            return Ok(());
+        };
+        let Some(template) = self.config.targets.get(&session.target_template_id) else {
+            return Ok(());
+        };
+        match template {
+            mj_core::config::TargetTemplate::LocalBare => {
+                if !project_directory.is_dir() {
+                    return Ok(());
+                }
+                if mj_core::repository::resolve_local_directory(project_directory, executor)
+                    .is_ok_and(|resolved| resolved.plain_directory)
+                {
+                    return Ok(());
+                }
+                let git = super::worktree::ExecutorGit::local(executor);
+                mj_checkpoint::snapshot::remove_launch_record(&git, project_directory, &session.id)
+            }
+            mj_core::config::TargetTemplate::SshBare { ssh, .. } => {
+                ensure!(
+                    !session.id.is_empty()
+                        && session
+                            .id
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                    "invalid session id {:?} for remote raw launch record removal",
+                    session.id
+                );
+                let script = concat!(
+                    "dir=$1; id=$2; ",
+                    "[ -d \"$dir\" ] || exit 0; ",
+                    "common=$(git -C \"$dir\" rev-parse --git-common-dir 2>/dev/null) || exit 0; ",
+                    "case \"$common\" in /*) ;; *) common=\"$dir/$common\" ;; esac; ",
+                    "rm -f \"$common/mj/sessions/$id/launch\"; ",
+                    "rmdir \"$common/mj/sessions/$id\" 2>/dev/null || true",
+                );
+                let spec = targets::ssh_command_owned(
+                    targets::SshTrafficClass::Control,
+                    &targets::SshTarget::from(ssh),
+                    vec![
+                        "sh".into(),
+                        "-c".into(),
+                        script.into(),
+                        "mj-remove-launch".into(),
+                        project_directory.to_string_lossy().into_owned(),
+                        session.id.clone(),
+                    ],
+                );
+                let output = executor
+                    .execute(&spec)
+                    .context("remove remote raw launch record")?;
+                if output.status != 0 {
+                    bail!(
+                        "remote raw launch record removal failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 }
 

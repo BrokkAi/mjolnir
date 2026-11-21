@@ -166,6 +166,8 @@ pub(in crate::controller) enum CheckpointExportPolicy {
     Always,
     /// Explicit suspend of an independent managed clone.
     OriginDelta,
+    /// Explicit suspend of a raw Git checkout.
+    OriginDeltaRaw,
     /// Fresh verified export with explicit consent to omit nested repositories.
     IgnoreNestedRepositories,
     /// Export session state and repository metadata; the lifecycle intent owns

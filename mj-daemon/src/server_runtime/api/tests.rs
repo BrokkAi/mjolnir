@@ -280,9 +280,25 @@ async fn selection_backend(
     selection_backend_refusing(offers, parent_view, Default::default()).await
 }
 
+/// Like [`test_config`], but gives synthetic Codex profiles an API key so
+/// native-login-file eligibility treats them as authenticated without an
+/// on-disk `auth.json`.
+fn authenticated_test_config(profiles: &[(&str, HarnessKind)]) -> mj_core::config::Config {
+    let mut config = test_config(profiles);
+    for profile in config.profiles.values_mut() {
+        if profile.kind == HarnessKind::Codex {
+            profile.environment = mj_core::config::Environment::from_sources(BTreeMap::from([(
+                "CODEX_API_KEY".to_owned(),
+                mj_core::config::EnvironmentValue::Literal("test-key".to_owned()),
+            )]));
+        }
+    }
+    config
+}
+
 /// The profiles [`selection_backend`] enables.
 fn selection_config() -> mj_core::config::Config {
-    test_config(&[
+    authenticated_test_config(&[
         ("parent", HarnessKind::Codex),
         ("codex-high", HarnessKind::Codex),
         ("deepseek", HarnessKind::Codex),
@@ -1171,7 +1187,10 @@ async fn spawn_refuses_a_model_no_enabled_profile_offers() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
     catalog
-        .sync_now(&test_config(&[("parent", HarnessKind::Codex)]))
+        .sync_now(&authenticated_test_config(&[(
+            "parent",
+            HarnessKind::Codex,
+        )]))
         .await;
     let warmed = calls.load(std::sync::atomic::Ordering::SeqCst);
 
@@ -1206,7 +1225,10 @@ async fn spawn_refuses_a_model_no_enabled_profile_offers() {
 async fn spawn_over_a_cold_catalogue_waits_for_the_background_discovery() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
-    catalog.sync(&test_config(&[("parent", HarnessKind::Codex)]));
+    catalog.sync(&authenticated_test_config(&[(
+        "parent",
+        HarnessKind::Codex,
+    )]));
 
     let result = spawn_backend(catalog)
         .execute_subagent_tool("parent-1".into(), spawn_with())
@@ -2894,6 +2916,141 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
         .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
     assert_eq!(exports.registered().profile_id, "parent");
+}
+
+// Hard-won: #1632: cached model discovery let spawn and parked selection pick a Codex profile whose auth.json had been deleted.
+#[tokio::test]
+async fn cached_codex_profile_with_deleted_auth_json_is_excluded_until_restored() {
+    let missing_home = tempfile::tempdir().unwrap();
+    let healthy_home = tempfile::tempdir().unwrap();
+    let api_key_home = tempfile::tempdir().unwrap();
+    let missing_auth = missing_home.path().join("auth.json");
+    let healthy_auth = healthy_home.path().join("auth.json");
+    std::fs::write(&missing_auth, r#"{"auth_mode":"chatgpt"}"#).unwrap();
+    std::fs::write(&healthy_auth, r#"{"auth_mode":"chatgpt"}"#).unwrap();
+
+    let mut api_key_profile =
+        mj_core::config::HarnessProfile::new(HarnessKind::Codex, api_key_home.path().to_path_buf());
+    api_key_profile.environment = mj_core::config::Environment::from_sources(BTreeMap::from([(
+        "CODEX_API_KEY".to_owned(),
+        mj_core::config::EnvironmentValue::Literal("sk-test".to_owned()),
+    )]));
+
+    let config = mj_core::config::Config {
+        profiles: BTreeMap::from([
+            (
+                "codex-missing".to_owned(),
+                mj_core::config::HarnessProfile::new(
+                    HarnessKind::Codex,
+                    missing_home.path().to_path_buf(),
+                ),
+            ),
+            (
+                "codex-healthy".to_owned(),
+                mj_core::config::HarnessProfile::new(
+                    HarnessKind::Codex,
+                    healthy_home.path().to_path_buf(),
+                ),
+            ),
+            ("codex-api-key".to_owned(), api_key_profile),
+        ]),
+        ..mj_core::config::Config::default()
+    };
+
+    let offers: &[(&str, &[&str])] = &[
+        ("codex-missing", &["luna"]),
+        ("codex-healthy", &["luna"]),
+        ("codex-api-key", &["luna"]),
+    ];
+    let catalog = ProfileCatalog::with_probe(models_probe(offers));
+    catalog.sync_now(&config).await;
+
+    let (quota_publications, quota_updates) = tokio::sync::watch::channel(BTreeMap::new());
+    let (quota_refresh, quota_refreshes) = tokio::sync::mpsc::unbounded_channel();
+    let exports = Arc::new(RecordingExports {
+        parent: parent_record("parent-1", "codex-healthy"),
+        registered: std::sync::Mutex::new(None),
+        override_call: std::sync::Mutex::new(None),
+        base_call: std::sync::Mutex::new(None),
+        quota_publications,
+        quota_refreshes: std::sync::Mutex::new(quota_refreshes),
+    });
+    let backend = Arc::new(
+        ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "parent-1".into(),
+                accepted_ordinal: 1,
+                submitted: mpsc::unbounded_channel().0,
+                view: None,
+            })),
+            running_states(),
+            exports,
+        )
+        .with_profile_catalog(catalog)
+        .with_quota_publications(quota_updates)
+        .with_quota_refresh(quota_refresh),
+    );
+
+    // Delete auth.json while model discovery remains cached.
+    std::fs::remove_file(&missing_auth).unwrap();
+
+    for (label, candidates) in [
+        (
+            "spawn",
+            backend
+                .subagent_candidates("codex-healthy".into())
+                .await
+                .unwrap(),
+        ),
+        (
+            "parked/quota",
+            backend.session_profile_candidates().await.unwrap(),
+        ),
+        (
+            "reviewer-ready",
+            backend
+                .reviewer_ready_candidates("luna".into())
+                .await
+                .unwrap(),
+        ),
+    ] {
+        let offered_ids: Vec<&str> = candidates
+            .offered
+            .iter()
+            .map(|c| c.profile_id.as_str())
+            .collect();
+        assert_eq!(
+            offered_ids,
+            vec!["codex-api-key", "codex-healthy"],
+            "{label} should exclude codex-missing and keep codex-healthy + codex-api-key"
+        );
+        assert_eq!(candidates.unavailable.len(), 1, "{label}");
+        assert_eq!(candidates.unavailable[0].0, "codex-missing", "{label}");
+        assert!(
+            candidates.unavailable[0]
+                .1
+                .contains("mj login --profile codex-missing"),
+            "{label}: {}",
+            candidates.unavailable[0].1
+        );
+    }
+
+    // Restoring auth.json makes codex-missing eligible again without re-discovering.
+    std::fs::write(&missing_auth, r#"{"auth_mode":"chatgpt"}"#).unwrap();
+    let restored = backend
+        .subagent_candidates("codex-healthy".into())
+        .await
+        .unwrap();
+    let restored_ids: Vec<&str> = restored
+        .offered
+        .iter()
+        .map(|c| c.profile_id.as_str())
+        .collect();
+    assert_eq!(
+        restored_ids,
+        vec!["codex-api-key", "codex-healthy", "codex-missing"]
+    );
+    assert!(restored.unavailable.is_empty());
 }
 
 /// A last message that stands in for a missing handback has no bound, so the
@@ -7977,13 +8134,7 @@ fn ask_oracle_request(request_id: &str, message: &str) -> mj_core::subagent::Sub
 /// the relay of the child `oracle-1` scripted as a current worker.
 async fn oracle_backend(exports: Arc<OracleExports>) -> Arc<ApiBackend> {
     let catalog = ProfileCatalog::with_probe(models_probe(SAME_MODELS));
-    catalog
-        .sync_now(&test_config(&[
-            ("parent", HarnessKind::Codex),
-            ("codex-high", HarnessKind::Codex),
-            ("deepseek", HarnessKind::Codex),
-        ]))
-        .await;
+    catalog.sync_now(&selection_config()).await;
     let quotas = BTreeMap::from([
         (
             "parent".to_owned(),

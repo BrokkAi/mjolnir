@@ -1,5 +1,22 @@
 use super::*;
 
+/// A streaming upload body whose blocking `Read` end can be woken and closed
+/// immediately when cancellation starts or the target subprocess exits early.
+pub struct UploadBody {
+    reader: Box<dyn std::io::Read + Send>,
+    abort: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl UploadBody {
+    pub fn new(reader: Box<dyn std::io::Read + Send>, abort: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self { reader, abort }
+    }
+
+    pub fn into_parts(self) -> (Box<dyn std::io::Read + Send>, Arc<dyn Fn() + Send + Sync>) {
+        (self.reader, self.abort)
+    }
+}
+
 /// Everything the API needs from the daemon: live session actors, the durable
 /// projection, and the target-side git operations.
 ///
@@ -466,9 +483,10 @@ pub trait SubagentBackend: Send + Sync {
         &self,
         _session_id: String,
         _path: PathBuf,
-        _bytes: Vec<u8>,
+        _body: UploadBody,
+        _expected_len: Option<u64>,
         _overwrite: bool,
-    ) -> BoxFuture<'_, Result<(), ExportError>> {
+    ) -> BoxFuture<'_, Result<u64, ExportError>> {
         Box::pin(async { Err(ExportError::Refused("file injection is unavailable".into())) })
     }
 
