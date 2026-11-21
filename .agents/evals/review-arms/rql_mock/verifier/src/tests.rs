@@ -192,7 +192,7 @@ fn guarded_events_include_propagation_and_exclude_non_raise_macros() {
     "#,
     );
     let found = by_kind(&source, &query);
-    assert_eq!(found["call"], ["call()", "Ok(())"]);
+    assert_eq!(found["call"], ["call()"]);
     assert_eq!(found["write"], ["state"]);
     assert_eq!(found["raise"], ["unreachable!()"]);
     assert_eq!(found["return"], ["call()?", "Ok(())"]);
@@ -258,15 +258,73 @@ fn a_whole_body_anchor_cannot_account_for_a_nested_candidate() {
 }
 
 #[test]
-fn exact_role_span_covers_only_its_own_call_on_the_line() {
-    let query = query("guarded-paths", &[":event", "\"call\""], procedure());
-    let text = "fn seed() {\n    blå(); other();\n}\n";
-    let event =
-        json!({"kind": "call", "site": value_site(2, 2), "written": written(2, 4, "blå()")});
-    let row = guarded(event, json!([]), json!([]), Value::Null);
+fn role_byte_bounds_use_the_argument_anchor_and_distinguish_same_line_operands() {
+    let query = query("value-transfers", &[":port", "\"argument\""], procedure());
+    let text = "fn seed() {\n    first(blå + 1); second(other);\n}\n";
+    let row = json!({"kind": "value_transfer", "fields": {
+        "selected_port": {"operand": written(2, 10, "blå")},
+        "sink": {"port": "argument", "site": value_site(2, 2)}
+    }});
     let out = accounting(&query, text, json!({"rows": [row]}));
     assert_eq!(codes(&out), ["unaccounted-candidate"]);
     assert_eq!(out.errors[0].candidate.as_deref(), Some("c2"));
+}
+
+#[test]
+fn narrow_and_wide_try_sites_cover_the_propagation_token() {
+    let query = query(
+        "contract-cases",
+        &[":depth", "0", ":kind", "\"error\""],
+        procedure(),
+    );
+    let text = "fn seed() -> Result<(), Error> {\n    first()\n        .transpose()?;\n    second()?;\n    third().await?;\n    Ok(())\n}\n";
+    let first_operand = json!({"site": value_site(2, 3), "verbatim": [
+        {"start_byte": 4, "end_byte": 11, "text": "first()"},
+        {"start_byte": 8, "end_byte": 20, "text": ".transpose()"}
+    ]});
+    for first_site in [value_site(3, 3), value_site(2, 3)] {
+        let rows = [
+            (first_site, first_operand.clone(), written(3, 20, "?")),
+            (
+                value_site(4, 4),
+                written(4, 4, "second()"),
+                written(4, 12, "?"),
+            ),
+            (
+                value_site(5, 5),
+                written(5, 4, "third().await"),
+                written(5, 17, "?"),
+            ),
+        ]
+        .into_iter()
+        .map(|(site, operand, token)| {
+            json!({"kind": "contract_case", "fields": {
+                "kind": "error", "site": site,
+                "outcome": {"operand": operand, "propagation_site": token}
+            }})
+        })
+        .collect::<Vec<_>>();
+        let out = accounting(&query, text, json!({"rows": rows}));
+        assert_eq!(out.candidates.len(), 3);
+        assert!(out.errors.is_empty() && out.unchecked.is_empty());
+    }
+}
+
+#[test]
+fn call_site_on_its_last_path_segment_covers_the_call() {
+    let query = query("guarded-paths", &[":event", "\"call\""], procedure());
+    let text = "fn seed() {\n    scope::\n        action(42);\n}\n";
+    let row = guarded(
+        json!({"kind": "call", "site": value_site(3, 3)}),
+        json!([]),
+        json!([]),
+        Value::Null,
+    );
+    assert!(
+        accounting(&query, text, json!({"rows": [row]}))
+            .errors
+            .is_empty()
+    );
 }
 
 #[test]
@@ -306,24 +364,116 @@ fn selected_port_and_pivot_account_even_when_primary_is_elsewhere() {
     );
 }
 
+// Hard-won: 12abda8: seed-body ? exits excluded as other
 #[test]
-fn exclusions_require_a_valid_reason_and_nonempty_other_detail() {
+fn contract_error_propagation_cannot_be_excluded_as_outside_depth_zero() {
+    let query = query(
+        "contract-cases",
+        &[":depth", "0", ":kind", "\"error\""],
+        procedure(),
+    );
+    let text = "fn seed() -> Result<(), Error> {\n    first()\n        .transpose()?;\n    second()?;\n    third().await?;\n    Err(failure)\n}\n";
+    let row = json!({"kind": "contract_case", "fields": {
+        "kind": "error", "site": value_site(6, 6)
+    }});
+    let excluded: Vec<_> = [(2, 3), (4, 4), (5, 5)]
+        .into_iter()
+        .map(|(start, end)| {
+            json!({"candidate_site": value_site(start, end), "reason": "other",
+               "detail": "callees outside depth 0"})
+        })
+        .collect();
+    let out = accounting(&query, text, json!({"rows": [row], "excluded": excluded}));
+    assert_eq!(codes(&out), ["unaccounted-candidate"; 3]);
+    assert_eq!(
+        out.errors
+            .iter()
+            .map(|issue| issue.site.start_line)
+            .collect::<Vec<_>>(),
+        [2, 4, 5]
+    );
+}
+
+#[test]
+fn unreachable_needs_a_condition_enclosing_the_candidate_in_a_branch() {
     let query = query("guarded-paths", &[":event", "\"call\""], procedure());
-    let text = "fn seed() {\n    action();\n}\n";
-    for (reason, detail, accepted) in [
-        ("unreachable", "", true),
-        ("made-up", "", false),
-        ("other", " ", false),
-        ("other", "the operation has no incident transfer", true),
+    let text = "fn seed() {\n    if flag {\n        action();\n    }\n    if unrelated {}\n}\n";
+    for (guard, passes) in [
+        (None, false),
+        (Some(value_site(5, 5)), false),
+        (Some(value_site(3, 3)), false),
+        (Some(value_site(2, 2)), true),
     ] {
-        let answer = json!({"rows": [], "excluded": [
-            {"candidate_site": value_site(2, 2), "reason": reason, "detail": detail}]});
-        assert_eq!(
-            accounting(&query, text, answer).errors.is_empty(),
-            accepted,
-            "{reason}"
-        );
+        let mut exclusion =
+            json!({"candidate_site": value_site(3, 3), "reason": "unreachable", "detail": ""});
+        if let Some(site) = guard {
+            exclusion["guard_site"] = site;
+        }
+        let out = accounting(&query, text, json!({"rows": [], "excluded": [exclusion]}));
+        if passes {
+            assert!(out.errors.is_empty());
+            assert_eq!(out.unchecked.len(), 1);
+            assert_eq!(out.unchecked[0].what, "c1");
+        } else {
+            assert_eq!(codes(&out), ["false-exclusion"]);
+        }
     }
+}
+
+#[test]
+fn unreachable_guard_can_cite_match_arm_while_or_let_else() {
+    let query = query("guarded-paths", &[":event", "\"call\""], procedure());
+    for text in [
+        "fn seed() {\n    match mode {\n        A => {\n            action();\n        }\n    }\n}\n",
+        "fn seed() {\n    {\n        while flag {\n            action();\n        }\n    }\n}\n",
+        "fn seed() {\n    {\n        let Some(value) = optional else {\n            action();\n            return;\n        };\n    }\n}\n",
+    ] {
+        let exclusion = json!({"candidate_site": value_site(4, 4), "reason": "unreachable",
+                               "detail": "", "guard_site": value_site(3, 3)});
+        let out = accounting(&query, text, json!({"rows": [], "excluded": [exclusion]}));
+        assert!(out.errors.is_empty(), "{text}");
+        assert_eq!(out.unchecked.len(), 1);
+    }
+}
+
+#[test]
+fn macro_not_call_requires_a_macro_invocation() {
+    let call = query("guarded-paths", &[":event", "\"call\""], procedure());
+    let raise = query("guarded-paths", &[":event", "\"raise\""], procedure());
+    let answer = json!({"rows": [], "excluded": [
+        {"candidate_site": value_site(2, 2), "reason": "macro-not-call", "detail": ""}
+    ]});
+    let out = accounting(&call, "fn seed() {\n    invoke();\n}\n", answer.clone());
+    assert_eq!(codes(&out), ["false-exclusion"]);
+    let out = accounting(&raise, "fn seed() {\n    panic!();\n}\n", answer);
+    assert!(out.errors.is_empty());
+    assert_eq!(out.candidates.len(), 1);
+}
+
+#[test]
+fn argument_and_call_candidates_skip_constructors_but_keep_nested_calls() {
+    let text = "fn seed() {\n    Ok(text);\n    Some(x);\n    Box::new(x);\n    Foo::Bar(fetch(y));\n    Widget(w);\n    return Err(e);\n}\n";
+    let arguments = query("value-transfers", &[":port", "\"argument\""], procedure());
+    assert_eq!(
+        by_kind(&file(&arguments, text), &arguments)["argument"],
+        ["x", "y"]
+    );
+    let calls = query("guarded-paths", &[":event", "\"call\""], procedure());
+    assert_eq!(
+        by_kind(&file(&calls, text), &calls)["call"],
+        ["Box::new(x)", "fetch(y)"]
+    );
+    let errors = query("contract-cases", &[":kind", "\"error\""], procedure());
+    assert_eq!(by_kind(&file(&errors, text), &errors)["error"], ["Err(e)"]);
+}
+
+#[test]
+fn explicit_aliases_and_names_that_cross_constructor_conventions_stay_unchecked() {
+    let query = query("guarded-paths", &[":event", "\"call\""], procedure());
+    let text = "use Option::Some as wrap;\nfn Upper(x: u8) {}\nstruct lower(u8);\nfn seed() {\n    wrap(1);\n    Upper(2);\n    lower(3);\n}\n";
+    let source = file(&query, text);
+    assert!(by_kind(&source, &query).is_empty());
+    assert_eq!(source.syntax.uncertain_constructors.len(), 3);
 }
 
 // Hard-won: 73f3134: exclusions passed with reasons false by construction
@@ -651,7 +801,7 @@ fn tail_branches_supply_error_candidates_and_partial_return_evidence() {
 fn exact_seed_paths_and_parse_failures_are_reported_per_file() {
     let scratch = std::env::temp_dir().join(format!("rql-verifier-test-{}", std::process::id()));
     fs::create_dir(&scratch).unwrap();
-    fs::write(scratch.join("fixture.rs"), "fn seed() -> u8 { 1 }\n").unwrap();
+    fs::write(scratch.join("fixture.rs"), "fn seed() -> u8 {\n    1\n}\n").unwrap();
     fs::write(scratch.join("other.rs"), "fn seed() -> u8 { 2 }\n").unwrap();
     fs::write(scratch.join("invalid.rs"), "fn invalid\n").unwrap();
     let input = Input {
@@ -665,9 +815,9 @@ fn exact_seed_paths_and_parse_failures_are_reported_per_file() {
                 ["where", "\"fixture.rs\"", ["callable", ":name", "\"seed\""]]
             ]),
         ),
-        answer: json!({"rows": [], "excluded": [
-            {"candidate_site": value_site(1, 1), "reason": "unreachable"}
-        ]}),
+        answer: json!({"rows": [{"kind": "contract_case", "fields": {
+            "kind": "return", "site": value_site(2, 2), "calls": []
+        }}]}),
     };
     let out = verify(input);
     fs::remove_dir_all(scratch).unwrap();

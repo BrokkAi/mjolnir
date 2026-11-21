@@ -101,6 +101,19 @@ impl Source {
             .expect("valid source span")
     }
 
+    pub fn role_anchor(&self, site: &Site, role: &Value) -> Option<Anchor> {
+        let lines = self.line_bytes(site)?;
+        if let Some(parts) = role["verbatim"].as_array()
+            && let Some(range) = self.written_range(site, parts)
+        {
+            return Some(Anchor { range, exact: true });
+        }
+        Some(Anchor {
+            range: lines,
+            exact: false,
+        })
+    }
+
     pub fn anchor(&self, site: &Site, evidence: &Value) -> Option<Anchor> {
         let lines = self.line_bytes(site)?;
         let mut ranges = Vec::new();

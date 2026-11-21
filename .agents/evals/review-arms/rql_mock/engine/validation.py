@@ -211,10 +211,11 @@ def validate_answer(answer, read_blob):
         if EXECUTION_LIMIT.search(frontier["reason"]):
             report("frontier-reason", label, "coverage may describe only semantic boundaries")
         site(frontier["site"], label + ".site")
+    exclusion_fields = {"candidate_site", "reason", "detail"}
     for index, item in enumerate(answer["excluded"]):
         label = f"excluded[{index}]"
-        if not isinstance(item, dict) or set(item) != {"candidate_site", "reason", "detail"}:
-            report("exclusion-shape", label, "expected candidate_site, reason and detail")
+        if not isinstance(item, dict) or not exclusion_fields <= item.keys() <= exclusion_fields | {"guard_site"}:
+            report("exclusion-shape", label, "expected candidate_site, reason, detail and optional guard_site")
             continue
         reason, detail = item["reason"], item["detail"]
         if not isinstance(reason, str):
@@ -222,6 +223,8 @@ def validate_answer(answer, read_blob):
         if not isinstance(detail, str):
             report("exclusion-detail", f"{label}.detail", "expected text")
         site(item["candidate_site"], f"{label}.candidate_site")
+        if "guard_site" in item:
+            site(item["guard_site"], f"{label}.guard_site")
     return rows, coverage, errors
 
 

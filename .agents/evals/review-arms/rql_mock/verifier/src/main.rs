@@ -238,6 +238,24 @@ fn verify(input: Input) -> io::Result<Output> {
 
     for file in &files {
         let source = &file.source;
+        if !(query.incoming && query.depth == 0)
+            && (query.selects_kind(Kind::Argument) || query.selects_kind(Kind::Call))
+        {
+            for &span in &file.syntax.uncertain_constructors {
+                if query.incoming
+                    || file
+                        .seeds
+                        .iter()
+                        .any(|&id| file.syntax.procedures[id].body.contains(span))
+                {
+                    let site = source.site(span);
+                    out.unchecked(
+                        format!("{}:{}", site.path, site.start_line),
+                        "naming exception or alias obscures whether this is a call or constructor",
+                    );
+                }
+            }
+        }
         for span in &file.syntax.uncertain_callbacks {
             if query.step == Step::Contract
                 && matches!(query.selector.as_str(), "all" | "callback")

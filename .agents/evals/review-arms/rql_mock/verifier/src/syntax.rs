@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
+use proc_macro2::Span;
 use syn::ext::IdentExt;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -48,6 +49,7 @@ pub struct Procedure {
 pub struct Construct {
     pub kind: Kind,
     pub span: Bytes,
+    pub anchor: usize,
     pub statement: Bytes,
     pub owner: Option<usize>,
     pub deferred: bool,
@@ -60,6 +62,7 @@ pub struct Guard {
     pub scope: Bytes,
     pub branches: Vec<(Option<bool>, Bytes)>,
     pub match_arms: Rc<[Bytes]>,
+    pub match_scrutinee: bool,
 }
 
 #[derive(Default)]
@@ -67,8 +70,10 @@ pub struct Syntax {
     pub procedures: Vec<Procedure>,
     pub constructs: Vec<Construct>,
     pub guards: Vec<Guard>,
+    pub macro_invocations: BTreeSet<Bytes>,
     pub opaque: Vec<Bytes>,
     pub uncertain_callbacks: Vec<Bytes>,
+    pub uncertain_constructors: Vec<Bytes>,
 }
 
 struct Scanner<'a> {
@@ -81,6 +86,7 @@ struct Scanner<'a> {
     shadowed: BTreeSet<String>,
     indirect_names: BTreeSet<String>,
     wildcard_import: bool,
+    constructor_name_exceptions: BTreeSet<String>,
 }
 
 pub fn scan(source: &mut Source) -> syn::Result<Syntax> {
@@ -98,6 +104,7 @@ pub fn scan(source: &mut Source) -> syn::Result<Syntax> {
         shadowed: BTreeSet::new(),
         indirect_names: imports.aliases,
         wildcard_import: imports.wildcard,
+        constructor_name_exceptions: imports.constructor_name_exceptions,
     };
     scanner.visit_file(&file);
     Ok(scanner.syntax)
@@ -119,11 +126,40 @@ impl<'ast> Visit<'ast> for Bindings {
 struct Imports {
     aliases: BTreeSet<String>,
     wildcard: bool,
+    constructor_name_exceptions: BTreeSet<String>,
 }
 
 impl<'ast> Visit<'ast> for Imports {
     fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
-        self.aliases.insert(rename.rename.unraw().to_string());
+        let alias = rename.rename.unraw().to_string();
+        if constructor_name(&rename.ident.unraw().to_string()) != constructor_name(&alias) {
+            self.constructor_name_exceptions.insert(alias.clone());
+        }
+        self.aliases.insert(alias);
+    }
+
+    fn visit_signature(&mut self, signature: &'ast Signature) {
+        let name = signature.ident.unraw().to_string();
+        if constructor_name(&name) {
+            self.constructor_name_exceptions.insert(name);
+        }
+        visit::visit_signature(self, signature);
+    }
+
+    fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+        let name = item.ident.unraw().to_string();
+        if matches!(item.fields, syn::Fields::Unnamed(_)) && !constructor_name(&name) {
+            self.constructor_name_exceptions.insert(name);
+        }
+        visit::visit_item_struct(self, item);
+    }
+
+    fn visit_variant(&mut self, variant: &'ast syn::Variant) {
+        let name = variant.ident.unraw().to_string();
+        if matches!(variant.fields, syn::Fields::Unnamed(_)) && !constructor_name(&name) {
+            self.constructor_name_exceptions.insert(name);
+        }
+        visit::visit_variant(self, variant);
     }
 
     fn visit_use_glob(&mut self, _: &'ast syn::UseGlob) {
@@ -131,11 +167,18 @@ impl<'ast> Visit<'ast> for Imports {
     }
 }
 
-fn call_name(expr: &Expr) -> Option<String> {
+// Rust's non_camel_case_types and non_snake_case lints distinguish type
+// and variant names from function names. Constructor operands have call
+// syntax in syn; classify path callees by their final written segment.
+fn constructor_name(name: &str) -> bool {
+    name.starts_with(char::is_uppercase) && !name.contains('_')
+}
+
+fn call_ident(expr: &Expr) -> Option<&syn::Ident> {
     match expr {
-        Expr::Path(path) => Some(path.path.segments.last()?.ident.unraw().to_string()),
-        Expr::Paren(paren) => call_name(&paren.expr),
-        Expr::Group(group) => call_name(&group.expr),
+        Expr::Path(path) => Some(&path.path.segments.last()?.ident),
+        Expr::Paren(paren) => call_ident(&paren.expr),
+        Expr::Group(group) => call_ident(&group.expr),
         _ => None,
     }
 }
@@ -192,10 +235,15 @@ fn compound_assignment(op: &BinOp) -> bool {
 
 impl Scanner<'_> {
     fn add(&mut self, kind: Kind, node: &impl Spanned, name: Option<String>) {
+        self.add_at(kind, node, node.span(), name);
+    }
+
+    fn add_at(&mut self, kind: Kind, node: &impl Spanned, anchor: Span, name: Option<String>) {
         let span = self.source.bytes(node.span());
         self.syntax.constructs.push(Construct {
             kind,
             span,
+            anchor: self.source.bytes(anchor).start,
             statement: self.statement.unwrap_or(span),
             owner: self.owner,
             deferred: self.deferred,
@@ -205,7 +253,11 @@ impl Scanner<'_> {
     }
 
     fn returned(&mut self, exit: &Expr, operand: Option<&Expr>) {
-        self.add(Kind::Return, exit, None);
+        let anchor = match exit {
+            Expr::Return(ret) => ret.return_token.span,
+            _ => exit.span(),
+        };
+        self.add_at(Kind::Return, exit, anchor, None);
         if let Some(operand) = operand {
             self.add(Kind::Operand, operand, None);
             self.returned_errors(operand);
@@ -214,9 +266,10 @@ impl Scanner<'_> {
 
     fn returned_errors(&mut self, operand: &Expr) {
         if let Expr::Call(call) = operand
-            && call_name(&call.func).as_deref() == Some("Err")
+            && let Some(callee) = call_ident(&call.func)
+            && callee.unraw() == "Err"
         {
-            self.add(Kind::Error, operand, None);
+            self.add_at(Kind::Error, operand, callee.span(), None);
         }
         for alternative in tail_alternatives(operand) {
             self.returned_errors(alternative);
@@ -247,13 +300,17 @@ impl Scanner<'_> {
 
         let mut formals = Bindings::default();
         for arg in &sig.inputs {
-            self.add(Kind::Input, arg, None);
-            match arg {
-                FnArg::Receiver(_) => {
+            let anchor = match arg {
+                FnArg::Receiver(receiver) => {
                     formals.0.insert("self".into());
+                    receiver.self_token.span
                 }
-                FnArg::Typed(typed) => formals.visit_pat(&typed.pat),
-            }
+                FnArg::Typed(typed) => {
+                    formals.visit_pat(&typed.pat);
+                    typed.pat.span()
+                }
+            };
+            self.add_at(Kind::Input, arg, anchor, None);
         }
         let mut locals = Bindings::default();
         locals.visit_block(block);
@@ -285,6 +342,7 @@ impl Scanner<'_> {
             scope: self.source.bytes(scope.span()),
             branches,
             match_arms: Rc::default(),
+            match_scrutinee: false,
         });
     }
 }
@@ -338,23 +396,39 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     fn visit_expr(&mut self, expr: &'ast Expr) {
         match expr {
             Expr::Return(ret) => self.returned(expr, ret.expr.as_deref()),
-            Expr::Try(_) => {
-                self.add(Kind::Try, expr, None);
-                self.add(Kind::Error, expr, None);
+            Expr::Try(propagation) => {
+                let anchor = propagation.question_token.span;
+                self.add_at(Kind::Try, expr, anchor, None);
+                self.add_at(Kind::Error, expr, anchor, None);
             }
             Expr::Call(call) => {
-                let name = call_name(&call.func);
+                let callee = call_ident(&call.func);
+                let name = callee.map(|ident| ident.unraw().to_string());
+                let anchor = callee.map_or_else(|| call.func.span(), syn::Ident::span);
                 let indirect = self.wildcard_import
                     || name
                         .as_ref()
                         .is_none_or(|name| self.indirect_names.contains(name))
                     || !matches!(&*call.func, Expr::Path(_));
-                self.add(Kind::Call, expr, name);
-                self.syntax
-                    .constructs
-                    .last_mut()
-                    .expect("added call")
-                    .indirect = indirect;
+                let ambiguous_constructor = name.as_ref().is_some_and(|name| {
+                    self.constructor_name_exceptions.contains(name)
+                        || (constructor_name(name) && self.indirect_names.contains(name))
+                });
+                if ambiguous_constructor {
+                    let span = self.source.bytes(expr.span());
+                    self.syntax.uncertain_constructors.push(span);
+                    self.syntax.opaque.push(span);
+                } else if !name.as_deref().is_some_and(constructor_name) {
+                    self.add_at(Kind::Call, expr, anchor, name);
+                    self.syntax
+                        .constructs
+                        .last_mut()
+                        .expect("added call")
+                        .indirect = indirect;
+                    for argument in &call.args {
+                        self.add(Kind::Argument, argument, None);
+                    }
+                }
                 if let Some(base) = formal_base(&call.func)
                     && self.formals.contains(&base)
                 {
@@ -363,19 +437,16 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                             .uncertain_callbacks
                             .push(self.source.bytes(expr.span()));
                     } else {
-                        self.add(Kind::Callback, expr, None);
+                        self.add_at(Kind::Callback, expr, anchor, None);
                     }
-                }
-                for argument in &call.args {
-                    self.add(Kind::Argument, argument, None);
                 }
             }
             Expr::MethodCall(call) => {
                 let name = call.method.unraw().to_string();
                 if matches!(name.as_str(), "unwrap" | "expect") {
-                    self.add(Kind::Panic, expr, None);
+                    self.add_at(Kind::Panic, expr, call.method.span(), None);
                 }
-                self.add(Kind::Call, expr, Some(name));
+                self.add_at(Kind::Call, expr, call.method.span(), Some(name));
                 self.add(Kind::Argument, &call.receiver, None);
                 for argument in &call.args {
                     self.add(Kind::Argument, argument, None);
@@ -392,23 +463,20 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        let name = mac
-            .path
-            .segments
-            .last()
-            .expect("macro name")
-            .ident
-            .to_string();
+        let ident = &mac.path.segments.last().expect("macro name").ident;
+        let name = ident.unraw().to_string();
         if matches!(
             name.as_str(),
             "panic" | "unreachable" | "todo" | "unimplemented"
         ) || name.starts_with("assert")
             || name.starts_with("debug_assert")
         {
-            self.add(Kind::Panic, mac, None);
-            self.add(Kind::Raise, mac, None);
+            self.add_at(Kind::Panic, mac, ident.span(), None);
+            self.add_at(Kind::Raise, mac, ident.span(), None);
         }
-        self.syntax.opaque.push(self.source.bytes(mac.span()));
+        let span = self.source.bytes(mac.span());
+        self.syntax.macro_invocations.insert(span);
+        self.syntax.opaque.push(span);
     }
 
     fn visit_expr_if(&mut self, expr: &'ast syn::ExprIf) {
@@ -432,11 +500,13 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             .iter()
             .map(|arm| self.source.bytes(arm.body.span()))
             .collect();
-        self.condition(
-            &expr.expr,
-            expr,
-            arms.iter().map(|&arm| (None, arm)).collect(),
-        );
+        self.syntax.guards.push(Guard {
+            conditions: vec![self.source.bytes(expr.expr.span())],
+            scope: self.source.bytes(expr.span()),
+            branches: arms.iter().map(|&arm| (None, arm)).collect(),
+            match_arms: Rc::default(),
+            match_scrutinee: true,
+        });
         for (index, arm) in expr.arms.iter().enumerate() {
             let body = arms[index];
             let pattern = self.source.bytes(arm.pat.span());
@@ -446,6 +516,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 scope,
                 branches: vec![(Some(true), body)],
                 match_arms: Rc::clone(&arms),
+                match_scrutinee: false,
             };
             if let Some((_, condition)) = &arm.guard {
                 // A pattern can match even when its if-guard rejects the arm.
@@ -454,6 +525,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                     scope,
                     branches: vec![(None, body)],
                     match_arms: Rc::default(),
+                    match_scrutinee: false,
                 });
                 guard.conditions = vec![self.source.bytes(condition.span())];
             }
@@ -481,6 +553,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 scope,
                 branches: vec![(Some(false), branch)],
                 match_arms: Rc::default(),
+                match_scrutinee: false,
             });
         }
         visit::visit_local(self, node);

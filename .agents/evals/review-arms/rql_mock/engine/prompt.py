@@ -48,19 +48,28 @@ value-transfer port identity in selected_port. Use null for an inapplicable
 field such as an outgoing guarded path's pivot.
 
 Account for the syntactic candidates within the query's seed and selected
-kind, port or event. Use an exact role span within the enclosing statement,
-not a whole-body span. For value transfers put the seed-side candidate's site
+kind, port or event. Use the role field's own site to cite the candidate's
+operator, name, or first operand token within its enclosing statement. A
+wider site within that statement also covers the candidate. For value
+transfers put the seed-side candidate's site
 or exact written operand evidence in fields.selected_port. For incoming
 guarded paths put the call-site anchor in fields.pivot. Otherwise, account for
 a candidate at the row's primary anchor. List each remaining candidate as
 {"candidate_site": {...}, "reason": "...", "detail": "..."} in excluded.
-Use the candidate's exact line span and one reason from unreachable,
-not-the-seed, macro-not-call, duplicate or other. For duplicate, put the ID
-of its twin in detail and cover that twin with a row. For other, give a
-nonempty explanation in detail. Use not-the-seed for unrelated same-named
-incoming callees or when seed filters require semantic resolution. Incoming
-queries at depth zero have no candidates. Use an empty excluded list when
-there are no exclusions, including for documented steps.
+Every depth-zero candidate in the seed body is in scope by construction.
+Include a row for it unless one of these four exclusion reasons applies.
+Contract-cases error candidates include written ? propagation, even at
+depth zero. The callee's depth does not exclude the propagation site. Constructor operands
+such as Ok(text) and Some(x) are outside the call-argument port. Box::new(x)
+is a call and x is its argument.
+
+Use the candidate's exact line span. For duplicate, put the ID of a candidate
+covered directly by a row in detail. Use macro-not-call only for a written
+macro invocation. Use not-the-seed only for an incoming name match whose
+callee is unrelated to the seed. For unreachable, add guard_site with the
+source site of the enclosing if, match arm, while or let-else condition.
+Explain in detail why the candidate's branch cannot run. Use an empty
+excluded list when there are no exclusions, including for documented steps.
 
 For each written operand, literal, field initializer, predicate, operator,
 message and command argument, represent its exact spelling as

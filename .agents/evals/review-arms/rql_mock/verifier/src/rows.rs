@@ -65,6 +65,20 @@ fn role_site(value: &Value) -> Option<(Site, &Value)> {
     None
 }
 
+// A role's declared site owns its bounds. Written operands or provenance
+// elsewhere in the row may describe only part of that site.
+fn coverage_site(role: &Value) -> Option<(Site, &Value)> {
+    if let Some(site) = site(role).or_else(|| site(&role["site"])) {
+        return Some((site, role));
+    }
+    for key in ["written", "operand"] {
+        if let Some(site) = site(&role[key]["site"]) {
+            return Some((site, &role[key]));
+        }
+    }
+    None
+}
+
 impl Row<'_> {
     fn primary_evidence(&self, step: Step) -> &Value {
         match step {
@@ -85,10 +99,10 @@ impl Row<'_> {
     fn candidate_sites(&self, query: &Query) -> Vec<(Site, &Value)> {
         match query.step {
             Step::Guarded if query.incoming => {
-                role_site(&self.fields["pivot"]).into_iter().collect()
+                coverage_site(&self.fields["pivot"]).into_iter().collect()
             }
             Step::Value => {
-                if let Some(selected) = role_site(&self.fields["selected_port"]) {
+                if let Some(selected) = coverage_site(&self.fields["selected_port"]) {
                     return vec![selected];
                 }
                 let endpoints: &[_] = if query.downstream {
@@ -101,16 +115,13 @@ impl Row<'_> {
                     .filter_map(|endpoint| {
                         let value = &self.fields[*endpoint];
                         (value["port"] == query.selector)
-                            .then(|| role_site(value))
+                            .then(|| coverage_site(value))
                             .flatten()
                     })
                     .collect()
             }
-            _ => self
-                .site
-                .iter()
-                .map(|site| (site.clone(), self.primary_evidence(query.step)))
-                .collect(),
+            Step::Guarded => coverage_site(&self.fields["event"]).into_iter().collect(),
+            Step::Contract => coverage_site(&self.fields["site"]).into_iter().collect(),
         }
     }
 }
@@ -140,15 +151,17 @@ fn row_coverage(
     let owner = &file.syntax.procedures[construct.owner.expect("selected procedure")];
     let mut ambiguity = None;
     for row in rows {
-        for (site, evidence) in row.candidate_sites(query) {
-            let Some(anchor) = source.anchor(&site, evidence) else {
+        for (site, role) in row.candidate_sites(query) {
+            let Some(anchor) = source.role_anchor(&site, role) else {
                 continue;
             };
             let candidate_range = project(source, construct.span, anchor);
             let statement = project(source, construct.statement, anchor);
             let body = project(source, owner.body, anchor);
             let declaration = project(source, owner.span, anchor);
-            if anchor.range.contains(candidate_range) && statement.contains(anchor.range) {
+            if (anchor.range.start..anchor.range.end).contains(&construct.anchor)
+                && statement.contains(anchor.range)
+            {
                 if anchor.range.contains(body) || anchor.range.contains(declaration) {
                     // Line-only evidence can be indistinguishable from a whole-body
                     // citation in a one-line function.
@@ -230,6 +243,26 @@ pub fn account<'a>(
         .extend(checked.into_iter().map(|(_, _, candidate, _)| candidate));
 }
 
+fn enclosing_exclusion_guard(file: &Parsed, construct: &Construct, guard_site: &Value) -> bool {
+    let Some((site, evidence)) = role_site(guard_site) else {
+        return false;
+    };
+    let Some(anchor) = file.source.anchor(&site, evidence) else {
+        return false;
+    };
+    file.syntax.guards.iter().any(|guard| {
+        !guard.match_scrutinee
+            && guard
+                .conditions
+                .iter()
+                .any(|&condition| project(&file.source, condition, anchor) == anchor.range)
+            && guard
+                .branches
+                .iter()
+                .any(|&(_, branch)| branch.contains(construct.span))
+    })
+}
+
 fn account_candidate(
     answer: &Value,
     file: &Parsed,
@@ -241,6 +274,8 @@ fn account_candidate(
 ) {
     let mut false_exclusion = None;
     let mut valid_exclusion = false;
+    let mut unreachable = false;
+    let mut unknown_reason = false;
     for exclusion in exclusions(answer) {
         let Some((site, evidence)) = role_site(&exclusion["candidate_site"]) else {
             continue;
@@ -255,9 +290,22 @@ fn account_candidate(
         }
         let detail = exclusion["detail"].as_str();
         match exclusion["reason"].as_str() {
-            Some("unreachable" | "macro-not-call") => valid_exclusion = true,
-            Some("other") if detail.is_some_and(|detail| !detail.trim().is_empty()) => {
+            Some("unreachable")
+                if enclosing_exclusion_guard(file, construct, &exclusion["guard_site"]) =>
+            {
                 valid_exclusion = true;
+                unreachable = true;
+            }
+            Some("unreachable") => {
+                false_exclusion = Some(
+                    "unreachable requires a guard_site identifying a condition that encloses the candidate in a branch",
+                );
+            }
+            Some("macro-not-call") if file.syntax.macro_invocations.contains(&construct.span) => {
+                valid_exclusion = true;
+            }
+            Some("macro-not-call") => {
+                false_exclusion = Some("macro-not-call requires a macro invocation");
             }
             Some("duplicate") if detail.is_some_and(|id| covered.contains(id)) => {
                 valid_exclusion = true;
@@ -272,12 +320,23 @@ fn account_candidate(
                     false_exclusion = Some("candidate matches the syntactically resolved seed");
                 }
             },
-            _ => {}
+            _ => unknown_reason = true,
         }
     }
     let (code, message) = if let Some(message) = false_exclusion {
         ("false-exclusion", message.to_owned())
+    } else if unknown_reason {
+        (
+            "unaccounted-candidate",
+            "candidate cites an unsupported exclusion reason".to_owned(),
+        )
     } else if valid_exclusion || matches!(coverage, RowCoverage::Covered) {
+        if unreachable {
+            out.unchecked(
+                &candidate.id,
+                "enclosing guard verified; branch reachability requires adjudication",
+            );
+        }
         return;
     } else if let RowCoverage::Ambiguous(why) = coverage {
         out.unchecked(&candidate.id, why);
