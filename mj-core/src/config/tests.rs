@@ -754,6 +754,32 @@ fn a_missing_secret_is_named_in_one_line_where_its_profile_is_used() {
     assert!(!error.contains('\n'), "{error}");
 }
 
+// Hard-won: ee847f7: a save removed every top-level setting the user wrote
+// out at its default, taking an explicit `[daemon] runtime = "host"` with it;
+// retired keys nested in such a table were only removed by that accident.
+#[test]
+fn a_save_keeps_settings_written_at_their_default_and_removes_retired_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let kept = format!(
+        "version = {CONFIG_VERSION}\ntheme = \"auto\"\n\n[daemon]\nruntime = \"host\"\n\n[phone]\nenabled = false\n"
+    );
+    fs::write(
+        &path,
+        format!(
+            "{kept}\n[subagents]\nmax_concurrent = 6\nenabled = true\n\n[sessionwiki]\nenabled = true\n"
+        ),
+    )
+    .unwrap();
+    Config::load_from(&path).unwrap().save_to(&path).unwrap();
+    // The written default stays beside the removed key; a table that held
+    // only a retired key goes with it.
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        format!("{kept}\n[subagents]\nmax_concurrent = 6\n")
+    );
+}
+
 #[test]
 fn obsolete_startup_settings_are_ignored_and_removed_when_saving() {
     let directory = tempfile::tempdir().unwrap();
