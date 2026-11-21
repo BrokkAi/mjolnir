@@ -1989,11 +1989,16 @@ impl Controller {
                 };
                 let cancelled =
                     executor.cancellation_requested() || operation.cancellation_requested;
-                operation.phase = if cancelled {
-                    MovePhase::Cancelled
-                } else {
-                    MovePhase::Failed
-                };
+                // `DispatchReleased` is post-commit for an in-place Move: keep
+                // its durable phase when the worker is disconnected so later
+                // recovery (and fresh worker attach) retries releasing the hold.
+                if !(operation.in_place && operation.phase == MovePhase::DispatchReleased) {
+                    operation.phase = if cancelled {
+                        MovePhase::Cancelled
+                    } else {
+                        MovePhase::Failed
+                    };
+                }
                 operation.cancellation_requested = cancelled;
                 released_handoffs = forget_unsealed_move_archives(
                     operation,
@@ -2209,13 +2214,23 @@ impl Controller {
             // `admit_move_queue`.
             if operation.in_place {
                 if operation.phase == MovePhase::DispatchReleased {
-                    if let Ok(mut relay) = MoveSourceRelay::lease(admission, manager, &id).await
-                        && let Some(conn) = relay.0.as_mut().map(|r| r.connection_mut())
-                        && let Some(expected_store_id) = operation.in_place_expected_store_id.clone()
-                        && conn.snapshot().operational.store_id.as_deref() == Some(expected_store_id.as_str())
+                    let mut relay = MoveSourceRelay::lease(admission, manager, &id).await?;
+                    let conn = relay
+                        .0
+                        .as_mut()
+                        .context(
+                            "in-place Move dispatch hold release requires a live worker connection",
+                        )?
+                        .connection_mut();
+                    if let Some(expected_store_id) = operation.in_place_expected_store_id.clone()
+                        && conn.snapshot().operational.store_id.as_deref()
+                            == Some(expected_store_id.as_str())
                     {
                         conn.client
-                            .release_in_place_move_dispatch(&operation.operation_id, &expected_store_id)
+                            .release_in_place_move_dispatch(
+                                &operation.operation_id,
+                                &expected_store_id,
+                            )
                             .await?;
                         if self.source_has_request_queue(&id) {
                             let _ = conn.set_subagent_admission(true).await;
@@ -2376,16 +2391,24 @@ impl Controller {
                         self.retain_failed_in_place_move(&id, &previous, cause)?
                     } else {
                         // Before DestinationOwns, source owns the session:
-                        // tear down any destination environment FIRST, and
-                        // only then restart the source agent in place.
-                        if let Err(cleanup_err) = self.cleanup_prepared_move_destination(&mut operation, executor) {
-                            tracing::warn!(
-                                session_id = %id,
-                                operation_id = %operation.operation_id,
-                                error = %cleanup_err,
-                                "prepared destination cleanup during Move recovery deferred"
-                            );
-                        }
+                        // tear down any destination environment FIRST, and ONLY
+                        // restart the source agent in place once destination
+                        // teardown is confirmed so two workers can never run
+                        // concurrently.
+                        let prepared_cleaned = match self
+                            .cleanup_prepared_move_destination(&mut operation, executor)
+                        {
+                            Ok(()) => true,
+                            Err(cleanup_err) => {
+                                tracing::warn!(
+                                    session_id = %id,
+                                    operation_id = %operation.operation_id,
+                                    error = %cleanup_err,
+                                    "prepared destination cleanup failed during Move recovery; keeping source stopped"
+                                );
+                                false
+                            }
+                        };
                         let rollback_err = self.rollback_failed_resume(
                             &id,
                             &previous,
@@ -2394,15 +2417,30 @@ impl Controller {
                             cause,
                             executor,
                         )?;
-                        if let Err(restart_err) = self
-                            .restart_retained_move_source(admission, &id, &previous, executor, manager)
-                            .await
-                        {
+                        let destination_teardown_confirmed = prepared_cleaned
+                            && self.state.sessions.get(&id).is_some_and(|record| {
+                                record.state != SessionState::Error
+                                    && record.target.as_deref() == previous.target.as_deref()
+                            });
+                        if destination_teardown_confirmed {
+                            if let Err(restart_err) = self
+                                .restart_retained_move_source(
+                                    admission, &id, &previous, executor, manager,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    session_id = %id,
+                                    operation_id = %operation.operation_id,
+                                    error = %restart_err,
+                                    "could not restart retained Move source after destination rollback"
+                                );
+                            }
+                        } else {
                             tracing::warn!(
                                 session_id = %id,
                                 operation_id = %operation.operation_id,
-                                error = %restart_err,
-                                "could not restart retained Move source after destination rollback"
+                                "skipping source restart because destination teardown was not confirmed"
                             );
                         }
                         rollback_err
@@ -2423,10 +2461,17 @@ impl Controller {
                     ))
                 }
                 MovePhase::DispatchReleased => {
-                    if let Ok(mut relay) = MoveSourceRelay::lease(admission, manager, &id).await
-                        && let Some(conn) = relay.0.as_mut().map(|r| r.connection_mut())
-                        && let Some(expected_store_id) = operation.in_place_expected_store_id.clone()
-                        && conn.snapshot().operational.store_id.as_deref() == Some(expected_store_id.as_str())
+                    let mut relay = MoveSourceRelay::lease(admission, manager, &id).await?;
+                    let conn = relay
+                        .0
+                        .as_mut()
+                        .context(
+                            "in-place Move dispatch hold release requires a live worker connection",
+                        )?
+                        .connection_mut();
+                    if let Some(expected_store_id) = operation.in_place_expected_store_id.clone()
+                        && conn.snapshot().operational.store_id.as_deref()
+                            == Some(expected_store_id.as_str())
                     {
                         conn.client
                             .release_in_place_move_dispatch(
@@ -3152,30 +3197,50 @@ impl Controller {
                 Box::pin(self.resume_session_for_cross_target_move(operation, executor)).await;
             if let Err(err) = restore_result {
                 // Before DestinationOwns, the source still owns the session.
-                // `resume_session_for_cross_target_move` has already torn down
-                // any partial destination runtime/checkout; clean up any
-                // prepared EC2 destination too, and ONLY THEN restart the
-                // source agent in place.
-                if let Err(cleanup_err) = self.cleanup_prepared_move_destination(operation, executor)
+                // Tear down any prepared destination too, and ONLY restart the
+                // source agent in place once destination teardown is confirmed
+                // so two workers can never run concurrently.
+                let prepared_cleaned = match self
+                    .cleanup_prepared_move_destination(operation, executor)
                 {
-                    tracing::warn!(
-                        session_id = %id,
-                        operation_id = %operation.operation_id,
-                        error = %cleanup_err,
-                        "prepared destination cleanup failed after cross-target Move error"
-                    );
-                }
-                if let Some(previous) = operation.recovery_session.clone()
-                    && let Err(restart_err) = self
-                        .restart_retained_move_source(admission, &id, &previous, executor, manager)
-                        .await
-                {
-                    tracing::warn!(
-                        session_id = %id,
-                        operation_id = %operation.operation_id,
-                        error = %restart_err,
-                        "could not restart source agent in place after failed cross-target Move"
-                    );
+                    Ok(()) => true,
+                    Err(cleanup_err) => {
+                        tracing::warn!(
+                            session_id = %id,
+                            operation_id = %operation.operation_id,
+                            error = %cleanup_err,
+                            "prepared destination cleanup failed after cross-target Move error; keeping source stopped"
+                        );
+                        false
+                    }
+                };
+                if let Some(previous) = operation.recovery_session.clone() {
+                    let destination_teardown_confirmed = prepared_cleaned
+                        && self.state.sessions.get(&id).is_some_and(|record| {
+                            record.state != SessionState::Error
+                                && record.target.as_deref() == previous.target.as_deref()
+                        });
+                    if destination_teardown_confirmed {
+                        if let Err(restart_err) = self
+                            .restart_retained_move_source(
+                                admission, &id, &previous, executor, manager,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                session_id = %id,
+                                operation_id = %operation.operation_id,
+                                error = %restart_err,
+                                "could not restart source agent in place after failed cross-target Move"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            session_id = %id,
+                            operation_id = %operation.operation_id,
+                            "skipping source restart because destination teardown was not confirmed"
+                        );
+                    }
                 }
                 return Err(err);
             }
