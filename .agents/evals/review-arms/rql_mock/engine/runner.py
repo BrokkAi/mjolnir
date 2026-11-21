@@ -22,6 +22,32 @@ SESSION_ID = re.compile(r"[a-f0-9]{32}")
 QUERY_SESSION_PROTOCOL = "sealed-session-per-query-v1"
 TURN_TIMEOUT = 1800
 RUN_ERRORS = (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError)
+SESSION_PROFILE_ROOT = PurePosixPath("/var/lib/hel/profiles")
+
+# Pass the credential over stdin so it stays out of process arguments.
+SYNC_CONTAINER_LOGIN = """
+import json, os, sys
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+
+destination = Path(sys.argv[1])
+access_only = sys.stdin.buffer.read()
+try:
+    staged = json.loads(destination.read_bytes())["claudeAiOauth"]["accessToken"]
+except FileNotFoundError:
+    staged = None
+changed = staged != json.loads(access_only)["claudeAiOauth"]["accessToken"]
+if changed:
+    with NamedTemporaryFile(dir=destination.parent, prefix=".engine-login-", delete=False) as copy:
+        temporary = Path(copy.name)
+        try:
+            copy.write(access_only)
+            copy.flush()
+            os.fsync(copy.fileno())
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+"""
 
 # Runs via Podman admin before the first prompt, outside the model's transcript.
 PROBE = """
@@ -474,13 +500,10 @@ class EngineRunner(SealedRunner):
     def __init__(self, config, manifest=None):
         self.login_profile = config.get("profile")
         super().__init__({**config, "profile": config.get("engine_profile")}, manifest)
-        self.login_expiry = None
 
     def check_quota(self):
         if hold := self.driver.pilot_claude_hold(self.login_profile):
             raise LaunchHeld(hold)
-        if self.login_expiry is not None:
-            self.check_login_expiry(self.login_expiry)
 
     def check_login_expiry(self, expires_at):
         # Leave enough time for Claude to finish one turn at the runner's timeout.
@@ -490,6 +513,10 @@ class EngineRunner(SealedRunner):
             )
 
     def seed_login(self):
+        self.sync_login()
+
+    def sync_login(self, sid=None):
+        """Publish the owner's access-only snapshot and return the token staged for this turn."""
         alias = self.config["profile"]
         if not alias or alias == self.login_profile:
             raise ValueError("the engine requires its own engine_profile and the original claude5 profile")
@@ -514,29 +541,78 @@ class EngineRunner(SealedRunner):
                 raise RuntimeError("claude5 credentials must be stored in its own login file")
             credentials = json.loads(credential_file.read_bytes())
             oauth = credentials.get("claudeAiOauth") if isinstance(credentials, dict) else None
-            if not isinstance(oauth, dict) or not oauth.get("accessToken"):
+            token = oauth.get("accessToken") if isinstance(oauth, dict) else None
+            if not isinstance(token, str) or not token:
                 raise RuntimeError(f"{self.login_profile} has no access credentials")
-            expires_at = oauth.get("expiresAt")
-            self.check_login_expiry(expires_at)
+            self.check_login_expiry(oauth.get("expiresAt"))
             oauth.pop("refreshToken", None)
+            access_only = json.dumps({"claudeAiOauth": oauth}).encode("utf-8")
+            if sid is not None:
+                self.sync_container_login(sid, access_only)
             destination = home / ".credentials.json"
+            if sid is not None and destination.is_file() and destination.read_bytes() == access_only:
+                return token
             with NamedTemporaryFile(dir=home, prefix=".engine-login-", delete=False) as copy:
                 temporary = Path(copy.name)
                 try:
-                    copy.write(json.dumps({"claudeAiOauth": oauth}).encode("utf-8"))
+                    copy.write(access_only)
                     copy.flush()
                     os.fsync(copy.fileno())
                     temporary.replace(destination)
                     sync_directory(home)
                 finally:
                     temporary.unlink(missing_ok=True)
-            self.login_expiry = expires_at
+            return token
+
+    def sync_container_login(self, sid, access_only):
+        container = self.driver.container(sid)["container"]
+        path = SESSION_PROFILE_ROOT / sid / ".credentials.json"
+        proc = subprocess.run(
+            ["podman", "exec", "-i", container, "python3", "-c", SYNC_CONTAINER_LOGIN, str(path)],
+            input=access_only, capture_output=True, timeout=300,
+        )
+        if proc.returncode:
+            raise RuntimeError(f"could not synchronize {self.login_profile} credentials in engine session {sid}")
+
+    def prompt(self, sid, text, context_id=None, *, before_send=None):
+        token = self.sync_login(sid)
+        try:
+            return super().prompt(sid, text, context_id, before_send=before_send)
+        except QuotaTurnFailure:
+            raise
+        except TurnFailure as error:
+            if not self._is_auth_refusal(error.record):
+                raise
+            try:
+                current_token = self.sync_login(sid)
+            except RUN_ERRORS as sync_error:
+                raise TurnFailure(f"{self.login_profile} login was refused: {sync_error}", error.record) from sync_error
+            if current_token == token:
+                raise TurnFailure(f"{self.login_profile} login was refused and its access token is unchanged",
+                                  error.record) from error
+
+        # The failed provider request accepted no work. The retry gets its own
+        # turn and command IDs and uses the same pending answer record.
+        try:
+            return super().prompt(sid, text, context_id)
+        except QuotaTurnFailure:
+            raise
+        except TurnFailure as error:
+            if self._is_auth_refusal(error.record):
+                raise TurnFailure(f"{self.login_profile} login was refused after token rotation", error.record) from error
+            raise
+
+    @staticmethod
+    def _is_auth_refusal(record):
+        # The frozen worker uses the ACP AUTH_REQUIRED display name as the
+        # diagnostic code. mj wait includes it for the matching turn only.
+        return (record.get("outcome") == "error"
+                and record["diagnostic"].get("code") == "Authentication required")
 
     def start(self, snapshot, record_id):
         try:
             if self.login_profile != "claude5":
                 raise ValueError("the engine quota profile must be claude5")
-            self.login_expiry = None
             self.check_quota()
             self.seed_login()
         except LaunchHeld:
@@ -549,7 +625,7 @@ class EngineRunner(SealedRunner):
         super().prepare(sid, snapshot, directory)
         container = self.driver.container(sid)["container"]
         proc = subprocess.run(
-            ["podman", "exec", container, "cat", f"/var/lib/hel/profiles/{sid}/settings.json"],
+            ["podman", "exec", container, "cat", str(SESSION_PROFILE_ROOT / sid / "settings.json")],
             capture_output=True, check=True, timeout=300,
         )
         settings = json.loads(proc.stdout)
