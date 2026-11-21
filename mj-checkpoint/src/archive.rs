@@ -1173,7 +1173,9 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if carries_origin_delta(&repositories) {
+        schema_version: if input.canonical_session.native_use_evidence.is_some() {
+            ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+        } else if carries_origin_delta(&repositories) {
             ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
         } else if input.canonical_session.mailbox.is_some() {
             ARCHIVE_SCHEMA_VERSION_MAILBOX
@@ -1849,6 +1851,18 @@ fn read_verified_zip_cancellable(
                 ARCHIVE_SCHEMA_VERSION_MAILBOX
             );
             ensure!(
+                manifest.schema_version >= ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+                    || snapshot.native_use_evidence.is_none(),
+                "native-session-use evidence requires archive schema {}",
+                ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+            );
+            ensure!(
+                manifest.schema_version != ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+                    || snapshot.native_use_evidence.is_some(),
+                "archive schema {} requires native-session-use evidence",
+                ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+            );
+            ensure!(
                 canonical_session.replace(snapshot).is_none(),
                 "archive contains duplicate canonical session payloads"
             );
@@ -2031,7 +2045,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_MAILBOX
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_NATIVE_USE,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -2099,13 +2114,17 @@ fn carries_origin_delta(repositories: &[RepositoryManifest]) -> bool {
 }
 
 fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
+    let has_origin_delta = carries_origin_delta(&manifest.repositories);
     ensure!(
-        (manifest.schema_version == ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA)
-            == carries_origin_delta(&manifest.repositories),
+        if has_origin_delta {
+            manifest.schema_version >= ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
+        } else {
+            manifest.schema_version != ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
+        },
         "origin delta repository metadata and archive schema disagree"
     );
     let expected_schema =
-        if carries_origin_delta(&manifest.repositories) {
+        if has_origin_delta {
             ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
         } else if carries_linked_worktrees(&manifest.repositories) {
             ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
@@ -2124,6 +2143,7 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         };
     ensure!(
         manifest.schema_version == expected_schema
+            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_NATIVE_USE
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_MAILBOX
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
@@ -2826,7 +2846,10 @@ pub use git::{
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};
-pub(crate) use git::{ensure_no_symlink_ancestors, restore_git_snapshot_for_session};
+pub(crate) use git::{
+    LegacyRestoreOptions, ensure_no_symlink_ancestors, restore_git_snapshot_for_session,
+    restore_git_snapshot_for_session_with_options,
+};
 use git::{
     validate_conflicted_worktree_tar, validate_conflicted_worktree_tar_reader,
     validate_operation_state_tar, validate_operation_state_tar_reader, validate_untracked_tar,

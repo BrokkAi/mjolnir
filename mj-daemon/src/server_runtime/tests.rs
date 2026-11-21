@@ -793,6 +793,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     record.state = SessionState::Running;
     controller.state.sessions.insert(record.id.clone(), record);
     let operational = RelayOperationalState {
+        in_place_move_hold: None,
         assessment: None,
         open_request: None,
         notification_stack: Default::default(),

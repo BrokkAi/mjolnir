@@ -20,8 +20,16 @@ mod background;
 #[cfg(test)]
 pub(crate) use background::AirTaskFixture;
 mod checkpoint_hold;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InPlaceHarnessRestartDecision {
+    Proceed,
+    AlreadyRestarted,
+}
+
 #[cfg(test)]
 mod checkpoint_hold_tests;
+#[cfg(test)]
+mod in_place_move_tests;
 mod commands;
 mod journal;
 mod native_history;
@@ -253,6 +261,8 @@ pub struct DurableRelay {
     /// journal: every bridge start records its own `AgentInitialized`.
     session_setup: bool,
     checkpoint_only: bool,
+    /// Active in-place harness restart operation ID serialized with the hold.
+    in_place_harness_restart_in_flight: Option<String>,
     /// Live reviewer leases share this owner's atomic checkpoint decision.
     reviewer_admissions: BTreeMap<u64, String>,
     /// Reviewer leases exist only around the Unix reviewer runtime, so this
@@ -834,11 +844,16 @@ impl DurableRelay {
                 // bridge start, exactly as it does after a restart.
                 snapshot.config.extend(restored.accepted_config);
                 snapshot.restored_native_session_unused = restored.native_session_unused;
-                snapshot.record_native_use(if restored.native_session_unused {
-                    NativeSessionUse::Unused
+                if let Some(evidence) = restored.native_use_evidence {
+                    snapshot.native_session_used = evidence.usage == NativeSessionUse::Used;
+                    snapshot.native_use_evidence = Some(evidence);
                 } else {
-                    NativeSessionUse::Unknown
-                });
+                    snapshot.record_native_use(if restored.native_session_unused {
+                        NativeSessionUse::Unused
+                    } else {
+                        NativeSessionUse::Unknown
+                    });
+                }
                 for queued in restored.queued_prompts {
                     anyhow::ensure!(
                         mj_core::continuation::valid_command_id(&queued.command_id),
@@ -1005,6 +1020,7 @@ impl DurableRelay {
         )?;
 
         let mut relay = Self {
+            in_place_harness_restart_in_flight: None,
             operator_away: Default::default(),
             root,
             relay_version: relay_version.into(),
@@ -1844,6 +1860,21 @@ impl DurableRelay {
             .values()
             .any(RelayDispatchRecord::prompt_may_have_reached_agent);
         if let Some(evidence) = &self.snapshot.native_use_evidence {
+            // Before the restored worker opens its first harness session,
+            // `native_session_id` is still `None` while the seed's archived
+            // evidence is already present. Honor `restored_native_session_unused`
+            // so an unused restored session can still take `LoadBeforeReplace`.
+            if self.snapshot.native_session_id.is_none() {
+                return if evidence.version == 1
+                    && evidence.usage == NativeSessionUse::Unused
+                    && self.snapshot.restored_native_session_unused
+                    && !dispatched
+                {
+                    NativeSessionHistory::LoadBeforeReplace
+                } else {
+                    NativeSessionHistory::MayHaveHistory
+                };
+            }
             if evidence.version != 1
                 || Some(&evidence.native_session_id) != self.snapshot.native_session_id.as_ref()
                 || evidence.usage != NativeSessionUse::Unused

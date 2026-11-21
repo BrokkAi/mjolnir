@@ -1927,18 +1927,18 @@ fn a_conversion_archive_carries_the_checkouts_remote_and_the_conversation() {
         mj_core::remote_git::resolve_local_repository(checkout.path(), &ProcessExecutor).unwrap();
     let repository_id = "bifrost-source";
     let destination = PathBuf::from("accepted/layout");
-    let snapshot = raw_checkout_snapshot(
+    let captured = capture_legacy_raw_checkout_snapshot(
         checkout.path(),
         repository_id,
         &source,
         &destination,
         &SystemGit,
-        false,
     )
     .unwrap();
 
     let output = directory.path().join("converted.hel.zip");
-    let converted = conversion_checkpoint(&previous.archive_path, snapshot, &output).unwrap();
+    let converted =
+        conversion_checkpoint(&previous.archive_path, captured.repository, &output).unwrap();
 
     // The archive provisioning will read: a real network clone of the
     // checkout's own remote, landing where the archive says.
@@ -1946,6 +1946,7 @@ fn a_conversion_archive_carries_the_checkouts_remote_and_the_conversation() {
     assert_eq!(converted.archive_path, output);
     assert_eq!(converted.sha256, verified.archive_sha256);
     assert_eq!(converted.event_frontier, previous.event_frontier);
+    assert!(verified.manifest.repositories[0].metadata.origin_delta.is_some());
     let bundle = crate::controller::network_git::bundle_from_manifest(&verified.manifest).unwrap();
     assert_eq!(verified.manifest.bundle.primary_repository, repository_id);
     assert_eq!(bundle.primary, destination.to_string_lossy());
@@ -1955,7 +1956,6 @@ fn a_conversion_archive_carries_the_checkouts_remote_and_the_conversation() {
         bundle.repositories[0].url.as_deref(),
         Some(FIXTURE_FETCH_URL)
     );
-    assert_eq!(bundle.repositories[0].push_urls, [FIXTURE_FETCH_URL]);
     assert_eq!(
         bundle.repositories[0].destination,
         destination.to_string_lossy()
@@ -2095,7 +2095,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
             .into(),
     );
     session.checkpoint = Some(Box::new(checkpoint.clone()));
-    let worktree = session.managed_worktree.clone().unwrap();
+    let worktree = session.managed_worktree.take().unwrap();
     let previous = session.clone();
 
     let profile_home = data_directory.join("profile");
@@ -2198,10 +2198,9 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
         durable.sessions[session_id].checkpoint,
         Some(Box::new(checkpoint))
     );
-    // The conversion archive is litter once the resume has failed, and the
-    // directory it was written in proves the conversion really ran.
+    // Legacy raw-to-workspace conversion no longer writes a persistent
+    // conversion archive into sessions_dir().
     let sessions = mj_core::config::sessions_dir();
-    assert!(sessions.is_dir(), "the conversion wrote an archive");
     let leftover: Vec<_> = std::fs::read_dir(&sessions)
         .map(|entries| {
             entries
@@ -3150,6 +3149,7 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,
+            native_use_evidence: None,
             event_frontier: 0,
             event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
             session: mj_core::archive::CanonicalSessionState {
@@ -3472,6 +3472,7 @@ fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() 
         transcript: Vec::new(),
         queued_prompts: Vec::new(),
         mailbox: Default::default(),
+        native_use_evidence: None,
     };
     let sha256 = mj_checkpoint::archive::write_archive_hashed(
         &archive_path,
@@ -3604,5 +3605,174 @@ fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() 
             && !detail.contains("repository provenance")
             && !detail.contains("original target"),
         "cutoff origin-delta resume should pass preflight past bundle_from_manifest: {detail}"
+    );
+}
+
+#[test]
+fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
+    const CHILD: &str = "MJ_TEST_LEGACY_CLONE_ON_DISK_REFUSAL_CHILD";
+    let test_name = crate::controller::test_support::test_name(
+        module_path!(),
+        "cross_target_resume_refuses_legacy_managed_clone_still_on_disk",
+    );
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name)
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let temp = tempfile::tempdir().unwrap();
+    let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
+    let base = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(checkout.path())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    std::fs::write(checkout.path().join("untracked-local.txt"), "precious\n").unwrap();
+
+    let snapshot = mj_checkpoint::archive::collect_git_snapshot(
+        &SystemGit,
+        checkout.path(),
+        &mj_checkpoint::archive::GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: "repo".into(),
+            history: mj_checkpoint::archive::GitHistoryMode::CloneFrom(base.clone()),
+            origin_override: None,
+        },
+    )
+    .unwrap();
+
+    let session_id = "legacy-clone-on-disk".to_owned();
+    let archive_path = temp.path().join("legacy-clone.hel.zip");
+    let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        command_ledger: None,
+        assessment_state: None,
+        notification_stack: None,
+        event_frontier: 0,
+        event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
+        session: mj_core::archive::CanonicalSessionState {
+            execution: mj_core::archive::CanonicalExecutionState::Idle,
+            last_activity_at_ms: None,
+            session_title: None,
+            configuration: Default::default(),
+        },
+        transcript: Vec::new(),
+        queued_prompts: Vec::new(),
+        mailbox: Default::default(),
+        native_use_evidence: None,
+    };
+    let written = mj_checkpoint::archive::write_archive_hashed(
+        &archive_path,
+        &mj_checkpoint::archive::ArchiveInput {
+            session: mj_core::archive::SessionManifest {
+                id: session_id.clone(),
+                title: "Legacy Clone".into(),
+                harness_kind: mj_core::config::HarnessKind::Codex,
+                profile_id: "codex".into(),
+                native_session_id: "native-1".into(),
+                created_at: "2026-11-21T00:00:00Z".into(),
+                checkpointed_at: "2026-11-21T00:00:00Z".into(),
+                hel_version: env!("CARGO_PKG_VERSION").into(),
+                relay_version: String::new(),
+                adapter_version: String::new(),
+            },
+            target: mj_core::archive::TargetManifest {
+                template_id: "local-bare".into(),
+                target_kind: "local-bare".into(),
+                details: Default::default(),
+            },
+            bundle: mj_core::archive::BundleManifest {
+                id: "repo".into(),
+                primary_repository: "repo".into(),
+            },
+            canonical_session: canonical,
+            repositories: vec![snapshot],
+            native_artifacts: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+    session.id = session_id.clone();
+    session.state = SessionState::Stopped;
+    session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+        source_repository: checkout.path().to_path_buf(),
+        worktree_root: checkout.path().to_path_buf(),
+        branch: "master".into(),
+        base_commit: Some(base),
+        source_project_directory: checkout.path().to_path_buf(),
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+    }));
+    session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+        created_at: "2026-11-21T00:00:00Z".into(),
+        archive_path,
+        sha256: written,
+        event_frontier: 0,
+    }));
+
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local-bare".into(), TargetTemplate::LocalBare);
+    config.targets.insert(
+        "podman".into(),
+        serde_json::from_value(serde_json::json!({
+            "kind": "local-podman",
+            "image": "agent-dev:latest"
+        }))
+        .unwrap(),
+    );
+    let profile_home = temp.path().join("codex-home");
+    std::fs::create_dir_all(&profile_home).unwrap();
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile::new(mj_core::config::HarnessKind::Codex, profile_home),
+    );
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.clone(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    let error = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(crate::controller::test_support::worker_test_scope_async(
+            &session_id,
+            controller.resume_session_controlled(
+                &session_id,
+                "codex",
+                "podman",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &ProcessExecutor,
+            ),
+        ))
+        .expect_err("legacy managed clone still on disk must be refused before acceptance");
+    let detail = format!("{error:#}");
+    assert!(
+        detail.contains("This older session still has a local managed checkout on disk; resume it on its original target first, then suspend or move it."),
+        "unexpected refusal: {detail}"
+    );
+    assert!(
+        checkout.path().join("untracked-local.txt").is_file(),
+        "refused resume must leave the local managed checkout and its untracked files intact"
     );
 }

@@ -744,6 +744,17 @@ impl StandaloneSession {
             .await
     }
 
+    /// The worker-owned native-session-use evidence at a ready checkpoint barrier's cut.
+    pub async fn read_checkpoint_native_use(
+        &mut self,
+        barrier_command_id: String,
+        cut: RelayCursor,
+    ) -> Result<Option<mj_core::relay::NativeSessionUseEvidence>> {
+        self.client
+            .read_checkpoint_native_use(barrier_command_id, cut)
+            .await
+    }
+
     pub async fn submit(&mut self, command_id: String, command: RelayCommand) -> Result<u64> {
         let ordinal = self.submit_accepted(command_id, command).await?;
         self.sync_in_place().await?;

@@ -158,7 +158,7 @@ pub enum WorkerRunMode {
     CheckpointOnly,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
     /// Chosen from the target locator, never from ambient container detection.
@@ -308,7 +308,7 @@ pub struct WorkerLaunchConfig {
     pub observe_policy: Option<serde::de::IgnoredAny>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitialWorkerCommand {
     pub command_id: String,

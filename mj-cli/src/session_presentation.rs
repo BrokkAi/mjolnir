@@ -250,6 +250,7 @@ mod tests {
         current_step_started_at_ms: Option<i64>,
     ) -> RelayOperationalState {
         RelayOperationalState {
+            in_place_move_hold: None,
             assessment: None,
             open_request: None,
             notification_stack: Default::default(),

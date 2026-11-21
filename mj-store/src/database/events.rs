@@ -483,6 +483,7 @@ mod tests {
                 command_id: "prompt-1".into(),
                 command: RelayCommand::Prompt { prompt: vec![] },
                 created_at_ms: 1,
+                insert_at_front: false,
             },
             RelayObservation::CommandStarted {
                 command_id: "prompt-1".into(),

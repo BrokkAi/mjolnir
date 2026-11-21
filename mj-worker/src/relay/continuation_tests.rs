@@ -708,6 +708,7 @@ fn a_legacy_automatic_continuation_is_refused_live_but_its_journal_entry_still_r
                 command_id: "auto-continue-old".into(),
                 command,
                 created_at_ms: 1,
+                insert_at_front: false,
             },
         )
         .unwrap();

@@ -23,7 +23,7 @@ use mj_checkpoint::checkpoint::{
     CHECKPOINT_STAGING_PROTOCOL_VERSION, CapturedCheckpoint, CheckpointCaptureSpec,
     CheckpointExportSpec, CheckpointPackSpecRef, CheckpointRepositoryCapture,
     CheckpointRepositorySpec, NO_SESSION_ARTIFACTS, checkpoint_sha256,
-    current_native_session_received_prompt,
+    current_native_session_is_unused,
 };
 use mj_core::config::{HarnessKind, sessions_dir};
 use mj_core::state::{

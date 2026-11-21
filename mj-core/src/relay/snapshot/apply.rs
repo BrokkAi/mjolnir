@@ -557,6 +557,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             command_id,
             command,
             created_at_ms,
+            insert_at_front,
         } => {
             snapshot
                 .validate_notification_command(command)
@@ -865,11 +866,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 _ => None,
             };
             if let Some(payload) = payload {
-                snapshot.queued_prompts.push(StoredQueuedRelayCommand {
+                let entry = StoredQueuedRelayCommand {
                     command_id: command_id.clone(),
                     payload,
                     created_at_ms: *created_at_ms,
-                });
+                };
+                if *insert_at_front {
+                    snapshot.queued_prompts.insert(0, entry);
+                } else {
+                    snapshot.queued_prompts.push(entry);
+                }
             }
             if let RelayCommand::RunUserShell { command } = command {
                 snapshot.active_user_shells.insert(
@@ -2741,6 +2747,7 @@ mod work_liveness_tests {
                 command_id: "hold-give-up-7".into(),
                 command,
                 created_at_ms: 1,
+                insert_at_front: false,
             },
         );
         assert_eq!(

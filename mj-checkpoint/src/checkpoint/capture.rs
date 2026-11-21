@@ -825,7 +825,10 @@ pub fn export_checkpoint_with_native_state(
     // A native session that never received a prompt legitimately has no
     // harness artifacts yet; requiring them would make an unused session, or
     // one just replaced by `/clear`, impossible to close cleanly (R4-5).
-    let prompted = current_native_session_received_prompt(&spec.canonical_session);
+    let allow_empty_native = current_native_session_is_unused(
+        &spec.canonical_session,
+        Some(spec.session.native_session_id.as_str()),
+    );
     let native_started = std::time::Instant::now();
     let mut native_artifacts = collect_checkpoint_native_artifacts(
         &spec.session,
@@ -833,7 +836,7 @@ pub fn export_checkpoint_with_native_state(
         &harness_home,
         &workspace_root,
         spec.report_directories.as_deref(),
-        !prompted,
+        allow_empty_native,
         native_state,
     )?;
     // The barrier stops dispatch, but a harness can still finish an async
@@ -932,9 +935,14 @@ fn verify_origin_delta_quiescence(
     use mj_core::worker_launch::{WorkerLaunchConfig, WorkerRunMode};
     use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest};
 
-    let [repository] = repositories else {
-        bail!("managed clone suspend requires exactly one repository");
-    };
+    let origin_delta_repos: Vec<_> = repositories
+        .iter()
+        .filter(|repository| repository.capture == CheckpointRepositoryCapture::OriginDelta)
+        .collect();
+    ensure!(
+        !origin_delta_repos.is_empty(),
+        "managed clone suspend requires at least one origin-delta repository"
+    );
     let request: SuspendRequest = wire::read(relay_root, wire::REQUEST)?
         .context("managed clone capture has no quiescence request")?;
     let receipt: SuspendReceipt = wire::read(relay_root, wire::RECEIPT)?
@@ -947,14 +955,17 @@ fn verify_origin_delta_quiescence(
                 == WorkerRunMode::CheckpointOnly,
         "managed clone capture requires a quiesced worker"
     );
-    let location = crate::archive::git::locate_checkout(
-        git,
-        &workspace_root.join(&repository.relative_destination),
-    )?;
-    ensure!(
-        location.top_level.canonicalize()? == request.checkout.canonicalize()?,
-        "quiescence receipt belongs to a different checkout"
-    );
+    let quiesced_checkout = request.checkout.canonicalize()?;
+    for repository in origin_delta_repos {
+        let location = crate::archive::git::locate_checkout(
+            git,
+            &workspace_root.join(&repository.relative_destination),
+        )?;
+        ensure!(
+            location.top_level.canonicalize()?.starts_with(&quiesced_checkout),
+            "quiescence receipt belongs to a different checkout"
+        );
+    }
     Ok(())
 }
 

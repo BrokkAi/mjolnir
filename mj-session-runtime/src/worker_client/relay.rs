@@ -920,6 +920,25 @@ impl RelayClient {
         }
     }
 
+    pub async fn read_checkpoint_native_use(
+        &mut self,
+        barrier_command_id: String,
+        cut: mj_core::relay::RelayCursor,
+    ) -> Result<Option<mj_core::relay::NativeSessionUseEvidence>> {
+        match self
+            .call(RelayRequest::ReadCheckpointNativeUse {
+                barrier_command_id,
+                cut,
+            })
+            .await?
+        {
+            RelayResponsePayload::CheckpointNativeUse {
+                native_use_evidence,
+            } => Ok(native_use_evidence),
+            _ => bail!("relay returned an unexpected checkpoint native-use response"),
+        }
+    }
+
     pub async fn read_pending_elicitation(
         &mut self,
         elicitation_id: String,

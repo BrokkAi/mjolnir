@@ -109,6 +109,54 @@ impl DurableRelay {
                 Ok(payload) => payload,
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },
+            RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id,
+                expected_store_id,
+            } => match self.hold_in_place_move_dispatch(operation_id, expected_store_id)? {
+                Ok(payload) => payload,
+                Err(error) => return Ok(RelayResponseBody::Error { error }),
+            },
+            RelayRequest::DiscardHeldMoveCommands {
+                operation_id,
+                expected_store_id,
+                command_ids,
+            } => match self.discard_held_move_commands(
+                operation_id,
+                expected_store_id,
+                command_ids,
+            )? {
+                Ok(payload) => payload,
+                Err(error) => return Ok(RelayResponseBody::Error { error }),
+            },
+            RelayRequest::SubmitFront {
+                operation_id,
+                expected_store_id,
+                command_id,
+                command,
+            } => match self.submit_front_command(
+                operation_id,
+                expected_store_id,
+                command_id,
+                command.clone(),
+            )? {
+                Ok(payload) => payload,
+                Err(error) => return Ok(RelayResponseBody::Error { error }),
+            },
+            RelayRequest::ReleaseInPlaceMoveDispatch {
+                operation_id,
+                expected_store_id,
+            } => match self.release_in_place_move_dispatch(operation_id, expected_store_id)? {
+                Ok(payload) => payload,
+                Err(error) => return Ok(RelayResponseBody::Error { error }),
+            },
+            RelayRequest::RestartHarnessInPlace { .. } => {
+                return Ok(relay_error(
+                    RelayErrorCode::InvalidRequest,
+                    "restart_harness_in_place is handled by the worker runtime",
+                    false,
+                    None,
+                ));
+            }
             RelayRequest::ReadQueuedCommand { command_id } => RelayResponsePayload::QueuedCommand {
                 // One admitted command is bounded by RELAY_COMMAND_BYTE_BUDGET,
                 // independently of the total size of the durable queue.
@@ -129,6 +177,22 @@ impl DurableRelay {
                 cut,
             } => match self.checkpoint_mailbox(barrier_command_id, cut)? {
                 Ok(mailbox) => RelayResponsePayload::CheckpointMailbox { mailbox },
+                Err(message) => {
+                    return Ok(relay_error(
+                        RelayErrorCode::InvalidState,
+                        message,
+                        false,
+                        None,
+                    ));
+                }
+            },
+            RelayRequest::ReadCheckpointNativeUse {
+                barrier_command_id,
+                cut,
+            } => match self.checkpoint_native_use(barrier_command_id, cut) {
+                Ok(native_use_evidence) => {
+                    RelayResponsePayload::CheckpointNativeUse { native_use_evidence }
+                }
                 Err(message) => {
                     return Ok(relay_error(
                         RelayErrorCode::InvalidState,

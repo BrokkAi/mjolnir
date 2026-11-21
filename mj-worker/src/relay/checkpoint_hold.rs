@@ -131,6 +131,18 @@ impl DurableRelay {
         Ok(Ok(mailbox))
     }
 
+    /// The worker-owned native-session-use evidence at a ready barrier's cut.
+    pub(super) fn checkpoint_native_use(
+        &self,
+        barrier_command_id: &str,
+        cut: &RelayCursor,
+    ) -> std::result::Result<Option<mj_core::relay::NativeSessionUseEvidence>, &'static str> {
+        if !self.at_checkpoint_cut(barrier_command_id, cut) {
+            return Err("the relay is no longer at this checkpoint cut");
+        }
+        Ok(self.snapshot.native_use_evidence.clone())
+    }
+
     /// Spoil the ready barrier's cut: end its hold and remember that work
     /// started after it, which a journal frontier cannot show.
     fn spoil_checkpoint_cut(&mut self) -> Result<()> {

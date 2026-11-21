@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 145;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 146;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2809,6 +2809,21 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              PRAGMA user_version = 145;
              COMMIT;"
         ))?;
+    }
+    // Breaking: checkpoint archives now carry worker-owned native-session-use
+    // evidence in their canonical session (archive schema 15). Older daemons
+    // reject that field (`deny_unknown_fields`), so they cannot read or resume
+    // sessions suspended by this daemon. Refuse their reads and writes. No
+    // table changes.
+    if version < 146 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 146 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (146, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 146;
+             COMMIT;",
+        )?;
     }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
@@ -5733,6 +5748,36 @@ mod reader_tests {
         materialized.pending_elicitations = vec![request.clone()];
         save_materialized_session_to(&path, &materialized).unwrap();
         assert_eq!(load().pending_elicitations, [request]);
+    }
+
+    #[test]
+    fn native_use_archive_migration_fences_revision_145() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let conn = open_writer(&path).unwrap();
+        drop(conn);
+
+        stamp_schema_version(&path, 145);
+        let previous = read_schema_state(&Connection::open(&path).unwrap()).unwrap();
+        assert_eq!(previous.revision, 145);
+        assert_eq!(previous.minimum_compatible, Some(145));
+        previous.ensure_supported_by(145).unwrap();
+
+        let upgraded = open_writer(&path).unwrap();
+        let schema = read_schema_state(&upgraded).unwrap();
+        assert_eq!(schema.revision, 146);
+        assert_eq!(schema.minimum_compatible, Some(146));
+        assert!(matches!(
+            schema
+                .ensure_supported_by(145)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: 146
+            }
+        ));
     }
 
     #[test]

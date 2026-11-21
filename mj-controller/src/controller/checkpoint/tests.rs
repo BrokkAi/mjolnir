@@ -240,6 +240,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
         latest_credential_sync_signal: None,
         worker_build: None,
         operational: mj_core::relay::RelayOperationalState {
+            in_place_move_hold: None,
             assessment: None,
             open_request: None,
             notification_stack: Default::default(),

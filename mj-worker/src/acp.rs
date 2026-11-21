@@ -38,6 +38,7 @@ pub use verdict_client::VerdictSource;
 use crate::relay::NativeSessionHistory;
 use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;
+mod antigravity_usage;
 mod claude_usage;
 mod goal;
 mod grok_usage;
@@ -315,6 +316,18 @@ pub enum CommandRequest {
         target: mj_core::relay::BackgroundTaskStopTarget,
         resolved: oneshot::Sender<std::result::Result<(), String>>,
     },
+    /// Restart only the harness bridge process under a new launch configuration
+    /// without stopping the worker daemon or its non-harness processes.
+    ReloadLaunchConfig {
+        launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+        environment: BTreeMap<String, String>,
+        command: Option<PathBuf>,
+        args: Option<Vec<String>>,
+        additional_directories: Vec<PathBuf>,
+        supervisor_spec: Option<Box<(PathBuf, crate::worker_runtime::AcpSupervisorSpec)>>,
+        leases: Option<Box<dyn std::fmt::Debug + Send + Sync>>,
+        resolved: oneshot::Sender<std::result::Result<(), String>>,
+    },
     CancelTurnFor {
         request_id: String,
         active_prompt_id: String,
@@ -394,21 +407,75 @@ struct OpenedSession {
     native_session_used: Arc<AtomicBool>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum SessionRestart {
     Resume(String),
     /// Reload the idle native session on a fresh bridge that imports the
     /// changed staged logins (OpenCode).
     ReloadLogins(String),
+    /// Restart only the harness bridge under a new launch configuration.
+    ReloadLaunchConfig {
+        launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+        environment: BTreeMap<String, String>,
+        command: Option<PathBuf>,
+        args: Option<Vec<String>>,
+        additional_directories: Vec<PathBuf>,
+        supervisor_spec: Option<Box<(PathBuf, crate::worker_runtime::AcpSupervisorSpec)>>,
+        leases: Option<Box<dyn std::fmt::Debug + Send + Sync>>,
+        resume_session: Option<String>,
+        resolved: oneshot::Sender<std::result::Result<(), String>>,
+    },
     Clear {
         reset: ContextReset,
         previous: String,
     },
 }
 
+impl PartialEq for SessionRestart {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Resume(a), Self::Resume(b)) => a == b,
+            (Self::ReloadLogins(a), Self::ReloadLogins(b)) => a == b,
+            (
+                Self::ReloadLaunchConfig {
+                    resume_session: a, ..
+                },
+                Self::ReloadLaunchConfig {
+                    resume_session: b, ..
+                },
+            ) => a == b,
+            (
+                Self::Clear {
+                    reset: ra,
+                    previous: pa,
+                },
+                Self::Clear {
+                    reset: rb,
+                    previous: pb,
+                },
+            ) => ra == rb && pa == pb,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SessionRestart {}
+
+struct LaunchConfigReload {
+    launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+    environment: BTreeMap<String, String>,
+    command: Option<PathBuf>,
+    args: Option<Vec<String>>,
+    additional_directories: Vec<PathBuf>,
+    supervisor_spec: Option<Box<(PathBuf, crate::worker_runtime::AcpSupervisorSpec)>>,
+    leases: Option<Box<dyn std::fmt::Debug + Send + Sync>>,
+    resolved: oneshot::Sender<std::result::Result<(), String>>,
+}
+
 struct BridgeRestart {
     clear_context: Option<(ContextReset, String)>,
     resume_session: Option<String>,
+    reload_launch_config: Option<LaunchConfigReload>,
     /// Carried into the next bridge's spec: what the dead bridge saw is the
     /// evidence for whether its thread may be replaced.
     native_session_used: bool,
@@ -425,6 +492,7 @@ struct BridgeSessionOpen<'a> {
     replacing_previous_bridge: bool,
     replace_unused_codex_thread: bool,
     first_replaced_unused_native_session_id: &'a mut Option<String>,
+    pending_reload_ack: &'a mut Option<oneshot::Sender<std::result::Result<(), String>>>,
 }
 
 async fn run_inner(
@@ -440,9 +508,16 @@ async fn run_inner(
     // A new worker starts from the relay journal's latest native session ID.
     // Within this worker, restore readiness can first see any replacement.
     let mut first_replaced_unused_native_session_id = None;
+    let mut pending_reload_ack: Option<oneshot::Sender<std::result::Result<(), String>>> = None;
+    let mut _active_reload_leases: Option<Box<dyn std::fmt::Debug + Send + Sync>> = None;
     let mut rollback = None;
     loop {
         if shutdown.is_cancelled() {
+            if let Some(resolved) = pending_reload_ack.take() {
+                let _ = resolved.send(Err(
+                    "ACP runtime shut down before replacement bridge opened".into(),
+                ));
+            }
             return Ok(());
         }
         let replace_unused_codex_thread = should_replace_unused_codex_thread(&spec);
@@ -473,6 +548,7 @@ async fn run_inner(
                 replace_unused_codex_thread,
                 first_replaced_unused_native_session_id:
                     &mut first_replaced_unused_native_session_id,
+                pending_reload_ack: &mut pending_reload_ack,
             },
             &shutdown,
         )
@@ -510,9 +586,22 @@ async fn run_inner(
                 replacing_previous_bridge = true;
                 continue;
             }
-            result => match result? {
-                None => return Ok(()),
-                Some(restart) => restart,
+            result => match result {
+                Ok(None) => {
+                    if let Some(resolved) = pending_reload_ack.take() {
+                        let _ = resolved.send(Err(
+                            "ACP runtime stopped before replacement bridge opened".into(),
+                        ));
+                    }
+                    return Ok(());
+                }
+                Ok(Some(restart)) => restart,
+                Err(error) => {
+                    if let Some(resolved) = pending_reload_ack.take() {
+                        let _ = resolved.send(Err(format!("{error:#}")));
+                    }
+                    return Err(error);
+                }
             },
         };
         if restart.native_session_used {
@@ -552,6 +641,52 @@ async fn run_inner(
             }
         }
         restart_notice = Some(restart.notice);
+        if let Some(LaunchConfigReload {
+            launch_config,
+            environment,
+            command,
+            args,
+            additional_directories,
+            supervisor_spec,
+            leases,
+            resolved,
+        }) = restart.reload_launch_config
+        {
+            if let Some(supervisor) = supervisor_spec {
+                let (supervisor_path, supervisor_spec) = *supervisor;
+                if let Err(error) = supervisor_spec.write_spec(&supervisor_path) {
+                    let _ =
+                        resolved.send(Err(format!("write updated ACP supervisor spec: {error:#}")));
+                    return Err(error);
+                }
+            }
+            match mj_core::login_environment::with_overrides(&environment).await {
+                Ok(environment) => {
+                    spec.apply_reload_accepted_config(&launch_config);
+                    spec.environment = environment;
+                    if let Some(command) = command {
+                        spec.command = command;
+                    }
+                    if let Some(args) = args {
+                        spec.args = args;
+                    }
+                    spec.cwd = launch_config.cwd.clone();
+                    spec.additional_directories = additional_directories;
+                    spec.harness = launch_config.harness;
+                    spec.initial_model = launch_config.initial_model.clone();
+                    spec.execution_policy = launch_config.execution_policy;
+                    spec.approval_choices = launch_config.approval_choices();
+                    spec.instruction_role = InstructionRole::from_launch(&launch_config);
+                    spec.project_memory = launch_config.project_memory.clone();
+                    _active_reload_leases = leases;
+                    pending_reload_ack = Some(resolved);
+                }
+                Err(error) => {
+                    let _ = resolved.send(Err(format!("{error:#}")));
+                    return Err(error);
+                }
+            }
+        }
         spec.goal_recovery
             .lock()
             .expect("goal lock poisoned")
@@ -780,21 +915,58 @@ async fn run_bridge(
         Ok(Some(SessionRestart::Clear { reset, previous })) => Ok(Some(BridgeRestart {
             clear_context: Some((reset, previous)),
             resume_session: None,
+            reload_launch_config: None,
             native_session_used: opened_now
                 .as_ref()
                 .is_some_and(|opened| opened.native_session_used.load(Ordering::Acquire)),
             session_age: Duration::ZERO,
             notice: BridgeRestartNotice::Planned("Clearing context"),
         })),
+        Ok(Some(SessionRestart::ReloadLaunchConfig {
+            launch_config,
+            environment,
+            command,
+            args,
+            additional_directories,
+            supervisor_spec,
+            leases,
+            resume_session,
+            resolved,
+        })) => Ok(Some(BridgeRestart {
+            clear_context: None,
+            resume_session,
+            reload_launch_config: Some(LaunchConfigReload {
+                launch_config,
+                environment,
+                command,
+                args,
+                additional_directories,
+                supervisor_spec,
+                leases,
+                resolved,
+            }),
+            native_session_used: opened_now
+                .as_ref()
+                .is_some_and(|opened| opened.native_session_used.load(Ordering::Acquire)),
+            session_age: opened_now
+                .map(|opened| opened.started_at.elapsed())
+                .unwrap_or(Duration::ZERO),
+            notice: BridgeRestartNotice::Planned(
+                "Restarting harness under updated launch configuration",
+            ),
+        })),
         Ok(Some(restart @ (SessionRestart::Resume(_) | SessionRestart::ReloadLogins(_)))) => {
             let (native_session_id, message) = match restart {
                 SessionRestart::Resume(id) => (id, ACP_BRIDGE_RESTART_WARNING),
                 SessionRestart::ReloadLogins(id) => (id, OPENCODE_LOGINS_RELOAD_MESSAGE),
-                SessionRestart::Clear { .. } => unreachable!("matched above"),
+                SessionRestart::Clear { .. } | SessionRestart::ReloadLaunchConfig { .. } => {
+                    unreachable!("matched above")
+                }
             };
             Ok(Some(BridgeRestart {
                 clear_context: None,
                 resume_session: Some(native_session_id),
+                reload_launch_config: None,
                 native_session_used: opened_now
                     .as_ref()
                     .is_some_and(|opened| opened.native_session_used.load(Ordering::Acquire)),
@@ -811,6 +983,7 @@ async fn run_bridge(
                 // Carry the identity even if we can replace it. The next
                 // session open decides whether to load or replace the thread.
                 resume_session: Some(opened.native_session_id),
+                reload_launch_config: None,
                 native_session_used: opened.native_session_used.load(Ordering::Acquire),
                 session_age: opened.started_at.elapsed(),
                 notice: BridgeRestartNotice::Unexpected,
