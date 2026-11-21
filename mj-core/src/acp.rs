@@ -545,11 +545,6 @@ pub enum RuntimeEvent {
     BridgeRetired {
         terminal_connection_id: String,
     },
-    /// Ordered before the native request and its updates on the worker FIFO.
-    NativeGoalResumeSent {
-        resume_id: u64,
-        goal: Option<crate::goal::GoalSnapshot>,
-    },
     NativeGoalResumeRejected {
         resume_id: u64,
     },

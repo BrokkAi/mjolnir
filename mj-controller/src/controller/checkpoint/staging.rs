@@ -636,7 +636,7 @@ pub(in crate::controller) fn release_projection_behind_checkpoint(
     session_id: &str,
     current: &CheckpointMetadata,
 ) {
-    match crate::database::compact_materialized_transcript_through(
+    match crate::database::compact_materialized_transcript_all_through(
         session_id,
         current.event_frontier,
     ) {

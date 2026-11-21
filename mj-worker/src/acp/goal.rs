@@ -2,22 +2,23 @@
 use super::*;
 use mj_core::goal::{GoalSnapshot, RECOVERY_ID};
 
-async fn record_resume_sent(
+fn record_resume_sent(
     owner: Option<&std::sync::Weak<crate::relay::RelayCell>>,
-    events: &mpsc::Sender<RuntimeEvent>,
     goal: Option<GoalSnapshot>,
 ) -> Result<Option<u64>> {
     if let Some(owner) = owner {
-        owner
+        let relay = owner
             .upgrade()
             .context("native resume relay owner disappeared")?;
         static NEXT_RESUME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let resume_id = NEXT_RESUME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        emit_runtime_event(
-            events,
-            RuntimeEvent::NativeGoalResumeSent { resume_id, goal },
-        )
-        .await?;
+        // Record the reservation directly on the relay under its own lock before
+        // sending `_session/goal`, so a quiescent adoption cut arriving over
+        // another connection cannot observe an unreserved gap.
+        relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .native_goal_resume_sent(resume_id, goal);
         return Ok(Some(resume_id));
     }
     Ok(None)
@@ -85,7 +86,7 @@ impl PendingControls {
                 // Explicit native resume may answer only when its turn finishes.
                 // Do not impose recovery's short acknowledgement timeout here.
                 let admission = if action == mj_core::goal::GoalControlAction::Resume {
-                    record_resume_sent(owner.as_ref(), &events, resume_goal).await
+                    record_resume_sent(owner.as_ref(), resume_goal)
                 } else {
                     Ok(None)
                 };
@@ -323,7 +324,7 @@ async fn control(
         mj_core::goal::GoalControlAction::Pause
     };
     let resume_id = if resume {
-        record_resume_sent(spec.terminal_owner.as_ref(), events, Some(goal.clone())).await?
+        record_resume_sent(spec.terminal_owner.as_ref(), Some(goal.clone()))?
     } else {
         None
     };
@@ -549,6 +550,7 @@ mod tests {
     // Hard-won: 5c9e20e: guarded Codex identity rejection uses invalidRequest.
     #[tokio::test]
     async fn goal_recovery_resumes_only_when_needed_and_explicit_open_asks() {
+        let _ = mj_core::login_environment::initialize_from_parent();
         for (asking, running, answer, expected_resumes, status, decision, timed_out, reject_code) in [
             (false, false, None, 1, "active", false, false, None),
             (false, true, None, 0, "active", false, false, None),
@@ -675,27 +677,42 @@ for line in sys.stdin:
             let task = mj_core::runtime::spawn(run(spec, rx, events));
             if track_cut {
                 let mut in_flight = BTreeMap::new();
+                let mut buffered_events = Vec::new();
                 // Reopen's automatic resume is not a relay command. Drain the
-                // real ACP setup while its resume request is held by the peer.
+                // bounded `events` channel so ACP startup cannot stall, but do
+                // NOT apply any events to `relay` yet: the relay must already
+                // hold the reservation as soon as `_session/goal` reaches the
+                // peer.
                 tokio::time::timeout(Duration::from_secs(10), async {
-                    while !root.path().join("resumes").exists()
-                        || !relay.observe().unwrap().adoption_blockers().iter().any(|blocker| blocker.contains("goal resume")) {
+                    while !root.path().join("resumes").exists() {
                         tokio::select! {
-                            event = receive.recv() => { crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event.unwrap()).unwrap(); }
+                            event = receive.recv() => {
+                                buffered_events.push(event.unwrap());
+                            }
                             _ = tokio::time::sleep(Duration::from_millis(10)) => {}
                         }
                     }
-                }).await.unwrap();
+                })
+                .await
+                .unwrap();
                 let mut cut = relay.lock().unwrap().reserve_live_baseline();
-                assert!(cut.try_recv().is_err());
+                assert!(
+                    cut.try_recv().is_err(),
+                    "quiescent adoption cut must be blocked before runtime events apply"
+                );
                 assert!(
                     relay
                         .observe()
                         .unwrap()
                         .adoption_blockers()
                         .iter()
-                        .any(|blocker| blocker.contains("goal resume"))
+                        .any(|blocker| blocker.contains("goal resume")),
+                    "relay must already report the goal resume blocker when peer receives _session/goal"
                 );
+                for event in buffered_events {
+                    crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event)
+                        .unwrap();
+                }
                 if timed_out {
                     tokio::time::pause();
                     tokio::time::advance(Duration::from_secs(31)).await;
@@ -906,6 +923,7 @@ for line in sys.stdin:
     }
     #[tokio::test]
     async fn goal_controls_work_during_prompts_and_pending_resume_with_large_output() {
+        let _ = mj_core::login_environment::initialize_from_parent();
         use mj_core::goal::GoalControlAction;
         for harness in [HarnessKind::Codex, HarnessKind::Claude] {
             for foreground in [false, true] {
