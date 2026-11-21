@@ -614,6 +614,31 @@ impl Controller {
                     repository.capture = CheckpointRepositoryCapture::OriginDeltaRaw;
                 }
             }
+        } else if export_policy == CheckpointExportPolicy::OriginDeltaCutoff
+            && relay_protocol >= mj_core::relay::RELAY_CUTOFF_ORIGIN_DELTA_PROTOCOL
+            && let Some(cutoff) = super::super::backend::session_history_cutoff(&session)?
+        {
+            let owner = self.state.workspace_owner(session_id)?;
+            let cutoff_repository_id = owner
+                .checkout
+                .as_ref()
+                .map(|checkout| checkout.repository_id.as_str());
+            let mut exclude_commits = vec![cutoff.head];
+            if let Some(base) = cutoff.base
+                && !exclude_commits.contains(&base)
+            {
+                exclude_commits.push(base);
+            }
+            for repository in &mut repositories {
+                if repository.capture == CheckpointRepositoryCapture::RemoteWorkspace
+                    && cutoff_repository_id == Some(repository.id.as_str())
+                {
+                    repository.capture = CheckpointRepositoryCapture::OriginDeltaCutoff {
+                        exclude_commits: exclude_commits.clone(),
+                    };
+                    repository.origin_override = None;
+                }
+            }
         }
 
         let exported: Result<CheckpointArtifact> = async {

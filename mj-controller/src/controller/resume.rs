@@ -1830,6 +1830,9 @@ impl Controller {
             .map_err(|reason| anyhow::anyhow!("{reason}"))?;
         let is_attached_checkout =
             matches!(checkout.effective(), mj_core::state::Checkout::Attached { .. });
+        let is_history_cutoff_origin_delta =
+            super::network_git::manifest_has_history_cutoff_origin_delta(archive_manifest)
+                && super::backend::session_history_cutoff(&previous)?.is_some();
         // An origin-delta checkpoint restores only into its own target so far.
         // Refuse a move to another target here, before Resume is accepted.
         if (transferring_workspace || plan != ResumePlan::InPlace)
@@ -1843,7 +1846,7 @@ impl Controller {
                     .metadata
                     .origin_delta
                     .as_ref()
-                    .is_some_and(|delta| delta.origin_url.is_none())
+                    .is_some_and(|delta| !delta.history_cutoff && delta.origin_url.is_none())
             });
             let message = if originless {
                 "This raw session has no Git origin remote and can only be resumed on its original target."
@@ -1869,6 +1872,7 @@ impl Controller {
         if !mj_core::config::is_bare_project_target(&target_template)
             && plan != ResumePlan::RawToWorkspace
             && !transferring_workspace
+            && !is_history_cutoff_origin_delta
         {
             super::network_git::bundle_from_manifest(archive_manifest)?;
         }
@@ -2114,7 +2118,10 @@ impl Controller {
         let result = async {
             if origin_delta {
                 ensure!(!transferring_workspace && plan == ResumePlan::InPlace, "origin delta conversion is unavailable");
-                if let Some(worktree) = previous_managed_worktree.as_ref() {
+                if is_history_cutoff_origin_delta {
+                    // Provisioning builds the cutoff-bounded clone from the configured
+                    // bundle; restore_into_target then applies the origin-delta snapshot.
+                } else if let Some(worktree) = previous_managed_worktree.as_ref() {
                     resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
                         executor, worktree, &archive_path, archive_manifest,
                     )?);
@@ -2259,10 +2266,11 @@ impl Controller {
             if transferring_workspace {
                 self.restore_move_workspace(session_id, executor)?;
             }
-            let restore_repositories = !origin_delta && !transferring_workspace && ((resumed_project_directory.is_none()
-                && conversion.is_none())
-                || plan == ResumePlan::RawToWorkspace
-                || (recreated_managed_worktree && plan == ResumePlan::InPlace));
+            let restore_repositories = (!origin_delta || is_history_cutoff_origin_delta)
+                && !transferring_workspace
+                && ((resumed_project_directory.is_none() && conversion.is_none())
+                    || plan == ResumePlan::RawToWorkspace
+                    || (recreated_managed_worktree && plan == ResumePlan::InPlace));
             // A conversion restores the archive it just wrote, not the raw one
             // the session was stopped with.
             let restored_archive = conversion_checkpoint_written

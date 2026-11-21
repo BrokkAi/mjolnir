@@ -889,7 +889,16 @@ impl Controller {
             } else if let Some(bundle) = move_bundle {
                 Some(bundle)
             } else if failure_disposition == ProvisioningFailureDisposition::Preserve {
-                Some(super::network_git::checkpoint_bundle(&session)?)
+                let history_cutoff_origin_delta =
+                    super::backend::session_history_cutoff(&session)?.is_some()
+                        && super::network_git::checkpoint_has_history_cutoff_origin_delta(
+                            &session,
+                        )?;
+                if history_cutoff_origin_delta {
+                    Some(backend_session_bundle(&session, &self.config, executor)?)
+                } else {
+                    Some(super::network_git::checkpoint_bundle(&session)?)
+                }
             } else {
                 Some(backend_session_bundle(&session, &self.config, executor)?)
             };

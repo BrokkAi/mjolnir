@@ -3036,6 +3036,32 @@ fn raw_git_session_uses_origin_delta_raw_policy_and_removes_launch_record_on_des
         CheckpointExportPolicy::ReuseUnchangedArchive
     );
 
+    let mut cutoff_session = raw_session.clone();
+    cutoff_session.id = "cutoff-session".into();
+    cutoff_session.project = None;
+    cutoff_session.project_directory = None;
+    cutoff_session.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
+        repository_id: "repo".into(),
+        commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        branch: None,
+        no_later_history: true,
+    }));
+    let cutoff_controller = Controller {
+        config: controller.config.clone(),
+        state: State {
+            sessions: [("cutoff-session".into(), cutoff_session)]
+                .into_iter()
+                .collect(),
+            ..State::default()
+        },
+    };
+    assert_eq!(
+        cutoff_controller
+            .explicit_suspend_export_policy("cutoff-session", false)
+            .unwrap(),
+        CheckpointExportPolicy::OriginDeltaCutoff
+    );
+
     controller
         .remove_raw_launch_record(&raw_session, &mj_core::targets::ProcessExecutor)
         .unwrap();

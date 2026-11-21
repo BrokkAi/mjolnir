@@ -1107,6 +1107,78 @@ fn collect_origin_delta_raw(
     })
 }
 
+pub fn cutoff_snapshot_input(
+    id: &str,
+    path: &Path,
+    exclude_commits: Vec<String>,
+    pack_path: PathBuf,
+) -> crate::snapshot::RepositoryInput {
+    use crate::snapshot::{CheckoutOwnership, ExclusionSource, RepositoryInput};
+
+    RepositoryInput {
+        id: id.to_owned(),
+        checkout: path.to_path_buf(),
+        ownership: CheckoutOwnership::Managed,
+        origin_override: None,
+        pack_path,
+        exclusions: ExclusionSource::Commits(exclude_commits),
+        keep_dir: Some(path.join(".mj/keep")),
+    }
+}
+
+fn collect_origin_delta_cutoff(
+    git: &dyn GitCommandRunner,
+    path: &Path,
+    repository: &CheckpointRepositorySpec,
+    exclude_commits: Vec<String>,
+    snapshot_directory: &Path,
+) -> Result<RepositorySnapshot> {
+    use crate::snapshot::{SessionCaptureConsent, SnapshotHead, capture_session_snapshot};
+
+    let location = crate::archive::git::locate_checkout(git, path)?;
+    let input = cutoff_snapshot_input(
+        &repository.id,
+        &location.top_level,
+        exclude_commits,
+        snapshot_directory.join(&repository.id),
+    );
+    let mut snapshot = capture_session_snapshot(git, &[input], &SessionCaptureConsent::default())?
+        .repositories
+        .remove(&repository.id)
+        .context("history-cutoff origin delta snapshot is missing")?;
+
+    Ok(RepositorySnapshot {
+        metadata: crate::archive::RepositoryMetadata {
+            id: repository.id.clone(),
+            relative_destination: repository.relative_destination.clone(),
+            checkout_subdirectory: location.subdirectory,
+            origin: String::new(),
+            push_urls: Vec::new(),
+            remote_workspace: false,
+            plain_directory: false,
+            base_commit: String::new(),
+            head_commit: snapshot.head.commit().to_owned(),
+            branch: match &snapshot.head {
+                SnapshotHead::Branch { name, .. } => Some(name.clone()),
+                SnapshotHead::Detached(_) => None,
+            },
+            review_refs_metadata_only: false,
+            review_baseline_ref: None,
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
+            git_operation: None,
+            origin_delta: Some(Box::new(snapshot.metadata)),
+        },
+        origin_delta_pack: snapshot.pack.take(),
+        committed_bundle: Vec::new(),
+        staged_patch: Vec::new(),
+        unstaged_patch: Vec::new(),
+        untracked_tar: Vec::new(),
+        operation_payloads: None,
+        linked_worktrees: Vec::new(),
+    })
+}
+
 fn collect_checkpoint_repositories_with_policy(
     workspace_root: &Path,
     specifications: &[CheckpointRepositorySpec],
@@ -1140,6 +1212,16 @@ fn collect_checkpoint_repositories_with_policy(
                         session_id.context("raw origin-delta export requires a session id")?,
                         snapshot_directory
                             .context("raw origin-delta export requires a single-shot export")?,
+                    );
+                }
+                CheckpointRepositoryCapture::OriginDeltaCutoff { exclude_commits } => {
+                    return collect_origin_delta_cutoff(
+                        git,
+                        &path,
+                        repository,
+                        exclude_commits.clone(),
+                        snapshot_directory
+                            .context("history-cutoff origin-delta export requires a single-shot export")?,
                     );
                 }
                 CheckpointRepositoryCapture::PlainDirectory => {

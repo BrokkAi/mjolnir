@@ -5217,3 +5217,121 @@ fn origin_delta_raw_export_handles_originless_repository() {
         .expect("origin_delta metadata");
     assert!(delta.origin_url.is_none());
 }
+
+#[test]
+fn origin_delta_cutoff_export_and_restore_round_trips_without_origin() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let checkout = spec
+        .workspace_root
+        .join(&spec.repositories[0].relative_destination);
+    let cutoff = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["remote", "remove", "origin"]);
+
+    // Prepare a fresh cutoff destination clone before making post-cutoff edits.
+    let restore_root = temp.path().join("restore-workspace");
+    let restore_checkout = restore_root.join(&spec.repositories[0].relative_destination);
+    fs::create_dir_all(&restore_checkout).unwrap();
+    git(&restore_checkout, &["init", "-b", "main"]);
+    git(&restore_checkout, &["config", "user.name", "Test"]);
+    git(
+        &restore_checkout,
+        &["config", "user.email", "test@example.com"],
+    );
+    git(
+        &restore_checkout,
+        &["fetch", checkout.to_str().unwrap(), &cutoff],
+    );
+    git(&restore_checkout, &["checkout", "-B", "main", "FETCH_HEAD"]);
+
+    // Make commits, branch, stash, and staged/unstaged edits past cutoff.
+    git(&checkout, &["checkout", "-b", "cutoff-branch"]);
+    fs::write(checkout.join("README.md"), "cutoff commit\n").unwrap();
+    git(&checkout, &["add", "README.md"]);
+    git(&checkout, &["commit", "-m", "cutoff commit"]);
+    let expected_head = git(&checkout, &["rev-parse", "HEAD"]);
+    fs::write(checkout.join("README.md"), "stashed cutoff edit\n").unwrap();
+    git(&checkout, &["stash", "push", "-m", "cutoff stash"]);
+    fs::write(checkout.join("README.md"), "staged cutoff edit\n").unwrap();
+    git(&checkout, &["add", "README.md"]);
+    fs::write(checkout.join("README.md"), "unstaged cutoff edit\n").unwrap();
+
+    spec.repositories[0].capture = CheckpointRepositoryCapture::OriginDeltaCutoff {
+        exclude_commits: vec![cutoff.clone()],
+    };
+    spec.repositories[0].origin_override = None;
+    spec.protocol_version = CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+    assert_eq!(
+        spec.protocol_version,
+        CHECKPOINT_ORIGIN_DELTA_EXPORT_PROTOCOL_VERSION
+    );
+
+    export_checkpoint(&spec).unwrap();
+    let archive = read_archive_verified(&spec.output_path).unwrap();
+    let repository = &archive.manifest.repositories[0];
+    assert!(repository.origin_delta_pack_path.is_some());
+    assert!(repository.metadata.origin.is_empty());
+    let delta = repository
+        .metadata
+        .origin_delta
+        .as_ref()
+        .expect("origin_delta metadata");
+    assert!(delta.history_cutoff);
+    assert!(delta.origin_url.is_none());
+
+    restore_repositories(&spec.output_path, &restore_root, &SystemGit).unwrap();
+    assert_eq!(git(&restore_checkout, &["rev-parse", "HEAD"]), expected_head);
+    assert_eq!(
+        git(&restore_checkout, &["branch", "--show-current"]),
+        "cutoff-branch"
+    );
+    assert_eq!(
+        fs::read_to_string(restore_checkout.join("README.md")).unwrap(),
+        "unstaged cutoff edit\n"
+    );
+    assert_eq!(
+        git(&restore_checkout, &["show", ":README.md"]),
+        "staged cutoff edit"
+    );
+    assert_eq!(git(&restore_checkout, &["stash", "list"]).lines().count(), 1);
+    let origin = SystemGit
+        .run(
+            &restore_checkout,
+            &crate::archive::GitCommand {
+                arguments: vec!["remote".into(), "get-url".into(), "origin".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_ne!(origin.status, 0);
+}
+
+#[test]
+fn origin_delta_cutoff_export_allows_empty_pack_at_cutoff() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let checkout = spec
+        .workspace_root
+        .join(&spec.repositories[0].relative_destination);
+    let cutoff = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["remote", "remove", "origin"]);
+
+    spec.repositories[0].capture = CheckpointRepositoryCapture::OriginDeltaCutoff {
+        exclude_commits: vec![cutoff],
+    };
+    spec.repositories[0].origin_override = None;
+    spec.protocol_version = CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+
+    export_checkpoint(&spec).unwrap();
+    let archive = read_archive_verified(&spec.output_path).unwrap();
+    let repository = &archive.manifest.repositories[0];
+    assert!(repository.origin_delta_pack_path.is_none());
+    assert!(repository.metadata.origin.is_empty());
+    let delta = repository
+        .metadata
+        .origin_delta
+        .as_ref()
+        .expect("origin_delta metadata");
+    assert!(delta.history_cutoff);
+    assert!(delta.origin_url.is_none());
+}

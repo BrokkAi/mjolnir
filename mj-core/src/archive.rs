@@ -199,6 +199,9 @@ pub struct WorkspaceSnapshotMetadata {
     pub remote_refs_stale: bool,
     /// Boundary commits and saved tips omitted from the origin-relative pack.
     pub prerequisites: Vec<String>,
+    /// True when captured relative to explicit history-cutoff commits rather than an origin remote.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub history_cutoff: bool,
 }
 
 pub fn archive_path_text(path: &std::path::Path) -> Result<String> {

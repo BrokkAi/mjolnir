@@ -2227,9 +2227,15 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
             );
         }
         if let Some(snapshot) = &metadata.origin_delta {
-            let origin_matches = match snapshot.origin_url.as_deref() {
-                Some(url) => !url.is_empty() && metadata.origin == url,
-                None => metadata.origin.is_empty() && repository.origin_delta_pack_path.is_none(),
+            let origin_matches = if snapshot.history_cutoff {
+                snapshot.origin_url.is_none() && metadata.origin.is_empty()
+            } else {
+                match snapshot.origin_url.as_deref() {
+                    Some(url) => !url.is_empty() && metadata.origin == url,
+                    None => {
+                        metadata.origin.is_empty() && repository.origin_delta_pack_path.is_none()
+                    }
+                }
             };
             ensure!(
                 origin_matches

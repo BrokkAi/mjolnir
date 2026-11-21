@@ -160,11 +160,23 @@ pub fn restore_checkpoint_with_native_state(
     // archive; the controller already holds it as the durable projection.
     let seed = relay_seed_for_restore(&canonical_session, spec.restore_native, spec.queue_policy)?;
     if spec.restore_repositories {
-        restore_repositories_from_archive(&archive, &spec.workspace_root, git, true)?;
+        restore_repositories_from_archive(
+            &spec.archive_path,
+            &archive,
+            &spec.workspace_root,
+            git,
+            true,
+        )?;
     } else {
         // Move has already transported workspace files. Review refs still
         // need their destination checkout names without changing its index.
-        restore_repositories_from_archive(&archive, &spec.workspace_root, git, false)?;
+        restore_repositories_from_archive(
+            &spec.archive_path,
+            &archive,
+            &spec.workspace_root,
+            git,
+            false,
+        )?;
     }
 
     // Attachment data belongs to the relay, even when native harness history
@@ -565,10 +577,11 @@ pub fn restore_repositories(
 ) -> Result<()> {
     ensure!(workspace_root.is_dir(), "restore workspace is missing");
     let archive = crate::archive::read_archive_repositories(archive_path)?;
-    restore_repositories_from_archive(&archive, workspace_root, git, true)
+    restore_repositories_from_archive(archive_path, &archive, workspace_root, git, true)
 }
 
 pub(super) fn restore_repositories_from_archive(
+    archive_path: &Path,
     archive: &crate::archive::VerifiedArchive,
     workspace_root: &Path,
     git: &dyn GitCommandRunner,
@@ -578,13 +591,53 @@ pub(super) fn restore_repositories_from_archive(
         // A plain project folder is the user's own directory on a bare local
         // target. Its files were never captured, so a restore must never
         // check out, rewrite or remove anything in it.
-        if repository.metadata.origin_delta.is_some() {
-            // The managed-clone provisioner has already applied this snapshot
-            // in its staging checkout and repaired the published worktrees.
-            ensure!(
-                !restore_contents,
-                "origin delta requires managed clone provisioning"
-            );
+        if let Some(delta) = repository.metadata.origin_delta.as_deref() {
+            if !restore_contents {
+                continue;
+            }
+            let id = &repository.metadata.id;
+            let pack_file = repository
+                .origin_delta_pack_path
+                .as_ref()
+                .map(|path| -> Result<_> {
+                    let descriptor = archive
+                        .manifest
+                        .payloads
+                        .iter()
+                        .find(|payload| {
+                            &payload.path == path
+                                && payload.role
+                                    == (PayloadRole::GitOriginDeltaPack {
+                                        repository_id: id.clone(),
+                                    })
+                        })
+                        .context("origin delta pack descriptor is missing")?;
+                    let mut temp = tempfile::NamedTempFile::new()
+                        .context("create temporary origin delta pack file")?;
+                    crate::archive::CheckpointPayloadReader::open(archive_path)?
+                        .copy_payload(descriptor, temp.as_file_mut())
+                        .context("stream origin delta pack payload")?;
+                    std::io::Write::flush(temp.as_file_mut())
+                        .context("flush temporary origin delta pack file")?;
+                    Ok(temp)
+                })
+                .transpose()?;
+            let snapshot = crate::snapshot::WorkspaceSnapshot {
+                metadata: delta.clone(),
+                pack: pack_file.as_ref().map(|file| file.path().to_path_buf()),
+            };
+            let path = checkout_top_level(
+                &workspace_root.join(&repository.metadata.relative_destination),
+                &repository.metadata,
+            )
+            .with_context(|| format!("restore repository {id:?}"))?;
+            let notices = crate::snapshot::restore_workspace_snapshot(git, &snapshot, &path)
+                .with_context(|| format!("restore repository {id:?}"))?;
+            for notice in notices {
+                tracing::info!(repository_id = %id, "{notice}");
+            }
+            crate::snapshot::repair_workspace_snapshot(git, &snapshot, &path)
+                .with_context(|| format!("repair repository {id:?}"))?;
             continue;
         }
         if repository.metadata.plain_directory {

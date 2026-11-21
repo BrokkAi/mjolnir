@@ -195,7 +195,9 @@ pub const RELAY_PERMISSION_TOOL_CALL_PROTOCOL: u32 = 76;
 pub const RELAY_CONCURRENT_REVIEW_PROTOCOL: u32 = 77;
 /// 78 supports `CheckpointRepositoryCapture::OriginDeltaRaw` for raw Git checkouts.
 pub const RELAY_RAW_ORIGIN_DELTA_PROTOCOL: u32 = 78;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_RAW_ORIGIN_DELTA_PROTOCOL;
+/// 79 supports `CheckpointRepositoryCapture::OriginDeltaCutoff` for history-cutoff sessions.
+pub const RELAY_CUTOFF_ORIGIN_DELTA_PROTOCOL: u32 = 79;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CUTOFF_ORIGIN_DELTA_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

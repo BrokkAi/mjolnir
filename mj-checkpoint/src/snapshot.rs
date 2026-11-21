@@ -1919,39 +1919,44 @@ fn estimate_delta_with_source(
 ) -> Result<DeltaEstimate> {
     let capture = CaptureGit::new(runner);
     let runner: &dyn GitCommandRunner = &capture;
-    let configured = run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?;
-    let remote = if configured.status == 0 {
-        Some("origin".to_owned())
+    let history_cutoff = matches!(source, ExclusionSource::Commits(_));
+    let (remote, inventory_origin) = if history_cutoff {
+        (String::new(), None)
     } else {
-        origin_override
-    };
-    let Some(remote) = remote else {
-        ensure!(
-            matches!(ownership, CheckoutOwnership::Raw { .. }),
-            "managed snapshot requires an origin remote or source override"
-        );
-        return Ok(DeltaEstimate {
-            committed_bytes: 0,
-            working_state_bytes: None,
-            total_bytes: None,
-            remote_refs_stale: false,
-        });
+        let configured = run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?;
+        let remote = if configured.status == 0 {
+            Some("origin".to_owned())
+        } else {
+            origin_override
+        };
+        let Some(remote) = remote else {
+            ensure!(
+                matches!(ownership, CheckoutOwnership::Raw { .. }),
+                "managed snapshot requires an origin remote or source override"
+            );
+            return Ok(DeltaEstimate {
+                committed_bytes: 0,
+                working_state_bytes: None,
+                total_bytes: None,
+                remote_refs_stale: false,
+            });
+        };
+        let resolved_remote = if configured.status == 0 {
+            remote.clone()
+        } else {
+            absolute_config_url(checkout, &remote)?
+        };
+        (resolved_remote, Some(remote))
     };
     let inventory = workspace_inventory_scoped(
         runner,
         checkout,
         ownership,
         &CheckoutKey::default(),
-        Some(&remote),
+        inventory_origin.as_deref(),
+        history_cutoff,
     )?;
     let cut = pin_workspace_cut(runner, checkout, ownership)?;
-    // Preflight above verifies that anchoring preserves literal URL rewrites.
-    // An absolute override cannot be mistaken for an existing remote name.
-    let remote = if configured.status == 0 {
-        remote
-    } else {
-        absolute_config_url(checkout, &remote)?
-    };
     let exclusions = snapshot_exclusions(runner, checkout, &remote, &cut.refs, source)?;
     let refs = selected_refs(runner, checkout, &cut, ownership)?;
     let mut committed: Vec<_> = refs.values().cloned().collect();
@@ -2140,12 +2145,14 @@ pub fn capture_session_snapshot(
             "duplicate snapshot repository ID {}",
             repository.id
         );
-        let in_place = in_place_only_mode(
-            runner,
-            &repository.checkout,
-            &repository.ownership,
-            repository.origin_override.as_deref(),
-        )?;
+        let history_cutoff = matches!(repository.exclusions, ExclusionSource::Commits(_));
+        let in_place = !history_cutoff
+            && in_place_only_mode(
+                runner,
+                &repository.checkout,
+                &repository.ownership,
+                repository.origin_override.as_deref(),
+            )?;
         let mode = if in_place {
             CaptureMode::InPlaceOnly
         } else {
@@ -2162,13 +2169,15 @@ pub fn capture_session_snapshot(
             .get_mut(&repository.id)
             .context("missing capture inventory")?
         {
-            inventory_origin_dependencies(
-                runner,
-                &repository.checkout,
-                inventory,
-                repository.origin_override.as_deref(),
-                &deletion_roots,
-            )?;
+            if !matches!(repository.exclusions, ExclusionSource::Commits(_)) {
+                inventory_origin_dependencies(
+                    runner,
+                    &repository.checkout,
+                    inventory,
+                    repository.origin_override.as_deref(),
+                    &deletion_roots,
+                )?;
+            }
             inventory.blockers = inventory_blockers(inventory)?;
         }
     }
@@ -2227,13 +2236,15 @@ pub fn capture_session_snapshot(
             {
                 let mut current = repository_inventory(runner, repository)
                     .map_err(|error| session_error(&repository.id, error))?;
-                inventory_origin_dependencies(
-                    runner,
-                    &repository.checkout,
-                    &mut current,
-                    repository.origin_override.as_deref(),
-                    &deletion_roots,
-                )?;
+                if !matches!(repository.exclusions, ExclusionSource::Commits(_)) {
+                    inventory_origin_dependencies(
+                        runner,
+                        &repository.checkout,
+                        &mut current,
+                        repository.origin_override.as_deref(),
+                        &deletion_roots,
+                    )?;
+                }
                 current.blockers = inventory_blockers(&current)?;
                 **previous = current;
             }
@@ -2363,6 +2374,7 @@ fn capture_in_place_metadata(
             index_gitlinks: Vec::new(),
             remote_refs_stale: false,
             prerequisites: Vec::new(),
+            history_cutoff: false,
         },
         pack: None,
     })
@@ -2378,21 +2390,26 @@ fn capture_prepared_workspace(
 ) -> Result<WorkspaceSnapshot> {
     let checkout = &repository.checkout;
     let ownership = &repository.ownership;
-    let configured = config_values(runner, checkout, "remote.origin.url")?
-        .into_iter()
-        .next();
-    let origin_url = configured
-        .clone()
-        .or_else(|| repository.origin_override.clone());
-    let Some(origin_url) = origin_url else {
-        return capture_in_place_metadata(runner, repository);
-    };
-    let remote = if configured.is_some() {
-        "origin".to_owned()
+    let history_cutoff = matches!(repository.exclusions, ExclusionSource::Commits(_));
+    let (origin_url, remote) = if history_cutoff {
+        (None, String::new())
     } else {
-        absolute_config_url(checkout, &origin_url)?
+        let configured = config_values(runner, checkout, "remote.origin.url")?
+            .into_iter()
+            .next();
+        let origin_url = configured
+            .clone()
+            .or_else(|| repository.origin_override.clone());
+        let Some(origin_url) = origin_url else {
+            return capture_in_place_metadata(runner, repository);
+        };
+        let remote = if configured.is_some() {
+            "origin".to_owned()
+        } else {
+            absolute_config_url(checkout, &origin_url)?
+        };
+        (Some(redact_snapshot_url(&origin_url)?), remote)
     };
-    let origin_url = Some(redact_snapshot_url(&origin_url)?);
     let cut = pin_workspace_cut(runner, checkout, ownership)?;
     let refs = selected_refs(runner, checkout, &cut, ownership)?;
     let exclusions =
@@ -2470,7 +2487,11 @@ fn capture_prepared_workspace(
             notices,
             head,
             refs: refs.clone(),
-            branch_tracking: branch_tracking(runner, checkout, &refs, &cut)?,
+            branch_tracking: if history_cutoff {
+                BTreeMap::new()
+            } else {
+                branch_tracking(runner, checkout, &refs, &cut)?
+            },
             stash,
             has_uncommitted_state: working.is_some()
                 || skipped
@@ -2496,6 +2517,7 @@ fn capture_prepared_workspace(
                     .iter()
                     .any(|(_, tree)| tree.remote_refs_stale),
             prerequisites,
+            history_cutoff,
         },
         pack,
     })
@@ -2701,12 +2723,18 @@ fn repository_inventory(
     runner: &dyn GitCommandRunner,
     repository: &RepositoryInput,
 ) -> Result<WorkspaceInventory> {
+    let history_cutoff = matches!(repository.exclusions, ExclusionSource::Commits(_));
     let mut inventory = workspace_inventory_scoped(
         runner,
         &repository.checkout,
         &repository.ownership,
         &repository_key(&repository.id),
-        repository.origin_override.as_deref(),
+        if history_cutoff {
+            None
+        } else {
+            repository.origin_override.as_deref()
+        },
+        history_cutoff,
     )?;
     if inventory.in_place_only {
         return Ok(inventory);
@@ -2763,7 +2791,14 @@ pub fn workspace_inventory(
 ) -> Result<WorkspaceInventory> {
     let capture = CaptureGit::new(runner);
     let runner: &dyn GitCommandRunner = &capture;
-    workspace_inventory_scoped(runner, checkout, ownership, &CheckoutKey::default(), None)
+    workspace_inventory_scoped(
+        runner,
+        checkout,
+        ownership,
+        &CheckoutKey::default(),
+        None,
+        false,
+    )
 }
 pub fn session_inventory(
     runner: &dyn GitCommandRunner,
@@ -2788,13 +2823,15 @@ pub fn session_inventory(
         let inventory = result
             .get_mut(&repository.id)
             .context("missing session inventory")?;
-        inventory_origin_dependencies(
-            runner,
-            &repository.checkout,
-            inventory,
-            repository.origin_override.as_deref(),
-            &deletion_roots,
-        )?;
+        if !matches!(repository.exclusions, ExclusionSource::Commits(_)) {
+            inventory_origin_dependencies(
+                runner,
+                &repository.checkout,
+                inventory,
+                repository.origin_override.as_deref(),
+                &deletion_roots,
+            )?;
+        }
         inventory.blockers = inventory_blockers(inventory)?;
     }
     Ok(result)
@@ -3228,8 +3265,9 @@ fn workspace_inventory_scoped(
     ownership: &CheckoutOwnership,
     key: &CheckoutKey,
     origin_override: Option<&str>,
+    history_cutoff: bool,
 ) -> Result<WorkspaceInventory> {
-    if in_place_only_mode(runner, checkout, ownership, origin_override)? {
+    if !history_cutoff && in_place_only_mode(runner, checkout, ownership, origin_override)? {
         return in_place_only_inventory(runner, checkout, key);
     }
     fn collect(
@@ -3239,6 +3277,7 @@ fn workspace_inventory_scoped(
         nested: &[PathBuf],
         key: &CheckoutKey,
         origin_override: Option<&str>,
+        history_cutoff: bool,
     ) -> Result<WorkspaceInventory> {
         let bytes = git_bytes(
             runner,
@@ -3251,7 +3290,7 @@ fn workspace_inventory_scoped(
             runner,
             checkout,
             origin_override,
-            !raw,
+            !raw && !history_cutoff,
         )?;
         for path in submodules
             .index_gitlinks
@@ -3347,11 +3386,22 @@ fn workspace_inventory_scoped(
                 .into_iter()
                 .map(|path| scoped(key, path))
                 .collect(),
-            dirty_submodules: submodules
-                .dirty
-                .into_iter()
-                .map(|path| scoped(key, path))
-                .collect(),
+            dirty_submodules: {
+                let mut dirty: Vec<_> = submodules
+                    .dirty
+                    .into_iter()
+                    .map(|path| scoped(key, path))
+                    .collect();
+                if history_cutoff && !raw {
+                    for module in &submodules.initialized {
+                        let entry = scoped(key, module.path.clone());
+                        if !dirty.contains(&entry) {
+                            dirty.push(entry);
+                        }
+                    }
+                }
+                dirty
+            },
             initialized_submodules: submodules
                 .initialized
                 .into_iter()
@@ -3368,7 +3418,8 @@ fn workspace_inventory_scoped(
             uninitialized_origins: submodules.uninitialized_origins,
             blockers: Vec::new(),
             in_place_only: false,
-            origin_missing: origin_override.is_none()
+            origin_missing: !history_cutoff
+                && origin_override.is_none()
                 && run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?.status != 0,
             intent_to_add: intent,
             hidden_tracked_edits: hidden.into_iter().map(|path| scoped(key, path)).collect(),
@@ -3380,13 +3431,17 @@ fn workspace_inventory_scoped(
     }
     // Restore shares the primary checkout's anchored origin with its linked
     // worktrees, even when their source config contains a relative URL.
-    let primary_origin = config_values(runner, checkout, "remote.origin.url")?;
-    let restore_origin = primary_origin
-        .last()
-        .map(String::as_str)
-        .or(origin_override)
-        .map(|origin| absolute_config_url(checkout, origin))
-        .transpose()?;
+    let restore_origin = if history_cutoff {
+        None
+    } else {
+        let primary_origin = config_values(runner, checkout, "remote.origin.url")?;
+        primary_origin
+            .last()
+            .map(String::as_str)
+            .or(origin_override)
+            .map(|origin| absolute_config_url(checkout, origin))
+            .transpose()?
+    };
     let origin_override = restore_origin.as_deref();
     let nested = discover_linked_worktrees(runner, checkout)?;
     let paths: Vec<_> = nested.iter().map(|tree| tree.relative.clone()).collect();
@@ -3399,7 +3454,15 @@ fn workspace_inventory_scoped(
         })?;
     }
     let raw = matches!(ownership, CheckoutOwnership::Raw { .. });
-    let mut result = collect(runner, checkout, raw, &paths, key, origin_override)?;
+    let mut result = collect(
+        runner,
+        checkout,
+        raw,
+        &paths,
+        key,
+        origin_override,
+        history_cutoff,
+    )?;
     for entry in selected_stash(runner, checkout, ownership)? {
         if stash_has_untracked(runner, checkout, &entry.commit)? {
             result.untracked_stashes.push(scoped(key, entry));
@@ -3425,6 +3488,7 @@ fn workspace_inventory_scoped(
                 &children,
                 &nested_key,
                 origin_override,
+                history_cutoff,
             )?,
         ));
     }
@@ -3443,7 +3507,7 @@ fn workspace_inventory_scoped(
                 .map(|module| root.join(&module.value.path)),
         );
     }
-    if !raw {
+    if !raw && !history_cutoff {
         inventory_origin_dependencies(
             runner,
             checkout,
@@ -3692,75 +3756,82 @@ pub fn restore_workspace_snapshot(
     snapshot: &WorkspaceSnapshot,
     destination: &Path,
 ) -> Result<Vec<String>> {
-    ensure!(
-        snapshot.origin_url.is_some(),
-        "snapshot is in-place-only; resume its raw checkout without restoring Git state"
-    );
-    let origin = snapshot
-        .origin_url
-        .as_ref()
-        .context("snapshot has no origin")?;
-    // Capture saved origin with credentials redacted; the seed keeps its URL
-    // as configured. Compare both redacted, so an unchanged origin keeps the
-    // seed's credentialed URL and its push settings.
-    let seeded = run_git(
-        runner,
-        destination,
-        ["config", "--get", "remote.origin.url"],
-        &[],
-    )?;
-    let origin_changed = seeded.status != 0
-        || redact_snapshot_url(String::from_utf8_lossy(&seeded.stdout).trim_end())?
-            != origin.as_str();
-    if origin_changed {
-        // The seed's push URL and tracking refs describe the seed's remote.
-        // Keep neither under the session's origin: a push must not reach the
-        // old destination, and upstreams must not resolve to its commits.
-        let unset = run_git(
-            runner,
-            destination,
-            ["config", "--local", "--unset-all", "remote.origin.pushurl"],
-            &[],
-        )?;
-        // Exit 5: there was no push URL to remove.
+    if snapshot.history_cutoff {
         ensure!(
-            matches!(unset.status, 0 | 5),
-            "remove the seed's origin push URL: {}",
-            String::from_utf8_lossy(&unset.stderr).trim()
+            snapshot.origin_url.is_none(),
+            "history-cutoff snapshot must not record an origin"
         );
-        // Git's own listing goes back to Git byte for byte: a ref name may end
-        // in characters that text trimming would remove.
-        let stale = git_bytes(
+    } else {
+        ensure!(
+            snapshot.origin_url.is_some(),
+            "snapshot is in-place-only; resume its raw checkout without restoring Git state"
+        );
+        let origin = snapshot
+            .origin_url
+            .as_ref()
+            .context("snapshot has no origin")?;
+        // Capture saved origin with credentials redacted; the seed keeps its URL
+        // as configured. Compare both redacted, so an unchanged origin keeps the
+        // seed's credentialed URL and its push settings.
+        let seeded = run_git(
             runner,
             destination,
-            [
-                "for-each-ref",
-                "--format=delete %(refname)",
-                "refs/remotes/origin/",
-            ],
+            ["config", "--get", "remote.origin.url"],
             &[],
-            "list the seed's origin tracking refs",
         )?;
-        if !stale.is_empty() {
-            git_bytes(
+        let origin_changed = seeded.status != 0
+            || redact_snapshot_url(String::from_utf8_lossy(&seeded.stdout).trim_end())?
+                != origin.as_str();
+        if origin_changed {
+            // The seed's push URL and tracking refs describe the seed's remote.
+            // Keep neither under the session's origin: a push must not reach the
+            // old destination, and upstreams must not resolve to its commits.
+            let unset = run_git(
                 runner,
                 destination,
-                ["update-ref", "--no-deref", "--stdin"],
-                &stale,
-                "remove the seed's origin tracking refs",
+                ["config", "--local", "--unset-all", "remote.origin.pushurl"],
+                &[],
+            )?;
+            // Exit 5: there was no push URL to remove.
+            ensure!(
+                matches!(unset.status, 0 | 5),
+                "remove the seed's origin push URL: {}",
+                String::from_utf8_lossy(&unset.stderr).trim()
+            );
+            // Git's own listing goes back to Git byte for byte: a ref name may end
+            // in characters that text trimming would remove.
+            let stale = git_bytes(
+                runner,
+                destination,
+                [
+                    "for-each-ref",
+                    "--format=delete %(refname)",
+                    "refs/remotes/origin/",
+                ],
+                &[],
+                "list the seed's origin tracking refs",
+            )?;
+            if !stale.is_empty() {
+                git_bytes(
+                    runner,
+                    destination,
+                    ["update-ref", "--no-deref", "--stdin"],
+                    &stale,
+                    "remove the seed's origin tracking refs",
+                )?;
+            }
+            git_text(
+                runner,
+                destination,
+                [
+                    "config",
+                    "--local",
+                    "--replace-all",
+                    "remote.origin.url",
+                    origin,
+                ],
             )?;
         }
-        git_text(
-            runner,
-            destination,
-            [
-                "config",
-                "--local",
-                "--replace-all",
-                "remote.origin.url",
-                origin,
-            ],
-        )?;
     }
     // Tracking refs for the restored origin arrive with the next fetch;
     // until then, upstreams show as gone rather than as the seed's commits.
@@ -3796,7 +3867,16 @@ pub fn restore_workspace_snapshot(
             git_failure("import snapshot pack", &output)
         );
     }
-    fetch_prerequisites(runner, destination, &snapshot.prerequisites)?;
+    if snapshot.history_cutoff {
+        let missing = missing_tips(runner, destination, &snapshot.prerequisites)?;
+        ensure!(
+            missing.is_empty(),
+            "history-cutoff snapshot prerequisites are missing: {}; refusing to fetch later history",
+            missing.join(", ")
+        );
+    } else {
+        fetch_prerequisites(runner, destination, &snapshot.prerequisites)?;
+    }
     for (name, oid) in &snapshot.refs {
         ensure!(
             local_snapshot_ref(name),
@@ -3804,38 +3884,40 @@ pub fn restore_workspace_snapshot(
         );
         git_text(runner, destination, ["update-ref", "--no-deref", name, oid])?;
     }
-    for (name, tracking) in &snapshot.branch_tracking {
-        git_text(
-            runner,
-            destination,
-            [
-                "config",
-                "--local",
-                "--replace-all",
-                &format!("branch.{name}.remote"),
-                "origin",
-            ],
-        )?;
-        let merge_key = format!("branch.{name}.merge");
-        // Replace the provisioner's default upstream; --add would duplicate it.
-        // Exit 5 is Git config's normal result when the key does not exist.
-        let cleared = run_git(
-            runner,
-            destination,
-            ["config", "--local", "--unset-all", &merge_key],
-            &[],
-        )?;
-        ensure!(
-            matches!(cleared.status, 0 | 5),
-            "{}",
-            git_failure("set saved origin upstream", &cleared)
-        );
-        for merge in &tracking.merge {
+    if !snapshot.history_cutoff {
+        for (name, tracking) in &snapshot.branch_tracking {
             git_text(
                 runner,
                 destination,
-                ["config", "--local", "--add", &merge_key, merge],
+                [
+                    "config",
+                    "--local",
+                    "--replace-all",
+                    &format!("branch.{name}.remote"),
+                    "origin",
+                ],
             )?;
+            let merge_key = format!("branch.{name}.merge");
+            // Replace the provisioner's default upstream; --add would duplicate it.
+            // Exit 5 is Git config's normal result when the key does not exist.
+            let cleared = run_git(
+                runner,
+                destination,
+                ["config", "--local", "--unset-all", &merge_key],
+                &[],
+            )?;
+            ensure!(
+                matches!(cleared.status, 0 | 5),
+                "{}",
+                git_failure("set saved origin upstream", &cleared)
+            );
+            for merge in &tracking.merge {
+                git_text(
+                    runner,
+                    destination,
+                    ["config", "--local", "--add", &merge_key, merge],
+                )?;
+            }
         }
     }
     for entry in snapshot.stash.iter().rev() {
@@ -3845,13 +3927,27 @@ pub fn restore_workspace_snapshot(
     if let Some(state) = &snapshot.working_state {
         git_text(runner, destination, ["stash", "apply", "--index", state])?;
     }
-    restore_submodules(
-        runner,
-        destination,
-        &snapshot.initialized_submodules,
-        (!snapshot.working_state_skipped).then_some(snapshot.index_gitlinks.as_slice()),
-        &mut notices,
-    )?;
+    if snapshot.history_cutoff {
+        ensure!(
+            snapshot.initialized_submodules.is_empty(),
+            "history-cutoff snapshot cannot restore initialized submodules without fetching later history"
+        );
+        restore_submodules(
+            runner,
+            destination,
+            &[],
+            (!snapshot.working_state_skipped).then_some(snapshot.index_gitlinks.as_slice()),
+            &mut notices,
+        )?;
+    } else {
+        restore_submodules(
+            runner,
+            destination,
+            &snapshot.initialized_submodules,
+            (!snapshot.working_state_skipped).then_some(snapshot.index_gitlinks.as_slice()),
+            &mut notices,
+        )?;
+    }
     for tree in &snapshot.worktrees {
         crate::archive::validate_worktree_relative_path(&tree.relative_path)?;
         let path = destination.join(&tree.relative_path);
@@ -3878,13 +3974,27 @@ pub fn restore_workspace_snapshot(
         if let Some(state) = &tree.working_state {
             git_text(runner, &path, ["stash", "apply", "--index", state])?;
         }
-        restore_submodules(
-            runner,
-            &path,
-            &tree.initialized_submodules,
-            (!tree.working_state_skipped).then_some(tree.index_gitlinks.as_slice()),
-            &mut notices,
-        )?;
+        if snapshot.history_cutoff {
+            ensure!(
+                tree.initialized_submodules.is_empty(),
+                "history-cutoff snapshot cannot restore initialized submodules without fetching later history"
+            );
+            restore_submodules(
+                runner,
+                &path,
+                &[],
+                (!tree.working_state_skipped).then_some(tree.index_gitlinks.as_slice()),
+                &mut notices,
+            )?;
+        } else {
+            restore_submodules(
+                runner,
+                &path,
+                &tree.initialized_submodules,
+                (!tree.working_state_skipped).then_some(tree.index_gitlinks.as_slice()),
+                &mut notices,
+            )?;
+        }
     }
     Ok(notices)
 }
@@ -6820,6 +6930,204 @@ mod tests {
             LaunchRecord::read(&SystemGit, &r.checkout, "session-b")
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn history_cutoff_capture_and_restore_without_origin_or_later_history() {
+        let r = Repo::new();
+        let cutoff = git(&r.checkout, &["rev-parse", "HEAD"]);
+        // Add a later commit to origin that must never leak into the cutoff session.
+        r.commit("later upstream commit\n");
+        let later = git(&r.checkout, &["rev-parse", "HEAD"]);
+        git(&r.checkout, &["push", "origin", "main"]);
+
+        // Provision a cutoff checkout with no origin and only history up to `cutoff`.
+        let cutoff_checkout = r.temp.path().join("cutoff-checkout");
+        fs::create_dir_all(&cutoff_checkout).unwrap();
+        git(&cutoff_checkout, &["init", "-b", "main"]);
+        git(&cutoff_checkout, &["config", "user.name", "Test"]);
+        git(
+            &cutoff_checkout,
+            &["config", "user.email", "test@example.com"],
+        );
+        git(
+            &cutoff_checkout,
+            &["fetch", r.origin.to_str().unwrap(), &cutoff],
+        );
+        git(&cutoff_checkout, &["checkout", "-B", "main", "FETCH_HEAD"]);
+
+        // Agent work beyond cutoff: commit, branch, stash, staged+unstaged edits,
+        // and even a manually added `origin` remote pointing at the full repo.
+        let origin_url = url::Url::from_directory_path(&r.origin)
+            .unwrap()
+            .to_string();
+        git(&cutoff_checkout, &["remote", "add", "origin", &origin_url]);
+        git(&cutoff_checkout, &["checkout", "-b", "work"]);
+        fs::write(cutoff_checkout.join("a.txt"), "cutoff work commit\n").unwrap();
+        git(&cutoff_checkout, &["add", "a.txt"]);
+        git(&cutoff_checkout, &["commit", "-m", "cutoff work"]);
+        let work_head = git(&cutoff_checkout, &["rev-parse", "HEAD"]);
+        fs::write(cutoff_checkout.join("a.txt"), "stashed change\n").unwrap();
+        git(&cutoff_checkout, &["stash", "push", "-m", "cutoff stash"]);
+        fs::write(cutoff_checkout.join("a.txt"), "staged change\n").unwrap();
+        git(&cutoff_checkout, &["add", "a.txt"]);
+        fs::write(cutoff_checkout.join("a.txt"), "unstaged change\n").unwrap();
+
+        let pack_path = r.temp.path().join("cutoff.pack");
+        let input = RepositoryInput {
+            id: "repo".to_owned(),
+            checkout: cutoff_checkout.clone(),
+            ownership: CheckoutOwnership::Managed,
+            origin_override: None,
+            pack_path,
+            exclusions: ExclusionSource::Commits(vec![cutoff.clone()]),
+            keep_dir: None,
+        };
+        let snapshot = capture_session_snapshot(
+            &FileGit,
+            &[input],
+            &SessionCaptureConsent::default(),
+        )
+        .unwrap()
+        .repositories
+        .remove("repo")
+        .unwrap();
+
+        assert!(snapshot.metadata.history_cutoff);
+        assert!(snapshot.metadata.origin_url.is_none());
+        assert!(snapshot.metadata.branch_tracking.is_empty());
+        assert!(snapshot.pack.is_some());
+        assert_eq!(snapshot.metadata.stash.len(), 1);
+        assert!(snapshot.metadata.working_state.is_some());
+
+        // Restore onto a fresh cutoff clone that has no `origin` remote.
+        let fresh = r.temp.path().join("cutoff-fresh");
+        fs::create_dir_all(&fresh).unwrap();
+        git(&fresh, &["init", "-b", "main"]);
+        git(&fresh, &["config", "user.name", "Test"]);
+        git(&fresh, &["config", "user.email", "test@example.com"]);
+        git(&fresh, &["fetch", r.origin.to_str().unwrap(), &cutoff]);
+        git(&fresh, &["checkout", "-B", "main", "FETCH_HEAD"]);
+
+        let notices = restore_workspace_snapshot(&FileGit, &snapshot, &fresh).unwrap();
+        assert!(notices.is_empty());
+        assert_eq!(git(&fresh, &["rev-parse", "HEAD"]), work_head);
+        assert_eq!(git(&fresh, &["branch", "--show-current"]), "work");
+        assert_eq!(
+            fs::read_to_string(fresh.join("a.txt")).unwrap(),
+            "unstaged change\n"
+        );
+        assert_eq!(git(&fresh, &["show", ":a.txt"]), "staged change");
+        assert_eq!(git(&fresh, &["stash", "list"]).lines().count(), 1);
+        // No origin remote was created and later upstream history was never fetched.
+        let origin_check = run_git(&FileGit, &fresh, ["remote", "get-url", "origin"], &[]).unwrap();
+        assert_ne!(origin_check.status, 0);
+        let later_check = run_git(&FileGit, &fresh, ["cat-file", "-e", &later], &[]).unwrap();
+        assert_ne!(later_check.status, 0);
+    }
+
+    #[test]
+    fn history_cutoff_restore_fails_visibly_when_prerequisite_missing_without_fetching() {
+        let r = Repo::new();
+        let cutoff = git(&r.checkout, &["rev-parse", "HEAD"]);
+        git(&r.checkout, &["remote", "remove", "origin"]);
+        fs::write(r.checkout.join("a.txt"), "after cutoff\n").unwrap();
+        git(&r.checkout, &["add", "a.txt"]);
+        git(&r.checkout, &["commit", "-m", "after cutoff"]);
+
+        let pack_path = r.temp.path().join("cutoff-missing-prereq.pack");
+        let input = RepositoryInput {
+            id: "repo".to_owned(),
+            checkout: r.checkout.clone(),
+            ownership: CheckoutOwnership::Managed,
+            origin_override: None,
+            pack_path,
+            exclusions: ExclusionSource::Commits(vec![cutoff.clone()]),
+            keep_dir: None,
+        };
+        let snapshot = capture_session_snapshot(
+            &FileGit,
+            &[input],
+            &SessionCaptureConsent::default(),
+        )
+        .unwrap()
+        .repositories
+        .remove("repo")
+        .unwrap();
+        assert!(snapshot.metadata.prerequisites.contains(&cutoff));
+
+        // Destination is an unrelated empty repo that DOES have `origin` pointing to `r.origin`
+        // (which contains `cutoff`). Restore must still refuse to fetch!
+        let dest = r.temp.path().join("dest-missing-prereq");
+        fs::create_dir_all(&dest).unwrap();
+        git(&dest, &["init", "-b", "main"]);
+        let origin_url = url::Url::from_directory_path(&r.origin)
+            .unwrap()
+            .to_string();
+        git(&dest, &["remote", "add", "origin", &origin_url]);
+
+        let err = restore_workspace_snapshot(&FileGit, &snapshot, &dest)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&cutoff) && err.contains("refusing to fetch later history"),
+            "unexpected error: {err}"
+        );
+        let check = run_git(&FileGit, &dest, ["cat-file", "-e", &cutoff], &[]).unwrap();
+        assert_ne!(check.status, 0, "restore must not fetch missing prerequisites");
+    }
+
+    #[test]
+    fn history_cutoff_refuses_initialized_submodules_before_teardown() {
+        let r = Repo::new();
+        let sub_origin = r.temp.path().join("sub.git");
+        let sub_src = r.temp.path().join("sub-src");
+        git(r.temp.path(), &["init", "--bare", "-b", "main", sub_origin.to_str().unwrap()]);
+        git(r.temp.path(), &["clone", sub_origin.to_str().unwrap(), sub_src.to_str().unwrap()]);
+        fs::write(sub_src.join("s.txt"), "sub\n").unwrap();
+        git(&sub_src, &["add", "s.txt"]);
+        git(&sub_src, &["commit", "-m", "sub base"]);
+        git(&sub_src, &["push", "origin", "main"]);
+
+        let cutoff = git(&r.checkout, &["rev-parse", "HEAD"]);
+        git(&r.checkout, &["remote", "remove", "origin"]);
+        git(
+            &r.checkout,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                sub_origin.to_str().unwrap(),
+                "vendor/sub",
+            ],
+        );
+        git(&r.checkout, &["commit", "-m", "add submodule"]);
+        // Create a local unpushed commit inside the initialized submodule and stage it.
+        let sub_path = r.checkout.join("vendor/sub");
+        fs::write(sub_path.join("s.txt"), "local sub commit\n").unwrap();
+        git(&sub_path, &["add", "s.txt"]);
+        git(&sub_path, &["commit", "-m", "local submodule commit"]);
+        git(&r.checkout, &["add", "vendor/sub"]);
+
+        let input = RepositoryInput {
+            id: "repo".to_owned(),
+            checkout: r.checkout.clone(),
+            ownership: CheckoutOwnership::Managed,
+            origin_override: None,
+            pack_path: r.temp.path().join("cutoff-sub.pack"),
+            exclusions: ExclusionSource::Commits(vec![cutoff]),
+            keep_dir: None,
+        };
+        let err = capture_session_snapshot(&FileGit, &[input], &SessionCaptureConsent::default())
+            .expect_err("history-cutoff capture must refuse initialized submodules");
+        assert!(
+            matches!(
+                err.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::DirtySubmodule(_))
+            ),
+            "expected DirtySubmodule refusal, got: {err:#}"
         );
     }
 }

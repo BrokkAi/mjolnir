@@ -3246,3 +3246,225 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
         );
     }
 }
+
+#[test]
+fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() {
+    const CHILD: &str = "MJ_TEST_CUTOFF_ORIGIN_DELTA_PREFLIGHT";
+    let temp = tempfile::tempdir().unwrap();
+    if std::env::var_os(CHILD).is_none() {
+        crate::controller::test_support::IsolatedTest::new(concat!(
+            module_path!(),
+            "::history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin"
+        ))
+        .env(CHILD, "1")
+        .isolated_store(temp.path())
+        .run();
+        return;
+    }
+
+    let checkout_dir = temp.path().join("cutoff-repo");
+    std::fs::create_dir_all(&checkout_dir).unwrap();
+    let run_git = |args: &[&str]| -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&checkout_dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    run_git(&["init", "--initial-branch=main"]);
+    std::fs::write(checkout_dir.join("README.md"), "cutoff\n").unwrap();
+    run_git(&["add", "README.md"]);
+    run_git(&["commit", "-m", "cutoff"]);
+    let cutoff_sha = run_git(&["rev-parse", "HEAD"]);
+
+    let input = mj_checkpoint::checkpoint::cutoff_snapshot_input(
+        "repo",
+        &checkout_dir,
+        vec![cutoff_sha.clone()],
+        temp.path().join("cutoff.pack"),
+    );
+    let snapshot = mj_checkpoint::snapshot::capture_session_snapshot(
+        &mj_checkpoint::archive::SystemGit,
+        &[input],
+        &mj_checkpoint::snapshot::SessionCaptureConsent::default(),
+    )
+    .unwrap()
+    .repositories
+    .remove("repo")
+    .unwrap();
+    assert!(snapshot.metadata.history_cutoff);
+    assert!(snapshot.metadata.origin_url.is_none());
+
+    let profile_home = temp.path().join("profile");
+    std::fs::create_dir_all(&profile_home).unwrap();
+    let session_id = "cutoff-resume-preflight".to_owned();
+    let mut session = checkpoint_test_session(&session_id);
+    session.target_template_id = "podman".into();
+    session.state = SessionState::Stopped;
+    session.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
+        repository_id: "repo".into(),
+        commit: cutoff_sha.clone(),
+        branch: None,
+        no_later_history: true,
+    }));
+    let archive_path = temp.path().join("cutoff.hel.zip");
+    let canonical = mj_core::archive::CanonicalSessionSnapshot {
+        command_ledger: None,
+        assessment_state: None,
+        notification_stack: None,
+        event_frontier: 0,
+        event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
+        session: mj_core::archive::CanonicalSessionState {
+            execution: mj_core::archive::CanonicalExecutionState::Idle,
+            last_activity_at_ms: None,
+            session_title: None,
+            configuration: Default::default(),
+        },
+        transcript: Vec::new(),
+        queued_prompts: Vec::new(),
+        mailbox: Default::default(),
+    };
+    let sha256 = mj_checkpoint::archive::write_archive_hashed(
+        &archive_path,
+        &mj_checkpoint::archive::ArchiveInput {
+            session: mj_core::archive::SessionManifest {
+                id: session_id.clone(),
+                title: session.title.clone(),
+                harness_kind: session.harness_kind,
+                profile_id: session.last_profile.clone(),
+                native_session_id: "native-cutoff".into(),
+                created_at: "2026-11-21T00:00:00Z".into(),
+                checkpointed_at: "2026-11-21T00:00:00Z".into(),
+                hel_version: env!("CARGO_PKG_VERSION").into(),
+                relay_version: String::new(),
+                adapter_version: String::new(),
+            },
+            target: mj_core::archive::TargetManifest {
+                template_id: "podman".into(),
+                target_kind: "local-podman".into(),
+                details: Default::default(),
+            },
+            bundle: mj_core::archive::BundleManifest {
+                id: "default".into(),
+                primary_repository: "repo".into(),
+            },
+            canonical_session: canonical,
+            native_artifacts: Vec::new(),
+            repositories: vec![mj_checkpoint::archive::RepositorySnapshot {
+                metadata: mj_checkpoint::archive::RepositoryMetadata {
+                    id: "repo".into(),
+                    relative_destination: std::path::PathBuf::from("repo"),
+                    checkout_subdirectory: None,
+                    origin: String::new(),
+                    push_urls: Vec::new(),
+                    remote_workspace: false,
+                    plain_directory: false,
+                    base_commit: String::new(),
+                    head_commit: cutoff_sha,
+                    branch: Some("refs/heads/main".into()),
+                    review_refs_metadata_only: false,
+                    review_baseline_ref: None,
+                    saved_refs: Default::default(),
+                    stash_stack: Vec::new(),
+                    git_operation: None,
+                    origin_delta: Some(Box::new(snapshot.metadata.clone())),
+                },
+                origin_delta_pack: snapshot.pack,
+                committed_bundle: Vec::new(),
+                staged_patch: Vec::new(),
+                unstaged_patch: Vec::new(),
+                untracked_tar: Vec::new(),
+                operation_payloads: None,
+                linked_worktrees: Vec::new(),
+            }],
+        },
+    )
+    .unwrap();
+    session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+        archive_path: archive_path.clone(),
+        sha256,
+        event_frontier: 0,
+        created_at: "2026-11-21T00:00:00Z".into(),
+    }));
+
+    assert!(
+        super::super::network_git::checkpoint_has_history_cutoff_origin_delta(&session).unwrap()
+    );
+    let verified = mj_checkpoint::archive::verify_archive_streaming(&archive_path).unwrap();
+    assert!(
+        super::super::network_git::manifest_has_history_cutoff_origin_delta(&verified.manifest)
+    );
+    assert!(
+        super::super::network_git::bundle_from_manifest(&verified.manifest).is_err(),
+        "empty-origin cutoff manifest must not pass bundle_from_manifest"
+    );
+
+    let mut non_cutoff_manifest = verified.manifest.clone();
+    non_cutoff_manifest.repositories[0]
+        .metadata
+        .origin_delta
+        .as_mut()
+        .unwrap()
+        .history_cutoff = false;
+    assert!(
+        !super::super::network_git::manifest_has_history_cutoff_origin_delta(&non_cutoff_manifest)
+    );
+
+    let mut config = resume_compatibility_config();
+    config.targets.insert(
+        "podman".into(),
+        serde_json::from_value(serde_json::json!({
+            "kind": "local-podman",
+            "image": "agent-dev:latest"
+        }))
+        .unwrap(),
+    );
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile::new(mj_core::config::HarnessKind::Codex, profile_home),
+    );
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.clone(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    let error = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(crate::controller::test_support::worker_test_scope_async(
+            &session_id,
+            controller.resume_session_controlled(
+                &session_id,
+                "codex",
+                "podman",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &RefusingExecutor("reached provisioning past resume preflight"),
+            ),
+        ))
+        .expect_err("RefusingExecutor stops after preflight");
+    let detail = format!("{error:#}");
+    assert!(
+        !detail.contains("has no origin")
+            && !detail.contains("repository provenance")
+            && !detail.contains("original target"),
+        "cutoff origin-delta resume should pass preflight past bundle_from_manifest: {detail}"
+    );
+}
