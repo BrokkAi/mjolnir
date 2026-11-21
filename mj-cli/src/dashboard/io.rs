@@ -1573,10 +1573,12 @@ impl DashboardContext {
                     }
                 }
                 Err(error) => {
-                    self.dashboard.cancel_modal();
-                    self.dashboard.set_failure_notice(format!(
-                        "Could not check workspace for {session_id}: {error}"
-                    ));
+                    if self.dashboard.dismiss_suspend_preflight(&session_id) {
+                        self.dashboard.set_failure_notice(format!(
+                            "Could not check workspace for {}: {error}",
+                            self.session_notice_name(&session_id)
+                        ));
+                    }
                 }
             },
             DashboardIoUpdate::ContainerUpgradeQueued { result } => match result {
