@@ -167,8 +167,9 @@ def main():
                            "cases_sha256": sha(census_root / "menu-steps-cases.md"),
                            "plan_sha256": hashlib.sha256(frozen_plan).hexdigest()},
                 "models": {"writer": "gpt-6.1-sol/high", "reviewer": "gpt-6.1-terra/high",
-                           "engine": "fable/high", "judge": "fable/high"},
-                "model_versions": {"fable": "Fable 5.2", "fable_provider_id": "claude-fable-5-2"},
+                           "engine": "sonnet/high", "judge": "sonnet/high"},
+                # Engine, fidelity adjudicator, judges and hand checks (study plan, Verifier, 2026-11-21).
+                "model_versions": {"claude": "Sonnet 5.5", "claude_provider_id": "claude-sonnet-5-5"},
                 "page_rows": 50, "served_steps": served_steps,
                 # Paths relative to this manifest; each file's sha256 is in "inputs".
                 "input_paths": {"catalogue": "../rql-documented-steps.md", "steps": "../menu-steps.md",

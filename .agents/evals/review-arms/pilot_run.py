@@ -445,7 +445,7 @@ class Pilot:
                 engine = load_engine()
                 if engine.identity != self.engine_identity:
                     raise ValueError("the RQL engine differs from the admitted identity")
-                if hold := driver.pilot_weekly_hold(engine.config["profile"], scope="fable"):
+                if hold := driver.pilot_claude_hold(engine.config["profile"]):
                     return f"interrupted: {hold}"
             except (OSError, ValueError, KeyError, TypeError) as error:
                 return f"needs-recovery: cannot check the interrupted writer's engine quota ({error})"

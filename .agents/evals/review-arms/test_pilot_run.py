@@ -23,7 +23,7 @@ import pilot_review
 def manifest_fixture():
     manifest = {"version": 1, "seed": 20261120, "plan_commit": "c" * 40, "inputs": {},
                 "models": {"writer": "gpt-6.1-sol/high", "reviewer": "gpt-6.1-terra/high",
-                           "judge": "fable/high", "engine": "fable/high"},
+                           "judge": "sonnet/high", "engine": "sonnet/high"},
                 "page_rows": 50, "diffs": [], "jobs": []}
     for index, (repo, name) in enumerate([("mjolnir", "first"), ("bifrost-dev", "second")]):
         key = f"{repo}/{name}"
@@ -108,13 +108,12 @@ class PilotTest(unittest.TestCase):
         if short_window:
             def quota(operation, *args):
                 self.assertEqual((operation, *args), ("quota", "--profile", "claude-test"))
-                windows = [{"remaining_percent": 80, "duration_seconds": 604800, "model_scope": scope}
-                           for scope in (None, "fable")]
+                windows = [{"remaining_percent": 80, "duration_seconds": 604800}]
                 return {"profiles": [{"report": {"windows": [*windows, short]}}]}
 
             self.addCleanup(setattr, pilot.driver, "mj", pilot.driver.mj)
             pilot.driver.mj = quota
-            reused.pilot_weekly_hold = pilot.driver.pilot_weekly_hold
+            reused.pilot_claude_hold = pilot.driver.pilot_claude_hold
         self.assertEqual(engine.answer(COMMIT, QUERY)["status"], "ok")
         reused.turn_refusal = refusal
         reused.quota_hold = None if refusal or short_window else "weekly quota below floor"
@@ -173,7 +172,7 @@ class PilotTest(unittest.TestCase):
             self.assertFalse(list(path.parent.glob(f"{path.name}.superseded-*")))
         reused.quota_hold = reused.turn_refusal = None
         short["remaining_percent"] = 21
-        with unittest.mock.patch.object(pilot.driver, "pilot_weekly_hold", reused.pilot_weekly_hold):
+        with unittest.mock.patch.object(pilot.driver, "pilot_claude_hold", reused.pilot_claude_hold):
             self.assertEqual(runner.execute(job), "done")
         self.assertEqual(answers[1]["status"], "ok")
         self.assertEqual(len(reused.turns), turns + 1)
@@ -816,7 +815,7 @@ if not (attempt / "recover").exists():
 
         reference = pilot.driver.SCRIPTS / "brief/rql-census"
         manifest = {**self.manifest, "served_steps": steps, "input_paths": {}, "inputs": {},
-                    "model_versions": {"fable_provider_id": "claude-fable-5-2"}}
+                    "model_versions": {"claude": "Sonnet 5.5", "claude_provider_id": "claude-sonnet-5-5"}}
         documents = {"catalogue": (reference / "rql-documented-steps.md").read_bytes(),
                      "steps": (reference / "menu-steps.md").read_bytes(), "menu": b"{}",
                      "eligible_labels": "\n".join(map(json.dumps, manifest["diffs"])).encode()}
@@ -828,7 +827,7 @@ if not (attempt / "recover").exists():
         path = self.root / "manifest.json"
         pilot.driver.save(path, manifest)
         config = self.root / "engine.json"
-        pilot.driver.save(config, {"manifest": str(path)})
+        pilot.driver.save(config, {"manifest": str(path), "verifier": "/bin/true"})
         self.addCleanup(setattr, engine, "CONFIG", engine.CONFIG)
         engine.CONFIG = config
         return path, engine.load_engine()

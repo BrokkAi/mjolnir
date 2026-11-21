@@ -49,7 +49,8 @@ p.add_argument("--text-only", action="store_true",
                help="pilot judgment task: one pinned profile and a sealed empty Podman checkout")
 p.add_argument("--instance", help="named instance for sealed pilot judges")
 p.add_argument("--seal-probe", type=pathlib.Path, help="trusted isolation probe for sealed pilot judges")
-p.add_argument("--provider-model", help="concrete provider-reported Fable model ID")
+p.add_argument("--provider-model", help="concrete provider-reported Claude model ID")
+p.add_argument("--model-version", help="frozen Claude model display version")
 p.add_argument("--output", help="task: the file each unit's session writes, fetched into the unit directory")
 # Model and profiles of the sessions; rounds A to F used Opus on the Claude profiles.
 p.add_argument("--model", default="opus")
@@ -77,14 +78,22 @@ if a.kind == "task" and not a.output:
 PROFILES = a.profiles.split(",")
 if a.text_only:
     import re
+    import tomllib
+    import driver as pilot_driver
+
     if (a.kind != "task" or a.output != "verdicts.jsonl" or not a.instance or not a.bundle
             or not re.fullmatch(r"[0-9a-f]{40}", a.repo_commit) or not a.seal_probe
             or not os.access(a.seal_probe, os.X_OK) or len(PROFILES) != 1 or not PROFILES[0]
-            or a.model != "fable" or not re.fullmatch(r"claude-fable-(?:[0-9]+-)*[0-9]+", a.provider_model or "")):
-        p.error("--text-only requires a named instance, pinned profile, Fable provider model, "
+            or a.model != pilot_driver.PILOT_CLAUDE_MODEL or not a.provider_model or not a.model_version):
+        p.error("--text-only requires a named instance, pinned profile, frozen Sonnet version and provider ID, "
                 "empty bundle commit, executable seal probe and verdicts.jsonl task")
-    import tomllib
-    import driver as pilot_driver
+    try:
+        pilot_driver.expected_provider_model({
+            "models": {"judge": f"{a.model}/{pilot_driver.PILOT_CLAUDE_EFFORT}"},
+            "model_versions": {"claude": a.model_version, "claude_provider_id": a.provider_model},
+        })
+    except ValueError as error:
+        p.error(str(error))
     config_path = pilot_driver.use_named_instance(a.instance) / "config.toml"
     config = tomllib.loads(config_path.read_text())
     bundle = config["bundles"][a.bundle]
@@ -93,8 +102,8 @@ if a.text_only:
         p.error("the sealed judge bundle must contain exactly one repository")
     JUDGE_DESTINATION = repositories[0]["destination"]
     pilot_driver.workspace_id()
-elif a.instance or a.seal_probe or a.provider_model:
-    p.error("--instance, --seal-probe and --provider-model require --text-only")
+elif a.instance or a.seal_probe or a.provider_model or a.model_version:
+    p.error("--instance, --seal-probe, --provider-model and --model-version require --text-only")
 REPO_NAME = a.bundle or os.environ.get("REVIEW_ARMS_REPO_DIR", "mjolnir")
 V = ROOT / a.verify
 REPO = ROOT / "verify/repo"
@@ -271,7 +280,12 @@ def fetch_output(sid):
     r = subprocess.run(invocation("fetch", "--session", sid, "--path", name, "--stdout"),
                        capture_output=True, timeout=300)
     if r.returncode:
-        raise RuntimeError(f"session {sid} left no {name}: {r.stderr.decode()[-400:]}")
+        error = r.stderr.decode(errors="replace")
+        if a.text_only and " does not exist on the session's target" in error:
+            return b""
+        raise RuntimeError(f"session {sid} left no {name}: {error[-400:]}")
+    if a.text_only:
+        return r.stdout
     if a.kind == "task":
         text = r.stdout.decode()
         if a.output.endswith(".jsonl"):
@@ -351,7 +365,8 @@ def publish_sealed_judge(attempt, batch_path, output_path):
     if (producer["profile"], producer["launch_profile"]) != (PROFILES[0], PROFILES[0]):
         raise RuntimeError(f"judge {sid} receipt is for another profile")
     data = (attempt / a.output).read_bytes()
-    validate_payload_verdicts(load(batch_path / "items.json"), data)
+    verification = load(attempt / "verification.json")
+    validate_payload_verdicts(load(batch_path / "items.json"), data, verification=verification)
     if sha(data) != producer["output_sha256"]:
         raise ValueError(f"judge {sid}: fetched verdict differs from receipt")
     durable_files(receipt_path, attempt / "launch.json", *(attempt / name for name in EVIDENCE_FILES))
@@ -363,12 +378,76 @@ def publish_sealed_judge(attempt, batch_path, output_path):
         save(cleanup, result)
     (batch_path / a.output).write_bytes(data)
     save(output_path, receipt)
+    return "done" if verification["state"] == "verified" else "unscored"
+
+
+def judge_round(batch_path, attempt, sid, index, previous, initial_prompt, payload):
+    import audit
+    from pilot_judge import check_payload_verdicts, load, sha
+
+    directory = attempt / "rounds" / str(index)
+    directory.mkdir(parents=True, exist_ok=True)
+    checkpoint = directory / "result.json"
+    if checkpoint.is_file():
+        return load(checkpoint)
+    request = directory / "request.json"
+    command = f"judge-{batch_path.name}-{sid[:12]}"
+    if previous is not None:
+        command += f"-repair-{index}"
+    if not request.is_file():
+        if hold := pilot_driver.pilot_claude_hold(PROFILES[0]):
+            raise RuntimeError("held before judge turn: " + hold)
+        pilot_driver.verify_session_selection(pilot_driver.session(sid), a.model, PROFILES[0], a.model_version)
+        if previous is None:
+            upload_inputs(sid, batch_path)
+            prompt = initial_prompt
+        else:
+            prompt = directory / "repair.txt"
+            errors = json.dumps(previous["errors"], indent=2)
+            prompt.write_text(
+                "The host could not verify the following judgments. Each error names its code, opaque output "
+                f"ID (row), and claim or field (site). Read PILOT.md and items.json in {INPUT}/{batch_path.name}/. "
+                "Correct the listed errors, checking each quote against that item's text. Rewrite the complete "
+                "verdicts.jsonl "
+                "with one record per item and keep correct decisions.\n\n" + errors + "\n"
+            )
+        save(request, pilot_driver.mj("message", "--session", sid, "--command-id", command,
+                                      "--prompt-file", prompt))
+    turn = load(request)["turn_id"]
+    waited = pilot_driver.mj("wait", "--session", sid, "--turn", turn, "--return-on-input",
+                             "--timeout", 1800, timeout=1830)
+    if waited.get("turn_id") != turn or waited["outcome"] != "finished":
+        raise RuntimeError(f"turn {turn} ended with {waited['outcome']}")
+    state = pilot_driver.session(sid)
+    pilot_driver.verify_session_selection(state, a.model, PROFILES[0], a.model_version)
+    if (state["last_turn_outcome"]["outcome"]).get("kind") != "completed":
+        raise RuntimeError(f"turn {turn} did not complete")
+
+    transcript_path = attempt / "transcript.json"
+    save(transcript_path, pilot_driver.transcript(sid))
+    verdict = audit.audit_pilot(transcript_path, sid, commits=(a.repo_commit,), single_commit=True)
+    save(attempt / "audit.json", verdict)
+    if not verdict["passed"]:
+        if any(hit["kind"] == "missing-or-unreadable-transcript" for hit in verdict["hits"]):
+            raise RuntimeError("the transcript capture could not be audited")
+        return None
+
+    cursor = 0 if previous is None else previous["latest_seq"]
+    usage = pilot_driver.mj("usage", "--session", sid, "--after-seq", cursor)
+    save(attempt / "usage.json", usage)
+    model = pilot_driver.provider_model(usage, command, turn, a.provider_model)
+    data = fetch_output(sid)
+    (attempt / a.output).write_bytes(data)
+    _, errors = check_payload_verdicts(payload, data)
+    result = {"command": command, "turn": turn, "provider_model": model, "latest_seq": usage["latest_seq"],
+              "output_sha256": sha(data), "errors": errors}
+    save(checkpoint, result)
+    return result
 
 
 def run_sealed_judge(batch_path):
-    import audit
     import brief_driver
-    from pilot_judge import EVIDENCE_FILES, load, provider_model, sha, validate_payload_verdicts
+    from pilot_judge import EVIDENCE_FILES, error_set, load, sha, verification_record
 
     tag = batch_path.name
     output_path = V / "out" / f"task-{tag}.json"
@@ -377,6 +456,7 @@ def run_sealed_judge(batch_path):
     attempt.mkdir(parents=True, exist_ok=True)
     prompt = V / "prompts" / f"prompt-{tag}.txt"
     prompt.write_text(prompt_text(batch_path, None))
+    payload = load(batch_path / "items.json")
     while True:
         launch_path = attempt / "launch.json"
         if (attempt / "void.json").is_file():
@@ -388,13 +468,13 @@ def run_sealed_judge(batch_path):
             if launch_intent.exists():
                 raise RuntimeError(f"{attempt}: launch has no recorded session ID; reconcile before retrying")
             profile = pick_profile()
-            if hold := pilot_driver.pilot_weekly_hold(profile, scope=a.model):
+            if hold := pilot_driver.pilot_claude_hold(profile):
                 raise RuntimeError("held before judge launch: " + hold)
             title = f"Assessment {tag}"
             scope = {"profile": profile, "instance": a.instance, "bundle": a.bundle, "commit": a.repo_commit}
             save(launch_intent, {**scope, "title": title})
             sid = brief_driver.sealed_launch(a.bundle, a.repo_commit, profile, title,
-                                             base=a.repo_commit, effort="high")
+                                             base=a.repo_commit, effort=pilot_driver.PILOT_CLAUDE_EFFORT)
             save(launch_path, {**scope, "session_id": sid})
         launch = load(launch_path)
         sid = launch["session_id"]
@@ -402,51 +482,36 @@ def run_sealed_judge(batch_path):
                 PROFILES[0], a.instance, a.bundle, a.repo_commit):
             raise RuntimeError(f"judge {sid} has a different recorded launch configuration")
         if (attempt / "receipt.json").is_file():
-            publish_sealed_judge(attempt, batch_path, output_path)
-            return tag, "done"
-        settings_path, request_path = attempt / "settings.json", attempt / "request.json"
-        command = f"judge-{tag}-{sid[:12]}"
-        if not settings_path.is_file():
-            attest_judge(attempt, sid)
-            save(settings_path, brief_driver.configure_pilot_model_ready(
-                sid, a.model, "high", wait_idle=pilot_driver.wait_idle))
-        if not request_path.is_file():
-            upload_inputs(sid, batch_path)
-            save(request_path, pilot_driver.mj("message", "--session", sid, "--command-id", command,
-                                                "--prompt-file", prompt))
-        turn = load(request_path)["turn_id"]
-        waited = pilot_driver.mj("wait", "--session", sid, "--turn", turn, "--return-on-input",
-                                 "--timeout", 1800, timeout=1830)
-        if waited.get("turn_id") != turn or waited["outcome"] != "finished":
-            raise RuntimeError(f"judge {sid} turn {turn} ended with {waited['outcome']}; session retained")
-        state = pilot_driver.session(sid)
-        if (state.get("profile_id") != PROFILES[0]
-                or (state["last_turn_outcome"]["outcome"]).get("kind") != "completed"):
-            raise RuntimeError(f"judge {sid} changed profiles or did not complete; session retained")
+            return tag, publish_sealed_judge(attempt, batch_path, output_path)
+        settings_path = attempt / "settings.json"
         try:
-            transcript_path = attempt / "transcript.json"
-            save(transcript_path, pilot_driver.transcript(sid))
-            verdict = audit.audit_pilot(transcript_path, sid, commits=(a.repo_commit,), single_commit=True)
-            save(attempt / "audit.json", verdict)
-            if not verdict["passed"]:
-                if any(hit["kind"] == "missing-or-unreadable-transcript" for hit in verdict["hits"]):
-                    raise RuntimeError("the transcript capture could not be audited")
-                save(attempt / "void.json", {"session_id": sid, "reason": "transcript audit failed"})
-                print(json.dumps({"batch": tag, "state": "void", "retained_session": sid}),
-                      file=sys.stderr, flush=True)
-                continue
-            usage = pilot_driver.mj("usage", "--session", sid)
-            save(attempt / "usage.json", usage)
-            model = provider_model(usage, command, turn, a.provider_model)
-            data = fetch_output(sid)["text"].encode("utf-8")
-            (attempt / a.output).write_bytes(data)
-            validate_payload_verdicts(load(batch_path / "items.json"), data)
-            producer = {"sealed": True, "session_id": sid, "profile": state["profile_id"],
-                        "launch_profile": launch["profile"], "config": load(settings_path),
-                        "provider_model": model, "command": command, "turn": turn, "output_sha256": sha(data)}
-            save(attempt / "receipt.json", {"producer": producer,
-                                          "evidence_sha256": {name: sha((attempt / name).read_bytes())
-                                                              for name in EVIDENCE_FILES}})
+            if not settings_path.is_file():
+                attest_judge(attempt, sid)
+                save(settings_path, brief_driver.configure_pilot_model_ready(
+                    sid, a.model, pilot_driver.PILOT_CLAUDE_EFFORT, wait_idle=pilot_driver.wait_idle))
+            previous = None
+            for index in itertools.count():
+                result = judge_round(batch_path, attempt, sid, index, previous, prompt, payload)
+                if result is None:
+                    save(attempt / "void.json", {"session_id": sid, "reason": "transcript audit failed"})
+                    print(json.dumps({"batch": tag, "state": "void", "retained_session": sid}),
+                          file=sys.stderr, flush=True)
+                    break
+                errors = result["errors"]
+                if errors and pilot_driver.repair_progress(
+                        error_set(previous["errors"]) if previous is not None else None, error_set(errors)):
+                    previous = result
+                    continue
+                if sha((attempt / a.output).read_bytes()) != result["output_sha256"]:
+                    raise ValueError("verdict file differs from the completed round")
+                save(attempt / "verification.json", verification_record(errors))
+                producer = {"sealed": True, "session_id": sid, "profile": PROFILES[0],
+                            "launch_profile": launch["profile"], "config": load(settings_path),
+                            **{key: result[key] for key in ("provider_model", "command", "turn", "output_sha256")}}
+                save(attempt / "receipt.json", {"producer": producer,
+                                              "evidence_sha256": {name: sha((attempt / name).read_bytes())
+                                                                  for name in EVIDENCE_FILES}})
+                return tag, publish_sealed_judge(attempt, batch_path, output_path)
         except (OSError, KeyError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
             raise RuntimeError(f"judge {sid}: {error}; session retained") from error
 

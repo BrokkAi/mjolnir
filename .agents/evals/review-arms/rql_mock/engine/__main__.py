@@ -35,7 +35,7 @@ def main():
     if args.operation == "teardown":
         # Old active records may predate the per-session provider pin.
         manifest = load(Path(config["manifest"]))
-        version = manifest["model_versions"]["fable_provider_id"]
+        version = manifest["model_versions"]["claude_provider_id"]
         accepted, failures = teardown(args.config.parent / "engine-cache",
                                       SealedRunner({**config, "model_version": version}))
         print(f"Engine session destroy requests accepted: {accepted}")

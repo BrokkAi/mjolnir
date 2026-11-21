@@ -1,20 +1,21 @@
 """Host-side, complete answers to frozen RQL queries."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
+from driver import expected_provider_model, repair_progress
 
 from .evidence import save_json, sync_directory
 from .grammar import MENU, parse
 from .prompt import PROMPT, REPAIR, semantics_only
 from .runner import (EFFORT, MODEL, QUERY_SESSION_PROTOCOL, RUN_ERRORS, SESSION_ID, DestroyUncertain,
                      IsolationFailure, LaunchHeld, QuotaTurnFailure, SealedRunner, TurnFailure)
-from .snapshot import OID, blob_reader, eligible_diffs, manifest_sources, prepared_snapshot
-from .validation import canonical, ordered_rows, validate
+from .snapshot import OID, blob_reader, eligible_diffs, manifest_sources, prepared_snapshot, verifier_snapshot
+from .validation import canonical, decode, ordered_rows, validate_answer
+from .verifier import verify
 
 
 ROOT = Path(os.environ.get("REVIEW_ARMS_ENGINE_ROOT", "/mnt/optane/review-arms-pilot"))
@@ -39,9 +40,7 @@ def read_frozen_inputs(manifest_path, raw):
             raise ValueError(f"frozen engine input digest does not match for {key} at {path}. "
                              f"Expected {expected}, got {actual}.")
         data[key] = content
-    provider_version = manifest["model_versions"]["fable_provider_id"]
-    if not re.fullmatch(r"claude-fable-[0-9]+(?:-[0-9]+)+", provider_version):
-        raise ValueError("frozen manifest must name a concrete Fable provider id")
+    provider_version = expected_provider_model(manifest, role="engine")
     served = manifest.get("served_steps", list(MENU))
     if (not isinstance(served, list) or any(not isinstance(step, str) or step not in MENU for step in served)
             or len(set(served)) != len(served)):
@@ -64,10 +63,15 @@ def cache_key(commit, query, inputs):
     return digest(commit, query, inputs)
 
 
-def input_hash(catalogue, menu, model_version, served_steps, menu_sha256):
+def input_hash(catalogue, menu, model_version, served_steps, menu_sha256, verifier_sha256):
     return digest(catalogue, menu, semantics_only(menu, served_steps), menu_sha256,
                   canonical(served_steps), MODEL, model_version, EFFORT, PROMPT, REPAIR,
-                  QUERY_SESSION_PROTOCOL)
+                  QUERY_SESSION_PROTOCOL, verifier_sha256)
+
+
+def file_sha256(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def load(path):
@@ -142,16 +146,20 @@ def teardown(cache, runner):
 
 class Engine:
     def __init__(self, cache, documents, source, runner, model_version,
-                 *, served_steps=tuple(MENU), menu_sha256="", manifest_sha256=""):
+                 *, served_steps=tuple(MENU), menu_sha256="", manifest_sha256="",
+                 verifier=None, verifier_source=None):
         self.cache = cache
         self.catalogue, self.menu = documents
         self.source = source
         self.runner = runner
         self.model_version = model_version
         self.served_steps = served_steps
+        self.verifier = verifier
+        self.verifier_source = verifier_source
+        self.verifier_sha256 = file_sha256(verifier) if verifier is not None else ""
         self.identity = {"manifest_sha256": manifest_sha256,
                          "engine_inputs_sha256": input_hash(self.catalogue, self.menu, model_version,
-                                                            served_steps, menu_sha256)}
+                                                            served_steps, menu_sha256, self.verifier_sha256)}
 
     def session(self, commit, snapshot, record_path):
         runner = self.runner()
@@ -201,10 +209,15 @@ class Engine:
             provenance.update({"inputs_sha256": inputs, "normalized_query": query})
             directory = self.cache / commit
             entry = directory / (key + ".json")
-            with locked(directory / ".lock"):
+            with locked(directory / ".lock"), ExitStack() as resources:
                 if not fresh and entry.exists():
                     return load(entry)
                 read_blob, snapshot = self.source(commit)
+                verifier_steps = [step for step in steps if step in MENU]
+                if verifier_steps:
+                    if self.verifier is None or self.verifier_source is None:
+                        raise RuntimeError("added RQL steps require a configured host verifier")
+                    root = resources.enter_context(self.verifier_source(snapshot))
                 active = directory / "active"
 
                 def add_turn(record):
@@ -223,21 +236,45 @@ class Engine:
                     try:
                         runner.prepare(sid, snapshot, active)
                         errors = []
+                        previous_errors = None
                         while True:
                             output, record, errors = runner.turn(
                                 sid, query, self.catalogue, self.menu, errors, active)
                             add_turn(record)
-                            if not errors:
-                                rows, coverage, errors = validate(output, read_blob)
                             evidence = active / "answers" / record["context_id"]
+                            findings = {}
+                            if errors:
+                                normalized = {("answer-capture",)}
+                            else:
+                                try:
+                                    answer = decode(output)
+                                except (ValueError, RecursionError) as error:
+                                    errors = [f"invalid JSON: {error}"]
+                                    normalized = {("invalid-json",)}
+                                else:
+                                    rows, coverage, errors = validate_answer(answer, read_blob)
+                                    normalized = {("validation", *issue.key) for issue in errors}
+                                    if verifier_steps and file_sha256(self.verifier) != self.verifier_sha256:
+                                        raise RuntimeError("frozen RQL verifier digest changed")
+                                    for step in verifier_steps:
+                                        findings[step] = verify(self.verifier, root, step, query, answer)
+                                        for issue in findings[step]["errors"]:
+                                            site = issue["site"]
+                                            normalized.add((issue["code"], issue["row"],
+                                                            site if isinstance(site, str) else canonical(site)))
+                                            errors.append(canonical(issue))
+                            if findings:
+                                save_json(evidence / "verifier.json", findings)
                             save_json(evidence / "validation.json", {"errors": errors})
                             if not errors:
                                 result = response("ok", ordered_rows(rows), coverage)
+                                result["excluded"] = answer["excluded"]
                                 save_json(evidence / "result.json", result)
                                 valid = True
                                 break
-                            if provenance["validation_retries"]:
+                            if not repair_progress(previous_errors, normalized):
                                 return response("engine_error", message="; ".join(errors))
+                            previous_errors = normalized
                             provenance["validation_retries"] += 1
                     except IsolationFailure as error:
                         add_turn(error.record)
@@ -268,15 +305,20 @@ def load_engine(config_path=None, *, manifest_path=None):
     manifest_path = Path(config["manifest"]) if manifest_path is None else manifest_path
     raw = manifest_path.read_bytes()
     manifest, documents, version = read_frozen_inputs(manifest_path, raw)
+    verifier = Path(config["verifier"])
+    if not verifier.is_absolute() or not verifier.is_file() or not os.access(verifier, os.X_OK):
+        raise ValueError(f"RQL verifier is not an absolute executable path: {verifier}")
 
     def source(revision):
         repo = manifest_sources(manifest, config["repos"])[revision]
         return blob_reader(repo, revision), prepared_snapshot(repo, config["snapshot_repo"], revision)
 
     engine = Engine(config_path.parent / "engine-cache", documents, source,
-                    lambda: SealedRunner({**config, "model_version": version}, manifest), version,
+                    lambda: SealedRunner({**config, "model_version": version,
+                                          "model_display": manifest["model_versions"]["claude"]}, manifest), version,
                     served_steps=manifest["served_steps"], menu_sha256=manifest["inputs"]["menu_sha256"],
-                    manifest_sha256=hashlib.sha256(raw).hexdigest())
+                    manifest_sha256=hashlib.sha256(raw).hexdigest(), verifier=verifier,
+                    verifier_source=lambda snapshot: verifier_snapshot(config["snapshot_repo"], snapshot["orphan"]))
     engine.manifest = manifest
     engine.config = config
     return engine

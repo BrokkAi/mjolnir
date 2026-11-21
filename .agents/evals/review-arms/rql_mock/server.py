@@ -129,6 +129,7 @@ class Server:
         window = rows[start:start + self.page_rows]
         if locations:
             window = [locations_only(row) for row in window]
+        # Exclusions belong to host verification evidence, outside the delivery schema.
         return {"status": "ok", "rows": window, **metadata}
 
     def call(self, params):

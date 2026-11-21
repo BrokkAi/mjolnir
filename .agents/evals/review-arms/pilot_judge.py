@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare both blinded passes, then run or collect independent Fable/high judgments."""
+"""Prepare both blinded passes, then run or collect independent Sonnet/high judgments."""
 import argparse
 from collections import defaultdict
 import fcntl
@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import random
-import re
 import secrets
 import subprocess
 import sys
@@ -394,31 +393,13 @@ def _prepare_locked(root, manifest, snapshot, defects, selected, manifest_sha256
     return key
 
 
-def expected_provider_model(manifest):
-    version = manifest["model_versions"]["fable"]
-    if not re.fullmatch(r"Fable [0-9]+(?:\.[0-9]+)*", version):
-        raise ValueError(f"unrecognized frozen Fable version {version!r}")
-    return "claude-fable-" + version.removeprefix("Fable ").replace(".", "-")
-
-
-def provider_model(usage, command, turn, expected):
-    turns = usage["turns"]
-    if len(turns) != 1 or (turns[0]["command_id"], turns[0]["accepted_ordinal"]) != (command, turn):
-        raise ValueError("provider usage does not identify exactly the judge's turn")
-    if usage["turn_selections"].get(command) != {"model": "fable", "effort": "high"}:
-        raise ValueError("provider usage does not attribute the judge turn to Fable/high")
-    models = turns[0]["usage"]["provider_details"]["model_usage"]
-    fable = {model.split("[", 1)[0] for model in models if model.startswith("claude-fable-")}
-    if fable != {expected}:
-        raise ValueError(f"expected provider usage for {expected}, found {sorted(fable)}")
-    return expected
-
-
-EVIDENCE_FILES = ("transcript.json", "usage.json", "audit.json", "verdicts.jsonl")
+EVIDENCE_FILES = ("transcript.json", "usage.json", "audit.json", "verdicts.jsonl", "verification.json")
 
 
 def verify_capture(attempt, receipt, expected):
     """Recheck the host evidence before publishing a judgment or retiring its session."""
+    from driver import provider_model
+
     producer = receipt["producer"]
     launch = load(attempt / "launch.json")
     if not producer.get("sealed") or producer["session_id"] != launch["session_id"]:
@@ -455,37 +436,111 @@ def normalize(record, entry):
                     and not isinstance(defect["matching_finding"], str))):
             raise ValueError("invalid defect decision")
     matches = sorted(d["defect_id"] for d in defects if d["label"] == "caught")
+    claims = {f"matched_defect:{defect}" for defect in matches}
     if kind == "reviewer":
         count = record["finding_count"]
         if type(count) is not int or count < 0:
             raise ValueError("invalid finding count")
-        return {"catch": bool(matches), fact_field: sorted(facts), "matched_defects": matches}
-    return {"contains_decisive": any(set(group) <= set(facts) for group in entry["minimal_sets"]),
-            fact_field: sorted(facts), "states_defect": bool(matches)}
+        claims.update(f"recovered_fact:{fact}" for fact in facts)
+        if matches:
+            claims.add("catch")
+        return {"catch": bool(matches), fact_field: sorted(facts), "matched_defects": matches}, claims
+    claims.update(f"contained_fact:{fact}" for fact in facts)
+    if matches:
+        claims.add("leak")
+    return ({"contains_decisive": any(set(group) <= set(facts) for group in entry["minimal_sets"]),
+             fact_field: sorted(facts), "states_defect": bool(matches)}, claims)
 
 
-def validate_payload_verdicts(payload, data):
-    """Validate exact batch coverage and each decision before publishing anything."""
+def quote_errors(record, text, claims):
+    evidence = record.get("evidence", [])
+    if not isinstance(evidence, list):
+        yield "invalid-evidence", "evidence"
+        evidence = []
+    output = " ".join(text.split())
+    credited = set()
+    for item in evidence:
+        if (not isinstance(item, dict) or set(item) != {"claim", "quote"}
+                or not isinstance(item["claim"], str) or not isinstance(item["quote"], str)):
+            yield "invalid-evidence", "evidence"
+            continue
+        claim = item["claim"]
+        if claim in claims:
+            credited.add(claim)
+        quote = " ".join(item["quote"].split())
+        if not quote or quote not in output:
+            yield "unmatched-quote", claim if claim in claims else "evidence"
+    for claim in claims - credited:
+        yield "missing-quote", claim
+
+
+def check_payload_verdicts(payload, data):
+    """Return verified rows and deterministic errors keyed by code, row and site."""
     kind = "writer" if payload["kind"] == "brief" else "reviewer"
     rubric = {"kind": kind, "defect_ids": [d["id"] for d in payload["defects"]],
               "outside_fact_ids": [f["id"] for f in payload["facts"] if not f["in_diff"]],
               "minimal_sets": payload.get("minimal_sets", [])}
-    expected = {item["output_id"] for item in payload["items"]}
-    submitted = {}
-    for line in data.decode("utf-8").splitlines():
+    texts = {item["output_id"]: item["text"] for item in payload["items"]}
+    submitted, seen, errors = {}, set(), set()
+    try:
+        lines = data.decode("utf-8").split("\n")
+    except UnicodeDecodeError:
+        lines = []
+        errors.add(("invalid-utf8", "", "verdicts.jsonl"))
+    for number, line in enumerate(lines, 1):
         if not line.strip():
             continue
-        record = json.loads(line)
-        oid = record["output_id"]
-        if oid in submitted or oid not in expected:
-            raise ValueError(f"duplicate or unknown verdict ID {oid}")
-        submitted[oid] = normalize(record, rubric)
-    if set(submitted) != expected:
-        raise ValueError(f"missing verdicts {sorted(expected - set(submitted))}")
+        try:
+            record = json.loads(line)
+        except ValueError:
+            errors.add(("invalid-json", "", f"line {number}"))
+            continue
+        oid = record.get("output_id") if isinstance(record, dict) else None
+        if not isinstance(oid, str) or oid not in texts:
+            errors.add(("unknown-verdict-id", "", f"line {number}"))
+            continue
+        if oid in seen:
+            submitted.pop(oid, None)
+            errors.add(("duplicate-verdict-id", oid, "output_id"))
+            continue
+        seen.add(oid)
+        try:
+            verdict, claims = normalize(record, rubric)
+        except (KeyError, TypeError, ValueError):
+            errors.add(("invalid-verdict", oid, "record"))
+            continue
+        problems = set(quote_errors(record, texts[oid], claims))
+        if problems:
+            errors.update((code, oid, site) for code, site in problems)
+        else:
+            submitted[oid] = verdict
+    errors.update(("missing-verdict", oid, "output_id") for oid in texts.keys() - seen)
+    if any(not row for _, row, _ in errors):
+        submitted.clear()  # Ambiguous records cannot be assigned to individual outputs.
+    return submitted, [{"code": code, "row": row, "site": site} for code, row, site in sorted(errors)]
+
+
+def error_set(errors):
+    return {(error["code"], error["row"], error["site"]) for error in errors}
+
+
+def verification_record(errors):
+    return {"state": "unscored" if errors else "verified", "errors": errors}
+
+
+def validate_payload_verdicts(payload, data, *, verification=None):
+    submitted, errors = check_payload_verdicts(payload, data)
+    if verification is None:
+        if errors:
+            raise ValueError(f"invalid judgment: {errors}")
+    elif verification != verification_record(errors):
+        raise ValueError("judgment verification differs from the recorded errors")
     return submitted
 
 
 def collect(root, key, *, hand=False, profile=None):
+    from driver import PILOT_CLAUDE_EFFORT, PILOT_CLAUDE_MODEL, expected_provider_model
+
     inputs, dest = (HAND_PATH, "hand-check") if hand else (INPUT_PATH, "judge")
     batches = defaultdict(dict)
     for oid, entry in key["outputs"].items():
@@ -501,13 +556,13 @@ def collect(root, key, *, hand=False, profile=None):
         if not proof.is_file():
             continue
         receipt = load(proof)
-        producer = verify_capture(batch.parent / "sessions" / batch.name / "attempt",
-                                  receipt, expected_provider_model(key["manifest"]))
+        attempt = batch.parent / "sessions" / batch.name / "attempt"
+        producer = verify_capture(attempt, receipt, expected_provider_model(key["manifest"]))
         if ((profile is not None and producer["profile"] != profile)
-                or producer["config"].get("model") != "fable"
-                or producer["config"].get("effort") != "high"
+                or producer["config"].get("model") != PILOT_CLAUDE_MODEL
+                or producer["config"].get("effort") != PILOT_CLAUDE_EFFORT
                 or producer["profile"] != producer["launch_profile"]):
-            raise ValueError(f"{batch.name}: verdicts lack pinned Fable/high provenance")
+            raise ValueError(f"{batch.name}: verdicts lack pinned Sonnet/high provenance")
         if producer.get("output_sha256") != sha(data):
             raise ValueError(f"{batch.name}: verdict file differs from the fetched output")
         other = root / (INPUT_PATH if hand else HAND_PATH) / "out" / proof.name
@@ -521,7 +576,7 @@ def collect(root, key, *, hand=False, profile=None):
             if (bound[oid] != entry["text_sha256"]
                     or sha((root / entry["artifact"]).read_bytes()) != entry["text_sha256"]):
                 raise ValueError(f"{oid}: verdict input differs from the hash-bound text")
-        submitted = validate_payload_verdicts(payload, data)
+        submitted = validate_payload_verdicts(payload, data, verification=load(attempt / "verification.json"))
         for oid, verdict in submitted.items():
             path = root / dest / f"{oid}.json"
             if path.exists() and load(path) != verdict:
@@ -535,6 +590,8 @@ def records(root, key, directory):
 
 
 def main():
+    from driver import PILOT_CLAUDE_MODEL, expected_provider_model
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("prepare", "run", "collect", "hand-check", "collect-hand-check"))
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -586,11 +643,12 @@ def main():
             result = subprocess.run(
                 [sys.executable, str(HERE / "verify_driver.py"), str(tasks),
                  "--kind", "task", "--text-only", "--output", "verdicts.jsonl",
-                 "--model", "fable", "--profiles", args.profile, "--quota-scope", "fable",
+                 "--model", PILOT_CLAUDE_MODEL, "--profiles", args.profile,
                  "--concurrency", str(args.concurrency), "--instance", args.instance,
                  "--bundle", args.bundle, "--repo-commit", args.repo_commit,
                  "--seal-probe", str(args.seal_probe.resolve()),
-                 "--provider-model", expected_provider_model(manifest)],
+                 "--provider-model", expected_provider_model(manifest),
+                 "--model-version", manifest["model_versions"]["claude"]],
                 env={**os.environ, "REVIEW_ARMS_DIR": str(root)},
             )
             key = prepare(root, manifest, snapshot, defects, selected, manifest_sha256=sha(raw_manifest),

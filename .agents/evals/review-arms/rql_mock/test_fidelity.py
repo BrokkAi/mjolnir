@@ -2,10 +2,12 @@
 from collections import Counter
 import unittest
 
+from driver import expected_provider_model, verify_session_selection
+
 from .fidelity import (BARS, CENSUS, Query, accuracy, bar_failures, gate_report, load_inputs,
                        measure, pooled_prescience, prescience_metrics, sample, step_result, stratum_metrics)
 from .engine.grammar import MENU
-from .fidelity_live import FABLE, TERRA, candidate_lines, model_usage, planned_calls, verify_session_selection
+from .fidelity_live import SONNET, TERRA, candidate_lines, model_usage, planned_calls
 from .fidelity_symbols import capture_symbols, changed_intervals
 
 
@@ -36,7 +38,7 @@ class Sampling(unittest.TestCase):
                                   ("guarded-paths", "random"): 10, ("guarded-paths", "decisive"): 7,
                                   ("documented", "random"): 20})
         self.assertEqual(planned_calls(queries, fresh),
-                         {"fable_engine": 92, "terra_enumerator": 72, "fable_adjudicator_at_most": 72})
+                         {"sonnet_engine": 92, "terra_enumerator": 72, "sonnet_adjudicator_at_most": 72})
         commits = {d["intro"] for d in self.manifest["diffs"]}
         self.assertTrue(all(q.commit in commits for q in queries if q.stratum == "random"))
         self.assertTrue(any(q.commit not in commits for q in queries if q.stratum == "decisive"))
@@ -184,7 +186,7 @@ class FakeModels:
         return {"rows": [{"name": "equivalent"}, {"name": "other"}]}
 
     def adjudicate(self, query, candidates):
-        self.calls.append(("fable", query.key))
+        self.calls.append(("sonnet", query.key))
         return {k: {"key": "e" if row["name"] == "equivalent" else row["name"],
                     "in_scope": row["name"] != "invalid", "reason": "fixed evidence"}
                 for k, row in candidates.items()}
@@ -201,7 +203,7 @@ class Pool(unittest.TestCase):
         self.assertEqual(result["decisive"], ["blind"])
         self.assertEqual(result["fresh"], ["e", "new"])
         self.assertEqual(fake.calls, [("engine", "commit", "(q)", False), ("terra", "repo", "commit", "(q)"),
-                                      ("engine", "commit", "(q)", True), ("fable", query.key)])
+                                      ("engine", "commit", "(q)", True), ("sonnet", query.key)])
 
     def test_missing_judgment_and_failed_answer_abort_the_measurement(self):
         query = Query("contract-cases", "random", "repo", "commit", "(q)")
@@ -221,17 +223,23 @@ class Pool(unittest.TestCase):
 
 
 class ModelIdentity(unittest.TestCase):
-    def test_fable_alias_and_provider_usage_must_both_match(self):
+    def test_sonnet_alias_and_provider_usage_must_both_match(self):
+        manifest = {"models": {"engine": "sonnet/high", "judge": "sonnet/high"},
+                    "model_versions": {"claude": "Sonnet 5.5", "claude_provider_id": "claude-sonnet-5-5"}}
+        self.assertEqual(expected_provider_model(manifest, "engine"), "claude-sonnet-5-5")
+        with self.assertRaisesRegex(ValueError, "versions disagree"):
+            expected_provider_model({**manifest, "model_versions": {
+                "claude": "Sonnet 5.5", "claude_provider_id": "claude-sonnet-5-4"}}, "engine")
         session = {"profile_id": "claude", "config_options": [
-            {"key": "model", "current": "fable", "choices": [{"value": "fable", "name": "Claude Fable 5.2"}]},
+            {"key": "model", "current": "sonnet", "choices": [{"value": "sonnet", "name": "Claude Sonnet 5.5"}]},
             {"key": "effort", "current": "high"}]}
-        self.assertEqual(verify_session_selection(session, FABLE, "claude", "Fable 5.2"), "Fable 5.2")
-        with self.assertRaisesRegex(ValueError, "5.2.*5.3"):
-            verify_session_selection(session, FABLE, "claude", "Fable 5.3")
+        self.assertEqual(verify_session_selection(session, SONNET, "claude", "Sonnet 5.5"), "Sonnet 5.5")
+        with self.assertRaisesRegex(ValueError, "5.5.*5.6"):
+            verify_session_selection(session, SONNET, "claude", "Sonnet 5.6")
         usage = {"turns": [{"command_id": "call", "accepted_ordinal": 1, "usage": {
-            "provider_details": {"model_usage": {"claude-fable-5-1": {}}}}}],
-            "turn_selections": {"call": {"model": FABLE, "effort": "high"}}}
-        with self.assertRaisesRegex(ValueError, "claude-fable-5-2"):
-            model_usage(usage, "call", 1, FABLE, "claude-fable-5-2")
+            "provider_details": {"model_usage": {"claude-sonnet-5-4": {}}}}}],
+            "turn_selections": {"call": {"model": SONNET, "effort": "high"}}}
+        with self.assertRaisesRegex(ValueError, "claude-sonnet-5-5"):
+            model_usage(usage, "call", 1, SONNET, "claude-sonnet-5-5")
         with self.assertRaisesRegex(ValueError, "Terra/high"):
-            model_usage(usage, "call", 1, TERRA, "claude-fable-5-2")
+            model_usage(usage, "call", 1, TERRA, "claude-sonnet-5-5")

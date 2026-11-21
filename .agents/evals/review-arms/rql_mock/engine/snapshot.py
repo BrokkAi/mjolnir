@@ -1,10 +1,11 @@
 """Build the host-only orphan repository and read original source blobs."""
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
-from tempfile import TemporaryFile
+from tempfile import TemporaryDirectory, TemporaryFile
 
 
 OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
@@ -106,3 +107,34 @@ def prepared_snapshot(source, destination, commit):
             or git_output(destination, "rev-list", "--parents", "-n", "1", orphan).split() != [orphan.encode()]):
         raise RuntimeError("prepared snapshot must be a parentless commit with the introducing tree")
     return {"orphan": orphan, "tree": tree.decode("ascii")}
+
+
+@contextmanager
+def verifier_snapshot(repo, orphan):
+    """Materialize the verifier's Rust source from Git blobs without checkout filters."""
+    files = []
+    for item in git_output(repo, "ls-tree", "-rz", "--full-tree", orphan).split(b"\0"):
+        if not item:
+            continue
+        meta, name = item.split(b"\t", 1)
+        mode, _, oid = meta.split()
+        if mode in {b"100644", b"100755"} and name.endswith(b".rs"):
+            files.append((os.fsdecode(name), oid))
+    with TemporaryDirectory(prefix="rql-verifier-") as directory, TemporaryFile() as objects:
+        root = Path(directory)
+        if files:
+            git(repo, "cat-file", "--batch", input=b"".join(oid + b"\n" for _, oid in files), stdout=objects)
+        objects.seek(0)
+        for name, oid in files:
+            digest, kind, length = objects.readline().split()
+            if (digest, kind) != (oid, b"blob"):
+                raise ValueError(f"verifier snapshot did not return the frozen blob for {name!r}")
+            data = objects.read(int(length))
+            if len(data) != int(length) or objects.read(1) != b"\n":
+                raise ValueError(f"verifier snapshot returned an incomplete blob for {name!r}")
+            path = root / name
+            if not path.is_relative_to(root) or ".." in path.parts:
+                raise ValueError(f"invalid verifier source path {name!r}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        yield root

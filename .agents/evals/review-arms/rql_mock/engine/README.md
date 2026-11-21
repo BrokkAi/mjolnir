@@ -2,11 +2,9 @@
 
 Set the SSH server's `engine` to `rql_mock.engine:load_engine`. Keep the engine
 configuration, source Git repositories, manifest, cache and audit files on the
-host. The engine keeps one Fable/high session per introducing commit across
-queries, writer arms and replicates. It serializes turns for that session, clears
-the native conversation before each query or repair, and drops the previous
-turn's workspace artifacts. It replays validated results for repeat queries and
-checks locations and copied byte slices against the pinned host Git tree.
+host. Each uncached query launches a sealed Sonnet/high session that also
+handles its repairs. R and R-loc share cached answers. The host checks sites
+and copied bytes against the frozen tree and runs the verifier for added steps.
 
 ## Private study instance
 
@@ -33,6 +31,7 @@ The sample port is shared with the bundle configuration.
     "bifrost-dev": "/absolute/path/to/bifrost-dev"
   },
   "snapshot_repo": "/mnt/optane/review-arms-pilot/engine-trees.git",
+  "verifier": "/mnt/optane/review-arms-pilot/bin/rql-verify-<rev>",
   "git_port": 9438,
   "bundle": "rql-pilot-engine",
   "destination": "engine-trees",
@@ -110,27 +109,26 @@ mjx --instance "$instance" new --workspace-id "$workspace_id" --target podman \
     --title "RQL pilot engine $intro_prefix" --json
 ```
 
-The launcher sends no prompt. Before the first turn the engine sets and
-verifies `model=fable` and `effort=high`, then checks the concrete Fable model
-in the provider's reported usage against `model_versions.fable_provider_id`.
-A synthetic prior-query recall probe runs on first use and is recorded under
-`context_probe`. A failed probe prevents serving answers from the session. Each
-query and repair then waits for the command-specific `context-cleared` boundary
-and records its own context ID. The agent receives the catalogue, the served
-menu's semantic sections and the query. The worked examples, coverage ledger,
-manifest and census labels stay on the host.
+The launcher sends no prompt. The engine checks the advertised Sonnet version,
+high effort, and the provider model ID recorded in usage against the manifest.
+Each paid turn requires more than 25% of the overall weekly quota and more than
+20% of the five-hour quota. The agent receives the catalogue, the served menu's
+semantic sections and the query. The worked examples, coverage ledger, manifest
+and census labels stay on the host.
+
+Set `verifier` to the absolute path of the frozen executable. Its SHA-256
+participates in the engine-inputs hash. The engine records candidates, errors,
+and unchecked items in `verifier.json`. Repairs continue while the normalized
+errors strictly shrink. Exclusions stay in the host evidence.
 
 The per-commit cache and session records live under
 `/mnt/optane/review-arms-pilot/engine-cache/`. A session with an uncertain launch
 record needs reconciliation with the private instance before another launch.
-The same session serves cache misses while it remains live. An isolation audit
-failure moves that session's evidence to `retired/<session>/`. The engine
-captures the whole audit transcript, usage with reported provider model IDs,
-and all answer attempts, including rejected output. It audits the saved
-transcript and records SHA-256 for each captured file in `capture.json` before
-requesting destruction of the recorded session and retrying once in a new
-sealed session. If capture fails, the container remains available for
-recovery.
+The engine moves each completed session under `retired/<session>/`, with its
+transcript, usage and answer attempts. It audits the saved transcript and
+records SHA-256 for the captured files in `capture.json` before requesting
+destruction. An isolation failure allows one replacement session. A capture
+failure preserves the container for recovery.
 
 After writer and fidelity requests have finished, use `teardown` to apply the
 same process to the remaining engine sessions in the named study instance.

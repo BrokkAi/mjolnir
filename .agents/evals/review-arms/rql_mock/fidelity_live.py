@@ -3,12 +3,10 @@ import argparse
 from dataclasses import asdict
 import json
 from pathlib import Path
-import re
 from uuid import uuid4
 
 import brief_driver
 import driver
-from pilot_judge import expected_provider_model, provider_model
 
 from .engine import CONFIG, load_engine, locked
 from .engine.prompt import assert_blind, semantics_only, turn_prompt
@@ -20,8 +18,8 @@ from .fidelity_symbols import touched_symbols
 
 
 TERRA = "gpt-6.1-terra"
-FABLE = "fable"
-EFFORT = "high"
+SONNET = driver.PILOT_CLAUDE_MODEL
+EFFORT = driver.PILOT_CLAUDE_EFFORT
 ADJUDICATION = """Adjudicate every candidate under the supplied RQL semantic documents
 and fidelity rulings. Read the query and candidate bundle from the host's input
 file. The bundle supplies exact source lines for every cited span. Inspect other
@@ -47,9 +45,9 @@ only if they make the same unsupported claim under the same evidence.
 """
 
 
-def model_usage(usage, command, turn, model, fable_version):
-    if model == FABLE:
-        return provider_model(usage, command, turn, fable_version)
+def model_usage(usage, command, turn, model, claude_version):
+    if model == SONNET:
+        return driver.provider_model(usage, command, turn, claude_version)
     turns = usage["turns"]
     if len(turns) != 1 or (turns[0]["command_id"], turns[0]["accepted_ordinal"]) != (command, turn):
         raise ValueError("usage does not identify the enumerator's turn")
@@ -58,22 +56,8 @@ def model_usage(usage, command, turn, model, fable_version):
     return TERRA
 
 
-def verify_session_selection(session, model, profile, version):
-    options = {entry["key"]: entry for entry in session["config_options"]}
-    model_option = options["model"]
-    if (session["profile_id"], model_option["current"], options["effort"]["current"]) != (profile, model, EFFORT):
-        raise ValueError("fidelity session profile, model, or effort differs from the launch")
-    offered = [entry["name"] for entry in model_option["choices"] if entry["value"] == model]
-    if len(offered) != 1:
-        raise ValueError(f"fidelity model {model} is not uniquely advertised")
-    name = re.sub(r" \(.* context\)$", "", offered[0].removeprefix("Claude "))
-    if model == FABLE and name != version:
-        raise ValueError(f"fidelity Fable alias resolves to {name!r}, expected {version!r}")
-    return name
-
-
 class LiveModels:
-    def __init__(self, config, manifest, documents, directory, terra_profile, fable_version):
+    def __init__(self, config, manifest, documents, directory, terra_profile, claude_version):
         self.config = config
         self.manifest = manifest
         self.catalogue = documents["catalogue"]
@@ -82,11 +66,11 @@ class LiveModels:
         self.rulings = self.rulings.split("\nValidation used ", 1)[0]
         self.directory = directory
         self.terra_profile = terra_profile
-        self.fable_version = fable_version
+        self.claude_version = claude_version
         self.sources = manifest_sources(manifest, config["repos"])
 
     def sealed_task(self, commit, directory, model, profile, files, prompt, check_output):
-        version = TERRA if model == TERRA else self.fable_version
+        version = TERRA if model == TERRA else self.claude_version
         role_config = {**self.config, "profile": profile, "model_version": version}
         runner = SealedRunner(role_config, self.manifest)
         read = blob_reader(self.sources[commit], commit)
@@ -116,7 +100,7 @@ class LiveModels:
                 if model == TERRA:
                     hold = driver.pilot_weekly_hold(profile, cost=driver.PILOT_TERRA_QUOTA_COST)
                 else:
-                    hold = driver.pilot_weekly_hold(profile, scope=model)
+                    hold = driver.pilot_claude_hold(profile)
                 if hold:
                     raise RuntimeError(hold)
                 driver.save(intent, identity)
@@ -148,8 +132,8 @@ class LiveModels:
             raise ValueError("sealed fidelity session uses the wrong profile")
         brief_driver.configure_pilot_model_ready(sid, model, EFFORT)
         configured = driver.wait_idle(sid)
-        advertised = verify_session_selection(configured, model, profile,
-                                              self.manifest["model_versions"]["fable"])
+        advertised = driver.verify_session_selection(configured, model, profile,
+                                                     self.manifest["model_versions"]["claude"])
         driver.save(directory / "settings.json", {"options": configured["config_options"],
                                                   "advertised_version": advertised})
         scratch = runner.clean_checkout(sid)
@@ -167,7 +151,7 @@ class LiveModels:
             raise RuntimeError("fidelity session failed the pilot audit")
         usage = driver.mj("usage", "--session", sid, "--after-seq", before["latest_seq"])
         driver.save(directory / "turn-usage.json", usage)
-        resolved = model_usage(usage, command, turn, model, self.fable_version)
+        resolved = model_usage(usage, command, turn, model, self.claude_version)
         output = runner.command("fetch", "--session", sid, "--path", f"{scratch}/output.json", "--stdout")
         record = {"session": sid, "turn": turn, "model": model, "version": resolved, "effort": EFFORT}
         return output, record
@@ -213,7 +197,7 @@ class LiveModels:
             return decisions
 
         decisions, _ = self.sealed_task(
-            query.commit, directory, FABLE, self.config["profile"], files, prompt, check_output)
+            query.commit, directory, SONNET, self.config["profile"], files, prompt, check_output)
         return decisions
 
 
@@ -242,8 +226,8 @@ def candidate_lines(candidates, read):
 
 
 def planned_calls(queries, fresh):
-    return {"fable_engine": len(queries) + len(fresh), "terra_enumerator": len(queries),
-            "fable_adjudicator_at_most": len(queries)}
+    return {"sonnet_engine": len(queries) + len(fresh), "terra_enumerator": len(queries),
+            "sonnet_adjudicator_at_most": len(queries)}
 
 
 def checkpoint_directory(directory, engine):
@@ -271,9 +255,7 @@ def main(argv=None):
     engine = load_engine(args.engine_config, manifest_path=manifest_path if args.sample_only else None)
     if engine.identity["manifest_sha256"] != digest:
         parser.error("engine manifest differs from the fidelity manifest")
-    config, manifest, fable_version = engine.config, engine.manifest, engine.model_version
-    if fable_version != expected_provider_model(manifest):
-        parser.error("frozen Fable display and provider versions disagree")
+    config, manifest, claude_version = engine.config, engine.manifest, engine.model_version
     directory = args.run_root / "fidelity"
     run = checkpoint_directory(directory, engine)
     with locked(directory / ".lock"):
@@ -311,7 +293,7 @@ def main(argv=None):
             return 0
         for commit in sorted({query.commit for query in queries}):
             prepared_snapshot(repos[commit], config["snapshot_repo"], commit)
-        adapter = LiveModels(config, manifest, documents, run, args.terra_profile, fable_version)
+        adapter = LiveModels(config, manifest, documents, run, args.terra_profile, claude_version)
         records = {}
         for query in queries:
             path = run / query.key / "measurement.json"

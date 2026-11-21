@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import driver as shared_driver
 import pilot_judge as j
 from pilot_lock import pilot_lock
 import pilot_readout as r
@@ -24,8 +25,8 @@ import pilot_run
 
 def fixture(n_diffs=1, replicate_first=True):
     manifest = {"version": 1, "seed": 20261120, "plan_commit": "fixture",
-                "inputs": {"labels_sha256": "fixture"}, "models": {"judge": "fable/high"},
-                "model_versions": {"fable": "Fable 5.2"},
+                "inputs": {"labels_sha256": "fixture"}, "models": {"judge": "sonnet/high"},
+                "model_versions": {"claude": "Sonnet 5.5", "claude_provider_id": "claude-sonnet-5-5"},
                 "page_rows": 50, "diffs": [], "jobs": []}
     labels, defects = [], {}
     for index in range(n_diffs):
@@ -105,25 +106,27 @@ def raw_verdict(payload, item):
                            "rationale": "No match.", "confidence": "high"} for defect in payload["defects"]]}
     if payload["kind"] == "review":
         return {**record, "recovered_facts": [], "finding_count": 0}
-    return {**record, "contained_facts": ["1/2"]}
+    return {**record, "contained_facts": ["1/2"],
+            "evidence": [{"claim": "contained_fact:1/2", "quote": item["text"]}]}
 
 
-def usage_record(command, model="claude-fable-5-2"):
-    return {"turns": [{"command_id": command, "accepted_ordinal": 1,
+def usage_record(command, model="claude-sonnet-5-5", turn=1):
+    return {"latest_seq": turn, "turns": [{"command_id": command, "accepted_ordinal": turn,
                        "usage": {"provider_details": {"model_usage": {model: {}}}}}],
-            "turn_selections": {command: {"model": "fable", "effort": "high"}}}
+            "turn_selections": {command: {"model": "sonnet", "effort": "high"}}}
 
 
-def captured_receipt(batch, data, model="claude-fable-5-2"):
+def captured_receipt(batch, data, model="claude-sonnet-5-5"):
     attempt = batch.parent / "sessions" / batch.name / "attempt"
     producer = {"sealed": True, "profile": "claude-pinned", "launch_profile": "claude-pinned",
-                "config": {"model": "fable", "effort": "high"}, "output_sha256": j.sha(data),
+                "config": {"model": "sonnet", "effort": "high"}, "output_sha256": j.sha(data),
                 "session_id": "first-pass", "provider_model": model, "command": "cmd", "turn": 1}
     j.save(attempt / "launch.json", {"session_id": "first-pass"})
     j.save(attempt / "usage.json", usage_record("cmd", model))
     j.save(attempt / "audit.json", {"passed": True})
     j.save(attempt / "transcript.json", [{"items": [{"role": "message", "text": "done"}]}])
     (attempt / "verdicts.jsonl").write_bytes(data)
+    j.save(attempt / "verification.json", j.verification_record([]))
     receipt = {"producer": producer,
                "evidence_sha256": {name: j.sha((attempt / name).read_bytes()) for name in j.EVIDENCE_FILES}}
     j.save(batch.parent / "out" / f"task-{batch.name}.json", receipt)
@@ -328,7 +331,7 @@ class PilotFixture(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "transcript.json: evidence differs"):
             j.collect(self.root, key, profile="claude-pinned")
         transcript.write_bytes(original)
-        with self.assertRaisesRegex(ValueError, "pinned Fable/high"):
+        with self.assertRaisesRegex(ValueError, "pinned Sonnet/high"):
             j.collect(self.root, key, profile="other-profile")
         j.collect(self.root, key, profile="claude-pinned")
         self.assertEqual(len(j.records(self.root, key, "judge")), len(payload["items"]))
@@ -340,9 +343,9 @@ class PilotFixture(unittest.TestCase):
         (self.root / key["outputs"][oid]["artifact"]).write_text("changed")
         with self.assertRaisesRegex(ValueError, "hash-bound text"):
             j.collect(self.root, key, profile="claude-pinned")
-        with self.assertRaisesRegex(ValueError, "duplicate"):
+        with self.assertRaisesRegex(ValueError, "duplicate-verdict-id"):
             j.validate_payload_verdicts(payload, data + data)
-        with self.assertRaisesRegex(ValueError, "missing verdicts"):
+        with self.assertRaisesRegex(ValueError, "missing-verdict"):
             j.validate_payload_verdicts(payload, b"")
 
     def test_second_pass_contains_every_output_and_no_first_pass_results(self):
@@ -606,8 +609,8 @@ class PilotFixture(unittest.TestCase):
         batch = next(iter((self.root / j.INPUT_PATH).iterdir()))
         payload = j.load(batch / "items.json")
         data = "".join(json.dumps(raw_verdict(payload, item)) + "\n" for item in payload["items"]).encode()
-        captured_receipt(batch, data, "claude-fable-5-1")
-        with self.assertRaisesRegex(ValueError, "expected provider usage for claude-fable-5-2"):
+        captured_receipt(batch, data, "claude-sonnet-5-4")
+        with self.assertRaisesRegex(ValueError, "expected provider usage for claude-sonnet-5-5"):
             j.collect(self.root, key)
         self.assertFalse(j.records(self.root, key, "judge"))
 
@@ -631,7 +634,7 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(stats["exposed_only_contains_decisive"], 0)
         self.assertEqual(stats["site_coverage_counts"]["none"], 2)
 
-    def run_fake_judges(self, key, *, failure=None):
+    def run_fake_judges(self, key, *, failure=None, repair=None):
         profile, pin = "claude-pinned", "a" * 40
         instance = self.root / "instance"
         instance.mkdir()
@@ -642,18 +645,21 @@ class PilotFixture(unittest.TestCase):
         probe.touch(mode=0o700)
         tasks = self.root / j.INPUT_PATH
         sessions, stages, destroyed = {}, {}, []
-        bad_audit_sid = None if failure else "session-0"
-        model = "claude-fable-5-1" if failure == "version" else "claude-fable-5-2"
+        bad_audit_sid = None if failure or repair else "session-0"
+        model = "claude-sonnet-5-4" if failure == "version" else "claude-sonnet-5-5"
 
         def launch(bundle, commit, selected_profile, title, *, base, effort):
             self.assertEqual((bundle, commit, selected_profile, base, effort), ("empty", pin, profile, pin, "high"))
             sid = f"session-{len(sessions)}"
-            sessions[sid] = {"tag": title.split()[-1], "phase": tasks}
+            sessions[sid] = {"tag": title.split()[-1], "phase": tasks, "commands": []}
             stages[sid] = []
             return sid
 
         def state(sid):
             return {"at": pin, "base": pin, "no_later_history": True, "profile_id": profile,
+                    "config_options": [{"key": "model", "current": "sonnet",
+                                        "choices": [{"name": "Claude Sonnet 5.5", "value": "sonnet"}]},
+                                       {"key": "effort", "current": "high"}],
                     "last_turn_outcome": {"outcome": {"kind": "completed"}}}
 
         def transcript(sid):
@@ -672,19 +678,26 @@ class PilotFixture(unittest.TestCase):
             sid = args[args.index("--session") + 1]
             stages[sid].append(verb)
             if verb == "message":
-                sessions[sid]["command"] = args[args.index("--command-id") + 1]
+                commands = sessions[sid]["commands"]
+                commands.append(args[args.index("--command-id") + 1])
                 self.assertEqual(stages[sid].count("put-file"), 4)
                 self.assertLess(stages[sid].index("seal"), stages[sid].index("put-file"))
-                return {"turn_id": 1}
+                if len(commands) > 1:
+                    prompt = Path(args[args.index("--prompt-file") + 1]).read_text()
+                    self.assertIn("unmatched-quote", prompt)
+                    self.assertNotIn("fabricated phrase", prompt)
+                return {"turn_id": len(commands)}
             if verb == "wait":
-                return {"turn_id": 1, "outcome": "finished"}
+                return {"turn_id": int(args[args.index("--turn") + 1]), "outcome": "finished"}
             if verb == "usage":
-                return usage_record(sessions[sid]["command"], model)
+                commands = sessions[sid]["commands"]
+                self.assertEqual(int(args[args.index("--after-seq") + 1]), len(commands) - 1)
+                return usage_record(commands[-1], model, turn=len(commands))
             if verb == "destroy":
                 info = sessions[sid]
                 attempt = info["phase"] / "sessions" / info["tag"] / "attempt"
                 receipt = j.load(attempt / "receipt.json")
-                j.verify_capture(attempt, receipt, "claude-fable-5-2")
+                j.verify_capture(attempt, receipt, "claude-sonnet-5-5")
                 self.assertEqual(receipt["producer"]["session_id"], sid)
                 destroyed.append(sid)
                 return {"accepted": True}
@@ -710,12 +723,31 @@ class PilotFixture(unittest.TestCase):
             self.assertEqual(verb, "fetch")
             self.assertLess(stages[sid].index("transcript"), stages[sid].index("fetch"))
             payload = j.load(info["phase"] / info["tag"] / "items.json")
-            data = "".join(json.dumps(raw_verdict(payload, item)) + "\n" for item in payload["items"])
+            records = [raw_verdict(payload, item) for item in payload["items"]]
+            if repair and payload["kind"] == "review":
+                record, item = records[0], payload["items"][0]
+                record["defects"][0].update(label="caught", matching_finding=item["text"])
+                turn = len(info["commands"])
+                fabricated = f"fabricated phrase {turn}"
+                other_text = next(other["text"] for other in payload["items"][1:]
+                                  if other["text"].strip() not in item["text"])
+                record["evidence"] = [
+                    {"claim": "catch", "quote": other_text if turn == 1 and repair == "verify" else item["text"]},
+                    {"claim": f"matched_defect:{payload['defects'][0]['id']}",
+                     "quote": fabricated if repair == "stalled" or turn < 3 else "  ".join(item["text"].split())},
+                ]
+            data = "".join(json.dumps(record) + "\n" for record in records)
             return subprocess.CompletedProcess(args, 0, stdout=data.encode())
 
         fake_driver = SimpleNamespace(use_named_instance=lambda name: instance, workspace_id=lambda: "workspace",
                                       mj_invocation=lambda *args: ["mj", "--instance", "fixture-instance", *args],
-                                      mj=command, pilot_weekly_hold=lambda *a, **k: None, wait_idle=state, session=state,
+                                      mj=command, pilot_claude_hold=lambda profile: None, wait_idle=state, session=state,
+                                      PILOT_CLAUDE_MODEL=shared_driver.PILOT_CLAUDE_MODEL,
+                                      PILOT_CLAUDE_EFFORT=shared_driver.PILOT_CLAUDE_EFFORT,
+                                      expected_provider_model=shared_driver.expected_provider_model,
+                                      provider_model=shared_driver.provider_model,
+                                      verify_session_selection=shared_driver.verify_session_selection,
+                                      repair_progress=shared_driver.repair_progress,
                                       container=lambda sid: {"container": sid},
                                       inventory=lambda *args: {"head": pin, "head_tree":
                                           "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
@@ -723,18 +755,21 @@ class PilotFixture(unittest.TestCase):
                                           "status": "", "ignored": ""},
                                       attest_pilot_cache=lambda *a: {"snapshots": {"only": {"commits": [pin]}}},
                                       transcript=transcript)
-        configured = lambda *a, **k: {"model": "fable", "effort": "high"}
+        configured = lambda *a, **k: {"model": "sonnet", "effort": "high"}
         fake_brief = SimpleNamespace(sealed_launch=launch, configure_pilot_model=configured,
                                      configure_pilot_model_ready=configured)
         args = [str(j.HERE / "verify_driver.py"), str(tasks), "--kind", "task", "--text-only",
-                "--output", "verdicts.jsonl", "--profiles", profile, "--model", "fable", "--instance",
+                "--output", "verdicts.jsonl", "--profiles", profile, "--model", "sonnet", "--instance",
                 "fixture-instance", "--bundle", "empty", "--repo-commit", pin, "--seal-probe", str(probe),
-                "--provider-model", "claude-fable-5-2", "--concurrency", "1"]
+                "--provider-model", "claude-sonnet-5-5", "--model-version", "Sonnet 5.5", "--concurrency", "1"]
         with (patch.object(sys, "argv", args), patch.dict(os.environ, {"REVIEW_ARMS_DIR": str(self.root),
                 "REVIEW_ARMS_INSTANCE": "default"}), patch.dict(sys.modules, {"driver": fake_driver,
                 "brief_driver": fake_brief}), patch("subprocess.run", side_effect=fake_process),
               contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors):
-            for phase in (j.INPUT_PATH,) if failure else (j.INPUT_PATH, j.INPUT_PATH, j.HAND_PATH):
+            phases = (j.INPUT_PATH,) if failure else (j.INPUT_PATH, j.INPUT_PATH)
+            if not failure and not repair:
+                phases += (j.HAND_PATH,)
+            for phase in phases:
                 tasks = self.root / phase
                 args[1] = str(tasks)
                 with self.assertRaises(SystemExit) as finished:
@@ -745,9 +780,14 @@ class PilotFixture(unittest.TestCase):
                 self.assertIn(expected[failure], output.getvalue())
                 self.assertIn("session retained", output.getvalue())
             else:
-                self.assertIn('"state": "void"', errors.getvalue())
+                if repair:
+                    expected = "unscored" if repair == "stalled" else "done"
+                    self.assertIn(f'"state": "{expected}"', output.getvalue())
+                else:
+                    self.assertIn('"state": "void"', errors.getvalue())
                 j.collect(self.root, key, profile=profile)
-                j.collect(self.root, key, hand=True, profile=profile)
+                if not repair:
+                    j.collect(self.root, key, hand=True, profile=profile)
         return stages, destroyed
 
     def test_sealed_judges_audit_and_retry_before_capture_and_destroy(self):
@@ -760,6 +800,50 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(len(list((self.root / j.INPUT_PATH).glob("sessions/*/void-session-0/audit.json"))), 1)
         self.assertEqual(j.records(self.root, key, "judge"), j.records(self.root, key, "hand-check"))
         self.assertEqual(len(j.records(self.root, key, "judge")), len(key["outputs"]))
+
+    def test_fabricated_quotes_repair_until_the_catch_verifies(self):
+        key = setup(self.root, *fixture())
+        stages, destroyed = self.run_fake_judges(key, repair="verify")
+        self.assertEqual(sorted(events.count("message") for events in stages.values()), [1, 3])
+        self.assertEqual(len(destroyed), 2)
+        verdicts = j.records(self.root, key, "judge")
+        self.assertEqual(len(verdicts), len(key["outputs"]))
+        self.assertEqual(sum(row.get("catch") is True for row in verdicts.values()), 1)
+        self.assertTrue(any(row.get("catch") is False for row in verdicts.values()))
+
+    def test_containment_quotes_do_not_substitute_for_leak_or_matched_defect_evidence(self):
+        key = setup(self.root, *fixture())
+        entry = next(entry for entry in key["outputs"].values() if entry["kind"] == "writer")
+        payload = j.load(self.root / j.INPUT_PATH / entry["batch"] / "items.json")
+        records = [raw_verdict(payload, item) for item in payload["items"]]
+        records[0]["defects"][0]["label"] = "caught"
+        data = "".join(json.dumps(record) + "\n" for record in records).encode()
+        verified, errors = j.check_payload_verdicts(payload, data)
+        oid = records[0]["output_id"]
+        self.assertNotIn(oid, verified)
+        self.assertEqual(j.error_set(errors), {
+            ("missing-quote", oid, "leak"), ("missing-quote", oid, "matched_defect:d0"),
+        })
+
+    def test_same_normalized_error_stops_repair_and_leaves_the_catch_unscored(self):
+        from rql_mock.engine.test_engine import EngineTests
+
+        key = setup(self.root, *fixture())
+        stages, destroyed = self.run_fake_judges(key, repair="stalled")
+        self.assertEqual(sorted(events.count("message") for events in stages.values()), [1, 2])
+        self.assertEqual(len(destroyed), 2)
+        reports = (self.root / j.INPUT_PATH).glob("sessions/*/attempt/verification.json")
+        report_path, = [path for path in reports if j.load(path)["state"] == "unscored"]
+        report = j.load(report_path)
+        error, = report["errors"]
+        self.assertEqual((error["code"], error["site"]), ("unmatched-quote", "matched_defect:d0"))
+        verdicts = j.records(self.root, key, "judge")
+        self.assertEqual(set(verdicts), set(key["outputs"]) - {error["row"]})
+        # Pass the judge's exact pair of normalized findings through the engine.
+        rounds = [j.load(report_path.parent / "rounds" / str(i) / "result.json")["errors"] for i in range(2)]
+        answer, runner = EngineTests.verified_query(self.root / "engine-fixture", rounds)
+        self.assertEqual(answer["status"], "engine_error")
+        self.assertEqual(len(runner.turns), 2)
 
     def test_provider_mismatch_keeps_sealed_session_and_usage(self):
         key = setup(self.root, *fixture())

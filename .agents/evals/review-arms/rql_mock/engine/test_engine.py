@@ -21,7 +21,7 @@ from .__main__ import audit
 from .grammar import parse
 from .prompt import assert_blind, semantics_only, turn_prompt
 from .runner import CHECKOUT_CLEAN, IsolationFailure, LaunchHeld, SealedRunner, usage_delta
-from .snapshot import blob_reader, git_output, manifest_sources, parentless_snapshot
+from .snapshot import blob_reader, git_output, manifest_sources, parentless_snapshot, verifier_snapshot
 from .validation import canonical, validate
 
 
@@ -29,7 +29,7 @@ CATALOGUE = (CENSUS / "rql-documented-steps.md").read_text(encoding="utf-8")
 MENU = (CENSUS / "menu-steps.md").read_text(encoding="utf-8")
 CASES = (CENSUS / "menu-steps-cases.md").read_text(encoding="utf-8")
 COMMIT = "a" * 40
-VERSION = "claude-fable-5-2"
+VERSION = "claude-sonnet-5-5"
 NONPILOT = "b" * 40
 SESSION = "c" * 32
 REPLACEMENT = "d" * 32
@@ -49,10 +49,19 @@ ROWS = [{"kind": "structural_match", "sites": [span()],
          "fields": {"operand": {"site": span(),
                                 "verbatim": [{"start_byte": 8, "end_byte": 12, "text": "0x10"}]}}}]
 SOURCE = {"source.rs": b"fn evaluate() {\nlet n = 0x10;\n}\n"}
+EXCLUDED_FIXTURE = ({"candidate_site": span(), "reason": "duplicate", "detail": ""},)
 
 
-def payload(rows=ROWS, coverage=None):
-    return json.dumps({"rows": rows, "coverage": closed() if coverage is None else coverage})
+def payload(rows=ROWS, coverage=None, excluded=()):
+    return json.dumps({"rows": rows, "coverage": closed() if coverage is None else coverage,
+                       "excluded": list(excluded)})
+
+
+def fixture_verifier(root, program="print('{\"version\":1,\"errors\":[],\"candidates\":[],\"unchecked\":[]}')"):
+    binary = root / "rql-verify"
+    binary.write_text("#!/usr/bin/env python3\n" + program + "\n")
+    binary.chmod(0o700)
+    return binary
 
 
 def worked_queries():
@@ -145,7 +154,8 @@ class FrozenInputTests(unittest.TestCase):
         documents = {"catalogue": CATALOGUE, "steps": MENU, "menu": "{}",
                      "eligible_labels": "\n".join(map(json.dumps, [pilot, extra]))}
         manifest = {"diffs": [pilot], "input_paths": {"cases": "must-not-open.md"}, "inputs": {},
-                    "model_versions": {"fable": "Fable 5.2", "fable_provider_id": VERSION},
+                    "models": {"engine": "sonnet/high", "judge": "sonnet/high"},
+                    "model_versions": {"claude": "Sonnet 5.5", "claude_provider_id": VERSION},
                     "served_steps": ["contract-cases", "guarded-paths"]}
         for key, text in documents.items():
             data = text.encode()
@@ -200,7 +210,7 @@ class FrozenInputTests(unittest.TestCase):
             raw["page_rows"] = 50
             manifest.write_text(json.dumps(raw))
             config = root / "engine.json"
-            config.write_text(json.dumps({"manifest": str(manifest)}))
+            config.write_text(json.dumps({"manifest": str(manifest), "verifier": str(fixture_verifier(root))}))
             engine = live_engine.load_engine(config)
             query, _ = parse(QUERY, engine.catalogue, engine.served_steps)
             key = live_engine.cache_key(COMMIT, query, engine.identity["engine_inputs_sha256"])
@@ -257,7 +267,7 @@ class FrozenInputTests(unittest.TestCase):
             for failure in ("missing_config", "unreadable_input", "wrong_digest"):
                 with self.subTest(failure=failure):
                     if failure != "missing_config":
-                        config.write_text(json.dumps({"manifest": str(manifest)}))
+                        config.write_text(json.dumps({"manifest": str(manifest), "verifier": str(fixture_verifier(root))}))
                     if failure == "unreadable_input":
                         catalogue.unlink()
                     elif failure == "wrong_digest":
@@ -280,7 +290,7 @@ class FrozenInputTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "engine.json"
-            config.write_text(json.dumps({"manifest": str(self.fixture(root))}))
+            config.write_text(json.dumps({"manifest": str(self.fixture(root)), "verifier": str(fixture_verifier(root))}))
             initial = live_engine.load_engine(config)
             before = fidelity_live.checkpoint_directory(root / "fidelity", initial) / "test-query"
             before.mkdir(parents=True)
@@ -295,6 +305,11 @@ class FrozenInputTests(unittest.TestCase):
             self.assertNotEqual(before.parent.name, after.parent.name)
             self.assertFalse(after.exists())
             self.assertTrue((before / "measurement.json").is_file())
+            binary = Path(json.loads(config.read_text())["verifier"])
+            binary.write_bytes(binary.read_bytes() + b"# changed verifier\n")
+            changed = live_engine.load_engine(config)
+            self.assertNotEqual(updated.identity, changed.identity)
+            self.assertNotEqual(updated.verifier_sha256, changed.verifier_sha256)
 
 
 class ValidationTests(unittest.TestCase):
@@ -426,7 +441,7 @@ class EngineTests(unittest.TestCase):
         return Engine(self.cache, (catalogue, menu), source, lambda: runner, model)
 
     # Hard-won: a19cfbf: an engine launch could ignore either Fable weekly quota window.
-    def test_fable_launch_checks_both_weekly_windows_and_can_retry(self):
+    def test_sonnet_launch_requires_overall_weekly_and_five_hour_windows(self):
         runner = FakeRunner([])
         runner.driver = driver
         runner.config = {"profile": "claude-fixture", "bundle": "test-bundle"}
@@ -448,13 +463,12 @@ class EngineTests(unittest.TestCase):
         driver.mj = quota
         engine = self.engine(runner)
         record = self.cache / "session.json"
-        for general, fable in ((24, 80), (25, 80), (80, 24), (80, 25), (None, 80), (80, None), (80, 80)):
-            with self.subTest(general=general, fable=fable):
-                windows[:] = [{"remaining_percent": percent, "duration_seconds": 604800, "model_scope": scope}
-                              for percent, scope in ((general, None), (fable, "fable")) if percent is not None]
-                windows.append({"remaining_percent": 0, "duration_seconds": 604800, "model_scope": "sonnet"})
-                windows.append({"remaining_percent": 80, "duration_seconds": 18000})
-                if (general, fable) == (80, 80):
+        for weekly, short in ((24, 80), (25, 80), (80, 19), (80, 20), (None, 80), (80, None), (80, 80)):
+            with self.subTest(weekly=weekly, short=short):
+                windows[:] = [{"remaining_percent": percent, "duration_seconds": seconds}
+                              for percent, seconds in ((weekly, 604800), (short, 18_000)) if percent is not None]
+                windows.append({"remaining_percent": 0, "duration_seconds": 604800, "model_scope": "opus"})
+                if (weekly, short) == (80, 80):
                     self.assertEqual(engine.session(COMMIT, {"orphan": COMMIT}, record), (runner, SESSION))
                 else:
                     with self.assertRaises(LaunchHeld):
@@ -472,7 +486,7 @@ class EngineTests(unittest.TestCase):
         changes = [
             {"catalogue": CATALOGUE + "\nCatalogue revision."},
             {"menu": MENU + "\nSemantics revision."},
-            {"model": "claude-fable-5-1"},
+            {"model": "claude-sonnet-5-4"},
         ]
         for change in changes:
             changed = self.engine(runner, **change).answer(COMMIT, QUERY)
@@ -592,6 +606,62 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(runner.launches), 1)
         self.assertEqual(runner.turns[0][0], runner.turns[1][0])
 
+    @staticmethod
+    def verified_query(cache, round_errors):
+        repo = cache / "repo"
+        repo.mkdir(parents=True)
+        git_output(repo, "init", "--template=")
+        (repo / "source.rs").write_bytes(SOURCE["source.rs"])
+        git_output(repo, "add", "source.rs")
+        git_output(repo, "-c", "user.name=Test", "-c", "user.email=test@localhost",
+                   "-c", "commit.gpgsign=false", "commit", "-m", "fixture")
+        orphan = git_output(repo, "rev-parse", "HEAD").decode().strip()
+        (repo / "source.rs").write_text("dirty work tree")
+        binary = fixture_verifier(cache, f"""
+import json, sys
+from pathlib import Path
+
+request = json.load(sys.stdin)
+root = Path(request["root"])
+assert (root / "source.rs").read_bytes() == {SOURCE["source.rs"]!r}
+assert not (root / ".git").exists()
+assert request["step"] == "contract-cases"
+assert isinstance(request["query"], list)
+assert request["answer"]["excluded"] == {list(EXCLUDED_FIXTURE)!r}
+cursor = Path(__file__).with_suffix(".round")
+index = int(cursor.read_text()) if cursor.exists() else 0
+cursor.write_text(str(index + 1))
+errors = {round_errors!r}[index]
+print(json.dumps(dict(version=1, candidates=[], errors=errors, unchecked=[])))
+""")
+        runner = FakeRunner([payload(excluded=EXCLUDED_FIXTURE)] * len(round_errors))
+        engine = Engine(cache, (CATALOGUE, MENU), lambda _: (SOURCE.get, {"orphan": orphan}),
+                        lambda: runner, VERSION, verifier=binary,
+                        verifier_source=lambda snapshot: verifier_snapshot(repo, snapshot["orphan"]))
+        query = '(contract-cases :depth 0 :kind "return" (procedure-of (function :name "evaluate")))'
+        return engine.answer(COMMIT, query), runner
+
+    def test_verifier_errors_drive_repairs_while_the_error_set_shrinks(self):
+        findings = [{"code": code, "message": code, "row": 0, "site": span(), "candidate": None}
+                    for code in ("outside-seed", "unaccounted-candidate")]
+        answer, runner = self.verified_query(self.cache, [findings, findings[1:], []])
+        self.assertEqual(answer["status"], "ok", answer)
+        self.assertEqual(answer["excluded"], list(EXCLUDED_FIXTURE))
+        self.assertEqual(answer["provenance"]["validation_retries"], 2)
+        self.assertIn("outside-seed", runner.turns[1][2][0])
+        self.assertIn("unaccounted-candidate", runner.turns[2][2][0])
+        self.assertEqual(len(runner.launches), 1)
+        self.assertEqual(len(list(self.cache.glob("*/retired/*/answers/*/verifier.json"))), 3)
+
+    def test_verifier_repair_stops_when_normalized_error_set_does_not_shrink(self):
+        issue = {"code": "anchor-kind", "message": "first diagnostic", "row": 0,
+                 "site": span(), "candidate": None}
+        answer, runner = self.verified_query(self.cache, [[issue], [{**issue, "message": "reworded diagnostic"}]])
+        self.assertEqual(answer["status"], "engine_error")
+        self.assertIn("reworded diagnostic", answer["message"])
+        self.assertEqual(len(runner.turns), 2)
+        self.assertFalse(list((self.cache / COMMIT).glob("*.json")))
+
     def test_parse_error_never_constructs_engine_session(self):
         runner = FakeRunner([])
         result = self.engine(runner).answer(COMMIT, "(what changed?)")
@@ -606,7 +676,8 @@ class FakeAcpRunner(SealedRunner):
 
     def __init__(self):
         self.driver = self
-        self.config = {"profile": "claude-test", "model_version": VERSION, "destination": "repo"}
+        self.config = {"profile": "claude-test", "model_version": VERSION, "model_display": "Sonnet 5.5",
+                       "destination": "repo"}
         self.manifest = {"diffs": []}
         self.served_steps = ("contract-cases", "value-transfers", "guarded-paths")
         self.messages = []
@@ -624,13 +695,14 @@ class FakeAcpRunner(SealedRunner):
     def retire(self, directory, record, *, require_clean_audit=False):
         (directory / "destroy-receipt.json").write_text("{}")
 
-    def pilot_weekly_hold(self, profile, *, scope):
-        assert (profile, scope) == ("claude-test", "fable")
+    def pilot_claude_hold(self, profile):
+        assert profile == "claude-test"
         return getattr(self, "quota_hold", None)
 
     def wait_idle(self, sid):
         return {"profile_id": "claude-test",
-                "config_options": [{"key": "model", "current": "fable"},
+                "config_options": [{"key": "model", "current": "sonnet",
+                                    "choices": [{"value": "sonnet", "name": "Claude Sonnet 5.5"}]},
                                    {"key": "effort", "current": "high"}]}
 
     def clean_checkout(self, sid, orphan="", *, clear=True):
@@ -670,7 +742,7 @@ class FakeAcpRunner(SealedRunner):
         turns = [row for row in self.turns if row["accepted_ordinal"] > cursor]
         return {"latest_seq": self.turns[-1]["accepted_ordinal"] if self.turns else 0, "turns": turns,
                 "totals": {"total_tokens": {"tokens": len(self.turns) * 15, "reported_turns": len(self.turns)}},
-                "turn_selections": {row["command_id"]: {"model": "fable", "effort": "high"}
+                "turn_selections": {row["command_id"]: {"model": "sonnet", "effort": "high"}
                                     for row in turns}}
 
 
@@ -798,7 +870,8 @@ def load_engine():
 
 def answer(commit, query, *, fresh=False):
     return {"status": "ok", "rows": [], "total": 0,
-            "coverage": {"complete": True, "open": []}, "provenance": {"fresh": fresh, "commit": commit}}
+            "excluded": [{"reason": "duplicate"}], "coverage": {"complete": True, "open": []},
+            "provenance": {"fresh": fresh, "commit": commit}}
 """)
             config, log = temp / "transport.json", temp / "queries.jsonl"
             from rql_mock.stub_engine import STUB_IDENTITY
@@ -829,6 +902,9 @@ def answer(commit, query, *, fresh=False):
             self.assertIsNone(records[0]["provenance"])
             self.assertIsNone(records[1]["provenance"])
             self.assertEqual(records[2]["provenance"], {"fresh": False, "commit": COMMIT})
+            delivered = json.loads(responses[-1]["result"]["content"][0]["text"])
+            self.assertEqual(delivered["status"], "ok")
+            self.assertNotIn("excluded", delivered)
 
 
 class CaptureDriver:
@@ -891,7 +967,7 @@ class RetirementTests(unittest.TestCase):
             root = Path(directory)
             default, selected = root / "default", root / "selected"
             manifest = root / "manifest.json"
-            manifest.write_text(json.dumps({"model_versions": {"fable_provider_id": VERSION}}))
+            manifest.write_text(json.dumps({"model_versions": {"claude_provider_id": VERSION}}))
             for instance_root, commit in ((default, NONPILOT), (selected, COMMIT)):
                 active = instance_root / "engine-cache" / commit / "active"
                 active.mkdir(parents=True)
@@ -992,7 +1068,7 @@ class RetirementTests(unittest.TestCase):
         adapter.config = {"instance": INSTANCE, "snapshot_repo": "snapshot", "bundle": "fixture"}
         adapter.manifest = {}
         adapter.sources = {COMMIT: "source"}
-        adapter.fable_version = VERSION
+        adapter.claude_version = VERSION
         failure = RuntimeError("original fidelity turn error")
         model = fidelity_live.TERRA
         result = {"session": SESSION, "turn": 1, "model": model, "version": model, "effort": "high"}
@@ -1072,11 +1148,11 @@ class SnapshotTests(unittest.TestCase):
         before = {"totals": {"total_tokens": {"tokens": 10, "reported_turns": 1}}}
         after = {"turns": [{"command_id": "cid", "accepted_ordinal": 2,
                             "usage": {"provider_details": {"model_usage": {VERSION: {}}}}}],
-                 "turn_selections": {"cid": {"model": "fable", "effort": "high"}},
+                 "turn_selections": {"cid": {"model": "sonnet", "effort": "high"}},
                  "totals": {"total_tokens": {"tokens": 29, "reported_turns": 2}}}
         self.assertEqual(usage_delta(before, after, "cid", 2, VERSION), {"total_tokens": 19})
         with self.assertRaisesRegex(RuntimeError, "expected provider usage"):
-            usage_delta(before, after, "cid", 2, "claude-fable-5-1")
+            usage_delta(before, after, "cid", 2, "claude-sonnet-5-4")
 
 
 if __name__ == "__main__":

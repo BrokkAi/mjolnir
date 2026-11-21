@@ -16,7 +16,8 @@ Keep temporary files beside the output file in the provided scratch directory.
 
 Write a single JSON object to the specified output path. Use this schema:
 {"rows": [{"kind": "row_kind", "sites": [{"path": "repo/relative", "start_line": 1,
-"end_line": 1}], "fields": {}}], "coverage": {"complete": true, "open": []}}
+ "end_line": 1}], "fields": {}}], "coverage": {"complete": true, "open": []},
+ "excluded": []}
 
 A site object has exactly path, start_line and end_line. Use a canonical
 repository-relative path and inclusive one-based line numbers. Keep identity and
@@ -43,6 +44,18 @@ The enclosing span 8–9 and the operand span 9–9 are separate locations.
 Menu fields follow the row specifications in the menu document. Put the selected
 value-transfer port identity in selected_port. Use null for an inapplicable
 field such as an outgoing guarded path's pivot.
+
+Account for the syntactic candidates within the query's seed and selected
+kind, port or event. Use an exact role span within the enclosing statement,
+not a whole-body span. For value transfers put the seed-side candidate's site
+or exact written operand evidence in fields.selected_port. For incoming
+guarded paths put the call-site anchor in fields.pivot. Otherwise, account for
+a candidate at the row's primary anchor. List each remaining candidate as
+{"candidate_site": {...}, "reason": "...", "detail": "..."} in excluded.
+Use the candidate's exact line span and one reason from kind-not-selected,
+port-not-selected, unreachable, not-the-seed, macro-not-call, duplicate or
+other. Use a nonempty explanation for other. Use an empty excluded list when
+there are no exclusions, including for documented steps.
 
 For each written operand, literal, field initializer, predicate, operator,
 message and command argument, represent its exact spelling as
@@ -73,8 +86,7 @@ classification, candidate tags and gold adjudication concern the full study desi
 """
 
 
-REPAIR = """A previous attempt at this query failed mechanical validation.
-This context contains the query and the errors, without the previous answer.
+REPAIR = """A previous attempt at this query failed mechanical verification.
 Evaluate the full query from source. Before writing the new answer, check every
 row against the applicable rules above:
 - For primary-anchor errors, set the required field (site, sink.site or
@@ -84,7 +96,7 @@ row against the applicable rules above:
 - For verbatim errors, verify UTF-8 byte offsets and text against source.
 Build each row's site list after its fields are complete.
 Fix the cited problems and check the same rules on all rows in the new answer.
-Here are the exact validator errors as JSON data:
+Here are the exact validation and verifier errors as JSON data:
 """
 
 

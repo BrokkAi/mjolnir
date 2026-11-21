@@ -853,7 +853,7 @@
     "eligible_labels_sha256": "17a6a495c4bab449296c2037c8be4f2bff391aade1ba6d6f017270bed4624072",
     "labels_snapshot_sha256": "c1c143eeb5b8e107f9785300b839bbf3f8f9d7ca99c9a563eb6fb2e6c868ea02",
     "menu_sha256": "2059cb17f85cc02e6362bc205ca850f21c26064abde21bdb0449cf24cef828d3",
-    "plan_sha256": "a075ab2d059cf3d3375bf9682755643f0d32c4845b4dde5e3cdc383960c1108d",
+    "plan_sha256": "2845953f684d4146032cb78f39031582a7a98291e566c05eac45b3b1475c97a9",
     "steps_sha256": "55733330171fa5ee7ba9956ea8679992758f867dd221879b5ef4cca909fdd377"
   },
   "jobs": [
@@ -4419,17 +4419,17 @@
     }
   ],
   "model_versions": {
-    "fable": "Fable 5.2",
-    "fable_provider_id": "claude-fable-5-2"
+    "claude": "Sonnet 5.5",
+    "claude_provider_id": "claude-sonnet-5-5"
   },
   "models": {
-    "engine": "fable/high",
-    "judge": "fable/high",
+    "engine": "sonnet/high",
+    "judge": "sonnet/high",
     "reviewer": "gpt-6.1-terra/high",
     "writer": "gpt-6.1-sol/high"
   },
   "page_rows": 50,
-  "plan_commit": "ce86d0cbbac8201c90764dd03dd3def02ed43da5",
+  "plan_commit": "b2eba79248bc873e8b7f2bfc83a543cec9283d80",
   "seed": 20261120,
   "served_steps": [
     "contract-cases",

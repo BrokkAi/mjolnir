@@ -5,14 +5,14 @@ import re
 import subprocess
 import time
 from uuid import uuid4
+from driver import PILOT_CLAUDE_EFFORT as EFFORT, PILOT_CLAUDE_MODEL as MODEL
+from driver import provider_model, verify_session_selection
 
 from .evidence import file_digests, save_bytes, save_json
 from .prompt import assert_blind, semantics_only, turn_prompt
 from .snapshot import PRIVATE_PATHS
 
 
-MODEL = "fable"
-EFFORT = "high"
 SESSION_ID = re.compile(r"[a-f0-9]{32}")
 QUERY_SESSION_PROTOCOL = "sealed-session-per-query-v1"
 RUN_ERRORS = (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError)
@@ -96,15 +96,10 @@ def reported_model_usage(turn):
 
 
 def usage_delta(before, after, command, turn, model_version):
-    turns = after["turns"]
-    if len(turns) != 1 or turns[0].get("command_id") != command or turns[0].get("accepted_ordinal") != turn:
-        raise RuntimeError("mj usage did not identify exactly the expected engine turn")
-    if after["turn_selections"].get(command) != {"model": MODEL, "effort": EFFORT}:
-        raise RuntimeError("mj usage did not attribute the engine turn to Fable/high")
-    models = reported_model_usage(turns[0])
-    fable_models = {model for model in models if model.startswith("claude-fable-")}
-    if fable_models != {model_version}:
-        raise RuntimeError(f"expected provider usage for {model_version}, got {sorted(fable_models)}")
+    try:
+        provider_model(after, command, turn, model_version)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
     old, new = before["totals"], after["totals"]
     result = {key: entry["tokens"] - old.get(key, {}).get("tokens", 0)
               for key, entry in new.items()
@@ -157,11 +152,7 @@ class SealedRunner:
 
     def verify(self, sid):
         s = self.driver.wait_idle(sid)
-        settings = {row["key"]: row.get("current") for row in s.get("config_options", [])}
-        if (settings.get("model"), settings.get("effort")) != (MODEL, EFFORT):
-            raise RuntimeError(f"engine session {sid} is not configured for {MODEL}/{EFFORT}")
-        if s.get("profile_id") != self.config["profile"]:
-            raise RuntimeError(f"engine session {sid} is on the wrong Claude profile")
+        verify_session_selection(s, MODEL, self.config["profile"], self.config["model_display"])
         return s
 
     def attest(self, sid, snapshot, directory):
@@ -223,7 +214,7 @@ class SealedRunner:
         return sid
 
     def check_quota(self):
-        if hold := self.driver.pilot_weekly_hold(self.config["profile"], scope=MODEL):
+        if hold := self.driver.pilot_claude_hold(self.config["profile"]):
             raise LaunchHeld(hold)
 
     def message(self, sid, text, command):

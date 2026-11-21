@@ -332,14 +332,13 @@ def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allo
     return "done"
 
 
-def quota_hold(scope=None, *, floor=None, weekly=False, strict=False, short_floor=None):
+def quota_hold(scope=None, *, floor=None, weekly=False, strict=False, short_floor=None, unscoped=False):
     """Why a new job must not start, or None. REVIEW_ARMS_QUOTA_FLOOR="codex4=25,..." names
     shared profiles whose least window must keep that many percent (a coordinator's limit,
     2026-11-16: codex4 is shared with other sessions). Checked once per launch, from the
     daemon's stored report; a missing or unreadable report holds the job, since unknown is
     not "enough". A caller can supply its own floor, restrict it to weekly windows, and
-    require the remaining percentage to strictly exceed the floor. A weekly Fable
-    check requires both the general and the Fable-specific weekly windows.
+    require the remaining percentage to strictly exceed the floor.
     An optional short floor also requires a usable five-hour window."""
     if floor is None:
         floor = os.environ.get("REVIEW_ARMS_QUOTA_FLOOR")
@@ -358,16 +357,16 @@ def quota_hold(scope=None, *, floor=None, weekly=False, strict=False, short_floo
             return f"{profile}: no usable quota report ({error})"
         # Antigravity reports separate Gemini and Claude/GPT pools. Unscoped
         # windows apply to every model; an absent matching pool stays unknown.
-        if scope:
+        if unscoped:
+            windows = [w for w, models in pools if models == [""]]
+        elif scope:
             windows = [w for w, models in pools if models == [""] or scope in models]
         short = [w for w in windows if w.get("duration_seconds") == 18_000] if short_floor is not None else None
         if weekly:
             windows = [w for w in windows if w.get("duration_seconds") == 7 * 24 * 60 * 60]
         left = [w.get("remaining_percent") for w in windows]
         if (not left or any(type(value) not in {int, float} or not 0 <= value <= 100 for value in left)
-                or report.get("error")
-                or (weekly and scope == "fable"
-                    and {bool(w.get("model_scope")) for w in windows} != {False, True})):
+                or report.get("error")):
             return f"{profile}: no usable quota report ({json.dumps(report)[:300]})"
         least = min(windows, key=lambda w: w["remaining_percent"])
         remaining = least["remaining_percent"]
@@ -392,18 +391,67 @@ PILOT_TERRA_QUOTA_COST = 20
 
 def pilot_weekly_hold(profile, *, scope=None, cost=0, quota=None):
     """Check the pilot's weekly and applicable short-window floors from one report."""
-    # PLAN-rql-census.md sets the floor at 25%. There is no measured Fable
-    # per-session weekly cost in the pilot, so its launches use the floor itself.
+    # PLAN-rql-census.md sets the floor at 25%, plus measured costs when available.
     threshold = 2500 + cost
     floor = f"{profile}={threshold // 100}.{threshold % 100:02}"
     quota = quota_hold if quota is None else quota
     if scope is None:
         return quota(floor=floor, weekly=True, strict=True)
-    if scope == "fable":
-        # Coordinator ruling, 2026-11-20: the Claude5 smoke measured 5–6 points
-        # per Fable/high answer. A 20% reserve leaves room for other sessions.
-        return quota(scope, floor=floor, weekly=True, strict=True, short_floor=20)
     return quota(scope, floor=floor, weekly=True, strict=True)
+
+
+PILOT_CLAUDE_MODEL = "sonnet"
+PILOT_CLAUDE_EFFORT = "high"
+
+
+def pilot_claude_hold(profile):
+    """Apply the study's overall weekly and five-hour floors from one report."""
+    return quota_hold(floor=f"{profile}=25", weekly=True, strict=True, short_floor=20, unscoped=True)
+
+
+def repair_progress(previous, current):
+    """Admit the first repair, then require a proper subset of the previous errors."""
+    return previous is None or current < previous
+
+
+def expected_provider_model(manifest, role="judge"):
+    selection = manifest["models"][role]
+    if selection != f"{PILOT_CLAUDE_MODEL}/{PILOT_CLAUDE_EFFORT}":
+        raise ValueError(f"unexpected frozen {role} selection {selection!r}")
+    versions = manifest["model_versions"]
+    display, concrete = versions["claude"], versions["claude_provider_id"]
+    match = re.fullmatch(r"Sonnet ([0-9]+(?:\.[0-9]+)+)", display)
+    if not match or concrete != "claude-sonnet-" + match[1].replace(".", "-"):
+        raise ValueError(f"frozen Claude display and provider versions disagree: {display!r}, {concrete!r}")
+    return concrete
+
+
+def verify_session_selection(session, model, profile, version):
+    options = {entry["key"]: entry for entry in session["config_options"]}
+    selection = options["model"]
+    if (session["profile_id"], selection["current"], options["effort"]["current"]) != (
+            profile, model, PILOT_CLAUDE_EFFORT):
+        raise ValueError("session profile, model, or effort differs from the launch")
+    offered = [entry["name"] for entry in selection["choices"] if entry["value"] == model]
+    if len(offered) != 1:
+        raise ValueError(f"model {model} is not uniquely advertised")
+    name = re.sub(r" \(.* context\)$", "", offered[0].removeprefix("Claude "))
+    if model == PILOT_CLAUDE_MODEL and name != version:
+        raise ValueError(f"Claude alias resolves to {name!r}, expected {version!r}")
+    return name
+
+
+def provider_model(usage, command, turn, expected):
+    turns = usage["turns"]
+    if len(turns) != 1 or (turns[0].get("command_id"), turns[0].get("accepted_ordinal")) != (command, turn):
+        raise ValueError("provider usage does not identify exactly the expected turn")
+    if usage["turn_selections"].get(command) != {"model": PILOT_CLAUDE_MODEL, "effort": PILOT_CLAUDE_EFFORT}:
+        raise ValueError("provider usage does not attribute the turn to Sonnet/high")
+    models = turns[0]["usage"]["provider_details"]["model_usage"]
+    reported = {model.split("[", 1)[0] for model in models if model.startswith("claude-")}
+    if reported != {expected}:
+        raise ValueError(f"expected provider usage for {expected}, found {sorted(reported)}")
+    return expected
 
 
 def wait_idle(sid, limit=1200):
