@@ -243,6 +243,7 @@ impl RelayClient {
             subagent_queue: BTreeMap::new(),
             subagent_publication: None,
             known_state: None,
+            handshake_complete: false,
             ssh_session,
         };
         match client
@@ -250,6 +251,7 @@ impl RelayClient {
             .await
         {
             Ok(()) => {
+                client.handshake_complete = true;
                 // The drain task keeps logging for the life of the connection.
                 Ok(client)
             }

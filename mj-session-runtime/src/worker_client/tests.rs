@@ -5623,6 +5623,7 @@ fn duplex_relay_client(controller: tokio::io::DuplexStream) -> RelayClient {
         subagent_queue: BTreeMap::new(),
         subagent_publication: None,
         known_state: None,
+        handshake_complete: true,
         ssh_session: None,
         adoption_wait_progress: None,
     }
@@ -5692,4 +5693,54 @@ async fn adoption_wait_reports_blockers_without_a_deadline_and_is_cancellable() 
         peer.abort();
         let _ = peer.await;
     }
+}
+
+// Hard-won: #1625: cancelling RelayClient::connect waited for detach grace on a detached thread and leaked sleep proxies on process exit.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_connect_before_handshake_stops_proxy_immediately() {
+    use std::ffi::CString;
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let fifo = temp.path().join("proxy-alive.fifo");
+    let c_fifo = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `c_fifo` is a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+
+    let mut spec = CommandSpec::new("sh", ["-c", "exec 3>\"$FIFO\"; exec sleep 600"]);
+    spec.env
+        .insert("FIFO".into(), fifo.to_string_lossy().into_owned());
+
+    let fifo_for_reader = fifo.clone();
+    let opened = mj_core::runtime::spawn_blocking(move || std::fs::File::open(fifo_for_reader));
+
+    let connect = mj_core::runtime::spawn(async move {
+        RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(30)).await
+    });
+    let mut reader = tokio::time::timeout(Duration::from_secs(5), opened)
+        .await
+        .expect("proxy must open the sentinel FIFO")
+        .unwrap()
+        .unwrap();
+
+    connect.abort();
+    let _ = connect.await;
+
+    // The kernel closes the proxy's write end of the FIFO as soon as the proxy
+    // is killed, even if container PID 1 does not reap zombies. Confirm it
+    // closes well before RELAY_PROXY_DETACH_GRACE.
+    let eof = tokio::time::timeout(
+        Duration::from_millis(500),
+        mj_core::runtime::spawn_blocking(move || {
+            let mut byte = [0_u8; 1];
+            reader.read(&mut byte)
+        }),
+    )
+    .await
+    .expect("cancelled connect must kill its proxy immediately without waiting for detach grace")
+    .unwrap()
+    .unwrap();
+    assert_eq!(eof, 0, "killed proxy must close the sentinel FIFO");
 }
