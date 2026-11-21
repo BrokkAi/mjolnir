@@ -41,6 +41,7 @@ print(json.dumps({
     "pinned_ref": pinned,
     "head": head,
     "tracked_symlinks": tracked_symlinks,
+    "tracked_paths": [os.fsdecode(path) for path in git("ls-tree", "-rz", "--name-only", head).split(b"\0") if path],
     "head_tree": text("rev-parse", "HEAD^{tree}"),
     "base_tree": text("rev-parse", request["base"] + "^{tree}"),
     "session_start": {r: text("rev-parse", r) for r in start_refs},

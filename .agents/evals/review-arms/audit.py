@@ -5,6 +5,7 @@ Writes audit.json in each run directory and prints a summary. A hit is not a
 verdict: every hit is read by hand before a run is accepted or excluded.
 """
 import ast
+from collections import Counter
 import json
 import os
 import pathlib
@@ -86,7 +87,7 @@ def rollout_commands(paths):
                     if not directory.startswith("/") or "\0" in directory:
                         conflicts.add(identifier)
                         continue
-                    command = (argv, directory)
+                    command = (argv, directory, item.get("exit_code"))
                     if commands.setdefault(identifier, command) != command:
                         conflicts.add(identifier)
     except (OSError, ValueError, AttributeError, TypeError):
@@ -102,14 +103,35 @@ def call_command(call):
     return command if isinstance(command, str) and command.strip() else None
 
 
+def tool_succeeded(call, body, rollout_exit):
+    status = call.get("status")
+    if status not in (None, "completed"):
+        return False
+    output = call.get("rawOutput")
+    output = output if isinstance(output, dict) else {}
+    terminals = body.get("terminal_outputs") or ()
+    if output.get("isError") is True or output.get("signal") or any(row.get("signal") for row in terminals):
+        return False
+    exit_codes = [output[key] for key in ("exit_code", "exitCode") if key in output]
+    exit_codes.extend(row.get("exit_code") for row in terminals)
+    if rollout_exit is not None:
+        exit_codes.append(rollout_exit)
+    if exit_codes:
+        reported = [code for code in exit_codes if code is not None]
+        return bool(reported) and all(type(code) is int and code == 0 for code in reported)
+    # Claude can finish a Bash call without a terminal result. Codex can
+    # publish completed cards with an absent exit code for running commands.
+    return call.get("name") == "Bash" and status == "completed"
+
+
 def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None,
-         rollout=None, allow_in_place_edits=False, tracked_symlinks=None):
+         rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None):
     first_page = pages[0] if pages else {}
     execution = first_page.get("execution")
     checkout = cwd or first_page.get("cwd") or (execution.get("cwd") if isinstance(execution, dict) else None)
     edit_paths = EditPathEvidence(checkout, tracked_symlinks) if allow_in_place_edits else None
     hits, calls = [], 0
-    scripts, written = {}, set()
+    scripts, written = ScriptEvidence(checkout, tracked_paths), set()
     for page in pages:
         execution = page.get("execution")
         execution = execution if isinstance(execution, dict) else {}
@@ -118,7 +140,8 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
         for item in page["items"]:
             if item["role"] not in ("tool", "terminal"):
                 continue
-            call = (item.get("body") or {}).get("call") or {}
+            body = item.get("body") or {}
+            call = body.get("call") or {}
             if commits is not None and not call:
                 # Standalone terminal_output rows contain output only. The
                 # originating command is recorded as its own tool call.
@@ -127,6 +150,7 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
             if allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query") and call.get("kind") != "execute":
                 continue
             if commits is not None:
+                match = None
                 if rollout is not None and call.get("name") == "exec_command":
                     match = rollout.get(call.get("toolCallId"))
                     if command := call_command(call):
@@ -138,17 +162,19 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                                     resolve_paths(directory, page_cwd or "") != resolve_paths(recorded, "")):
                                 hits.append({"seq": item["seq"], "kind": "needs-inspection", "where": "input",
                                              "snippet": "Codex transcript and rollout working directories disagree"})
+                                scripts.clear()
                                 if edit_paths is not None:
                                     edit_paths.blocked = True
                                 continue
                             directory = recorded
                         call = {**call, "kind": "execute", "rawInput": {"command": command, "cwd": directory}}
                     elif match:
-                        argv, directory = match
+                        argv, directory, _ = match
                         call = {**call, "kind": "execute", "rawInput": {"argv": argv, "cwd": directory}}
                     else:
                         hits.append({"seq": item["seq"], "kind": "needs-inspection", "where": "input",
                                      "snippet": f"missing Codex command evidence: {call.get('title') or 'exec_command'}"})
+                        scripts.clear()
                         if edit_paths is not None:
                             edit_paths.blocked = True
                         continue
@@ -156,7 +182,8 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                 edit_index = 0
                 for name, snippet in pilot_hits(call, own_workspace, commits, single_commit, scripts=scripts,
                                                 written=written, cwd=page_cwd, home=page_home,
-                                                edit_paths=edit_paths):
+                                                edit_paths=edit_paths,
+                                                succeeded=tool_succeeded(call, body, match[2] if match else None)):
                     hit = {"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
                     if name == "in-place-edit":
                         hits.append({**hit, "edit_index": edit_index})
@@ -165,6 +192,7 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                         if name == "needs-inspection" and edit_paths is not None:
                             edit_paths.blocked = True
                         observed[name] = hit
+                scripts.forget_ambiguous()
                 hits.extend(observed.values())
                 continue
             inp, out = call_parts(item)
@@ -463,10 +491,9 @@ def shell_commands(command, cwd, home):
             if delimiter and any(mode == "<" for mode, _ in paths):
                 raise InspectionRequired("heredoc combined with another stdin redirection")
             if pending or delimiter:
-                unconditional = preceding in {None, ";", "\n"} and token in {";", "\n", "&&"}
-                pending.append((argv, targets, delimiter, cwd, unconditional))
+                pending.append((argv, targets, delimiter, cwd, preceding, token))
             else:
-                yield argv, targets, None, cwd, False
+                yield argv, targets, None, cwd, preceding, token
             skipped = frozenset()
             if token != preceding and preceding in {"&&", "||"}:
                 # A different connector can rejoin an earlier skipped branch.
@@ -498,9 +525,9 @@ def shell_commands(command, cwd, home):
         if has_command or token != "\n":
             preceding = token
         if token == "\n":
-            for argv, targets, marker, start_dir, unconditional in pending:
+            for argv, targets, marker, start_dir, leading, trailing in pending:
                 source, offset = heredoc_body(command, offset, marker) if marker else (None, offset)
-                yield argv, targets, source, start_dir, unconditional
+                yield argv, targets, source, start_dir, leading, trailing
             pending.clear()
             if offset >= len(command):
                 return
@@ -1403,7 +1430,7 @@ def link_hits(args, own_workspace, cwd):
 
 
 def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, written=None, cwd="", home=None,
-                 running_scripts=frozenset(), edit_paths=None):
+                 running_scripts=frozenset(), edit_paths=None, successful_writes=None):
     executable, *args = words
     if "/" in executable:
         yield from path_hits(executable, own_workspace, cwd)
@@ -1441,10 +1468,11 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
             record_script_write(scripts, written, inner, (), None, cwd)
         yield from command_hits(inner, own_workspace, commits, single_commit,
                                 scripts=scripts, written=written, cwd=cwd, home=home, running_scripts=running_scripts,
-                                edit_paths=edit_paths)
+                                edit_paths=edit_paths, successful_writes=successful_writes)
     elif program in {"bash", "sh"} and len(args) == 2 and args[0] in {"-c", "-lc"}:
         yield from shell_hits(args[1], own_workspace, commits, single_commit, scripts=scripts, written=written, cwd=cwd, home=home,
-                              running_scripts=running_scripts, edit_paths=edit_paths)
+                              running_scripts=running_scripts, edit_paths=edit_paths,
+                              successful_writes=successful_writes)
     elif program in AWK | {"sed", "perl"}:
         yield from text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, scripts, written,
                                     edit_paths)
@@ -1454,7 +1482,7 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
         yield from interpreter_hits(program, inline[1], own_workspace, commits, single_commit, cwd, written,
                                     edit_paths=edit_paths)
         if scripts is not None:
-            scripts.clear()  # A program can modify files through computed paths.
+            interpreter_writes(scripts, program, inline[1], cwd, [inline[0], *inline[2:]])
     elif program in SEARCH:
         files, operands, trailing = search_operands(program, args)
         for path in files + operands + trailing:
@@ -1520,18 +1548,122 @@ def interpreter_arguments(program, args):
     return args[offset:]
 
 
-def forget_script(scripts, path, cwd):
+class ScriptEvidence(dict):
+    """Confirmed contents and screened writes whose destinations started empty."""
+
+    def __init__(self, checkout=None, tracked=None):
+        super().__init__()
+        self.checkout = checkout if isinstance(checkout, str) and posixpath.isabs(checkout) else None
+        self.tracked = set(tracked) if isinstance(tracked, list) else None
+        self.fresh = {}
+        self.opaque_paths = set()
+        self.opaque = False
+
+    def clear(self):
+        super().clear()
+        self.fresh.clear()
+        self.opaque = True
+
+    def forget_ambiguous(self):
+        for cache in (self, self.fresh):
+            for key in tuple(cache):
+                if isinstance(key, tuple):
+                    cache.pop(key)
+
+    def starts_empty(self, path, cwd):
+        if (self.opaque or self.tracked is None or not self.checkout or ".." in path.split("/")
+                or re.search(r"[*?\[]", path)):
+            return False
+        paths = resolve_paths(path, cwd)
+        if not paths:
+            return False
+        prefix = self.checkout.rstrip("/") + "/"
+        for filename in paths:
+            if not filename.startswith(prefix) or any(
+                filename == path or filename.startswith(path.rstrip("/") + "/") for path in self.opaque_paths
+            ):
+                return False
+            relative = filename.removeprefix(prefix)
+            if relative in self.tracked or any(
+                str(parent) in self.tracked for parent in pathlib.PurePosixPath(relative).parents
+            ):
+                return False
+        return True
+
+    def opaque_write(self, path, cwd):
+        paths = resolve_paths(path, cwd)
+        if not paths or re.search(r"[*?\[]", path) or self.tracked is not None and any(
+            not posixpath.isabs(filename) for filename in paths
+        ):
+            self.clear()
+            return
+        self.opaque_paths.update(paths)
+        for key in tuple(self.fresh):
+            locations = {key} if isinstance(key, str) else resolve_paths(key[1], key[0])
+            if paths.intersection(locations):
+                self.fresh.pop(key)
+
+    def possible_sources(self, path, cwd, program):
+        if not self.starts_empty(path, cwd):
+            return ()
+        candidates = resolve_paths(path, cwd)
+        sources = {}
+        for key, (language, versions) in self.fresh.items():
+            locations = {key} if isinstance(key, str) else resolve_paths(key[1], key[0])
+            if candidates.intersection(locations):
+                if program is not None and not same_interpreter(program, language):
+                    return ()
+                sources.update(dict.fromkeys(versions))
+        return tuple(sources)
+
+
+SCRIPT_INTERPRETERS = {
+    ".py": "python3", ".js": "node", ".mjs": "node", ".cjs": "node", ".sh": "sh", ".rb": "ruby", ".pl": "perl",
+}
+
+
+def script_language(path, source):
+    if source.startswith("#!"):
+        argv = shlex.split(source.splitlines()[0][2:])
+        if argv[:1] == ["/usr/bin/env"]:
+            argv = argv[1:]
+        if argv:
+            program = posixpath.basename(argv[0])
+            if program in INLINE_OPTIONS or program in {"sh", "bash"}:
+                return program
+    return SCRIPT_INTERPRETERS.get(posixpath.splitext(path)[1])
+
+
+def same_interpreter(left, right):
+    return left == right or left in PYTHON and right in PYTHON or left in {"sh", "bash"} and right in {"sh", "bash"}
+
+
+def script_key(path, cwd):
+    key = recorded_path(path, cwd)
+    if key is None and isinstance(cwd, frozenset) and not re.search(r"[*?\[]", path):
+        # The same relative operand is valid across an uninterrupted chain,
+        # but no individual absolute path is established by this write.
+        return cwd, path
+    return key
+
+
+def forget_script(scripts, path, cwd, *, opaque=True):
+    if opaque:
+        scripts.opaque_write(path, cwd)
     paths = resolve_paths(path, cwd)
     if paths is None:
         scripts.clear()
         return
     for key in paths:
         scripts.pop(key, None)
+    for key in tuple(scripts):
+        if isinstance(key, tuple) and paths.intersection(resolve_paths(key[1], key[0])):
+            scripts.pop(key)
     if not cwd and not posixpath.isabs(path):
         key = next(iter(paths))
         # The transcript may omit the directory for one of two equivalent paths.
         for previous in list(scripts):
-            if previous.endswith("/" + key):
+            if isinstance(previous, str) and previous.endswith("/" + key):
                 scripts.pop(previous)
 
 
@@ -1547,51 +1679,179 @@ def literal_printf(args):
     return None
 
 
-def record_script_write(scripts, written, words, redirections, source, cwd):
-    def record(path, text):
-        if (key := recorded_path(path, cwd)) is not None:
-            scripts[key] = text
-
+def record_script_write(scripts, written, words, redirections, source, cwd, staged=None):
     program = posixpath.basename(words[0]) if words else ""
+    stdout = [(mode, path) for mode, path in redirections if mode in {">", ">>"}]
+    target = stdout[0][1] if len(stdout) == 1 and stdout[0][0] == ">" else None
+    visible = {}
+    if source is not None and words == ["cat"] and target is not None:
+        system_program(words[0], written)
+        visible[target] = source
+    elif source is not None and program == "tee" and all(not path.startswith("-") for path in words[1:]):
+        system_program(words[0], written)
+        visible.update(dict.fromkeys(words[1:] + ([target] if target else []), source))
+    elif program == "printf" and target is not None:
+        system_program(words[0], written)
+        if (text := literal_printf(words[1:])) is not None:
+            visible[target] = text
     for mode, path in redirections:
         if mode != "<":
             written.add(posixpath.basename(path))
-            forget_script(scripts, path, cwd)
+            forget_script(scripts, path, cwd, opaque=mode != ">" or path not in visible)
     if program in {"cp", "mv", "ln"} and len(words) >= 2:
         written.add(posixpath.basename(words[-1]))
     if program == "touch":
         written.update(posixpath.basename(path) for path in file_operands(words[1:]))
-    if program in {"cp", "mv", "rm", "ln"} or program == "git" and words[1:2] in (["checkout"], ["switch"]):
+    if program in {"cp", "mv", "ln"} or program == "git" and words[1:2] in (["checkout"], ["switch"]):
         scripts.clear()  # A destination can name a directory or be a symlink.
+    elif program == "rm":
+        dict.clear(scripts)  # Directory operands may remove more than the named path.
+        for path in file_operands(words[1:]):
+            forget_script(scripts, path, cwd)
     elif program == "sort":
-        # Known in-place options, and any options whose destination form is opaque.
         if any(word.startswith(("-i", "--in-place", "-o", "--output")) or re.fullmatch(r"-[nEr]+i[niEr]*", word)
                for word in words[1:]):
             scripts.clear()
     elif program == "tee":
         for path in file_operands(words[1:]):
             written.add(posixpath.basename(path))
-            forget_script(scripts, path, cwd)
+            forget_script(scripts, path, cwd, opaque=path not in visible)
     elif program == "xxd":
         paths = list(file_operands(words[1:], XXD_VALUE_OPTIONS, options_first=True))
         if len(paths) == 2 and paths[1] != "-":
             written.add(posixpath.basename(paths[1]))
             forget_script(scripts, paths[1], cwd)
-    stdout = [(mode, path) for mode, path in redirections if mode in {">", ">>"}]
-    target = stdout[0][1] if len(stdout) == 1 and stdout[0][0] == ">" else None
-    if source is not None and words == ["cat"] and target is not None:
-        record(target, source)
-        return target
-    elif source is not None and program == "tee" and all(not path.startswith("-") for path in words[1:]):
-        for path in words[1:] + ([target] if target else []):
-            record(path, source)
-    elif program == "printf" and target is not None:
-        text = literal_printf(words[1:])
-        if text is not None:
-            record(target, text)
+    for path, text in visible.items():
+        if staged is not None and (key := script_key(path, cwd)) is not None:
+            scripts[key] = text
+            staged.add(key)
+    return visible
 
 
-def recorded_script(words, scripts, written, cwd, preceding_write=None):
+def interpreter_writes(scripts, program, source, cwd, argv):
+    # Preserve only the empty-at-start history when the interpreter's
+    # possible mutations can be assigned to specific paths.
+    if scripts.tracked is None or program not in PYTHON:
+        scripts.clear()
+        return
+    dict.clear(scripts)
+    try:
+        nodes = list(ast.walk(ast.parse(source)))
+    except SyntaxError:
+        scripts.clear()
+        return
+
+    stores = Counter(node.id for node in nodes if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store))
+    stores.update(node.arg for node in nodes if isinstance(node, ast.arg))
+    bindings = {target.id: node.value for node in nodes if isinstance(node, ast.Assign)
+                for target in node.targets if isinstance(target, ast.Name) and stores[target.id] == 1}
+    imports = {}
+    understood = {"builtins", "collections", "copy", "functools", "io", "itertools",
+                  "json", "math", "os", "pathlib", "posix", "re", "sys", "typing"}
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                module = alias.name.split(".")[0]
+                if module not in understood:
+                    scripts.clear()
+                    return
+                imports[alias.asname or module] = alias.name if alias.asname else module
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or not node.module or node.module.split(".")[0] not in understood:
+                scripts.clear()
+                return
+            for alias in node.names:
+                imports[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+    if stores.keys() & imports.keys() or any(
+        isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del))
+        and python_name(node.value, imports) in {"sys", "sys.argv", "sys.path"}
+        for node in nodes
+    ):
+        scripts.clear()
+        return
+
+    def value(node, seen=frozenset()):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name) and node.id in bindings and node.id not in seen:
+            return value(bindings[node.id], seen | {node.id})
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = value(node.left, seen), value(node.right, seen)
+            if left is not None and right is not None:
+                return left + right
+        if (isinstance(node, ast.Subscript) and python_name(node.value, imports) == "sys.argv"
+                and isinstance(node.slice, ast.Constant) and type(node.slice.value) is int
+                and 0 <= node.slice.value < len(argv)):
+            return argv[node.slice.value]
+        if (isinstance(node, ast.Call) and python_name(node.func, imports) == "pathlib.Path"
+                and len(node.args) == 1 and not node.keywords):
+            return value(node.args[0], seen)
+        return None
+
+    def argument(node, index, keyword):
+        if index < len(node.args):
+            return node.args[index]
+        return next((pair.value for pair in node.keywords if pair.arg == keyword), None)
+
+    for node in nodes:
+        if not isinstance(node, ast.Call):
+            continue
+        name = python_name(node.func, imports)
+        method = node.func.attr if isinstance(node.func, ast.Attribute) else ""
+        if name in {"open", "builtins.open", "io.open"} or method == "open" and name != "os.open":
+            bound = name not in {"open", "builtins.open", "io.open"}
+            if any(keyword.arg is None for keyword in node.keywords) or any(isinstance(arg, ast.Starred) for arg in node.args):
+                scripts.clear()
+                return
+            mode = argument(node, 0 if bound else 1, "mode")
+            if mode is None or value(mode) in {"r", "rb", "rt", "U", "rU"}:
+                continue
+            target = node.func.value if bound else argument(node, 0, "file")
+        elif name in {"os.open", "os.remove", "os.unlink", "os.rmdir", "sqlite3.connect"}:
+            target = argument(node, 0, "path")
+        elif method in {"write_text", "write_bytes", "touch", "unlink", "rmdir"}:
+            target = node.func.value
+        elif name in PROCESS_CALLS | OPAQUE_CALLS | {"getattr", "globals", "locals", "__import__"} or (
+                python_may_relocate_links(node, name)
+                or name.startswith(("builtins.", "io.", "shutil.", "tempfile.", "importlib.", "sys.argv.", "sys.path."))
+                or name.startswith(("os.", "posix.")) and not name.startswith("os.path.")):
+            scripts.clear()
+            return
+        else:
+            continue
+        path = value(target)
+        if path is None:
+            scripts.clear()
+            return
+        scripts.opaque_write(path, cwd)
+
+
+def screen_script_writes(scripts, visible, own_workspace, commits, single_commit, cwd):
+    for path, text in visible.items():
+        program = script_language(path, text)
+        if program is None:
+            scripts.opaque_write(path, cwd)
+            continue
+        if program in {"sh", "bash"}:
+            hits = list(shell_hits(text, own_workspace, commits, single_commit, cwd=cwd))
+        else:
+            hits = list(interpreter_hits(program, text, own_workspace, commits, single_commit, cwd))
+        fresh = scripts.starts_empty(path, cwd)
+        yield from (hit for hit in hits if fresh or hit[0] != "interpreter-screened")
+        if any(name not in PASSING_HIT_KINDS for name, _ in hits):
+            scripts.opaque_write(path, cwd)
+        elif fresh and (key := script_key(path, cwd)) is not None:
+            previous = scripts.fresh.get(key)
+            if previous is None or same_interpreter(previous[0], program):
+                versions = () if previous is None else previous[1]
+                if text not in versions:
+                    scripts.fresh[key] = (program, (*versions, text))
+            else:
+                scripts.opaque_write(path, cwd)
+
+
+def recorded_script(words, scripts, written, cwd):
     if not words:
         return None
     path, *args = words
@@ -1602,45 +1862,61 @@ def recorded_script(words, scripts, written, cwd, preceding_write=None):
         if not args or args[0].startswith("-"):
             return None
         path, *args = args
-    elif path.startswith(("./", "/", "../")) and (source := scripts.get(recorded_path(path, cwd))) is not None:
+        if (confirmed := scripts.get(script_key(path, cwd))) is not None:
+            sources = (confirmed,)
+        else:
+            sources = scripts.possible_sources(path, cwd, program)
+    elif path.startswith(("./", "/", "../")):
         if program in SYSTEM_PROGRAM_NAMES:
             system_program(path, written)
-        shebang = source.splitlines()[0][2:] if source.startswith("#!") else "/bin/sh"
-        argv = shlex.split(shebang)
-        if argv[:1] == ["/usr/bin/env"]:
-            argv = argv[1:]
-        program = system_program(argv[0], written) if argv else ""
-        if program not in INLINE_OPTIONS and program not in {"sh", "bash"}:
-            raise InspectionRequired("unrecognized recorded script interpreter")
-        if interpreter_arguments(program, argv[1:]):
-            raise InspectionRequired("unsupported recorded script interpreter options")
+        confirmed = scripts.get(script_key(path, cwd))
+        if confirmed is None:
+            sources = scripts.possible_sources(path, cwd, None)
+            if not sources or any(not source.startswith("#!") for source in sources):
+                return None
+        else:
+            sources = (confirmed,)
+        interpreters = set()
+        for source in sources:
+            shebang = source.splitlines()[0][2:] if source.startswith("#!") else "/bin/sh"
+            argv = shlex.split(shebang)
+            if argv[:1] == ["/usr/bin/env"]:
+                argv = argv[1:]
+            interpreter = system_program(argv[0], written) if argv else ""
+            if interpreter not in INLINE_OPTIONS and interpreter not in {"sh", "bash"}:
+                raise InspectionRequired("unrecognized recorded script interpreter")
+            if interpreter_arguments(interpreter, argv[1:]):
+                raise InspectionRequired("unsupported recorded script interpreter options")
+            interpreters.add(interpreter)
+        if len(interpreters) != 1:
+            raise InspectionRequired("recorded script versions use different interpreters")
+        program, = interpreters
     else:
         return None
-    source = scripts.get(recorded_path(path, cwd))
-    if source is None and preceding_write is not None:
-        write_cwd, target, written_source = preceding_write
-        if cwd == write_cwd and path == target:
-            source = written_source
-    if source is None:
-        return None
-    if re.match(r"(?:\./)?(?:tests?|e2e|scripts)/", path):
+    if not sources or re.match(r"(?:\./)?(?:tests?|e2e|scripts)/", path):
         return None  # Keep the build and test command screen in force.
-    return program, path, args, source
+    return program, path, args, sources
 
 
 def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, written=None, cwd="", home=None,
-               running_scripts=frozenset(), edit_paths=None):
+               running_scripts=frozenset(), edit_paths=None, successful_writes=None):
     if scripts is None:
-        scripts = {}
+        scripts = ScriptEvidence()
     if written is None:
         written = set()
-    preceding_write = None
+    # A newly recorded script is provisional until every intervening
+    # connector is && or the tool's success confirms the final && chain.
+    staged = set()
+    forked = False
     try:
-        for words, redirections, source, start_dir, unconditional in shell_commands(command, cwd, home):
-            # An unconditional relative write may be followed immediately by
-            # the same relative lookup. Neither absolute candidate is known
-            # to have been written, so the evidence stays local to this pair.
-            last_write, preceding_write = preceding_write, None
+        for words, redirections, source, start_dir, leading, trailing in shell_commands(command, cwd, home):
+            if leading != "&&":
+                for key in staged:
+                    scripts.pop(key, None)
+                staged.clear()
+                forked = leading in {"||", "|"}
+            forked |= trailing in {"||", "|"}
+            new_writes = None if forked else staged
             for _, path in redirections:
                 yield from path_hits(path, own_workspace, start_dir)
             if not words and source is None:
@@ -1648,38 +1924,41 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                 continue
             try:
                 if source is None:
-                    script = recorded_script(words, scripts, written, start_dir, last_write)
-                    record_script_write(scripts, written, words, redirections, source, start_dir)
+                    script = recorded_script(words, scripts, written, start_dir)
+                    visible = record_script_write(scripts, written, words, redirections, source, start_dir, new_writes)
+                    yield from screen_script_writes(scripts, visible, own_workspace, commits, single_commit, start_dir)
+                    if words[0] == "cd":
+                        scripts.forget_ambiguous()
                     if script is None:
                         yield from command_hits(words, own_workspace, commits, single_commit,
                                                 scripts=scripts, written=written, cwd=start_dir, home=home,
-                                                running_scripts=running_scripts, edit_paths=edit_paths)
+                                                running_scripts=running_scripts, edit_paths=edit_paths,
+                                                successful_writes=new_writes)
                     else:
-                        program, path, arguments, script_source = script
+                        program, path, arguments, script_sources = script
                         yield from path_hits(path, own_workspace, start_dir)
                         for arg in arguments:
                             yield from source_literal_hits(arg, own_workspace, start_dir)
                         if program in {"sh", "bash"}:
-                            key = recorded_path(path, start_dir)
+                            key = script_key(path, start_dir)
                             if key in running_scripts:
                                 raise InspectionRequired("recursive recorded script")
-                            yield from shell_hits(script_source, own_workspace, commits, single_commit,
-                                                  scripts=scripts, written=written, cwd=start_dir, home=home,
-                                                  running_scripts=running_scripts | {key},
-                                                  edit_paths=edit_paths)
+                            for script_source in script_sources:
+                                yield from shell_hits(script_source, own_workspace, commits, single_commit,
+                                                      scripts=scripts, written=written, cwd=start_dir, home=home,
+                                                      running_scripts=running_scripts | {key},
+                                                      edit_paths=edit_paths)
                             yield "interpreter-screened", program
                         else:
-                            yield from interpreter_hits(program, script_source, own_workspace, commits, single_commit,
-                                                        start_dir, written, edit_paths=edit_paths)
-                            scripts.clear()
+                            for script_source in script_sources:
+                                yield from interpreter_hits(program, script_source, own_workspace, commits, single_commit,
+                                                            start_dir, written, edit_paths=edit_paths)
+                                interpreter_writes(scripts, program, script_source, start_dir, [path, *arguments])
                 else:
-                    target = record_script_write(scripts, written, words, redirections, source, start_dir)
+                    visible = record_script_write(scripts, written, words, redirections, source, start_dir, new_writes)
+                    yield from screen_script_writes(scripts, visible, own_workspace, commits, single_commit, start_dir)
                     if words == ["cat"]:
                         system_program(words[0], written)
-                        if (unconditional and isinstance(start_dir, frozenset) and target
-                                and redirections == [(">", target)] and not posixpath.isabs(target)
-                                and not re.search(r"[*?\[]", target)):
-                            preceding_write = (start_dir, target, source)
                         continue  # Here the body is literal data.
                     if words and posixpath.basename(words[0]) == "tee":
                         yield from command_hits(words, own_workspace, commits, single_commit, written=written, cwd=start_dir)
@@ -1693,20 +1972,25 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                         yield from source_literal_hits(arg, own_workspace, start_dir)
                     yield from interpreter_hits(program, source, own_workspace, commits, single_commit,
                                                         start_dir, written, edit_paths=edit_paths)
-                    scripts.clear()
+                    interpreter_writes(scripts, program, source, start_dir, ["-", *arguments[1:]])
             except InspectionRequired as error:
                 scripts.clear()
                 yield "needs-inspection", f"{error}: {shlex.join(words)[:400]}"
     except ValueError as error:
         scripts.clear()
         yield "needs-inspection", f"{error}: {command[:400]}"
+    if successful_writes is not None:
+        successful_writes.update(staged)
+    else:
+        for key in staged:
+            scripts.pop(key, None)
 
 
 PATH_KEYS = {"cwd", "path", "paths", "file_path", "filePath", "directory", "workdir", "target_file"}
 
 
 def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written, cwd, home,
-               edit_paths):
+               edit_paths, succeeded=False):
     title = call.get("title") or ""
     kind = call.get("kind")
     raw = call.get("rawInput")
@@ -1788,7 +2072,8 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
         command = shlex.join(command)
     if isinstance(command, str) and command.strip() and (kind in {None, "execute", "other"} or listing):
         yield from shell_hits(command, own_workspace, commits, single_commit, scripts=scripts, written=written,
-                              cwd=cwd or "", home=home, edit_paths=edit_paths)
+                              cwd=cwd or "", home=home, edit_paths=edit_paths,
+                              successful_writes=set() if succeeded else None)
     elif listing and not target_seen:
         yield "needs-inspection", f"missing read path: {title[:400]}"
     elif kind == "execute" or title in {"rql_query", "mcp__rql__rql_query"}:
@@ -1808,11 +2093,12 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
             cwd = cwd or placement.get("cwd")
             home = home or placement.get("home")
         inventory = transcript_path.with_name("pre-inventory.json")
-        tracked_symlinks = None
-        if allow_in_place_edits and inventory.is_file():
-            tracked_symlinks = json.loads(inventory.read_text()).get("tracked_symlinks")
+        before = json.loads(inventory.read_text()) if inventory.is_file() else {}
+        cwd = cwd or before.get("cwd")
         result = scan(pages, own_workspace, commits=commits, allow_rql=allow_rql, single_commit=single_commit,
-                      cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits, tracked_symlinks=tracked_symlinks,
+                      cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits,
+                      tracked_symlinks=before.get("tracked_symlinks"),
+                      tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
                       rollout=rollout_commands(
                           sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))))
     except (OSError, ValueError, KeyError, TypeError) as error:

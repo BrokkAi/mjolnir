@@ -183,7 +183,10 @@ class SealedRunner:
         check = subprocess.run([*probe, place["container"]], capture_output=True, timeout=300)
         if check.returncode:
             raise RuntimeError(f"engine isolation probe failed: {check.stderr.decode(errors='replace').strip()}")
-
+        before = self.driver.inventory(place, "audit", snapshot["orphan"])
+        if before["head"] != snapshot["orphan"]:
+            raise RuntimeError("engine pre-inventory does not match the pinned checkout")
+        save_json(directory / "pre-inventory.json", {**before, "cwd": cwd})
         return s
 
     def prepare(self, sid, snapshot, directory):

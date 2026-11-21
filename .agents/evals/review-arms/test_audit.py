@@ -174,17 +174,23 @@ def test_live_shell_forms_preserve_audit_controls(tmp_path, command, kind):
     assert kind in {hit["kind"] for hit in report["hits"]}
 
 
-def audit_calls(tmp_path, calls, *, allow_in_place_edits=False, **metadata):
+def audit_calls(tmp_path, calls, *, allow_in_place_edits=False, terminal_results=None, **metadata):
     transcript = tmp_path / "transcript.json"
     transcript.write_text(json.dumps([{**metadata, "items": [
-        {"seq": seq, "role": "tool", "body": {"call": call}}
+        {"seq": seq, "role": "tool", "body": {
+            "call": call, "terminal_outputs": (terminal_results or {}).get(seq, []),
+        }}
         for seq, call in enumerate(calls, 1)
     ]}]))
     return audit_pilot(transcript, OWN, commits=[PIN], single_commit=True, allow_in_place_edits=allow_in_place_edits)
 
 
-def shell(command):
-    return {"kind": "execute", "rawInput": {"command": command}}
+def shell(command, **result):
+    return {"kind": "execute", "rawInput": {"command": command}, **result}
+
+
+def successful_bash(command):
+    return shell(command, name="Bash", status="completed")
 
 
 # Hard-won: 8c9d945: live engine query voided for running a visibly written script
@@ -195,7 +201,7 @@ def shell(command):
     ("tee f <<'EOF'\ncat README.md\nEOF", 'sh "$PWD/f"'),
 ])
 def test_audit_screens_scripts_written_visibly_in_an_earlier_call(tmp_path, write, run):
-    report = audit_calls(tmp_path, [shell(write), shell(run)], cwd=f"/workspace/{OWN}/repo")
+    report = audit_calls(tmp_path, [successful_bash(write), shell(run)], cwd=f"/workspace/{OWN}/repo")
     assert report["passed"], report["hits"]
     assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(2, "interpreter-screened")]
 
@@ -208,7 +214,7 @@ def test_audit_screens_scripts_written_visibly_in_an_earlier_call(tmp_path, writ
 def test_engine_correlates_a_relative_scratch_script_and_screens_its_argument(tmp_path, argument, extra_hits):
     checkout = f"/workspace/{OWN}/engine-trees"
     command = (
-        f"cd {checkout}; D=.rql-engine-{OWN}; cat > $D/build.py <<'EOF'\n"
+        f"cd {checkout}; D=.rql-engine-{OWN}; cat > $D/build.py <<'EOF' &&\n"
         f"print('safe')\nEOF\npython3 -I $D/build.py {argument}"
     )
     report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo")
@@ -232,10 +238,126 @@ def test_engine_runs_a_visible_script_in_the_same_success_chain(tmp_path):
 def test_ambiguous_relative_write_cannot_attest_an_absolute_script(tmp_path):
     checkout = f"/workspace/{OWN}/engine-trees"
     report = audit_calls(tmp_path, [
-        shell(f"cd {checkout}; cat > build.py <<'EOF'\nprint('safe')\nEOF\npython3 -I {checkout}/build.py"),
+        shell(f"cd {checkout}; cat > build.py <<'EOF' &&\nprint('safe')\nEOF\npython3 -I {checkout}/build.py"),
     ], cwd=f"/workspace/{OWN}/repo")
     assert not report["passed"]
     assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+@pytest.mark.parametrize(("before", "connector", "after"), [
+    ("", "\n", "python3 -I build.py"),
+    ("", ";", "python3 -I build.py"),
+    ("true || ", " && ", "python3 -I build.py"),
+    ("", " && ", "true; python3 -I build.py"),
+])
+def test_unguarded_run_does_not_use_contents_from_a_potentially_failed_write(tmp_path, before, connector, after):
+    command = f"{before}cat > build.py <<'EOF'{connector}"
+    if connector == "\n":
+        command += f"print('safe')\nEOF\n{after}"
+    else:
+        command += f"{after}\nprint('safe')\nEOF"
+    report = audit_calls(tmp_path, [successful_bash(command)], cwd=f"/workspace/{OWN}/repo")
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+@pytest.mark.parametrize(("tracked", "passed"), [
+    ([".rql-engine-" + OWN + "/build.py"], False),
+    (None, False),
+    ([], True),
+])
+def test_unconfirmed_heredoc_run_requires_a_proven_new_script_path(tmp_path, tracked, passed):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    if tracked is not None:
+        (tmp_path / "pre-inventory.json").write_text(json.dumps({"tracked_paths": tracked}))
+    path = f"{checkout}/.rql-engine-{OWN}/build.py"
+    command = f"cat > {path} <<'EOF'\nprint('visible')\nEOF\npython3 -I {path}"
+    report = audit_calls(tmp_path, [shell(command, name="Bash", status="failed")], cwd=checkout)
+    assert report["passed"] is passed
+    assert {hit["kind"] for hit in report["hits"]} == {"interpreter-screened" if passed else "needs-inspection"}
+
+
+@pytest.mark.parametrize("first", ["print('first')", "open('/run/hel/git-cache/config')"])
+def test_every_visible_version_is_screened_before_an_unconfirmed_run(tmp_path, first):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    (tmp_path / "pre-inventory.json").write_text('{"tracked_paths":[]}')
+    path = f"{checkout}/.rql-engine-{OWN}/build.py"
+    report = audit_calls(tmp_path, [
+        shell(f"cat > {path} <<'EOF'\n{first}\nEOF"),
+        shell(f"cat > {path} <<'EOF'\nprint('second')\nEOF"),
+        shell(f"python3 -I {path}"),
+    ], cwd=checkout)
+    if first.startswith("print"):
+        assert report["passed"], report["hits"]
+        assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [
+            (1, "interpreter-screened"), (2, "interpreter-screened"), (3, "interpreter-screened"),
+        ]
+    else:
+        assert not report["passed"]
+        assert (1, "git-history-escape") in {(hit["seq"], hit["kind"]) for hit in report["hits"]}
+
+
+@pytest.mark.parametrize("opaque_write", [
+    "cat seed.py > {path}",
+    """python3 -I -c 'open("{path}", "w").write("print(1)")'""",
+])
+def test_opaque_earlier_write_prevents_the_new_script_exception(tmp_path, opaque_write):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    (tmp_path / "pre-inventory.json").write_text('{"tracked_paths":[]}')
+    path = f"{checkout}/.rql-engine-{OWN}/build.py"
+    report = audit_calls(tmp_path, [
+        shell(opaque_write.format(path=path)),
+        shell(f"cat > {path} <<'EOF'; python3 -I {path}\nprint('visible')\nEOF"),
+    ], cwd=checkout)
+    assert not report["passed"]
+    assert (2, "needs-inspection") in {(hit["seq"], hit["kind"]) for hit in report["hits"]}
+
+
+@pytest.mark.parametrize(("name", "status", "raw_output", "terminal_exit", "passed"), [
+    ("Bash", "completed", None, 0, True),
+    ("Bash", "failed", None, 1, False),
+    ("Bash", None, None, None, False),
+    ("exec_command", "completed", {"exit_code": 0}, None, True),
+    ("exec_command", "completed", {"exit_code": 1}, None, False),
+    ("exec_command", "completed", {"exit_code": None}, None, False),
+    ("exec_command", "completed", None, 0, True),
+])
+def test_separate_script_run_requires_recorded_write_success(tmp_path, name, status, raw_output, terminal_exit, passed):
+    write = shell("cat > build.py <<'EOF'\nprint('safe')\nEOF", name=name, status=status, rawOutput=raw_output)
+    results = {} if terminal_exit is None else {1: [{"terminal_id": "write", "exit_code": terminal_exit}]}
+    report = audit_calls(tmp_path, [write, shell("python3 -I build.py")], terminal_results=results)
+    assert report["passed"] is passed
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [
+        (2, "interpreter-screened" if passed else "needs-inspection"),
+    ]
+
+
+@pytest.mark.parametrize("exit_code", [0, 1, None])
+def test_codex_rollout_exit_status_confirms_a_wrapped_write(tmp_path, exit_code):
+    cwd = f"/workspace/{OWN}/repo"
+    directory = tmp_path / "codex-rollout"
+    directory.mkdir()
+    item = {"type": "CommandExecution", "id": "exec-write", "cwd": f"file://{cwd}",
+            "command": ["/bin/bash", "-lc", "cat > f.py <<'EOF'\nprint('safe')\nEOF"],
+            "exit_code": exit_code}
+    row = {"type": "event_msg", "payload": {"type": "item_completed", "item": item}}
+    (directory / "rollout-fixture.jsonl").write_text(json.dumps(row) + "\n")
+    report = audit_calls(tmp_path, [
+        {"name": "exec_command", "toolCallId": "exec-write", "status": "completed", "kind": "execute"},
+        shell("python3 -I f.py"),
+    ], cwd=cwd)
+    assert report["passed"] is (exit_code == 0)
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [
+        (2, "interpreter-screened" if exit_code == 0 else "needs-inspection"),
+    ]
+
+
+@pytest.mark.parametrize("suffix", ["; true", " || true"])
+def test_whole_call_success_does_not_confirm_a_write_whose_status_was_masked(tmp_path, suffix):
+    write = successful_bash(f"cat > build.py <<'EOF'{suffix}\nprint('safe')\nEOF")
+    report = audit_calls(tmp_path, [write, shell("python3 -I build.py")])
+    assert not report["passed"]
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(2, "needs-inspection")]
 
 
 def test_script_evidence_does_not_flow_into_a_heredoc_failure_branch(tmp_path):
@@ -251,7 +373,7 @@ def test_engine_script_remains_opaque_after_an_in_place_edit(tmp_path):
     checkout = f"/workspace/{OWN}/engine-trees"
     scratch = f"{checkout}/.rql-engine-{OWN}"
     report = audit_calls(tmp_path, [
-        shell(f"cd {scratch} && cat > build_answer.py <<'EOF'\nprint('before')\nEOF"),
+        successful_bash(f"cd {scratch} && cat > build_answer.py <<'EOF'\nprint('before')\nEOF"),
         shell(f"cd {scratch} && sed -i 's/before/after/g' build_answer.py && python3 -I build_answer.py"),
     ], cwd=checkout)
     assert not report["passed"]
@@ -274,7 +396,7 @@ def test_cd_failure_cannot_run_a_script_recorded_only_in_the_target_directory(tm
 ])
 def test_recorded_script_accepts_safe_interpreter_flags(tmp_path, program, source):
     report = audit_calls(tmp_path, [
-        shell(f"cat > answer <<'EOF'\n{source}\nEOF\n{program} answer"),
+        shell(f"cat > answer <<'EOF' &&\n{source}\nEOF\n{program} answer"),
     ], cwd=f"/workspace/{OWN}/repo")
     assert report["passed"], report["hits"]
     assert {hit["kind"] for hit in report["hits"]} == {"interpreter-screened"}
@@ -288,7 +410,7 @@ def test_recorded_script_accepts_safe_interpreter_flags(tmp_path, program, sourc
 ])
 def test_interpreter_options_do_not_hide_unrecorded_code(tmp_path, run):
     report = audit_calls(tmp_path, [
-        shell(f"cat > answer <<'EOF'\nprint('safe')\nEOF\n{run}"),
+        shell(f"cat > answer <<'EOF' &&\nprint('safe')\nEOF\n{run}"),
     ], cwd=f"/workspace/{OWN}/repo")
     assert not report["passed"]
     assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
@@ -302,7 +424,7 @@ def test_interpreter_options_do_not_hide_unrecorded_code(tmp_path, run):
 ])
 def test_script_changed_after_visible_write_is_opaque(tmp_path, mutation):
     report = audit_calls(tmp_path, [
-        shell("cat > f.py <<'EOF'\nprint('safe')\nEOF"),
+        successful_bash("cat > f.py <<'EOF'\nprint('safe')\nEOF"),
         mutation,
         shell("python3 f.py"),
     ])
@@ -312,7 +434,7 @@ def test_script_changed_after_visible_write_is_opaque(tmp_path, mutation):
 
 def test_audit_checks_protected_effects_in_recorded_script_and_resolved_home(tmp_path):
     report = audit_calls(tmp_path, [
-        shell("printf '%s\\n' \"open('.mj/store.db')\" > f.py; python3 f.py"),
+        shell("printf '%s\\n' \"open('.mj/store.db')\" > f.py && python3 f.py"),
         shell('cat "$HOME/.local/share/mjolnir/store"'),
     ], home="/home/hel")
     assert not report["passed"]
@@ -330,7 +452,7 @@ def test_pwd_uses_recorded_placement_and_does_not_guess_after_failed_cd(tmp_path
 
 def test_recursively_invoked_script_requires_inspection(tmp_path):
     report = audit_calls(tmp_path, [
-        shell("printf '%s\\n' \"bash -c 'sh f'\" > f"),
+        successful_bash("printf '%s\\n' \"bash -c 'sh f'\" > f"),
         shell("sh f"),
     ])
     assert not report["passed"]
@@ -494,7 +616,7 @@ def test_list_with_recorded_target_or_visible_default_passes(tmp_path, evidence)
 ])
 def test_writes_invalidate_recorded_scripts(tmp_path, overwrite):
     report = audit_calls(tmp_path, [
-        shell("cat > script.py <<'PY'\nprint('recorded content')\nPY"),
+        successful_bash("cat > script.py <<'PY'\nprint('recorded content')\nPY"),
         shell(overwrite),
         shell("python3 script.py"),
     ])
@@ -633,7 +755,7 @@ def test_in_place_edits_count_separate_commands_in_one_call(tmp_path):
 # Hard-won: 59c3dcb: an in-place edit through an alias left the original script cached.
 def test_in_place_edit_invalidates_scripts_recorded_under_another_path(tmp_path):
     report = audit_calls(tmp_path, [
-        shell("cat > real/script.sh <<'EOF'\ncat README.md\nEOF"),
+        successful_bash("cat > real/script.sh <<'EOF'\ncat README.md\nEOF"),
         shell("sed -i 's/README.md/notes.md/' notes.md"),
         shell("sh real/script.sh"),
     ], cwd=writer_checkout(tmp_path), allow_in_place_edits=True)
