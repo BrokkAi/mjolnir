@@ -3964,3 +3964,820 @@ async fn legacy_closing_and_destroying_subagent_routes_through_archive_free_comp
         );
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_through_target_locator() {
+    use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest, WorkerIdentity};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    type RecordedCommands = Arc<Mutex<Vec<(String, Vec<String>)>>>;
+
+    #[derive(Clone, Default)]
+    struct TargetWireFake {
+        files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        commands: RecordedCommands,
+        worker_alive: Arc<Mutex<bool>>,
+    }
+
+    impl CommandExecutor for TargetWireFake {
+        fn execute(&self, command: &mj_core::targets::CommandSpec) -> Result<mj_core::targets::CommandOutput> {
+            self.execute_without_deadline(command)
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> Result<mj_core::targets::CommandOutput> {
+            self.commands
+                .lock()
+                .unwrap()
+                .push((command.program.clone(), command.args.clone()));
+            let joined = command.args.join(" ");
+            if joined.contains("remote.origin.url") {
+                return Ok(mj_core::targets::CommandOutput {
+                    status: 0,
+                    stdout: b"https://example.com/repo.git\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if joined.contains("identity-alive") {
+                let alive = *self.worker_alive.lock().unwrap();
+                return Ok(mj_core::targets::CommandOutput {
+                    status: 0,
+                    stdout: if alive { b"alive\n".to_vec() } else { b"dead\n".to_vec() },
+                    stderr: Vec::new(),
+                });
+            }
+            if joined.contains("quiesce") {
+                // Extract --operation and --checkout and record request + receipt, then mark dead.
+                let op = command
+                    .args
+                    .last()
+                    .and_then(|s| s.split("'--operation' ").nth(1))
+                    .and_then(|s| s.split_whitespace().next())
+                    .map(|s| s.trim_matches('\''))
+                    .unwrap_or("op")
+                    .to_owned();
+                let checkout = command
+                    .args
+                    .last()
+                    .and_then(|s| s.split("'--checkout' ").nth(1))
+                    .and_then(|s| s.split_whitespace().next())
+                    .map(|s| s.trim_matches('\''))
+                    .unwrap_or("/remote/clone")
+                    .to_owned();
+                let mut files = self.files.lock().unwrap();
+                files.insert(
+                    wire::REQUEST.to_owned(),
+                    serde_json::to_vec(&SuspendRequest {
+                        operation: op.clone(),
+                        worker: WorkerIdentity { pid: 4242, start: 99 },
+                        checkout: PathBuf::from(checkout),
+                        child_sessions: Vec::new(),
+                    })
+                    .unwrap(),
+                );
+                files.insert(
+                    wire::RECEIPT.to_owned(),
+                    serde_json::to_vec(&SuspendReceipt {
+                        operation: op,
+                        error: None,
+                    })
+                    .unwrap(),
+                );
+                *self.worker_alive.lock().unwrap() = false;
+                return Ok(mj_core::targets::CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            if joined.contains("'rm'") && joined.contains("'-f'") {
+                let mut files = self.files.lock().unwrap();
+                for name in [
+                    wire::ACCEPTED,
+                    wire::REQUEST,
+                    wire::RECEIPT,
+                    wire::PROGRESS,
+                    wire::RESTART,
+                ] {
+                    if joined.contains(name) {
+                        files.remove(name);
+                    }
+                }
+                return Ok(mj_core::targets::CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            // Wire read/write via sh -c
+            for name in [
+                wire::ACCEPTED,
+                wire::CAPABILITY,
+                wire::REQUEST,
+                wire::RECEIPT,
+                wire::PROGRESS,
+                wire::RESTART,
+            ] {
+                if joined.contains(name) {
+                    if let Some(stdin) = command.sensitive_stdin() {
+                        self.files
+                            .lock()
+                            .unwrap()
+                            .insert(name.to_owned(), stdin.to_vec());
+                        return Ok(mj_core::targets::CommandOutput {
+                            status: 0,
+                            stdout: Vec::new(),
+                            stderr: Vec::new(),
+                        });
+                    }
+                    if let Some(bytes) = self.files.lock().unwrap().get(name).cloned() {
+                        return Ok(mj_core::targets::CommandOutput {
+                            status: 0,
+                            stdout: bytes,
+                            stderr: Vec::new(),
+                        });
+                    }
+                    return Ok(mj_core::targets::CommandOutput {
+                        status: 44,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+            }
+            anyhow::bail!("unexpected command: {} {:?}", command.program, command.args)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> Result<mj_core::targets::CommandOutput> {
+            self.execute_without_deadline(command)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
+
+    let session_id = "0123456789abcdef0123456789abcde1";
+    let mut session = checkpoint_test_session(session_id);
+    session.target_template_id = "ssh-bare".into();
+    session.target = Some(Box::new(TargetLocator::SshBare {
+        host: "remote.example".into(),
+        workspace: PathBuf::from("/remote/clones/ssh-origin-delta"),
+        worker_id: Some(session_id.into()),
+    }));
+    session.project_directory = Some(PathBuf::from("/remote/clones/ssh-origin-delta"));
+    session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: PathBuf::from("/remote/repo"),
+        source_repository: PathBuf::from("/remote/repo"),
+        worktree_root: PathBuf::from("/remote/clones/ssh-origin-delta"),
+        branch: "mj/ssh-origin-delta".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Ssh {
+            destination: "user@remote.example".into(),
+            ssh_args: Vec::new(),
+        },
+        base_commit: None,
+    }));
+    let mut config = Config::default();
+    config.targets.insert(
+        "ssh-bare".into(),
+        TargetTemplate::SshBare {
+            ssh: mj_core::config::SshConnection {
+                host: "remote.example".into(),
+                user: Some("user".into()),
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            permissions: mj_core::config::PermissionMode::Yolo,
+            workspace_prefix: ".local/share/hel/workspaces".into(),
+        },
+    );
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    let fake = TargetWireFake::default();
+    *fake.worker_alive.lock().unwrap() = true;
+    fake.files.lock().unwrap().insert(
+        wire::CAPABILITY.to_owned(),
+        serde_json::to_vec(&WorkerIdentity { pid: 4242, start: 99 }).unwrap(),
+    );
+
+    assert_eq!(
+        controller
+            .explicit_suspend_export_policy_with_executor(session_id, false, &fake)
+            .unwrap(),
+        CheckpointExportPolicy::OriginDelta
+    );
+
+    let mut attempt = origin_delta::OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    assert!(!attempt.accepted());
+    assert!(attempt.worker_capable(&fake).unwrap());
+
+    attempt.accept(&fake).unwrap();
+    assert!(attempt.accepted());
+    attempt.request_stop(&fake).unwrap();
+    assert!(attempt.request_recorded());
+
+    let receipt = attempt.wait_for_stop(&fake).await.unwrap();
+    assert!(receipt.error.is_none());
+
+    attempt
+        .record_restart(&anyhow::anyhow!("cancelled"), &fake)
+        .unwrap();
+    assert_eq!(
+        attempt.restart_reason(&fake).unwrap().as_deref(),
+        Some("cancelled")
+    );
+    attempt.clear_after_restart(&fake).unwrap();
+
+    // Every single command must have been dispatched via `ssh`, never host-local.
+    let commands = fake.commands.lock().unwrap();
+    assert!(!commands.is_empty());
+    assert!(
+        commands.iter().all(|(program, _)| program == "ssh"),
+        "expected all commands via ssh, got: {commands:?}"
+    );
+    // CAPABILITY file must be preserved while the 5 suspend wire files are removed.
+    let files = fake.files.lock().unwrap();
+    assert!(files.contains_key(wire::CAPABILITY));
+    assert!(!files.contains_key(wire::ACCEPTED));
+    assert!(!files.contains_key(wire::REQUEST));
+    assert!(!files.contains_key(wire::RECEIPT));
+    assert!(!files.contains_key(wire::RESTART));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_through_container_exec() {
+    use mj_core::worker_suspend::{self as wire, SuspendRequest, WorkerIdentity};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    type RecordedCommands = Arc<Mutex<Vec<(String, Vec<String>)>>>;
+
+    #[derive(Clone, Default)]
+    struct ContainerWireFake {
+        files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        commands: RecordedCommands,
+        worker_alive: Arc<Mutex<bool>>,
+        write_receipt_on_quiesce: bool,
+    }
+
+    impl CommandExecutor for ContainerWireFake {
+        fn execute(&self, command: &mj_core::targets::CommandSpec) -> Result<mj_core::targets::CommandOutput> {
+            self.execute_without_deadline(command)
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> Result<mj_core::targets::CommandOutput> {
+            self.commands
+                .lock()
+                .unwrap()
+                .push((command.program.clone(), command.args.clone()));
+            let joined = command.args.join(" ");
+            if joined.contains("config --get remote.origin.url") {
+                return Ok(mj_core::targets::CommandOutput {
+                    status: 0,
+                    stdout: b"https://example.com/app.git\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if joined.contains("worker identity-alive") {
+                let alive = *self.worker_alive.lock().unwrap();
+                return Ok(mj_core::targets::CommandOutput {
+                    status: 0,
+                    stdout: if alive { b"alive\n".to_vec() } else { b"dead\n".to_vec() },
+                    stderr: Vec::new(),
+                });
+            }
+            if joined.contains("worker quiesce") {
+                let op_idx = command
+                    .args
+                    .iter()
+                    .position(|a| a == "--operation")
+                    .unwrap();
+                let op = command.args[op_idx + 1].clone();
+                let checkout_idx = command
+                    .args
+                    .iter()
+                    .position(|a| a == "--checkout")
+                    .unwrap();
+                let checkout = command.args[checkout_idx + 1].clone();
+                assert_eq!(checkout, "/workspace/0123456789abcdef0123456789abcde2");
+                let mut files = self.files.lock().unwrap();
+                files.insert(
+                    wire::REQUEST.to_owned(),
+                    serde_json::to_vec(&SuspendRequest {
+                        operation: op,
+                        worker: WorkerIdentity { pid: 17, start: 55 },
+                        checkout: PathBuf::from(checkout),
+                        child_sessions: Vec::new(),
+                    })
+                    .unwrap(),
+                );
+                *self.worker_alive.lock().unwrap() = false;
+                return Ok(mj_core::targets::CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            for name in [
+                wire::ACCEPTED,
+                wire::CAPABILITY,
+                wire::REQUEST,
+                wire::RECEIPT,
+                wire::PROGRESS,
+                wire::RESTART,
+            ] {
+                if joined.contains(name) {
+                    if let Some(stdin) = command.sensitive_stdin() {
+                        self.files
+                            .lock()
+                            .unwrap()
+                            .insert(name.to_owned(), stdin.to_vec());
+                        return Ok(mj_core::targets::CommandOutput {
+                            status: 0,
+                            stdout: Vec::new(),
+                            stderr: Vec::new(),
+                        });
+                    }
+                    if let Some(bytes) = self.files.lock().unwrap().get(name).cloned() {
+                        return Ok(mj_core::targets::CommandOutput {
+                            status: 0,
+                            stdout: bytes,
+                            stderr: Vec::new(),
+                        });
+                    }
+                    return Ok(mj_core::targets::CommandOutput {
+                        status: 44,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+            }
+            let _ = self.write_receipt_on_quiesce;
+            anyhow::bail!("unexpected command: {} {:?}", command.program, command.args)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> Result<mj_core::targets::CommandOutput> {
+            self.execute_without_deadline(command)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
+
+    let session_id = "0123456789abcdef0123456789abcde2";
+    let container_id = targets::resource_name(session_id).unwrap();
+    let volume = format!("{container_id}-workspace");
+    let mut session = checkpoint_test_session(session_id);
+    session.target_template_id = "local-podman".into();
+    session.bundle_id = "bundle".into();
+    session.target = Some(Box::new(TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id,
+        workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume { name: volume },
+    }));
+    session.container_workspace = Some(PathBuf::from(format!("/workspace/{session_id}")));
+    let mut config = Config::default();
+    config.targets.insert(
+        "local-podman".into(),
+        TargetTemplate::LocalPodman {
+            container: ConfigContainer {
+                build_cache: None,
+                image: "agent-dev:latest".into(),
+                pull_policy: Default::default(),
+                platform: None,
+                cpus: None,
+                memory: None,
+                environment: Default::default(),
+                workspace_storage: mj_core::config::PodmanWorkspaceStorage::PodmanVolume,
+            },
+        },
+    );
+    config.bundles.insert(
+        "bundle".into(),
+        mj_core::config::ProjectBundle {
+            primary_repo: "app".into(),
+            repositories: vec![mj_core::config::ProjectRepository {
+                id: "app".into(),
+                github: Some("owner/app".into()),
+                destination: PathBuf::from("app"),
+                ..Default::default()
+            }],
+        },
+    );
+    let controller = Controller {
+        config: config.clone(),
+        state: State {
+            sessions: [(session_id.into(), session.clone())]
+                .into_iter()
+                .collect(),
+            ..State::default()
+        },
+    };
+
+    let fake = ContainerWireFake::default();
+    *fake.worker_alive.lock().unwrap() = true;
+    fake.files.lock().unwrap().insert(
+        wire::CAPABILITY.to_owned(),
+        serde_json::to_vec(&WorkerIdentity { pid: 17, start: 55 }).unwrap(),
+    );
+
+    assert_eq!(
+        controller
+            .explicit_suspend_export_policy_with_executor(session_id, false, &fake)
+            .unwrap(),
+        CheckpointExportPolicy::OriginDelta
+    );
+
+    let mut attempt = origin_delta::OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    assert!(attempt.worker_capable(&fake).unwrap());
+    attempt.accept(&fake).unwrap();
+    attempt.request_stop(&fake).unwrap();
+    // Worker exited without writing a receipt: wait_for_stop must report an error
+    // rather than silently succeeding over potentially live writers.
+    let receipt = attempt.wait_for_stop(&fake).await.unwrap();
+    assert!(
+        receipt
+            .error
+            .as_deref()
+            .is_some_and(|msg| msg.contains("exited without confirming checkout quiescence")),
+        "expected missing-receipt error, got: {receipt:?}"
+    );
+
+    let commands = fake.commands.lock().unwrap();
+    assert!(!commands.is_empty());
+    assert!(
+        commands
+            .iter()
+            .all(|(program, args)| program == "podman" && args.first().map(String::as_str) == Some("exec")),
+        "expected all commands via podman exec, got: {commands:?}"
+    );
+    drop(commands);
+
+    // History-cutoff container session selects OriginDeltaCutoff and still loads OriginDeltaSuspend.
+    let mut cutoff_session = session;
+    cutoff_session.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
+        repository_id: "app".into(),
+        commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        branch: None,
+        no_later_history: true,
+    }));
+    let cutoff_controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), cutoff_session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    assert_eq!(
+        cutoff_controller
+            .explicit_suspend_export_policy_with_executor(session_id, false, &fake)
+            .unwrap(),
+        CheckpointExportPolicy::OriginDeltaCutoff
+    );
+    let cutoff_attempt =
+        origin_delta::OriginDeltaSuspend::load(&cutoff_controller, session_id, &fake).unwrap();
+    assert!(cutoff_attempt.accepted());
+}
+
+#[cfg(unix)]
+#[test]
+fn suspend_wait_is_worker_owned_returns_true_without_io_for_unreachable_ssh_and_podman_targets() {
+    let ssh_id = "0123456789abcdef0123456789abcde3";
+    let mut ssh_session = checkpoint_test_session(ssh_id);
+    ssh_session.state = SessionState::Closing;
+    ssh_session.target_template_id = "ssh-bare".into();
+    ssh_session.target = Some(Box::new(TargetLocator::SshBare {
+        host: "192.0.2.1".into(),
+        workspace: PathBuf::from("/unreachable/clone"),
+        worker_id: Some(ssh_id.into()),
+    }));
+    ssh_session.project_directory = Some(PathBuf::from("/unreachable/clone"));
+    ssh_session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: PathBuf::from("/unreachable/repo"),
+        source_repository: PathBuf::from("/unreachable/repo"),
+        worktree_root: PathBuf::from("/unreachable/clone"),
+        branch: "mj/test".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Ssh {
+            destination: "user@192.0.2.1".into(),
+            ssh_args: Vec::new(),
+        },
+        base_commit: None,
+    }));
+
+    let podman_id = "0123456789abcdef0123456789abcde4";
+    let container_id = targets::resource_name(podman_id).unwrap();
+    let mut podman_session = checkpoint_test_session(podman_id);
+    podman_session.state = SessionState::Closing;
+    podman_session.target_template_id = "local-podman".into();
+    podman_session.bundle_id = "bundle".into();
+    podman_session.target = Some(Box::new(TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: container_id.clone(),
+        workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
+            name: format!("{container_id}-workspace"),
+        },
+    }));
+
+    let mut config = Config::default();
+    config.targets.insert(
+        "ssh-bare".into(),
+        TargetTemplate::SshBare {
+            ssh: mj_core::config::SshConnection {
+                host: "192.0.2.1".into(),
+                user: Some("user".into()),
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            permissions: mj_core::config::PermissionMode::Yolo,
+            workspace_prefix: ".local/share/hel/workspaces".into(),
+        },
+    );
+    config.targets.insert(
+        "local-podman".into(),
+        TargetTemplate::LocalPodman {
+            container: ConfigContainer {
+                build_cache: None,
+                image: "agent-dev:latest".into(),
+                pull_policy: Default::default(),
+                platform: None,
+                cpus: None,
+                memory: None,
+                environment: Default::default(),
+                workspace_storage: mj_core::config::PodmanWorkspaceStorage::PodmanVolume,
+            },
+        },
+    );
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [
+                (ssh_id.into(), ssh_session),
+                (podman_id.into(), podman_session),
+            ]
+            .into_iter()
+            .collect(),
+            ..State::default()
+        },
+    };
+
+    // Must decide from daemon state alone without touching unreachable SSH/Podman targets.
+    assert!(controller.suspend_wait_is_worker_owned(ssh_id));
+    assert!(controller.suspend_wait_is_worker_owned(podman_id));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local_target() {
+    use mj_core::worker_suspend::{
+        self as wire, SuspendProgress, SuspendReceipt, SuspendRequest, WorkerIdentity,
+    };
+    use std::collections::HashMap;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct CancelledExecutor;
+
+    impl CommandExecutor for CancelledExecutor {
+        fn execute(
+            &self,
+            _command: &mj_core::targets::CommandSpec,
+        ) -> Result<mj_core::targets::CommandOutput> {
+            anyhow::bail!("cancelled executor must not run target commands")
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            true
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            true
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct UncancelledTargetFake {
+        files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        alive_polls: Arc<AtomicUsize>,
+    }
+
+    impl CommandExecutor for UncancelledTargetFake {
+        fn execute(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> Result<mj_core::targets::CommandOutput> {
+            self.execute_without_deadline(command)
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> Result<mj_core::targets::CommandOutput> {
+            let joined = command.args.join(" ");
+            if joined.contains("identity-alive") {
+                // Alive on first poll, dead on second poll.
+                let poll = self.alive_polls.fetch_add(1, Ordering::SeqCst);
+                return Ok(mj_core::targets::CommandOutput {
+                    status: 0,
+                    stdout: if poll == 0 {
+                        b"alive\n".to_vec()
+                    } else {
+                        b"dead\n".to_vec()
+                    },
+                    stderr: Vec::new(),
+                });
+            }
+            for name in [
+                wire::ACCEPTED,
+                wire::REQUEST,
+                wire::RECEIPT,
+                wire::PROGRESS,
+                wire::RESTART,
+            ] {
+                if joined.contains(name) {
+                    if let Some(stdin) = command.sensitive_stdin() {
+                        self.files
+                            .lock()
+                            .unwrap()
+                            .insert(name.to_owned(), stdin.to_vec());
+                        return Ok(mj_core::targets::CommandOutput {
+                            status: 0,
+                            stdout: Vec::new(),
+                            stderr: Vec::new(),
+                        });
+                    }
+                    if let Some(bytes) = self.files.lock().unwrap().get(name).cloned() {
+                        return Ok(mj_core::targets::CommandOutput {
+                            status: 0,
+                            stdout: bytes,
+                            stderr: Vec::new(),
+                        });
+                    }
+                    return Ok(mj_core::targets::CommandOutput {
+                        status: 44,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+            }
+            anyhow::bail!("unexpected command: {} {:?}", command.program, command.args)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> Result<mj_core::targets::CommandOutput> {
+            self.execute_without_deadline(command)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
+
+    let session_id = "0123456789abcdef0123456789abcde5";
+    let mut session = checkpoint_test_session(session_id);
+    session.target_template_id = "ssh-bare".into();
+    session.target = Some(Box::new(TargetLocator::SshBare {
+        host: "remote.example".into(),
+        workspace: PathBuf::from("/remote/clones/cancel-test"),
+        worker_id: Some(session_id.into()),
+    }));
+    session.project_directory = Some(PathBuf::from("/remote/clones/cancel-test"));
+    session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: PathBuf::from("/remote/repo"),
+        source_repository: PathBuf::from("/remote/repo"),
+        worktree_root: PathBuf::from("/remote/clones/cancel-test"),
+        branch: "mj/cancel-test".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Ssh {
+            destination: "user@remote.example".into(),
+            ssh_args: Vec::new(),
+        },
+        base_commit: None,
+    }));
+    let mut config = Config::default();
+    config.targets.insert(
+        "ssh-bare".into(),
+        TargetTemplate::SshBare {
+            ssh: mj_core::config::SshConnection {
+                host: "remote.example".into(),
+                user: Some("user".into()),
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            permissions: mj_core::config::PermissionMode::Yolo,
+            workspace_prefix: ".local/share/hel/workspaces".into(),
+        },
+    );
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    let op = "origin-delta-suspend-cancel-1".to_owned();
+    let target_fake = UncancelledTargetFake::default();
+    {
+        let mut files = target_fake.files.lock().unwrap();
+        files.insert(wire::ACCEPTED.to_owned(), serde_json::to_vec(&op).unwrap());
+        files.insert(
+            wire::REQUEST.to_owned(),
+            serde_json::to_vec(&SuspendRequest {
+                operation: op.clone(),
+                worker: WorkerIdentity { pid: 9001, start: 77 },
+                checkout: PathBuf::from("/remote/clones/cancel-test"),
+                child_sessions: Vec::new(),
+            })
+            .unwrap(),
+        );
+        files.insert(
+            wire::PROGRESS.to_owned(),
+            serde_json::to_vec(&SuspendProgress {
+                operation: op.clone(),
+                remaining_pids: vec![9002],
+            })
+            .unwrap(),
+        );
+        files.insert(
+            wire::RECEIPT.to_owned(),
+            serde_json::to_vec(&SuspendReceipt {
+                operation: op,
+                error: None,
+            })
+            .unwrap(),
+        );
+    }
+
+    let attempt =
+        origin_delta::OriginDeltaSuspend::load(&controller, session_id, &target_fake).unwrap();
+    let receipt = attempt
+        .wait_for_stop_with_uncancelled(&CancelledExecutor, &target_fake)
+        .await
+        .unwrap();
+    assert!(receipt.error.is_none());
+    assert_eq!(target_fake.alive_polls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        attempt.restart_reason(&target_fake).unwrap().as_deref(),
+        Some("suspend was cancelled")
+    );
+}

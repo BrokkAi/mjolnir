@@ -935,9 +935,14 @@ fn verify_origin_delta_quiescence(
     use mj_core::worker_launch::{WorkerLaunchConfig, WorkerRunMode};
     use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest};
 
-    let [repository] = repositories else {
-        bail!("managed clone suspend requires exactly one repository");
-    };
+    let origin_delta_repos: Vec<_> = repositories
+        .iter()
+        .filter(|repository| repository.capture == CheckpointRepositoryCapture::OriginDelta)
+        .collect();
+    ensure!(
+        !origin_delta_repos.is_empty(),
+        "managed clone suspend requires at least one origin-delta repository"
+    );
     let request: SuspendRequest = wire::read(relay_root, wire::REQUEST)?
         .context("managed clone capture has no quiescence request")?;
     let receipt: SuspendReceipt = wire::read(relay_root, wire::RECEIPT)?
@@ -950,14 +955,17 @@ fn verify_origin_delta_quiescence(
                 == WorkerRunMode::CheckpointOnly,
         "managed clone capture requires a quiesced worker"
     );
-    let location = crate::archive::git::locate_checkout(
-        git,
-        &workspace_root.join(&repository.relative_destination),
-    )?;
-    ensure!(
-        location.top_level.canonicalize()? == request.checkout.canonicalize()?,
-        "quiescence receipt belongs to a different checkout"
-    );
+    let quiesced_checkout = request.checkout.canonicalize()?;
+    for repository in origin_delta_repos {
+        let location = crate::archive::git::locate_checkout(
+            git,
+            &workspace_root.join(&repository.relative_destination),
+        )?;
+        ensure!(
+            location.top_level.canonicalize()?.starts_with(&quiesced_checkout),
+            "quiescence receipt belongs to a different checkout"
+        );
+    }
     Ok(())
 }
 

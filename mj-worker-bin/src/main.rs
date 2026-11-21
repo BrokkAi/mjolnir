@@ -142,6 +142,15 @@ enum WorkerCommand {
         #[arg(long = "child-session")]
         child_sessions: Vec<String>,
     },
+    /// Print `alive` or `dead` for a recorded worker process identity in this
+    /// target's PID namespace.
+    #[command(hide = true)]
+    IdentityAlive {
+        #[arg(long)]
+        pid: u32,
+        #[arg(long)]
+        start: u64,
+    },
     /// Print this worker's compatibility identity. The controller asks an
     /// image's worker this before linking a session to it.
     #[command(hide = true)]
@@ -815,6 +824,11 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
                 let _ = (root, operation, checkout, child_sessions);
                 anyhow::bail!("managed checkout quiescence requires Linux or macOS");
             }
+        }
+        WorkerCommand::IdentityAlive { pid, start } => {
+            let alive = mj_core::worker_suspend::WorkerIdentity { pid, start }.is_alive()?;
+            println!("{}", if alive { "alive" } else { "dead" });
+            Ok(())
         }
         WorkerCommand::BuildId => {
             println!("{}", mj_core::worker_build::worker_build_id());
