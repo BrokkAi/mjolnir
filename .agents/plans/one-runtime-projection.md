@@ -38,7 +38,7 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-20) Milestone 4 second review: protected queues held by Move at selection and worker admission, restored terminal warnings for active tool and shell work, and sent Interrupt All requests to independent workers concurrently. The composer refreshes its child counts from the same frame as the dashboard.
 - [x] (2026-11-20) Milestone 4 third review: Move admission protects pending prose questions, lifecycle warnings include tool-only children, and Interrupt All refuses untargetable autonomous goal cancellation.
 - [x] (2026-11-20) Milestone 4 review follow-ups: fixed all five verdict and action issues listed under Outcomes. The focused Rust and Chromium regressions, 35 terminal goldens, the phone golden, 97 web unit tests and Clippy passed. The `feeds-m4f` live checks confirmed the standalone shell shortcut and Interrupt All for a managed child under a held Move. The completed import’s second daemon read stays deferred.
-- [ ] Milestone 5: one history for both feeds. Whether to do it now or fold it into the versioned `/api/v1` stream plan is awaiting the user's decision (asked 2026-11-20).
+- [ ] Milestone 5: one history for both feeds. The user chose to do it now (2026-11-20). The section below has been revised to move the browser-only inputs into the capture first.
 
 
 ## Surprises & Discoveries
@@ -143,6 +143,10 @@ This plan does not add a new public API. A later plan will publish this projecti
 - An autonomous goal can count as unfinished without a worker-issued command that identifies its turn. Execution reports a refusal in this case because a raw cancel could hit the next queued prompt. Tool-only activity counts in lifecycle warnings even without an open turn to interrupt.
   Date/Author: 2026-11-20, Milestone 4 review.
 
+- Decision: do Milestone 5 now, not as part of the later versioned `/api/v1` stream plan. Before it merges the histories, it moves the three browser-only inputs (conversation projections, launch failures for requests that produced no session, per-action error notices) into daemon runtime state. A browser view is then a pure function of one retained capture. Those payloads stay off the terminal wire, and the history's memory cost is measured before any limit is considered.
+  Rationale: the parent recommended deferring, because the two histories no longer disagree about any fact. The user chose to finish the unification now. One history can only serve per-client views if every input of a view is part of the capture.
+  Date/Author: 2026-11-20, user decision; design by the parent session.
+
 ## Outcomes & Retrospective
 
 
@@ -221,9 +225,19 @@ Compute verdicts in the daemon from the capture, family by family so a parent's 
 ### Milestone 5: one history for both feeds
 
 
-At the end of this milestone the web viewer's cursor is a `RuntimeHistory` cursor and `viewer_feed.rs`'s separate 128-snapshot history and incarnation are gone.
+At the end of this milestone the web viewer's cursor is a `RuntimeHistory` cursor, and `viewer_feed.rs`'s separate 128-snapshot history and incarnation are gone. The phone publication loop in `mj-daemon/src/server_runtime/run.rs` no longer publishes snapshots. It keeps its other job of executing phone actions.
 
-Give `RuntimeHistory` a browser view: the redacted public `ViewerSnapshot` built from a retained capture, cached the way terminal scoped views are cached. The web events handler waits on the runtime revision watch the same way the terminal long-poll does and encodes deltas between two browser views with the existing `viewer_wire` encoding. The server-sent event ID keeps its `incarnation:revision` text form, now carrying the runtime incarnation and sequence; `viewer.js` needs no change beyond any it already makes for resets. HTTP handlers that read the latest `ViewerSnapshot`, and the transient activity frames of `/api/v1/events`, read the latest browser view. The durable `/api/v1/events` log and its numeric IDs do not change. After a daemon replacement both feeds see a new incarnation and send a fresh snapshot, as today.
+A browser view must be a pure function of one retained capture, so first move the inputs that only the web viewer uses into daemon-owned runtime state (`RuntimeState`, `mj-daemon/src/daemon/state.rs`). The capture then reads them like every other fact, and a change to any of them publishes a runtime revision. There are three such inputs today.
+
+- Conversation projections: the browser's conversation availability, preview and last-message time. The phone loop computes these asynchronously from transcript tails (its conversation projection jobs and conversation watch). Keep the asynchronous jobs, but install each finished projection into runtime state, together with the tail sequence it was projected from, and publish a revision. A projection whose tail has moved on since it started is installed only if nothing newer is already present. Projecting tails that are present in the first capture (the Milestone 3 follow-up fixed in ce7103de9) must keep working.
+- Launch failures for requests that never produced a session.
+- The per-action error notices the browser shows when a record's shared `last_error` is empty.
+
+These are browser-only payloads. Keep them out of the terminal's serialized frames, in the same way Milestone 3 kept prompt and form bodies off the terminal wire, so the control protocol does not change.
+
+Then give `RuntimeHistory` a browser view: the redacted public `ViewerSnapshot` built from a retained capture, cached the way terminal scoped views are cached. The web events handler waits on the runtime revision watch the same way the terminal long-poll does and encodes deltas between two browser views with the existing `viewer_wire` encoding. The server-sent event ID keeps its `incarnation:revision` text form, now carrying the runtime incarnation and sequence; `viewer.js` needs no change beyond any it already makes for resets. HTTP handlers that read the latest `ViewerSnapshot`, and the transient activity frames of `/api/v1/events`, read the latest browser view. The durable `/api/v1/events` log and its numeric IDs do not change. After a daemon replacement both feeds see a new incarnation and send a fresh snapshot, as today. Build each new browser view by reusing unchanged rows from the previous one, with the dependency rule from Milestone 3: rebuild a row when its own entries, any of its children's entries, or metadata it reads have changed. Waiters in `/api/v1` that await future snapshot values (wait, turn completion, sub-agent readiness, the SQLite activity recorder) subscribe to the history's latest browser view instead of the old watch, and their timing tests must pass unchanged.
+
+`RuntimeHistory` keeps up to 4,096 captures, and with this change those captures also hold the browser-only payloads (the Milestone 3 review follow-up about retained prompt bodies). Unchanged entries are shared between captures, so the cost should grow only with the number of changes. Measure it rather than assume it: compare the history's retained memory before and after on the 1,200-session fixture from Milestone 3, with a run of conversation updates, and record the numbers here. If the increase is large enough to matter on that store, stop and report before adding any limit. A new cap needs a measured reason (AGENTS.md).
 
 
 ## Concrete Steps
@@ -249,7 +263,13 @@ Milestone 3 is accepted when the three scenarios in Surprises & Discoveries no l
 
 Milestone 4 is accepted when, for each disagreement scenario in the Decision Log (a failed Destroy with no remaining operation, a parent whose only unfinished work is a cancellable native child, a failed Move holding its queue, an ordinary checkpoint during a workspace edit), the terminal and the web viewer offer the same actions, and Interrupt All from either surface stops the same sessions.
 
-Milestone 5 is accepted when a web viewer reconnecting with a cursor within the retained history receives a delta, one with an evicted cursor receives a snapshot, and after a daemon replacement both the terminal and the web viewer receive fresh snapshots and continue updating.
+Milestone 5 is accepted when a web viewer reconnecting with a cursor within the retained history receives a delta, one with an evicted cursor receives a snapshot, and after a daemon replacement both the terminal and the web viewer receive fresh snapshots and continue updating. In addition:
+- a new agent message updates the browser's conversation preview with no other change in the daemon;
+- a session that is already attached when the daemon starts shows its conversation;
+- a launch request that fails before producing a session still shows its failure notice;
+- a failed action still shows its error notice;
+- the terminal's control frames carry none of the browser-only payloads;
+- the memory measurement is recorded.
 
 Tests follow the "Which tests to add" rules in `AGENTS.md`: golden renders of the terminal pickers and web viewer output where those exist, end-to-end runs in a named instance, and tricky-condition tests for unknown versus missing, single-flight checks with one rerun, and stale-dependency cases. Do not add tests that only restate a computed value.
 
