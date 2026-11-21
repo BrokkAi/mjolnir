@@ -487,6 +487,12 @@ def test_visible_command_uses_matching_rollout_directory(tmp_path, directory, ex
     assert {hit["kind"] for hit in report["hits"]} == {expected}
 
 
+def writer_checkout(tmp_path, tracked=()):
+    if tracked is not None:
+        (tmp_path / "pre-inventory.json").write_text(json.dumps({"tracked_symlinks": list(tracked)}))
+    return f"/workspace/{OWN}/repo"
+
+
 # Hard-won: c5d02f5: writer in-place brief edit voided
 @pytest.mark.parametrize("command", [
     "sed -i 's/package_function_value.rs:178/package_function_value.rs:168/' brief.md",
@@ -495,7 +501,7 @@ def test_visible_command_uses_matching_rollout_directory(tmp_path, directory, ex
     "perl -i -pe 's/\\xC2\\xAD//g' brief.md",
 ])
 def test_suffix_free_in_place_brief_edits_pass(tmp_path, command):
-    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
+    report = audit_calls(tmp_path, [shell(command)], cwd=writer_checkout(tmp_path), allow_in_place_edits=True)
     assert report["passed"], report["hits"]
     assert {hit["kind"] for hit in report["hits"]} == {"in-place-edit"}
 
@@ -513,17 +519,20 @@ def test_suffix_free_in_place_brief_edits_pass(tmp_path, command):
     ("perl -i -n -e 's/a/b/' brief.md", {"needs-inspection"}),
 ])
 def test_in_place_edits_keep_the_workspace_and_read_subset_checks(tmp_path, command, expected):
-    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
+    report = audit_calls(tmp_path, [shell(command)], cwd=writer_checkout(tmp_path), allow_in_place_edits=True)
     assert not report["passed"]
     assert {hit["kind"] for hit in report["hits"]} == expected
 
 
 def test_in_place_edits_count_separate_commands_in_one_call(tmp_path):
     command = "sed -i 's/a/b/' brief.md; perl -i -lpe 's/b/c/' brief.md"
-    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
+    report = audit_calls(tmp_path, [
+        shell("""python3 -c 'from pathlib import Path; print(Path("brief.md").read_text().replace("a", "b"))'"""),
+        shell(command),
+    ], cwd=writer_checkout(tmp_path), allow_in_place_edits=True)
     assert report["passed"], report["hits"]
-    assert [(hit["kind"], hit["seq"], hit["edit_index"]) for hit in report["hits"]] == [
-        ("in-place-edit", 1, 0), ("in-place-edit", 1, 1),
+    assert [(hit["seq"], hit["edit_index"]) for hit in report["hits"] if hit["kind"] == "in-place-edit"] == [
+        (2, 0), (2, 1),
     ]
 
 
@@ -533,7 +542,7 @@ def test_in_place_edit_invalidates_scripts_recorded_under_another_path(tmp_path)
         shell("cat > real/script.sh <<'EOF'\ncat README.md\nEOF"),
         shell("sed -i 's/README.md/notes.md/' notes.md"),
         shell("sh real/script.sh"),
-    ], cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
+    ], cwd=writer_checkout(tmp_path), allow_in_place_edits=True)
     assert not report["passed"]
     assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [
         (2, "in-place-edit"), (3, "needs-inspection"),
@@ -544,7 +553,7 @@ def test_in_place_edit_invalidates_scripts_recorded_under_another_path(tmp_path)
 @pytest.mark.parametrize("writer", [True, False])
 def test_in_place_edit_requires_writer_permission(tmp_path, writer):
     command = """bash -lc "sed -i 's/a/b/' brief.md" """
-    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo",
+    report = audit_calls(tmp_path, [shell(command)], cwd=writer_checkout(tmp_path),
                          **({"allow_in_place_edits": True} if writer else {}))
     assert report["passed"] is writer
     expected = "in-place-edit" if writer else "needs-inspection"
@@ -552,32 +561,58 @@ def test_in_place_edit_requires_writer_permission(tmp_path, writer):
 
 
 # Hard-won: 129387d: in-place edit through a symlink escaped the workspace
-@pytest.mark.parametrize("create", [
-    "ln -s /tmp alias",
-    "ln -sf /tmp alias",
-    "cp -s /tmp alias",
-    """python3 -c 'import os; os.symlink("/tmp", "alias")'""",
+def test_in_place_edit_rejects_symlinked_directory_created_in_session(tmp_path):
+    report = audit_calls(tmp_path, [shell("ln -s /tmp alias; sed -i 's/a/b/' alias/file")],
+                         cwd=writer_checkout(tmp_path), allow_in_place_edits=True)
+    assert [hit["kind"] for hit in report["hits"]] == ["needs-inspection"]
+
+
+# Hard-won: b7a6b8c: in-place edit through a relocated link
+@pytest.mark.parametrize(("relocate", "target", "reason"), [
+    ("ln -s /tmp alias; mv alias other", "other/file", "bare filename"),
+    ("ln -s /tmp/f x; mv x brief.md", "brief.md", "link handling"),
 ])
-def test_in_place_edit_rejects_symlink_created_in_session(tmp_path, create):
-    (tmp_path / "pre-inventory.json").write_text('{"tracked_symlinks": []}')
-    report = audit_calls(tmp_path, [shell(f"{create}; sed -i 's/a/b/' alias/file")],
-                         cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
+def test_in_place_edit_rejects_relocated_link(tmp_path, relocate, target, reason):
+    report = audit_calls(tmp_path, [shell(f"{relocate}; sed -i 's/a/b/' {target}")],
+                         cwd=writer_checkout(tmp_path), allow_in_place_edits=True)
     assert not report["passed"]
-    kinds = {hit["kind"] for hit in report["hits"]}
-    assert "needs-inspection" in kinds
-    assert "in-place-edit" not in kinds
+    assert [hit["kind"] for hit in report["hits"]] == ["needs-inspection"]
+    assert reason in report["hits"][0]["snippet"]
 
 
-@pytest.mark.parametrize(("tracked", "target", "allowed"), [
-    (["alias"], "alias/file", False),
-    (["alias"], "src/file", True),
-    (None, "src/file", False),
-    (None, "brief.md", True),
+@pytest.mark.parametrize("prior", [
+    "cp -P x y",
+    "cp -vR src dest",
+    "cp --preserve=mode,links x y",
+    "cp --no-deref x y",
+    "env mv x y",
+    "mv x y",
+    "ln x y",
+    """python3 -c 'import os; os.symlink("/tmp/f", "x")'""",
+    """python3 -c 'from os import rename as move; move("x", "y")'""",
+    """python3 -c 'from pathlib import Path; Path("x").replace("y")'""",
+    "unresolvable-command",
 ])
-def test_in_place_edit_screens_tracked_directory_symlinks(tmp_path, tracked, target, allowed):
-    if tracked is not None:
-        (tmp_path / "pre-inventory.json").write_text(json.dumps({"tracked_symlinks": tracked}))
-    report = audit_calls(tmp_path, [shell(f"sed -i 's/a/b/' {target}")],
-                         cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
+def test_root_in_place_edit_rejects_earlier_link_handling(tmp_path, prior):
+    report = audit_calls(tmp_path, [shell(prior), shell("sed -i 's/a/b/' brief.md")],
+                         cwd=writer_checkout(tmp_path), allow_in_place_edits=True)
+    assert not report["passed"]
+    edit_hits = [hit for hit in report["hits"] if hit["seq"] == 2]
+    assert [hit["kind"] for hit in edit_hits] == ["needs-inspection"]
+    assert "link handling or an unresolved command" in edit_hits[0]["snippet"]
+
+
+@pytest.mark.parametrize(("tracked", "command", "allowed"), [
+    (["alias"], "sed -i 's/a/b/' alias/file", False),
+    (["brief.md"], "sed -i 's/a/b/' brief.md", False),
+    (["brief.md"], """perl -i -pe 's/a/b/' " brief.md" """, False),
+    ([], "sed -i 's/a/b/' src/file", False),
+    ([], "cd src && sed -i 's/a/b/' brief.md", False),
+    (None, "sed -i 's/a/b/' brief.md", False),
+    (["sub/brief.md"], "sed -i 's/a/b/' brief.md", True),
+])
+def test_in_place_edit_requires_root_and_tracked_link_inventory(tmp_path, tracked, command, allowed):
+    report = audit_calls(tmp_path, [shell(command)], cwd=writer_checkout(tmp_path, tracked),
+                         allow_in_place_edits=True)
     assert report["passed"] is allowed
     assert {hit["kind"] for hit in report["hits"]} == ({"in-place-edit"} if allowed else {"needs-inspection"})

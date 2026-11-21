@@ -138,6 +138,8 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                                     resolve_paths(directory, page_cwd or "") != resolve_paths(recorded, "")):
                                 hits.append({"seq": item["seq"], "kind": "needs-inspection", "where": "input",
                                              "snippet": "Codex transcript and rollout working directories disagree"})
+                                if edit_paths is not None:
+                                    edit_paths.blocked = True
                                 continue
                             directory = recorded
                         call = {**call, "kind": "execute", "rawInput": {"command": command, "cwd": directory}}
@@ -147,6 +149,8 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                     else:
                         hits.append({"seq": item["seq"], "kind": "needs-inspection", "where": "input",
                                      "snippet": f"missing Codex command evidence: {call.get('title') or 'exec_command'}"})
+                        if edit_paths is not None:
+                            edit_paths.blocked = True
                         continue
                 observed = {}
                 edit_index = 0
@@ -158,6 +162,8 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                         hits.append({**hit, "edit_index": edit_index})
                         edit_index += 1
                     else:
+                        if name == "needs-inspection" and edit_paths is not None:
+                            edit_paths.blocked = True
                         observed[name] = hit
                 hits.extend(observed.values())
                 continue
@@ -985,76 +991,48 @@ def perl_open_operand(value):
 
 class EditPathEvidence:
     def __init__(self, checkout, tracked):
-        self.checkout = recorded_path(checkout, "") if isinstance(checkout, str) else None
-        self.links = set()
-        self.complete = self.checkout is not None and isinstance(tracked, list)
-        if self.complete:
-            for path in tracked:
-                if not isinstance(path, str) or posixpath.isabs(path) or ".." in path.split("/"):
-                    self.complete = False
-                    continue
-                self.add(path, self.checkout)
+        self.checkout = checkout if isinstance(checkout, str) and posixpath.isabs(checkout) else None
+        self.root_links = None
+        if isinstance(tracked, list) and all(
+            isinstance(path, str) and all(part not in {"", ".", ".."} for part in path.split("/"))
+            for path in tracked
+        ):
+            self.root_links = {path for path in tracked if "/" not in path}
+        self.blocked = False
 
-    def add(self, path, cwd):
-        if not isinstance(path, str) or not path or re.search(r"[*?\[]", path) or ".." in path.split("/"):
-            self.complete = False
-            return
-        locations = resolve_paths(path, cwd)
-        if not locations or any(not posixpath.isabs(location) for location in locations):
-            self.complete = False
-            return
-        self.links.update(locations)
+    def check(self, path, cwd, own_workspace):
+        if (not self.checkout or not self.checkout.startswith(f"/workspace/{own_workspace}/")
+                or cwd != self.checkout or not path or path in {".", ".."}
+                or path.startswith(("-", "~")) or re.search(r"[/\x00*?\[]", path)):
+            raise InspectionRequired("in-place edit requires a bare filename at the recorded checkout root")
+        if self.blocked:
+            raise InspectionRequired("in-place edit follows link handling or an unresolved command")
+        if self.root_links is None:
+            raise InspectionRequired("in-place edit requires tracked symlink inventory")
+        if path in self.root_links:
+            raise InspectionRequired("in-place edit names a tracked symlink")
 
-    def allows(self, path, locations):
-        if not self.checkout or not locations or ".." in path.split("/"):
-            return False
-        for filename in locations:
-            if not filename.startswith(self.checkout + "/"):
-                return False
-            directories = pathlib.PurePosixPath(filename).parents
-            if any(str(directory) in self.links for directory in directories):
-                return False
-            if str(directories[0]) != self.checkout and not self.complete:
-                return False
+
+def may_relocate_links(program, args):
+    if program in {"ln", "mv", "rsync", "tar", "cpio", "install"}:
         return True
-
-    def record_links(self, targets, destination, cwd, *, directory=False, exact=False):
-        if not directory:
-            self.add(destination, cwd)
-        if directory or not exact:
-            for target in targets:
-                self.add(posixpath.join(destination, posixpath.basename(target.rstrip("/"))), cwd)
-
-
-def record_cp_links(args, cwd, edit_paths):
-    options = args[:args.index("--")] if "--" in args else args
-    if not any(arg == "--symbolic-link" or re.fullmatch(r"-[a-zA-Z]*s[a-zA-Z]*", arg) for arg in options):
-        return
-    # Direct two-operand copies and copies to an explicit directory cover
-    # the visible forms. Other option syntax leaves directory evidence incomplete.
-    operands, target_dir = [], None
-    words = iter(args)
-    parsing = True
-    for arg in words:
-        if parsing and arg == "--":
-            parsing = False
-        elif parsing and arg in {"-t", "--target-directory"}:
-            target_dir = next(words, None)
-        elif parsing and arg.startswith("--target-directory="):
-            target_dir = arg.partition("=")[2]
-        elif parsing and arg.startswith("-"):
-            if arg != "--symbolic-link" and not re.fullmatch(r"-[sfvnT]+", arg):
-                edit_paths.complete = False
-                return
-        else:
-            operands.append(arg)
-    if target_dir and operands:
-        edit_paths.record_links(operands, target_dir, cwd, directory=True)
-    elif len(operands) >= 2:
-        edit_paths.record_links(operands[:-1], operands[-1], cwd, directory=len(operands) > 2,
-                                exact=any("T" in arg and re.fullmatch(r"-[sfvnT]+", arg) for arg in options))
-    else:
-        edit_paths.complete = False
+    if program != "cp":
+        return False
+    end = args.index("--") if "--" in args else len(args)
+    for arg in args[:end]:
+        flag, _, value = arg.partition("=")
+        if flag.startswith("--") and any(option.startswith(flag) for option in (
+            "--symbolic-link", "--no-dereference", "--archive", "--recursive",
+        )):
+            return True
+        if flag.startswith("--") and "--preserve".startswith(flag) and any(
+            attribute and ("links".startswith(attribute) or "all".startswith(attribute))
+            for attribute in value.split(",")
+        ):
+            return True
+        if re.match(r"^-[^-]*[sPdaRr]", arg):
+            return True
+    return False
 
 
 def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, scripts, written,
@@ -1076,21 +1054,17 @@ def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, 
 
         unsafe_edit = False
         for path in paths:
-            if program == "perl":
-                _, path = perl_open_operand(path)
-            hazards = list(path_hits(path, own_workspace, cwd))
+            _, operand = perl_open_operand(path) if program == "perl" else ("read", path)
+            hazards = list(path_hits(operand, own_workspace, cwd))
             yield from hazards
-            if in_place:
-                locations = resolve_paths(path, cwd)
-                prefix = f"/workspace/{own_workspace}/"
-                unsafe_edit |= (bool(hazards) or not path or path.startswith(("-", "~"))
-                                or bool(re.search(r"[*?\[]", path)) or not locations
-                                or any(not filename.startswith(prefix) for filename in locations)
-                                or edit_paths is not None and not edit_paths.allows(path, locations))
-        if in_place and not edit_paths:
-            raise InspectionRequired("in-place edits are permitted only in writer sessions")
-        if in_place and (not paths or unsafe_edit):
-            raise InspectionRequired("in-place edit requires literal file paths inside its own workspace without directory symlinks")
+            unsafe_edit |= bool(hazards) or path != operand
+        if in_place:
+            if edit_paths is None:
+                raise InspectionRequired("in-place edits are permitted only in writer sessions")
+            if not paths or unsafe_edit:
+                raise InspectionRequired("in-place edit requires screened file operands")
+            for path in paths:
+                edit_paths.check(path, cwd, own_workspace)
         if program == "perl":
             for value in values:
                 check_perl_interpolation(value, regex=True)
@@ -1106,7 +1080,7 @@ def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, 
                         yield from path_hits(argument, own_workspace, cwd)
         if in_place:
             if scripts is not None:
-                scripts.clear()  # An edited path may name a script through a directory alias.
+                scripts.clear()
             if written is not None:
                 written.update(posixpath.basename(path) for path in paths)
             yield "in-place-edit", shlex.join(paths)
@@ -1164,6 +1138,22 @@ def python_name(expr, imports):
     return ""
 
 
+def python_may_relocate_links(node, name):
+    if name in {"os.symlink", "os.rename", "os.replace", "shutil.move", "shutil.copytree"}:
+        return True
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    if node.func.attr in {"symlink_to", "rename"}:
+        return True
+    if node.func.attr != "replace":
+        return False
+    # Path.replace(target) takes one argument. The unbound class method
+    # takes two, as does the ordinary string operation replace(old, new).
+    if name in {"Path.replace", "pathlib.Path.replace"}:
+        return True
+    return sum(not isinstance(arg, ast.Starred) for arg in node.args) < 2
+
+
 def subprocess_hits(value, own_workspace, commits, single_commit, cwd="", written=None, *,
                     edit_paths=None):
     if isinstance(value, str):
@@ -1195,20 +1185,6 @@ def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd
             elif isinstance(node, ast.ImportFrom) and node.module:
                 for alias in node.names:
                     imports[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-        if edit_paths is not None:
-            directory_changed = any(isinstance(node, ast.Call)
-                                    and python_name(node.func, imports) in {"os.chdir", "os.fchdir"} for node in nodes)
-            for node in nodes:
-                if not isinstance(node, ast.Call) or python_name(node.func, imports) != "os.symlink":
-                    continue
-                destination = node.args[1] if len(node.args) > 1 else next(
-                    (keyword.value for keyword in node.keywords if keyword.arg == "dst"), None)
-                if (isinstance(destination, ast.Constant) and isinstance(destination.value, str)
-                        and not any(keyword.arg == "dir_fd" for keyword in node.keywords)
-                        and (not directory_changed or posixpath.isabs(destination.value))):
-                    edit_paths.add(destination.value, cwd)
-                else:
-                    edit_paths.complete = False
         argv_nodes = {arg_node for node in nodes if isinstance(node, ast.Call)
                       and node.args and python_name(node.func, imports) in PROCESS_CALLS
                       for arg_node in ast.walk(node.args[0])}
@@ -1218,6 +1194,8 @@ def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd
             if not isinstance(node, ast.Call):
                 continue
             name = python_name(node.func, imports)
+            if edit_paths is not None and python_may_relocate_links(node, name):
+                edit_paths.blocked = True
             if NETWORK_CALL.match(name):
                 yield "network-command", name
             elif name in OPAQUE_CALLS or name.startswith("base64.") and "decode" in name:
@@ -1368,7 +1346,7 @@ def file_operands(args, value_options=(), *, options_first=False):
                 options = False
 
 
-def link_hits(args, own_workspace, cwd, edit_paths=None):
+def link_hits(args, own_workspace, cwd):
     operands = []
     target_dir = None
     options, symbolic, relative, no_target_dir = True, False, False, False
@@ -1394,15 +1372,6 @@ def link_hits(args, own_workspace, cwd, edit_paths=None):
 
     if not operands or (no_target_dir and (target_dir or len(operands) != 2)):
         raise InspectionRequired("ln target or link destination is ambiguous")
-    if symbolic and edit_paths is not None:
-        if target_dir:
-            edit_paths.record_links(operands, target_dir, cwd, directory=True)
-        elif len(operands) == 1:
-            edit_paths.record_links(operands, ".", cwd, directory=True)
-        else:
-            edit_paths.record_links(operands[:-1], operands[-1], cwd,
-                                    directory=len(operands) > 2 or operands[-1].endswith("/"),
-                                    exact=no_target_dir)
     if not symbolic or relative:
         # GNU ln --relative computes its target from the command's cwd.
         for path in [*operands, *([target_dir] if target_dir else [])]:
@@ -1438,6 +1407,8 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
     if "/" in executable:
         yield from path_hits(executable, own_workspace, cwd)
     program = system_program(executable, written or ())
+    if edit_paths is not None and may_relocate_links(program, args):
+        edit_paths.blocked = True
     inline = interpreter_arguments(program, args)
     if program in NETWORK:
         yield "network-command", program
@@ -1491,7 +1462,7 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
         for path in find_paths(args):
             yield from path_hits(path, own_workspace, cwd)
     elif program == "ln":
-        yield from link_hits(args, own_workspace, cwd, edit_paths)
+        yield from link_hits(args, own_workspace, cwd)
     elif program == "jq":
         for path in jq_paths(args):
             yield from path_hits(path, own_workspace, cwd)
@@ -1500,8 +1471,6 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
             raise InspectionRequired("printf may assign a shell variable")
         return  # These operands are data. Redirection targets are checked separately.
     elif program in READ_COMMANDS:
-        if program == "cp" and edit_paths is not None:
-            record_cp_links(args, cwd, edit_paths)
         if program == "sort":
             end = args.index("--") if "--" in args else len(args)
             if any(arg.startswith("--compress") for arg in args[:end]):
@@ -1706,7 +1675,10 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
 
     base = cwd or ""
     if isinstance(raw, dict) and (directory := raw.get("cwd") or raw.get("workdir")):
-        cwd = one_or_many(resolve_paths(directory, base))
+        cwd = (posixpath.join(base, directory) if edit_paths is not None
+               else one_or_many(resolve_paths(directory, base)))
+    if edit_paths is not None and kind == "move":
+        edit_paths.blocked = True
     target_seen = False
     for fields in [raw, *(call.get("locations") or [])]:
         if isinstance(fields, dict):
@@ -1739,6 +1711,8 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
         if isinstance(patch, str) and patch.startswith("*** Begin Patch\n") and patch.rstrip().endswith("*** End Patch"):
             paths = re.findall(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", patch, re.M)
             if paths:
+                if edit_paths is not None and re.search(r"^\*\*\* Move to: ", patch, re.M):
+                    edit_paths.blocked = True
                 for path in paths:
                     yield from path_hits(path, own_workspace, cwd or "")
                     written.add(posixpath.basename(path))
