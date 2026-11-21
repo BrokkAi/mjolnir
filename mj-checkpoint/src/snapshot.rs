@@ -3290,7 +3290,7 @@ fn workspace_inventory_scoped(
             runner,
             checkout,
             origin_override,
-            !raw,
+            !raw && !history_cutoff,
         )?;
         for path in submodules
             .index_gitlinks
@@ -3386,11 +3386,22 @@ fn workspace_inventory_scoped(
                 .into_iter()
                 .map(|path| scoped(key, path))
                 .collect(),
-            dirty_submodules: submodules
-                .dirty
-                .into_iter()
-                .map(|path| scoped(key, path))
-                .collect(),
+            dirty_submodules: {
+                let mut dirty: Vec<_> = submodules
+                    .dirty
+                    .into_iter()
+                    .map(|path| scoped(key, path))
+                    .collect();
+                if history_cutoff && !raw {
+                    for module in &submodules.initialized {
+                        let entry = scoped(key, module.path.clone());
+                        if !dirty.contains(&entry) {
+                            dirty.push(entry);
+                        }
+                    }
+                }
+                dirty
+            },
             initialized_submodules: submodules
                 .initialized
                 .into_iter()
@@ -3917,6 +3928,10 @@ pub fn restore_workspace_snapshot(
         git_text(runner, destination, ["stash", "apply", "--index", state])?;
     }
     if snapshot.history_cutoff {
+        ensure!(
+            snapshot.initialized_submodules.is_empty(),
+            "history-cutoff snapshot cannot restore initialized submodules without fetching later history"
+        );
         restore_submodules(
             runner,
             destination,
@@ -3924,12 +3939,6 @@ pub fn restore_workspace_snapshot(
             (!snapshot.working_state_skipped).then_some(snapshot.index_gitlinks.as_slice()),
             &mut notices,
         )?;
-        for module in &snapshot.initialized_submodules {
-            notices.push(format!(
-                "submodule {} was left uninitialized to avoid fetching later history",
-                module.path.display()
-            ));
-        }
     } else {
         restore_submodules(
             runner,
@@ -3966,6 +3975,10 @@ pub fn restore_workspace_snapshot(
             git_text(runner, &path, ["stash", "apply", "--index", state])?;
         }
         if snapshot.history_cutoff {
+            ensure!(
+                tree.initialized_submodules.is_empty(),
+                "history-cutoff snapshot cannot restore initialized submodules without fetching later history"
+            );
             restore_submodules(
                 runner,
                 &path,
@@ -3973,12 +3986,6 @@ pub fn restore_workspace_snapshot(
                 (!tree.working_state_skipped).then_some(tree.index_gitlinks.as_slice()),
                 &mut notices,
             )?;
-            for module in &tree.initialized_submodules {
-                notices.push(format!(
-                    "submodule {} was left uninitialized to avoid fetching later history",
-                    module.path.display()
-                ));
-            }
         } else {
             restore_submodules(
                 runner,
@@ -7069,5 +7076,58 @@ mod tests {
         );
         let check = run_git(&FileGit, &dest, ["cat-file", "-e", &cutoff], &[]).unwrap();
         assert_ne!(check.status, 0, "restore must not fetch missing prerequisites");
+    }
+
+    #[test]
+    fn history_cutoff_refuses_initialized_submodules_before_teardown() {
+        let r = Repo::new();
+        let sub_origin = r.temp.path().join("sub.git");
+        let sub_src = r.temp.path().join("sub-src");
+        git(r.temp.path(), &["init", "--bare", "-b", "main", sub_origin.to_str().unwrap()]);
+        git(r.temp.path(), &["clone", sub_origin.to_str().unwrap(), sub_src.to_str().unwrap()]);
+        fs::write(sub_src.join("s.txt"), "sub\n").unwrap();
+        git(&sub_src, &["add", "s.txt"]);
+        git(&sub_src, &["commit", "-m", "sub base"]);
+        git(&sub_src, &["push", "origin", "main"]);
+
+        let cutoff = git(&r.checkout, &["rev-parse", "HEAD"]);
+        git(&r.checkout, &["remote", "remove", "origin"]);
+        git(
+            &r.checkout,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                sub_origin.to_str().unwrap(),
+                "vendor/sub",
+            ],
+        );
+        git(&r.checkout, &["commit", "-m", "add submodule"]);
+        // Create a local unpushed commit inside the initialized submodule and stage it.
+        let sub_path = r.checkout.join("vendor/sub");
+        fs::write(sub_path.join("s.txt"), "local sub commit\n").unwrap();
+        git(&sub_path, &["add", "s.txt"]);
+        git(&sub_path, &["commit", "-m", "local submodule commit"]);
+        git(&r.checkout, &["add", "vendor/sub"]);
+
+        let input = RepositoryInput {
+            id: "repo".to_owned(),
+            checkout: r.checkout.clone(),
+            ownership: CheckoutOwnership::Managed,
+            origin_override: None,
+            pack_path: r.temp.path().join("cutoff-sub.pack"),
+            exclusions: ExclusionSource::Commits(vec![cutoff]),
+            keep_dir: None,
+        };
+        let err = capture_session_snapshot(&FileGit, &[input], &SessionCaptureConsent::default())
+            .expect_err("history-cutoff capture must refuse initialized submodules");
+        assert!(
+            matches!(
+                err.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::DirtySubmodule(_))
+            ),
+            "expected DirtySubmodule refusal, got: {err:#}"
+        );
     }
 }
