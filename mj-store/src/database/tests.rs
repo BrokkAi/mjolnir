@@ -7486,6 +7486,7 @@ fn history_window_deduplicates_deliveries_after_their_row_leaves_the_live_tail()
                     events: vec![message.clone()],
                 },
                 created_at_ms: 5000,
+                insert_at_front: false,
             },
         ] {
             assert!(

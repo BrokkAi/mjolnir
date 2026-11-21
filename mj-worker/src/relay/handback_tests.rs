@@ -183,6 +183,7 @@ fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_che
                     event: event.clone(),
                 },
                 created_at_ms: 1,
+                insert_at_front: false,
             })
             .unwrap();
         // Queuing alone must not create an assignment.
@@ -210,7 +211,8 @@ fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_che
                         events: vec![event.clone()],
                     },
                     created_at_ms: 1,
-                })
+                insert_at_front: false,
+            })
                 .unwrap();
             relay.claim_pending_commands(true).unwrap();
             let newer = MailboxEvent {
@@ -227,7 +229,8 @@ fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_che
                         event: newer.clone(),
                     },
                     created_at_ms: 2,
-                })
+                insert_at_front: false,
+            })
                 .unwrap();
             relay
                 .record_observation(RelayObservation::MailboxEventsDelivered {

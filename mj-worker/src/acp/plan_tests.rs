@@ -1780,6 +1780,7 @@ async fn permission_ids_survive_bridge_restart_without_consuming_the_new_questio
                     prompt: vec![ContentBlock::from("run tests")],
                 },
                 created_at_ms: 1,
+                insert_at_front: false,
             },
         )
         .unwrap();

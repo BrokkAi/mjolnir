@@ -9676,3 +9676,221 @@ fn session_instructions_stalled_read_does_not_hold_runtime_shutdown() {
     shutdown.expect("the runtime exits without waiting for the memory reader");
     runtime_thread.join().unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reload_launch_config_propagates_replacement_bridge_startup_failure() {
+    let _ = mj_core::login_environment::initialize_from_parent();
+    let temp = tempfile::tempdir().unwrap();
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.cwd = temp.path().to_path_buf();
+    spec.harness = HarnessKind::Codex;
+    spec.command = "python3".into();
+    spec.args = vec![
+        "-u".into(),
+        "-c".into(),
+        r#"
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if "method" not in req or "id" not in req:
+        continue
+    m = req["method"]
+    if m == "initialize":
+        res = {"protocolVersion": 1}
+    elif m == "session/new":
+        res = {"sessionId": "ses-initial", "modes": {"currentModeId": "agent", "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "plan", "name": "Plan"}]}}
+    else:
+        res = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": res}), flush=True)
+"#
+        .into(),
+    ];
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let runtime = mj_core::runtime::spawn(run_with_shutdown(spec, cmd_rx, event_tx, shutdown.clone()));
+
+    let mut configured = false;
+    let mut seen = Vec::new();
+    while let Some(event) = event_rx.recv().await {
+        if matches!(event, RuntimeEvent::SessionConfigured { .. }) {
+            configured = true;
+            break;
+        }
+        seen.push(format!("{event:?}"));
+    }
+    assert!(
+        configured,
+        "initial bridge should open and configure; seen={seen:?}"
+    );
+
+    let mut bad_launch =
+        crate::worker_runtime::relay_tests::launch_config(temp.path().to_str().unwrap());
+    bad_launch.cwd = temp.path().join("nonexistent-reload-cwd");
+    let (resolved, resolution) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(CommandRequest::ReloadLaunchConfig {
+            environment: bad_launch.environment.clone(),
+            launch_config: Box::new(bad_launch),
+            command: None,
+            args: None,
+            additional_directories: Vec::new(),
+            supervisor_spec: None,
+            leases: None,
+            resolved,
+        })
+        .await
+        .unwrap();
+
+    let outcome = resolution
+        .await
+        .expect("reload reply channel should carry the startup failure");
+    let err = outcome.expect_err("replacement bridge startup failure must not ack Ok");
+    assert!(
+        err.contains("does not exist") || err.contains("nonexistent-reload-cwd"),
+        "unexpected error: {err}"
+    );
+    shutdown.cancel();
+    let _ = runtime.await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reload_launch_config_spawns_updated_command_args_and_writes_supervisor_spec() {
+    let _ = mj_core::login_environment::initialize_from_parent();
+    let temp = tempfile::tempdir().unwrap();
+    let bridge_script = |session_id: &str| {
+        format!(
+            r#"
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if "method" not in req or "id" not in req:
+        continue
+    m = req["method"]
+    if m == "initialize":
+        res = {{"protocolVersion": 1}}
+    elif m == "session/new":
+        res = {{"sessionId": "{session_id}", "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Agent"}}, {{"id": "default", "name": "Default"}}, {{"id": "bypassPermissions", "name": "Bypass"}}]}}}}
+    else:
+        res = {{}}
+    print(json.dumps({{"jsonrpc": "2.0", "id": req["id"], "result": res}}), flush=True)
+"#
+        )
+    };
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.cwd = temp.path().to_path_buf();
+    spec.harness = HarnessKind::Codex;
+    spec.command = "python3".into();
+    spec.args = vec!["-u".into(), "-c".into(), bridge_script("ses-initial")];
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let runtime =
+        mj_core::runtime::spawn(run_with_shutdown(spec, cmd_rx, event_tx, shutdown.clone()));
+
+    while let Some(event) = event_rx.recv().await {
+        if matches!(event, RuntimeEvent::SessionConfigured { .. }) {
+            break;
+        }
+    }
+
+    let supervisor_path = temp.path().join("acp-supervisor.json");
+    let mut next_launch =
+        crate::worker_runtime::relay_tests::launch_config(temp.path().to_str().unwrap());
+    next_launch.cwd = temp.path().to_path_buf();
+    next_launch.harness = HarnessKind::Claude;
+    let next_command = PathBuf::from("python3");
+    let next_args = vec!["-u".into(), "-c".into(), bridge_script("ses-reloaded")];
+    let mut next_supervisor = crate::worker_runtime::AcpSupervisorSpec::from(&next_launch);
+    next_supervisor.command = next_command.clone();
+    next_supervisor.args = next_args.clone();
+    let (resolved, resolution) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(CommandRequest::ReloadLaunchConfig {
+            environment: next_launch.environment.clone(),
+            command: Some(next_command),
+            args: Some(next_args),
+            launch_config: Box::new(next_launch),
+            additional_directories: Vec::new(),
+            supervisor_spec: Some(Box::new((supervisor_path.clone(), next_supervisor))),
+            leases: None,
+            resolved,
+        })
+        .await
+        .unwrap();
+
+    resolution
+        .await
+        .expect("reload reply channel should resolve")
+        .expect("replacement bridge should open cleanly");
+
+    let written_spec = std::fs::read_to_string(&supervisor_path).unwrap();
+    assert!(
+        written_spec.contains("ses-reloaded"),
+        "expected updated supervisor spec on disk, got: {written_spec}"
+    );
+    let mut saw_reloaded = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if format!("{event:?}").contains("ses-reloaded") {
+            saw_reloaded = true;
+            break;
+        }
+    }
+    assert!(
+        saw_reloaded,
+        "replacement bridge should have opened with the new command/args (ses-reloaded)"
+    );
+    shutdown.cancel();
+    let _ = runtime.await;
+}
+
+#[test]
+fn reload_launch_config_clears_stale_accepted_config_selectors() {
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.harness = HarnessKind::Codex;
+    spec.initial_model = Some("old-codex-model".into());
+    *spec.accepted_config.lock().unwrap() = AcceptedSessionConfig {
+        model: Some("accepted-codex-model".into()),
+        effort: Some("high".into()),
+    };
+
+    // Same harness with a new initial_model clears stale accepted model so startup_model()
+    // selects the new Move model, while preserving effort.
+    let mut same_harness = crate::worker_runtime::relay_tests::launch_config("/profile");
+    same_harness.harness = HarnessKind::Codex;
+    same_harness.initial_model = Some("new-codex-model".into());
+    spec.apply_reload_accepted_config(&same_harness);
+    spec.initial_model = same_harness.initial_model.clone();
+    assert_eq!(spec.startup_model().as_deref(), Some("new-codex-model"));
+    assert_eq!(
+        spec.accepted_config.lock().unwrap().effort.as_deref(),
+        Some("high")
+    );
+
+    // Harness switch clears accepted_config completely (both model and effort).
+    *spec.accepted_config.lock().unwrap() = AcceptedSessionConfig {
+        model: Some("accepted-codex-model".into()),
+        effort: Some("xhigh".into()),
+    };
+    let mut cross_harness = crate::worker_runtime::relay_tests::launch_config("/profile");
+    cross_harness.harness = HarnessKind::Claude;
+    cross_harness.initial_model = Some("claude-sonnet".into());
+    spec.apply_reload_accepted_config(&cross_harness);
+    spec.harness = cross_harness.harness;
+    spec.initial_model = cross_harness.initial_model.clone();
+    assert_eq!(spec.startup_model().as_deref(), Some("claude-sonnet"));
+    assert!(spec.accepted_config.lock().unwrap().effort.is_none());
+}

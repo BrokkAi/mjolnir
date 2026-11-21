@@ -4306,6 +4306,7 @@ async fn a_create_stalled_in_one_stage_fails_its_start_and_names_the_stage() {
 pub(super) fn ready_startup_view() -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let operational = mj_core::relay::RelayOperationalState {
+        in_place_move_hold: None,
         assessment: None,
         open_request: None,
         notification_stack: Default::default(),
