@@ -534,6 +534,7 @@ pub(super) fn checkpoint_has_history_cutoff_origin_delta(
 
 pub(super) fn checkpoint_bundle(
     session: &mj_core::state::SessionRecord,
+    config: &mj_core::config::Config,
 ) -> Result<targets::ProjectBundleSpec> {
     let checkpoint = session
         .checkpoint
@@ -544,42 +545,85 @@ pub(super) fn checkpoint_bundle(
         archive.archive_sha256 == checkpoint.sha256 && archive.manifest.session.id == session.id,
         "persisted checkpoint verification failed"
     );
-    bundle_from_manifest(&archive.manifest)
+    bundle_from_manifest_for_session(&archive.manifest, Some(session), Some(config))
 }
 
+#[cfg(test)]
 pub(super) fn bundle_from_manifest(
     manifest: &mj_checkpoint::archive::ArchiveManifest,
+) -> Result<targets::ProjectBundleSpec> {
+    bundle_from_manifest_for_session(manifest, None, None)
+}
+
+pub(super) fn bundle_from_manifest_for_session(
+    manifest: &mj_checkpoint::archive::ArchiveManifest,
+    session: Option<&mj_core::state::SessionRecord>,
+    config: Option<&mj_core::config::Config>,
 ) -> Result<targets::ProjectBundleSpec> {
     ensure!(
         !manifest.repositories.is_empty(),
         "checkpoint has no network repository provenance; start a new network-backed session"
     );
-    let repositories = manifest.repositories.iter().map(|repository| {
-        let metadata = &repository.metadata;
-        ensure!(metadata.remote_workspace,
-            "resuming legacy isolated or raw-local sessions into an isolated workspace is not supported; start a new network-backed session");
-        mj_core::remote_git::validate_network_url(&metadata.origin)?;
-        for url in &metadata.push_urls {
-            mj_core::remote_git::validate_network_url(url)?;
-        }
-        Ok(targets::RepositorySpec {
-            url: Some(metadata.origin.clone()),
-            push_urls: metadata.push_urls.clone(),
-            destination: metadata.relative_destination.to_string_lossy().into_owned(),
-            git_ref: None,
-            reference: None,
-            history_cutoff: None,
+    let session_primary_destination = session.and_then(|session| {
+        let bundle = session
+            .project
+            .as_deref()
+            .map(|project| &project.bundle)
+            .or_else(|| config.and_then(|config| session.project_bundle(config)));
+        bundle.and_then(|bundle| {
+            bundle
+                .repositories
+                .iter()
+                .find(|repository| repository.id == bundle.primary_repo)
+                .map(|repository| repository.destination.to_string_lossy().into_owned())
         })
-    }).collect::<Result<Vec<_>>>()?;
-    let primary = manifest
+    });
+    let mut primary_destination = None;
+    let repositories = manifest
         .repositories
         .iter()
-        .find(|repository| repository.metadata.id == manifest.bundle.primary_repository)
-        .context("checkpoint primary repository is missing")?
-        .metadata
-        .relative_destination
-        .to_string_lossy()
-        .into_owned();
+        .map(|repository| {
+            let metadata = &repository.metadata;
+            let origin_backed_delta = metadata
+                .origin_delta
+                .as_deref()
+                .is_some_and(|delta| !delta.history_cutoff && !metadata.origin.is_empty());
+            if !metadata.remote_workspace && !origin_backed_delta {
+                if metadata.origin_delta.is_some() && metadata.origin.is_empty() {
+                    anyhow::bail!(
+                        "This raw session has no Git origin remote and can only be resumed on its original target."
+                    );
+                }
+                anyhow::bail!(
+                    "resuming legacy isolated or raw-local sessions into an isolated workspace is not supported; start a new network-backed session"
+                );
+            }
+            mj_core::remote_git::validate_network_url(&metadata.origin)?;
+            for url in &metadata.push_urls {
+                mj_core::remote_git::validate_network_url(url)?;
+            }
+            let destination = if metadata.id == crate::controller::checkpoint::HOST_CHECKOUT_REPOSITORY
+            {
+                session_primary_destination.clone().unwrap_or_else(|| {
+                    metadata.relative_destination.to_string_lossy().into_owned()
+                })
+            } else {
+                metadata.relative_destination.to_string_lossy().into_owned()
+            };
+            if metadata.id == manifest.bundle.primary_repository {
+                primary_destination = Some(destination.clone());
+            }
+            Ok(targets::RepositorySpec {
+                url: Some(metadata.origin.clone()),
+                push_urls: metadata.push_urls.clone(),
+                destination,
+                git_ref: None,
+                reference: None,
+                history_cutoff: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let primary = primary_destination.context("checkpoint primary repository is missing")?;
     Ok(targets::ProjectBundleSpec {
         primary,
         repositories,
@@ -679,7 +723,7 @@ mod tests {
                 0,
             ),
         ));
-        let bundle = checkpoint_bundle(&session).unwrap();
+        let bundle = checkpoint_bundle(&session, &mj_core::config::Config::default()).unwrap();
         assert_eq!(bundle.primary, "project");
         assert_eq!(
             bundle.repositories[0].url.as_deref(),

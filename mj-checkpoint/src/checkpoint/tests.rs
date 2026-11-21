@@ -5335,3 +5335,78 @@ fn origin_delta_cutoff_export_allows_empty_pack_at_cutoff() {
     assert!(delta.history_cutoff);
     assert!(delta.origin_url.is_none());
 }
+
+#[test]
+fn restore_checkpoint_with_notices_uses_primary_repository_root_for_origin_delta() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let checkout = spec
+        .workspace_root
+        .join(&spec.repositories[0].relative_destination);
+    let origin = temp.path().join("origin.git");
+    fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "--bare", "--initial-branch=main"]);
+    let origin_url = origin.to_string_lossy().into_owned();
+    git(&checkout, &["remote", "set-url", "origin", &origin_url]);
+    git(&checkout, &["push", "-u", "origin", "HEAD:main"]);
+
+    crate::snapshot::record_launch_if_absent(&SystemGit, &checkout, &spec.session.id).unwrap();
+
+    // Make an unpushed commit and a working-tree edit in the source checkout.
+    git(&checkout, &["checkout", "-b", "feature/cross-target"]);
+    fs::write(checkout.join("cross.txt"), "from raw checkout\n").unwrap();
+    git(&checkout, &["add", "cross.txt"]);
+    git(&checkout, &["commit", "-m", "cross-target commit"]);
+    fs::write(checkout.join("cross.txt"), "dirty edit\n").unwrap();
+
+    // Capture under HOST_CHECKOUT_REPOSITORY ("project") with a different
+    // relative_destination than the container's primary_repository_root.
+    spec.bundle.primary_repository = "project".into();
+    spec.repositories[0].id = "project".into();
+    spec.repositories[0].capture = CheckpointRepositoryCapture::OriginDeltaRaw;
+    spec.protocol_version = CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+    export_checkpoint(&spec).unwrap();
+
+    // Provision a fresh container-style workspace where the primary repo sits at
+    // `<workspace_root>/container-repo` (not `<workspace_root>/<relative_destination>`).
+    let restore_ws = temp.path().join("container-ws");
+    let primary_root = restore_ws.join("container-repo");
+    fs::create_dir_all(&restore_ws).unwrap();
+    let clone = std::process::Command::new("git")
+        .args(["clone", "--no-checkout", &origin_url])
+        .arg(&primary_root)
+        .output()
+        .unwrap();
+    assert!(
+        clone.status.success(),
+        "git clone failed: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+
+    let restore_spec = CheckpointRestoreSpec {
+        archive_path: spec.output_path.clone(),
+        workspace_root: restore_ws.clone(),
+        report_root: None,
+        relay_root: temp.path().join("relay"),
+        harness_home: temp.path().join("home"),
+        restore_repositories: true,
+        restore_native: false,
+        queue_policy: QueueRestorePolicy::Restore,
+        primary_repository_root: Some(primary_root.clone()),
+    };
+    let notices =
+        restore_checkpoint_with_notices(&restore_spec, &SystemGit, &NoNativeCheckpointState)
+            .unwrap();
+    assert!(
+        notices.is_empty(),
+        "clean restore should emit no unexpected notices: {notices:?}"
+    );
+    assert_eq!(
+        git(&primary_root, &["symbolic-ref", "--short", "HEAD"]),
+        "feature/cross-target"
+    );
+    assert_eq!(
+        fs::read_to_string(primary_root.join("cross.txt")).unwrap(),
+        "dirty edit\n"
+    );
+}

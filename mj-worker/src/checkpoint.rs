@@ -230,7 +230,14 @@ pub fn restore_missing_from_spec_file(path: &Path, seed_path: Option<&Path>) -> 
 
 pub fn restore_from_spec_file(path: &Path) -> Result<()> {
     let spec = read_restore_spec(path)?;
-    restore_checkpoint_with_native_state(&spec, &SystemGit, &NativeState)
+    let notices = restore_checkpoint_with_notices(&spec, &SystemGit, &NativeState)?;
+    if !notices.is_empty() {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "notices": notices }))?
+        );
+    }
+    Ok(())
 }
 
 fn read_restore_spec(path: &Path) -> Result<CheckpointRestoreSpec> {

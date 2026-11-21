@@ -986,7 +986,7 @@ impl Controller {
                 )?));
             }
             ResumePlan::WorkspaceToRaw => {
-                self.plan_workspace_to_raw(source, target_id, executor)?;
+                self.plan_workspace_to_raw(source, target_id, false, executor)?;
             }
             ResumePlan::InPlace
                 if matches!(checkout, mj_core::state::Checkout::Attached { .. }) =>
