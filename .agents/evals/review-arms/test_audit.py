@@ -530,14 +530,13 @@ def test_in_place_edits_count_separate_commands_in_one_call(tmp_path):
 # Hard-won: 59c3dcb: an in-place edit through an alias left the original script cached.
 def test_in_place_edit_invalidates_scripts_recorded_under_another_path(tmp_path):
     report = audit_calls(tmp_path, [
-        shell("ln -s real alias"),
         shell("cat > real/script.sh <<'EOF'\ncat README.md\nEOF"),
-        shell("sed -i 's/README.md/notes.md/' alias/script.sh"),
+        shell("sed -i 's/README.md/notes.md/' notes.md"),
         shell("sh real/script.sh"),
     ], cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
     assert not report["passed"]
     assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [
-        (3, "in-place-edit"), (4, "needs-inspection"),
+        (2, "in-place-edit"), (3, "needs-inspection"),
     ]
 
 
@@ -550,3 +549,35 @@ def test_in_place_edit_requires_writer_permission(tmp_path, writer):
     assert report["passed"] is writer
     expected = "in-place-edit" if writer else "needs-inspection"
     assert {hit["kind"] for hit in report["hits"]} == {expected}
+
+
+# Hard-won: 129387d: in-place edit through a symlink escaped the workspace
+@pytest.mark.parametrize("create", [
+    "ln -s /tmp alias",
+    "ln -sf /tmp alias",
+    "cp -s /tmp alias",
+    """python3 -c 'import os; os.symlink("/tmp", "alias")'""",
+])
+def test_in_place_edit_rejects_symlink_created_in_session(tmp_path, create):
+    (tmp_path / "pre-inventory.json").write_text('{"tracked_symlinks": []}')
+    report = audit_calls(tmp_path, [shell(f"{create}; sed -i 's/a/b/' alias/file")],
+                         cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
+    assert not report["passed"]
+    kinds = {hit["kind"] for hit in report["hits"]}
+    assert "needs-inspection" in kinds
+    assert "in-place-edit" not in kinds
+
+
+@pytest.mark.parametrize(("tracked", "target", "allowed"), [
+    (["alias"], "alias/file", False),
+    (["alias"], "src/file", True),
+    (None, "src/file", False),
+    (None, "brief.md", True),
+])
+def test_in_place_edit_screens_tracked_directory_symlinks(tmp_path, tracked, target, allowed):
+    if tracked is not None:
+        (tmp_path / "pre-inventory.json").write_text(json.dumps({"tracked_symlinks": tracked}))
+    report = audit_calls(tmp_path, [shell(f"sed -i 's/a/b/' {target}")],
+                         cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
+    assert report["passed"] is allowed
+    assert {hit["kind"] for hit in report["hits"]} == ({"in-place-edit"} if allowed else {"needs-inspection"})

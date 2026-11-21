@@ -5,6 +5,7 @@ Prints a JSON inventory. Read-only except for the pin's one update-ref.
 """
 import hashlib
 import json
+import os
 import subprocess
 import sys
 
@@ -33,9 +34,13 @@ for line in text("cat-file", "--batch-all-objects", "--batch-check=%(objectname)
     objects[oid] = kind
 commits = sorted(oid for oid, kind in objects.items() if kind == "commit")
 refs = text("for-each-ref", "--format=%(refname) %(objectname)").splitlines()
+head = text("rev-parse", "HEAD")
+tracked_symlinks = [os.fsdecode(row.split(b"\t", 1)[1])
+                    for row in git("ls-tree", "-rz", head).split(b"\0") if row.startswith(b"120000 ")]
 print(json.dumps({
     "pinned_ref": pinned,
-    "head": text("rev-parse", "HEAD"),
+    "head": head,
+    "tracked_symlinks": tracked_symlinks,
     "head_tree": text("rev-parse", "HEAD^{tree}"),
     "base_tree": text("rev-parse", request["base"] + "^{tree}"),
     "session_start": {r: text("rev-parse", r) for r in start_refs},
