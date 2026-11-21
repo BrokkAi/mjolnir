@@ -973,7 +973,17 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
                                 }
                             }
                             Ec2GrantState::Removing => {
-                                if present {
+                                let revoke_in_flight = self
+                                    .in_flight_revokes
+                                    .lock()
+                                    .expect("in-flight revoke lock")
+                                    .contains(&key);
+                                if revoke_in_flight {
+                                    // Keep the Removing reservation intact until
+                                    // the active revoke completes so a concurrent
+                                    // acquire cannot adopt the rule mid-revoke.
+                                    report.remaining_pending += 1;
+                                } else if present {
                                     record.absent_checks = 0;
                                     revoke_candidates.insert((key.clone(), record.attempt_id));
                                 } else {
@@ -1388,6 +1398,28 @@ mod tests {
             "second reconciler must skip key already in in_flight_revokes"
         );
         assert_eq!(client.revoke_calls(), 0);
+
+        // Even if AWS describes the rule as absent across multiple passes while
+        // the revoke is still in flight, reconciliation must keep the `Removing`
+        // reservation intact so a concurrent acquire cannot race the revoke.
+        let saved_rules = std::mem::take(&mut client.state.lock().unwrap().rules);
+        for _ in 0..3 {
+            let absent_report = mgr
+                .reconcile_group("sg-rev")
+                .expect("reconcile while absent and revoking");
+            assert_eq!(absent_report.dropped_records, 0);
+            assert_eq!(absent_report.remaining_pending, 1);
+        }
+        let still_reserved = mgr
+            .store()
+            .with_transaction(|records| {
+                Ok(records
+                    .get(&key)
+                    .is_some_and(|r| r.state == Ec2GrantState::Removing && r.absent_checks == 0))
+            })
+            .unwrap();
+        assert!(still_reserved, "Removing grant must remain reserved while revoke is in flight");
+        client.state.lock().unwrap().rules = saved_rules;
 
         // Now finish the first revoke, re-acquire a fresh grant (generation 42 != 7),
         // and verify a stale revoke for generation 7 makes ZERO AWS revoke calls
