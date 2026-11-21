@@ -75,6 +75,10 @@ pub struct GrantedMoveKey {
     /// Host-side worker binary path used to run `worker authorized-keys remove`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_bin: Option<String>,
+    /// Self-contained SSH target so deferred revocation works even after the
+    /// Move retires its source or another Move runs on the same session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_target: Option<crate::targets::SshTarget>,
 }
 
 /// Durable ownership record for a shared EC2 security-group ingress grant used by a Move.

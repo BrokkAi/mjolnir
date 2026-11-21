@@ -279,6 +279,92 @@ pub fn spawn_ec2_grant_reconcile_background(active_operation_ids: BTreeSet<Strin
     });
 }
 
+static MOVE_KEY_CLEANUP_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct MoveKeyCleanupGuard;
+impl Drop for MoveKeyCleanupGuard {
+    fn drop(&mut self) {
+        MOVE_KEY_CLEANUP_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Spawn a non-admitted background exponential-backoff retry task that revokes
+/// any ephemeral Move SSH credentials (`granted_keys`) left behind on finished
+/// or failed moves when a remote host was transiently unreachable.
+///
+/// Only non-active (`Completed | Failed | Cancelled`) moves are touched so an
+/// in-flight transfer's keys are never revoked mid-stream. At most one loop
+/// runs per daemon; it exits once no non-active move has remaining keys.
+pub fn spawn_move_key_cleanup_background() {
+    if MOVE_KEY_CLEANUP_RUNNING
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return;
+    }
+    mj_core::runtime::spawn(async move {
+        let _guard = MoveKeyCleanupGuard;
+        let mut backoff = Duration::from_secs(5);
+        let max_backoff = Duration::from_secs(300);
+        loop {
+            let outcome = mj_core::runtime::spawn_blocking(move || -> Result<usize> {
+                let operations = crate::database::load_move_operations()?;
+                let pending_ops: Vec<_> = operations
+                    .into_iter()
+                    .filter(|op| !op.is_active() && !op.granted_keys.is_empty())
+                    .collect();
+                if pending_ops.is_empty() {
+                    return Ok(0);
+                }
+                let controller = crate::controller::Controller::load()?;
+                let executor = mj_core::targets::ProcessExecutor;
+                let mut remaining_count = 0_usize;
+                for mut op in pending_ops {
+                    controller.cleanup_move_granted_keys(&mut op, &executor);
+                    remaining_count += op.granted_keys.len();
+                }
+                Ok(remaining_count)
+            })
+            .await;
+            match outcome {
+                Ok(Ok(0)) => {
+                    tracing::debug!("ephemeral Move SSH credential cleanup settled");
+                    break;
+                }
+                Ok(Ok(remaining)) => {
+                    tracing::info!(
+                        remaining_keys = remaining,
+                        backoff_secs = backoff.as_secs(),
+                        "ephemeral Move SSH credential cleanup has unreachable hosts; retrying"
+                    );
+                }
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        error = %err,
+                        backoff_secs = backoff.as_secs(),
+                        "ephemeral Move SSH credential cleanup error; retrying"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "ephemeral Move SSH credential cleanup task panicked"
+                    );
+                    break;
+                }
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(max_backoff);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

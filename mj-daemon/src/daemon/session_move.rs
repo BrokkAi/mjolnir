@@ -471,10 +471,12 @@ impl RuntimeState {
         mj_controller::controller::move_session::recovery::spawn_ec2_grant_reconcile_background(
             active_op_ids,
         );
-        // Revoke any ephemeral Move credentials left on already-resolved moves.
+        // Revoke any ephemeral Move credentials left on non-active moves, and
+        // schedule non-admitted background retries for any unreachable hosts.
         let cleanup_executor = mj_core::targets::ProcessExecutor;
+        let mut needs_key_cleanup_retry = false;
         for operation in &mut operations {
-            if operation.is_resolved() && !operation.granted_keys.is_empty() {
+            if !operation.is_active() && !operation.granted_keys.is_empty() {
                 if let Ok(controller) = mj_controller::controller::Controller::load() {
                     controller.cleanup_move_granted_keys(operation, &cleanup_executor);
                 } else {
@@ -482,7 +484,13 @@ impl RuntimeState {
                         &operation.granted_keys,
                     );
                 }
+                if !operation.granted_keys.is_empty() {
+                    needs_key_cleanup_retry = true;
+                }
             }
+        }
+        if needs_key_cleanup_retry {
+            mj_controller::controller::move_session::recovery::spawn_move_key_cleanup_background();
         }
         // Recover any pre-149 LegacyMoveOperation rows across an upgrade:
         // - Active or unfinished-queue moves run rollback or finish-forward

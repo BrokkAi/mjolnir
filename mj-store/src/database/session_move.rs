@@ -455,6 +455,7 @@ pub(super) fn reap_finished_move_intents_with(connection: &Connection) -> Result
                 .as_ref()
                 .is_some_and(|destination| destination.owns_resource()))
             || operation.retains_checkpoint()
+            || !operation.granted_keys.is_empty()
             || operation
                 .restore_artifact()
                 .is_some_and(|checkpoint| checkpoint.archive_path.exists())

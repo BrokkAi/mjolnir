@@ -1257,15 +1257,30 @@ pub(crate) fn cleanup_interrupted_move_credentials(
 ) -> Vec<mj_core::state::GrantedMoveKey> {
     let mut remaining = Vec::new();
     for key in granted_keys {
-        let matched_host = candidate_targets
-            .iter()
-            .copied()
-            .find(|locator| target_ssh_host(locator).as_deref() == Some(key.host.as_str()))
-            .map(host_shell_locator);
+        let matched_host = key
+            .ssh_target
+            .as_ref()
+            .map(|ssh| TargetLocator::SshBare {
+                ssh: ssh.clone(),
+                workspace: String::new(),
+                worker_id: None,
+            })
+            .or_else(|| {
+                candidate_targets
+                    .iter()
+                    .copied()
+                    .find(|locator| target_ssh_host(locator).as_deref() == Some(key.host.as_str()))
+                    .map(host_shell_locator)
+            });
         let Some(host) = matched_host else {
             super::recovery::cleanup_local_move_key_files(std::slice::from_ref(key));
             continue;
         };
+        let key_operation_id = key
+            .comment
+            .strip_prefix("mj-move-")
+            .filter(|id| !id.is_empty())
+            .unwrap_or(operation_id);
         let mut ok = true;
         if let (Some(worker_bin), Some(auth_keys_path)) =
             (key.worker_bin.as_deref(), key.authorized_keys_path.as_deref())
@@ -1281,7 +1296,7 @@ pub(crate) fn cleanup_interrupted_move_credentials(
                     "--path".into(),
                     auth_keys_path.to_string_lossy().into_owned(),
                     "--operation-id".into(),
-                    operation_id.to_owned(),
+                    key_operation_id.to_owned(),
                 ],
             )
             .purpose("remove temporary Move authorized_keys entry");
@@ -2491,6 +2506,7 @@ fi
                 known_hosts_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.known_hosts")),
                 authorized_keys_path: Some(PathBuf::from("/home/u/.ssh/authorized_keys")),
                 worker_bin: Some("/home/u/.local/share/mjolnir/workers/s1/hel".into()),
+                ssh_target: None,
             },
             mj_core::state::GrantedMoveKey {
                 host: "dst.example.com".into(),
@@ -2499,11 +2515,15 @@ fi
                 known_hosts_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.pull.known_hosts")),
                 authorized_keys_path: Some(PathBuf::from("/home/u/.ssh/authorized_keys")),
                 worker_bin: Some("/home/u/.local/share/mjolnir/workers/s1/hel".into()),
+                ssh_target: Some(mj_core::targets::SshTarget {
+                    destination: "user@dst.example.com".into(),
+                    ssh_args: vec![],
+                }),
             },
         ];
         let executor = RecordingCleanupExecutor::default();
         let remaining = cleanup_interrupted_move_credentials(
-            "op-crash",
+            "op-different",
             &keys,
             &[&src, &dst],
             &executor,
@@ -2533,5 +2553,17 @@ fi
                 && args.iter().any(|a| a.contains("dst.example.com"))
                 && args.iter().any(|a| a.contains("mj-move-op-crash.pull.key"))
         }));
+
+        // Self-contained `ssh_target` revokes even when no candidate targets exist
+        // (e.g. after source retirement or carry-over onto a newer Move).
+        let deferred_executor = RecordingCleanupExecutor::default();
+        let deferred_remaining = cleanup_interrupted_move_credentials(
+            "op-later-move",
+            std::slice::from_ref(&keys[1]),
+            &[],
+            &deferred_executor,
+        );
+        assert!(deferred_remaining.is_empty());
+        assert_eq!(deferred_executor.commands.lock().unwrap().len(), 2);
     }
 }

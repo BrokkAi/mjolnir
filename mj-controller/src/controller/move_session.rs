@@ -1795,7 +1795,15 @@ impl Controller {
                 op.error = None;
                 op
             }
-            None => MoveOperation {
+            None => {
+                // Preserve any still-unrevoked ephemeral SSH keys from a prior
+                // finished Move on this session so accepting a new Move cannot
+                // drop pending remote credential revocation.
+                let carried_keys = crate::database::load_move_operation(&id)?
+                    .filter(|prev| !prev.is_active())
+                    .map(|prev| prev.granted_keys)
+                    .unwrap_or_default();
+                MoveOperation {
                 quota_stop_reason: None,
                 quota_continuation: None,
                 prepared_destination: None,
@@ -1804,7 +1812,7 @@ impl Controller {
                 transfer_route: None,
                 consent: checked.selection.consent.clone(),
                 skip_keep_paths: checked.selection.skip_keep_paths.clone(),
-                granted_keys: Vec::new(),
+                granted_keys: carried_keys,
                 granted_ec2_rules: Vec::new(),
                 in_place_expected_store_id: None,
                 in_place_continuation_command_id: None,
@@ -1839,7 +1847,8 @@ impl Controller {
                 created_at: timestamp.clone(),
                 updated_at: timestamp,
                 error: None,
-            },
+            }
+            }
         };
         if let Some((reason, continuation)) = quota_move {
             operation.quota_stop_reason = Some(reason);
@@ -3732,9 +3741,13 @@ pub(super) fn transfer_move_snapshot_to_destination(
         )
     };
     if let Some(peer) = direct_peer.as_ref() {
-        // Persist ephemeral key ownership BEFORE installing keys on either host.
+        // Persist ephemeral key ownership BEFORE installing keys on either host,
+        // preserving any carried-over unrevoked keys from earlier moves.
         let comment = format!("mj-move-{}", peer.operation_id);
-        operation.granted_keys = vec![
+        let src_ssh = direct_ssh_endpoint(source, source_worker_root).map(|(ssh, _)| ssh.clone());
+        let dst_ssh =
+            direct_ssh_endpoint(destination, destination_worker_root).map(|(ssh, _)| ssh.clone());
+        operation.granted_keys.extend([
             mj_core::state::GrantedMoveKey {
                 host: peer.source_address.clone(),
                 comment: comment.clone(),
@@ -3748,6 +3761,7 @@ pub(super) fn transfer_move_snapshot_to_destination(
                 ),
                 authorized_keys_path: Some(peer.source_authorized_keys.clone()),
                 worker_bin: Some(peer.source_worker_bin.clone()),
+                ssh_target: src_ssh,
             },
             mj_core::state::GrantedMoveKey {
                 host: peer.destination_address.clone(),
@@ -3762,8 +3776,9 @@ pub(super) fn transfer_move_snapshot_to_destination(
                 ),
                 authorized_keys_path: Some(peer.destination_authorized_keys.clone()),
                 worker_bin: Some(peer.destination_worker_bin.clone()),
+                ssh_target: dst_ssh,
             },
-        ];
+        ]);
         operation.updated_at = now();
         crate::database::save_move_operation(operation)?;
     }
@@ -3802,6 +3817,12 @@ pub(super) fn transfer_move_snapshot_to_destination(
         operation.granted_keys = remaining;
         operation.updated_at = now();
         let _ = crate::database::save_move_operation(operation);
+        if !operation.granted_keys.is_empty() {
+            // Host was transiently unreachable; schedule non-admitted
+            // background retry so revocation completes even after the Move
+            // settles as Completed or Failed.
+            recovery::spawn_move_key_cleanup_background();
+        }
     }
     let receipt = result?;
     operation.transfer_route = Some(receipt.route);
