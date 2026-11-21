@@ -386,16 +386,21 @@ class PilotFixture(unittest.TestCase):
         judge = self.root / j.KEY_PATH.parent / "retired" / "batch" / j.HAND_PATH / "sessions" / "batch" / "void-judge"
         screened = {"kind": "interpreter-screened", "seq": 5}
         rejected = {"kind": "github-or-web", "seq": 6}
+        edits = [{"kind": "in-place-edit", "seq": 5, "edit_index": i} for i in range(2)]
         isolation_files = []
         for kind, path, launch in (("writer", writer_path, "launch.json"),
                                    ("reviewer", reviewer_path, "launch.json"),
                                    ("engine", engine, "session.json"), ("judge", judge, "launch.json")):
             j.save(path / launch, {"session_id": kind})
             hits = [screened] if kind == "reviewer" else [screened, rejected]
+            if kind == "writer":
+                hits += edits
             j.save(path / "audit.json", {"passed": kind == "reviewer", "hits": hits})
             isolation_files.extend((path / launch, path / "audit.json"))
         j.save(engine / "turn-3-audit.json", {"passed": False, "hits": [screened, rejected]})
         isolation_files.append(engine / "turn-3-audit.json")
+        j.save(writer_path / "turn-1-audit.json", {"passed": True, "hits": edits})
+        isolation_files.append(writer_path / "turn-1-audit.json")
         isolation_files.append(egress_log)
         # The isolated study directory contains only the committed-style snapshot.
         self.assertFalse((self.root / "labels" / "development-primary.jsonl").exists())
@@ -416,6 +421,8 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual(isolation["void_sessions"], {"writer": 1, "reviewer": 0, "engine": 1, "judge": 1})
         self.assertEqual(isolation["interpreter_screened"], {"writer": 1, "reviewer": 1, "engine": 1, "judge": 1})
         self.assertEqual(isolation["void_reasons"]["engine"], {"engine": [rejected]})
+        self.assertEqual(isolation["in_place_edits"], {"writer": 2, "reviewer": 0, "engine": 0, "judge": 0})
+        self.assertEqual(isolation["void_reasons"]["writer"], {"writer": [rejected]})
         self.assertEqual({attempt["session_id"] for attempt in isolation["attempts"]},
                          {"writer", "reviewer", "engine", "judge"})
         self.assertEqual(isolation, key["isolation"])

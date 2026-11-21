@@ -485,3 +485,43 @@ def test_visible_command_uses_matching_rollout_directory(tmp_path, directory, ex
                            raw={"command": command, **directory})
     assert not report["passed"]
     assert {hit["kind"] for hit in report["hits"]} == {expected}
+
+
+# Hard-won: c5d02f5: writer in-place brief edit voided
+@pytest.mark.parametrize("command", [
+    "sed -i 's/package_function_value.rs:178/package_function_value.rs:168/' brief.md",
+    "sed -i 's/that collection receives balanced lexical definitions before member-owner metadata is compared/that collection receives balanced lexical definitions regardless of the member-owner metadata comparison/; s/fact_resolution.rs:14350/fact_resolution.rs:14348/' brief.md",
+    "sed -i '/^- Attribute-name recognition/d; /^- The new fixtures/d; /^- The type branch derives/d' brief.md",
+    "perl -i -pe 's/\\xC2\\xAD//g' brief.md",
+])
+def test_suffix_free_in_place_brief_edits_pass(tmp_path, command):
+    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo")
+    assert report["passed"], report["hits"]
+    assert {hit["kind"] for hit in report["hits"]} == {"in-place-edit"}
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    ("sed -i.bak 's/a/b/' brief.md", {"needs-inspection"}),
+    ("sed -i''backup 's/a/b/' brief.md", {"needs-inspection"}),
+    ("sed --in-place=backup 's/a/b/' brief.md", {"needs-inspection"}),
+    ("sed -Ibackup 's/a/b/' brief.md", {"needs-inspection"}),
+    (f"sed -i 's/a/b/' /workspace/{FOREIGN}/x", {"needs-inspection", "other-workspace"}),
+    ("sed -i 's/a/b/' '*.md'", {"needs-inspection"}),
+    ("sed -i 's/a/b/' /tmp/x", {"needs-inspection"}),
+    ("sed -i 's/a/b/e' brief.md", {"needs-inspection"}),
+    ("perl -i.orig -pe 's/a/b/' brief.md", {"needs-inspection"}),
+    ("perl -i -n -e 's/a/b/' brief.md", {"needs-inspection"}),
+])
+def test_in_place_edits_keep_the_workspace_and_read_subset_checks(tmp_path, command, expected):
+    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo")
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == expected
+
+
+def test_in_place_edits_count_separate_commands_in_one_call(tmp_path):
+    command = "sed -i 's/a/b/' brief.md; perl -i -lpe 's/b/c/' brief.md"
+    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo")
+    assert report["passed"], report["hits"]
+    assert [(hit["kind"], hit["seq"], hit["edit_index"]) for hit in report["hits"]] == [
+        ("in-place-edit", 1, 0), ("in-place-edit", 1, 1),
+    ]

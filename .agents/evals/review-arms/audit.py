@@ -53,6 +53,7 @@ def audit_reviewer(transcript_path, own_workspace):
 
 
 ROLLOUT_DIRECTORY = "codex-rollout"
+PASSING_HIT_KINDS = {"interpreter-screened", "in-place-edit"}
 
 
 def rollout_commands(paths):
@@ -142,9 +143,17 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                         hits.append({"seq": item["seq"], "kind": "needs-inspection", "where": "input",
                                      "snippet": f"missing Codex command evidence: {call.get('title') or 'exec_command'}"})
                         continue
-                for name, snippet in dict(pilot_hits(call, own_workspace, commits, single_commit, scripts=scripts, written=written,
-                                                    cwd=page_cwd, home=page_home)).items():
-                    hits.append({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet})
+                observed = {}
+                edit_index = 0
+                for name, snippet in pilot_hits(call, own_workspace, commits, single_commit, scripts=scripts,
+                                                written=written, cwd=page_cwd, home=page_home):
+                    hit = {"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
+                    if name == "in-place-edit":
+                        hits.append({**hit, "edit_index": edit_index})
+                        edit_index += 1
+                    else:
+                        observed[name] = hit
+                hits.extend(observed.values())
                 continue
             inp, out = call_parts(item)
             for name, pattern in INPUT_PATTERNS.items():
@@ -695,10 +704,13 @@ def awk_arguments(args):
 
 def sed_arguments(args):
     sources, paths = [], []
+    in_place = False
     options = iter(args)
     for arg in options:
         if arg.startswith("-") and arg != "-":
-            if arg.startswith("-e"):
+            if arg == "-i" and not in_place:
+                in_place = True
+            elif arg.startswith("-e"):
                 program = arg[2:] or next(options, None)
                 if program is None:
                     raise InspectionRequired("missing sed -e program")
@@ -711,7 +723,7 @@ def sed_arguments(args):
             paths.append(arg)
     if not sources:
         raise InspectionRequired("missing sed program")
-    return sources, paths, []
+    return sources, paths, in_place
 
 
 def awk_tokens(source):
@@ -965,15 +977,36 @@ def perl_open_operand(value):
     return "read", value
 
 
-def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd):
-    arguments = awk_arguments if program in AWK else sed_arguments if program == "sed" else perl_arguments
+def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, scripts, written):
     sources, values = args, ()
+    in_place = False
     try:
-        sources, paths, values = arguments(args)
+        if program == "sed":
+            sources, paths, in_place = sed_arguments(args)
+        elif program == "perl":
+            in_place = args[:1] == ["-i"]
+            if in_place:
+                args = args[1:]
+                if not args or args[0] not in {"-pe", "-lpe"}:
+                    raise InspectionRequired("perl in-place edit requires -pe or -lpe")
+            sources, paths, values = perl_arguments(args)
+        else:
+            sources, paths, values = awk_arguments(args)
+
+        unsafe_edit = False
         for path in paths:
             if program == "perl":
                 _, path = perl_open_operand(path)
-            yield from path_hits(path, own_workspace, cwd)
+            hazards = list(path_hits(path, own_workspace, cwd))
+            yield from hazards
+            if in_place:
+                locations = resolve_paths(path, cwd)
+                prefix = f"/workspace/{own_workspace}/"
+                unsafe_edit |= (bool(hazards) or not path or path.startswith(("-", "~"))
+                                or bool(re.search(r"[*?\[]", path)) or not locations
+                                or any(not filename.startswith(prefix) for filename in locations))
+        if in_place and (not paths or unsafe_edit):
+            raise InspectionRequired("in-place edit requires literal file paths inside its own workspace")
         if program == "perl":
             for value in values:
                 check_perl_interpolation(value, regex=True)
@@ -987,6 +1020,13 @@ def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd):
                         yield from subprocess_hits(argument, own_workspace, commits, single_commit, cwd)
                     elif argument:
                         yield from path_hits(argument, own_workspace, cwd)
+        if in_place:
+            for path in paths:
+                if scripts is not None:
+                    forget_script(scripts, path, cwd)
+                if written is not None:
+                    written.add(posixpath.basename(path))
+            yield "in-place-edit", shlex.join(paths)
     except InspectionRequired:
         # Literals in an accepted program are data. In an opaque program
         # they may name resources the program accesses.
@@ -1321,7 +1361,7 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
         yield from shell_hits(args[1], own_workspace, commits, single_commit, scripts=scripts, written=written, cwd=cwd, home=home,
                               running_scripts=running_scripts)
     elif program in AWK | {"sed", "perl"}:
-        yield from text_filter_hits(program, args, own_workspace, commits, single_commit, cwd)
+        yield from text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, scripts, written)
     elif program in INLINE_OPTIONS and len(inline) >= 2 and inline[0] == INLINE_OPTIONS[program]:
         for arg in inline[2:]:
             yield from source_literal_hits(arg, own_workspace, cwd)
@@ -1406,7 +1446,7 @@ def record_script_write(scripts, written, words, redirections, source, cwd):
         written.update(posixpath.basename(path) for path in file_operands(words[1:]))
     if program in {"cp", "mv", "rm", "ln"} or program == "git" and words[1:2] in (["checkout"], ["switch"]):
         scripts.clear()  # A destination can name a directory or be a symlink.
-    elif program == "sed" or program == "sort":
+    elif program == "sort":
         # Known in-place options, and any options whose destination form is opaque.
         if any(word.startswith(("-i", "--in-place", "-o", "--output")) or re.fullmatch(r"-[nEr]+i[niEr]*", word)
                for word in words[1:]):
@@ -1631,7 +1671,7 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
                           sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))))
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = {"tool_items": 0, "hits": [{"kind": "missing-or-unreadable-transcript", "snippet": str(error)}]}
-    return dict(result, passed=all(hit["kind"] == "interpreter-screened" for hit in result["hits"]))
+    return dict(result, passed=all(hit["kind"] in PASSING_HIT_KINDS for hit in result["hits"]))
 
 
 def audit_run(run):
