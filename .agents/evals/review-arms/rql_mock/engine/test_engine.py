@@ -462,7 +462,7 @@ class EngineTests(unittest.TestCase):
         self.addCleanup(setattr, driver, "mj", driver.mj)
         driver.mj = quota
         engine = self.engine(runner)
-        record = self.cache / "session.json"
+        record = self.cache / COMMIT / "active" / "session.json"
         for weekly, short in ((24, 80), (25, 80), (80, 19), (80, 20), (None, 80), (80, None), (80, 80)):
             with self.subTest(weekly=weekly, short=short):
                 windows[:] = [{"remaining_percent": percent, "duration_seconds": seconds}
@@ -476,6 +476,18 @@ class EngineTests(unittest.TestCase):
                     self.assertFalse(record.exists())
                     self.assertFalse(runner.launches)
         self.assertEqual(len(runner.launches), 1)
+
+    # Hard-won: 3dbf317: a held launch left an empty active directory for teardown.
+    def test_teardown_after_a_held_launch_has_nothing_to_retire(self):
+        class HeldRunner(FakeRunner):
+            def start(self, snapshot, commit):
+                raise LaunchHeld("fixture quota hold")
+
+        runner = HeldRunner([])
+        result = self.engine(runner).answer(COMMIT, QUERY)
+        self.assertEqual(result["status"], "quota_hold")
+        self.assertFalse((self.cache / COMMIT / "active").exists())
+        self.assertEqual(teardown(self.cache, runner), (0, []))
 
     def test_cache_normalization_and_changed_input(self):
         runner = FakeRunner([payload()] * 4)

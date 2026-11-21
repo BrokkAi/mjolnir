@@ -1,5 +1,6 @@
 """Host-side, complete answers to frozen RQL queries."""
 from contextlib import ExitStack, contextmanager
+import errno
 import fcntl
 import hashlib
 import json
@@ -175,6 +176,13 @@ class Engine:
             sid = runner.start(snapshot, commit)
         except LaunchHeld:
             record_path.unlink()
+            try:
+                record_path.parent.rmdir()
+            except OSError as error:
+                if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+                    raise
+            else:
+                sync_directory(record_path.parent.parent)
             raise
         save_json(record_path, {**identity, "session_id": sid, "instance": runner.instance,
                                 "model_version": self.model_version})
