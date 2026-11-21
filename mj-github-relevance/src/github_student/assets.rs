@@ -9,13 +9,13 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Deserialize)]
-pub(super) struct Manifest {
+pub(crate) struct Manifest {
     pub repository: String,
     pub revision: String,
     pub files: Vec<Artifact>,
 }
 #[derive(Clone, Deserialize)]
-pub(super) struct Artifact {
+pub(crate) struct Artifact {
     pub name: String,
     pub sha256: String,
     pub bytes: u64,
@@ -136,6 +136,8 @@ pub(super) async fn download(
         .error_for_status()
         .map_err(|e| PreparationFailure::error(StudentFailureKind::Download, e, retry_after))?;
     let mut stream = response.bytes_stream();
+    let directory = path.parent().context("download path has no parent")?;
+    tokio::fs::create_dir_all(directory).await?;
     let mut output = tokio::fs::File::create(path).await?;
     loop {
         let chunk = tokio::select! {
@@ -159,7 +161,7 @@ fn root_for_reuse(destination: &Path, name: &str) -> PathBuf {
     }
 }
 /// Only the owner calls preparation; pair classification observes Loading.
-pub(super) async fn prepare(
+pub(crate) async fn prepare(
     root: PathBuf,
     manifest: Manifest,
     base: &str,
@@ -190,6 +192,8 @@ pub(super) async fn prepare(
             let to = path.clone();
             let copied = mj_core::runtime::spawn_blocking(move || -> Result<()> {
                 verify_file(&existing, reuse.bytes, &reuse.sha256)?;
+                let directory = to.parent().context("reuse path has no parent")?;
+                std::fs::create_dir_all(directory)?;
                 std::fs::copy(existing, to)?;
                 Ok(())
             })
@@ -302,16 +306,19 @@ mod tests {
     }
     #[tokio::test]
     async fn interrupted_download_never_publishes_and_restart_recovers() {
+        crate::signing_key::install_rustls_crypto_provider();
         let source = source();
         source.interrupt.store(true, Ordering::SeqCst);
         let server = Server::start(source.clone()).await;
         let root = tempfile::tempdir().unwrap();
         let client = reqwest::Client::new();
         let cancel = CancellationToken::new();
+        let mut nested = manifest(&source);
+        nested.files[0].name = "onnx/fp32/model.onnx".into();
         assert!(
             prepare(
                 root.path().into(),
-                manifest(&source),
+                nested.clone(),
                 &server.url,
                 &client,
                 &cancel
@@ -322,19 +329,34 @@ mod tests {
         assert!(!root.path().join("immutable").exists());
         let path = prepare(
             root.path().into(),
-            manifest(&source),
+            nested.clone(),
             &server.url,
             &client,
             &cancel,
         )
         .await
         .unwrap();
-        verified(&path, &manifest(&source).files).unwrap();
+        verified(&path, &nested.files).unwrap();
+        assert_eq!(source.requests.load(Ordering::SeqCst), 2);
+        // A CoreML sibling revision reuses nested model files from the base
+        // revision, creating its staging parents without another HTTP fetch.
+        let sibling = nested.selected(true);
+        let reused = prepare(
+            root.path().into(),
+            sibling.clone(),
+            &server.url,
+            &client,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        verified(&reused, &sibling.files).unwrap();
         assert_eq!(source.requests.load(Ordering::SeqCst), 2);
         server.close().await;
     }
     #[tokio::test]
     async fn bad_digest_is_a_verification_failure_and_not_a_cache_entry() {
+        crate::signing_key::install_rustls_crypto_provider();
         let source = source();
         source.corrupt.store(true, Ordering::SeqCst);
         let server = Server::start(source.clone()).await;

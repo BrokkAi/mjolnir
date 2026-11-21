@@ -60,7 +60,7 @@ fn target() -> Result<&'static str> {
         .into()),
     }
 }
-pub(super) fn validate_platform() -> Result<()> {
+pub(crate) fn validate_platform() -> Result<()> {
     target().map(|_| ())
 }
 fn files(platform: &Platform) -> Vec<Artifact> {
@@ -82,7 +82,7 @@ struct Selection {
     directml: bool,
 }
 static SELECTION: OnceLock<Selection> = OnceLock::new();
-pub(super) fn directml_selected() -> bool {
+pub(crate) fn directml_selected() -> bool {
     SELECTION.get().is_some_and(|s| s.directml)
 }
 pub(super) fn gpu_requires_restart() -> bool {
@@ -91,7 +91,7 @@ pub(super) fn gpu_requires_restart() -> bool {
             || (cfg!(all(target_os = "linux", target_arch = "x86_64")) && !s.cuda)
     })
 }
-pub(super) fn cuda_selected() -> bool {
+pub(crate) fn cuda_selected() -> bool {
     SELECTION.get().is_some_and(|s| s.cuda)
 }
 fn select(use_gpu: bool) -> Result<Selection> {
@@ -179,7 +179,7 @@ fn directx12_available() -> bool {
         create(std::ptr::null_mut(), 0xb000, &DEVICE, std::ptr::null_mut()) >= 0
     }
 }
-pub(super) async fn prepare_selected(
+pub(crate) async fn prepare_selected(
     root: PathBuf,
     use_gpu: bool,
     notice: &super::Notice,
@@ -207,6 +207,30 @@ pub(super) async fn prepare_selected(
         .clone();
     prepare_platform(root, target, platform, client, cancellation).await
 }
+fn cache_directory(root: &Path, target: &str) -> PathBuf {
+    // Include the entire pin inventory in the key: DirectML's independent
+    // revision can change without overwriting a DLL used by another daemon.
+    root.join(format!(
+        "{}-{}-{}",
+        manifest().version,
+        target,
+        mj_core::hex::lower_hex(Sha256::digest(include_bytes!("runtime.json")))
+    ))
+}
+
+#[cfg(test)]
+pub(crate) fn cached_cpu_library(root: &Path) -> Result<PathBuf> {
+    let target = target()?;
+    let platform = manifest()
+        .platforms
+        .get(target)
+        .context("unsupported runtime target")?;
+    let _ = SELECTION.set(select(false)?);
+    let directory = cache_directory(root, target);
+    assets::verified(&directory, &files(platform))?;
+    Ok(directory.join(&platform.library).canonicalize()?)
+}
+
 async fn prepare_platform(
     root: PathBuf,
     target: &str,
@@ -214,15 +238,7 @@ async fn prepare_platform(
     client: &reqwest::Client,
     cancellation: &CancellationToken,
 ) -> Result<PathBuf> {
-    // Include the entire pin inventory in the key: DirectML's independent
-    // revision can change without overwriting a DLL used by another daemon.
-    let key = format!(
-        "{}-{}-{}",
-        manifest().version,
-        target,
-        mj_core::hex::lower_hex(Sha256::digest(include_bytes!("runtime.json")))
-    );
-    let destination = root.join(key);
+    let destination = cache_directory(&root, target);
     let check = destination.clone();
     let expected = files(&platform);
     if mj_core::runtime::spawn_blocking(move || assets::verified(&check, &expected))
@@ -307,7 +323,7 @@ fn extract(path: &Path, archive: &Archive, directory: &Path) -> Result<()> {
     Ok(())
 }
 /// Only called after every native payload and its notices have been verified.
-pub(super) fn environment(path: &Path) -> Result<ort::environment::Environment> {
+pub(crate) fn environment(path: &Path) -> Result<ort::environment::Environment> {
     #[cfg(windows)]
     {
         use libloading::os::windows::{LOAD_LIBRARY_SEARCH_SYSTEM32, Library};

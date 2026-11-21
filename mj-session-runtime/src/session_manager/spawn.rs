@@ -22,6 +22,7 @@ pub fn spawn_session_manager_observed(
     let session_cpu = updates_tx.cpu.subscribe();
     let model_policies = updates_tx.model_policies.clone();
     let harness_failure = updates_tx.harness_failure.clone();
+    let guardian_stage1 = updates_tx.guardian_stage1.clone();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let task = mj_core::runtime::spawn(async move {
         let mut starting = StartingSessions::default();
@@ -226,6 +227,7 @@ pub fn spawn_session_manager_observed(
             session_gate,
             credential_wakes,
             harness_failure,
+            guardian_stage1,
             model_policies,
             commands: commands_tx,
             launches: launches_tx,

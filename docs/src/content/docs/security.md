@@ -136,8 +136,14 @@ native approval mode and any native reviewer. Literal `gh` and identifiable
 Mjolnir-owned tools that are already approved, along with plan approvals that
 need your consent, follow their existing paths.
 
-When a direct utility model is configured, Mjolnir sends it the request and
-the retained evidence for a structured decision. This reviewer has no tools
+The daemon first scores eligible actions locally with Wolf Defender Jev. This
+approve-only stage can allow an action when the model scores it as strongly
+aligned with your task. Borderline scores, long actions, context that exceeds
+the model's token limit, and requests received while the model is unavailable
+continue to the next stage. The daemon downloads the pinned model on demand.
+
+When a direct utility model is configured, the next stage sends it the request
+and retained evidence for a structured decision. This reviewer has no tools
 or file access. If no direct utility model is configured, the worker starts a
 separate session using the same harness, login, and model. It removes
 session-owned mailbox hooks and MCP registrations, supplies no MCP servers or
@@ -145,21 +151,22 @@ client tools, and refuses its permission requests. This reviewer can inspect
 files where the harness allows reads. A review already waiting for the daemon
 keeps its request if the daemon restarts.
 
-Each review sees:
+The utility and ACP reviewers see:
 
 - Codex's security policy: data exfiltration, credential probing, persistent
   security weakening, and destructive actions, with Codex's risk levels and
   user-authorization scoring.
-- The messages you wrote in the session. The ACP reviewer can also verify
-  authorization in `AGENTS.md` files. Messages Mjolnir delivered on your behalf,
+- The messages you wrote in the session and a bounded excerpt of project
+  instructions from `AGENTS.md`. The ACP reviewer can also inspect those files
+  where it has read access. Messages Mjolnir delivered on your behalf,
   tool output, and the agent's own text supply evidence. A sub-agent session
   has no messages of its own from you, so it has no direct authorization for
   high-risk actions.
 - The recent transcript, within Codex's review budget.
 - The exact action: the tool, its input, and any file edit as a unified patch.
 
-The reviewer answers with a risk level, how clearly you authorized the action,
-and allow or deny. Mjolnir enforces Codex's thresholds on that answer: a
+The utility or ACP reviewer answers with a risk level, how clearly you
+authorized the action, and allow or deny. Mjolnir enforces Codex's thresholds on that answer: a
 `critical` action is always denied, and a `high`-risk one unless you
 authorized it at least in substance. If you write to the session while a
 review runs, its verdict is set aside and the action reviewed again on what you

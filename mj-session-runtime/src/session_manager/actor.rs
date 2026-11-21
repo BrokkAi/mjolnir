@@ -336,6 +336,13 @@ pub async fn run_session_actor(
                     let snapshot =
                         sync_actor_connection(&updates.session_gate, &target, &mut connection)
                             .await?;
+                    // Only the relay actor consumes Guardian requests. A
+                    // lifecycle connection leaves them pending for this tick.
+                    connection
+                        .as_mut()
+                        .expect("synced connection")
+                        .sync_guardian(updates.guardian_stage1.get())
+                        .await?;
                     let observed_at = tokio::time::Instant::now();
                     let now = tokio::time::Instant::now();
                     if now >= next_cpu_read {
@@ -1860,7 +1867,6 @@ pub async fn sync_actor_connection(
                 tracing::warn!(session_id = %target.session_id, %error, "could not prune read notifications on relay attachment");
             }
         }
-        fresh.sync_guardian().await?;
         fresh.start_observing(target).await;
         let snapshot = fresh.snapshot();
         observe_worker_readiness(target, &snapshot, observation).await?;
@@ -1869,7 +1875,6 @@ pub async fn sync_actor_connection(
     }
     let connection = connection.as_mut().expect("connection was initialized");
     let changed = connection.sync_in_place().await?;
-    connection.sync_guardian().await?;
     connection.start_observing(target).await;
     if changed || observation.is_some() {
         // Readiness can already have been published while the swap owner was

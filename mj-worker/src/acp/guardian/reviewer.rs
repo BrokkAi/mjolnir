@@ -67,6 +67,7 @@ impl Guardian {
         input: Option<&serde_json::Value>,
         native_child: bool,
     ) -> GuardianDecision {
+        let deadline = tokio::time::Instant::now() + GUARDIAN_REVIEW_TIMEOUT;
         if self.spec.turn_context.guardian_tripped() {
             tracing::info!(
                 target: "mj_guardian",
@@ -86,16 +87,23 @@ impl Guardian {
         );
         let tool_call_id = request.tool_call.tool_call_id.to_string();
         let cwd = self.spec.cwd.clone();
-        let project_instructions = match mj_core::runtime::spawn_blocking(move || {
-            collect_project_instructions(&cwd)
-        })
+        let project_instructions = match tokio::time::timeout_at(
+            deadline,
+            mj_core::runtime::spawn_blocking(move || collect_project_instructions(&cwd)),
+        )
         .await
         {
-            Ok(instructions) => instructions,
-            Err(error) => {
+            Ok(Ok(instructions)) => instructions,
+            Ok(Err(error)) => {
                 tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "could not collect project instructions");
                 return GuardianDecision::AskPerson {
                     reason: format!("it could not collect project instructions: {error}"),
+                };
+            }
+            Err(_) => {
+                tracing::warn!(target: "mj_guardian", %tool_call_id, "collecting project instructions timed out");
+                return GuardianDecision::AskPerson {
+                    reason: "collecting project instructions timed out".into(),
                 };
             }
         };
@@ -106,6 +114,7 @@ impl Guardian {
                     &tool_call_id,
                     &action,
                     project_instructions.as_deref(),
+                    deadline,
                 )
                 .await
             {
@@ -135,8 +144,8 @@ impl Guardian {
         tool_call_id: &str,
         action: &serde_json::Value,
         project_instructions: Option<&str>,
+        deadline: tokio::time::Instant,
     ) -> Result<GuardianReviewOutcome> {
-        let deadline = tokio::time::Instant::now() + GUARDIAN_REVIEW_TIMEOUT;
         let mut evidence = self.collect_evidence(tool_call_id, action, project_instructions);
         loop {
             let result = endpoint.review(evidence.request.clone(), deadline).await?;

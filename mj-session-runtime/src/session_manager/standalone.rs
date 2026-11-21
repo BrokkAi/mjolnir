@@ -1,10 +1,33 @@
 use super::*;
 use mj_core::guardian::{
     GUARDIAN_REVIEW_TIMEOUT, GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
-    MAX_PENDING_GUARDIAN_REVIEWS, Outcome,
+    MAX_PENDING_GUARDIAN_REVIEWS, Outcome, WOLF_STAGE1_ALLOW_THRESHOLD,
 };
 use mj_import::utility_llm::{GuardianUtilityOutcome, review_guardian_with_utility};
+use std::{future::Future, pin::Pin};
 use tokio::task::JoinError;
+
+pub enum GuardianStage1Verdict {
+    Scored {
+        unsafe_prob: f64,
+        tokens: usize,
+        elapsed_ms: u64,
+    },
+    EscalatedActionTooLong,
+    Overflow {
+        tokens: usize,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+pub trait GuardianStage1: Send + Sync {
+    fn classify<'a>(
+        &'a self,
+        request: &'a GuardianReviewRequest,
+    ) -> Pin<Box<dyn Future<Output = GuardianStage1Verdict> + Send + 'a>>;
+}
 
 pub struct StandaloneSession {
     pub client: RelayClient,
@@ -561,13 +584,17 @@ impl StandaloneSession {
 
     /// Called only by the relay actor. Lifecycle connections leave pending
     /// reviews with the worker until an actor takes ownership.
-    pub(super) async fn sync_guardian(&mut self) -> Result<()> {
+    pub(super) async fn sync_guardian(
+        &mut self,
+        classifier: Option<&Arc<dyn GuardianStage1>>,
+    ) -> Result<()> {
         for request in self.client.guardian_requests().await? {
             if self.guardian_active.len() >= MAX_PENDING_GUARDIAN_REVIEWS {
                 break;
             }
             if self.guardian_active.insert(request.request_id.clone()) {
-                self.guardian_jobs.spawn(execute_guardian_review(request));
+                self.guardian_jobs
+                    .spawn(execute_guardian_review(request, classifier.cloned()));
             }
         }
         Ok(())
@@ -1244,10 +1271,47 @@ pub fn projection_integrity_failure(error: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<ProjectionIntegrityError>().is_some())
 }
 
-async fn execute_guardian_review(request: GuardianReviewRequest) -> GuardianReviewResult {
+async fn execute_guardian_review(
+    request: GuardianReviewRequest,
+    classifier: Option<Arc<dyn GuardianStage1>>,
+) -> GuardianReviewResult {
     let cancel = tokio_util::sync::CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
     let decision = tokio::time::timeout(GUARDIAN_REVIEW_TIMEOUT, async {
+        let mut stage1_score = None;
+        if let Some(classifier) = classifier {
+            match classifier.classify(&request).await {
+                GuardianStage1Verdict::Scored { unsafe_prob, tokens, elapsed_ms } => {
+                    let local_allow = (0.0..=WOLF_STAGE1_ALLOW_THRESHOLD).contains(&unsafe_prob);
+                    tracing::info!(
+                        target: "mj_guardian",
+                        stage = "stage1_wolf",
+                        unsafe_prob,
+                        threshold = WOLF_STAGE1_ALLOW_THRESHOLD,
+                        tokens,
+                        elapsed_ms,
+                        local_allow,
+                        "Wolf Defender Jev scored a permission request"
+                    );
+                    stage1_score = Some(unsafe_prob);
+                    if local_allow {
+                        return GuardianReviewOutcome::Allow {
+                            stage: "stage1_wolf".into(),
+                            stage1_score,
+                        };
+                    }
+                }
+                GuardianStage1Verdict::EscalatedActionTooLong => {
+                    tracing::debug!(target: "mj_guardian", "Wolf action length exceeded");
+                }
+                GuardianStage1Verdict::Overflow { tokens } => {
+                    tracing::debug!(target: "mj_guardian", tokens, "Wolf case token limit exceeded");
+                }
+                GuardianStage1Verdict::Unavailable { reason } => {
+                    tracing::debug!(target: "mj_guardian", %reason, "Wolf classifier unavailable");
+                }
+            }
+        }
         let config = match mj_core::runtime::spawn_blocking(mj_core::config::Config::load).await {
             Ok(Ok(config)) => config,
             Ok(Err(error)) => {
@@ -1267,19 +1331,19 @@ async fn execute_guardian_review(request: GuardianReviewRequest) -> GuardianRevi
                 match assessment.enforced_outcome() {
                     Outcome::Allow => GuardianReviewOutcome::Allow {
                         stage,
-                        stage1_score: None,
+                        stage1_score,
                     },
                     Outcome::Deny => GuardianReviewOutcome::Deny {
                         rationale: assessment.rationale,
                         risk_level: assessment.risk_level,
                         user_authorization: assessment.user_authorization,
                         stage,
-                        stage1_score: None,
+                        stage1_score,
                     },
                 }
             }
             GuardianUtilityOutcome::NoUtilityModel { .. } => {
-                GuardianReviewOutcome::UseAcpFallback { stage1_score: None }
+                GuardianReviewOutcome::UseAcpFallback { stage1_score }
             }
             GuardianUtilityOutcome::Failed { error } => {
                 GuardianReviewOutcome::AskPerson { reason: error }
@@ -1288,7 +1352,7 @@ async fn execute_guardian_review(request: GuardianReviewRequest) -> GuardianRevi
     })
     .await
     .unwrap_or_else(|_| GuardianReviewOutcome::AskPerson {
-        reason: "its utility model review timed out".into(),
+        reason: "its daemon review timed out".into(),
     });
     GuardianReviewResult {
         request_id: request.request_id,
