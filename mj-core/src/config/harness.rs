@@ -2751,6 +2751,31 @@ impl HarnessProfile {
             })
             .collect()
     }
+
+    /// Whether this profile's native login file is missing on disk when it is
+    /// required to launch a session.
+    ///
+    /// Codex `AuthScheme::NativeLogin` profiles require `auth.json` at launch
+    /// unless an accepted API-key/token environment variable is supplied.
+    pub fn missing_native_login_reason(&self, id: &str) -> Option<String> {
+        if self.kind != HarnessKind::Codex || !self.auth_scheme().uses_native_login_file() {
+            return None;
+        }
+        const CODEX_ENV_AUTH_VARS: [&str; 3] =
+            ["CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"];
+        if CODEX_ENV_AUTH_VARS
+            .iter()
+            .any(|name| self.supplies_api_key(name))
+        {
+            return None;
+        }
+        if self.authentication_marker().is_file() {
+            return None;
+        }
+        Some(format!(
+            "Codex login file auth.json is missing; run `mj login --profile {id}`"
+        ))
+    }
 }
 
 #[cfg(test)]

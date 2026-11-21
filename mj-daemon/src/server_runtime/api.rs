@@ -649,28 +649,73 @@ impl QuotaWait {
 }
 
 impl ApiBackend {
-    pub(crate) async fn discover_profile_candidates(
+    /// Partition `ids` into eligible profiles and those unavailable because
+    /// their login was refused or their required native login file is missing.
+    ///
+    /// Runs filesystem checks on a blocking thread pool so the Tokio reactor
+    /// never blocks on disk I/O.
+    async fn filter_eligible_profiles(
         &self,
-        mut ids: Vec<(String, mj_core::config::HarnessKind)>,
-        candidate_kind: &str,
-    ) -> Result<crate::server::api::SubagentCandidates> {
-        let mut candidates = crate::server::api::SubagentCandidates::default();
-        // A profile whose login the provider has refused would start a
-        // session that dies on its first request, so it remains unavailable
-        // until its login file changes.
+        ids: Vec<(String, mj_core::config::HarnessKind)>,
+        config: &mj_core::config::Config,
+    ) -> Result<(
+        Vec<(String, mj_core::config::HarnessKind)>,
+        Vec<(String, String)>,
+    )> {
+        let mut eligible = Vec::with_capacity(ids.len());
+        let mut unavailable = Vec::new();
+        let mut to_check = Vec::new();
         {
             let rejected = self
                 .rejected_logins
                 .lock()
                 .map_err(|_| anyhow!("refused logins lock poisoned"))?;
-            ids.retain(|(profile_id, _)| match rejected.refusal(profile_id) {
-                Some(reason) => {
-                    candidates.unavailable.push((profile_id.clone(), reason));
-                    false
+            for (profile_id, harness) in ids {
+                if let Some(reason) = rejected.refusal(&profile_id) {
+                    unavailable.push((profile_id, reason));
+                    continue;
                 }
-                None => true,
-            });
+                let profile = config.enabled_profile(&profile_id).cloned();
+                to_check.push((profile_id, harness, profile));
+            }
         }
+        let checked = mj_core::runtime::spawn_blocking(move || {
+            to_check
+                .into_iter()
+                .map(|(profile_id, harness, profile)| {
+                    let missing = profile
+                        .as_ref()
+                        .and_then(|profile| profile.missing_native_login_reason(&profile_id));
+                    (profile_id, harness, missing)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .context("profile login check task failed")?;
+        for (profile_id, harness, missing) in checked {
+            if let Some(reason) = missing {
+                unavailable.push((profile_id, reason));
+            } else {
+                eligible.push((profile_id, harness));
+            }
+        }
+        Ok((eligible, unavailable))
+    }
+
+    pub(crate) async fn discover_profile_candidates(
+        &self,
+        ids: Vec<(String, mj_core::config::HarnessKind)>,
+        candidate_kind: &str,
+    ) -> Result<crate::server::api::SubagentCandidates> {
+        let config = self.profile_catalog.live()?;
+        // A profile whose login the provider has refused or whose required
+        // login file was removed would fail at launch, so exclude it before
+        // discovery or cached capability lookup.
+        let (ids, unavailable) = self.filter_eligible_profiles(ids, &config).await?;
+        let mut candidates = crate::server::api::SubagentCandidates {
+            unavailable,
+            ..Default::default()
+        };
         // One discovery per profile, so a profile whose harness cannot be
         // discovered drops out on its own instead of failing the whole answer.
         let discoveries = futures::future::join_all(
@@ -686,7 +731,6 @@ impl ApiBackend {
             .lock()
             .map_err(|_| anyhow!("profile health lock poisoned"))?;
         let now = std::time::SystemTime::now();
-        let config = self.profile_catalog.live()?;
         for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
             match discovery.map(|mut choices| choices.pop()) {
                 Ok(Some(choices)) => {
@@ -4186,15 +4230,13 @@ impl SubagentBackend for ApiBackend {
         _model: String,
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
-            // Remove refused logins before the shared selector resolves the
-            // requested alias once over the remaining ready profiles.
+            // Remove refused logins and missing native login files before the
+            // shared selector resolves the requested alias once over the
+            // remaining ready profiles.
             let ids = self.profile_catalog.ready_candidates("")?;
             let config = self.profile_catalog.live()?;
+            let (ids, unavailable) = self.filter_eligible_profiles(ids, &config).await?;
             let snapshot = self.profile_catalog.snapshot();
-            let rejected = self
-                .rejected_logins
-                .lock()
-                .map_err(|_| anyhow!("refused logins lock poisoned"))?;
             let quota_reports = self
                 .quota_reports
                 .lock()
@@ -4203,12 +4245,11 @@ impl SubagentBackend for ApiBackend {
                 .lock()
                 .map_err(|_| anyhow!("profile health lock poisoned"))?;
             let now = std::time::SystemTime::now();
-            let mut candidates = crate::server::api::SubagentCandidates::default();
+            let mut candidates = crate::server::api::SubagentCandidates {
+                unavailable,
+                ..Default::default()
+            };
             for (profile_id, harness) in ids {
-                if let Some(reason) = rejected.refusal(&profile_id) {
-                    candidates.unavailable.push((profile_id, reason));
-                    continue;
-                }
                 let Some(profile) = config.enabled_profile(&profile_id) else {
                     continue;
                 };
