@@ -3,10 +3,12 @@ from contextlib import redirect_stdout
 from decimal import Decimal
 from io import StringIO
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 import re
 import subprocess
+import tarfile
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -568,9 +570,22 @@ class PilotTest(unittest.TestCase):
         driver.MJ_INSTANCE_ARGS = ("--instance", "test-pilot")
         seen = []
         paths = {}
+        rollout_name = "rollout-test.jsonl"
 
         def run(argv, **kwargs):
             seen.append(argv)
+            if argv[:2] == ["podman", "exec"]:
+                sid = argv[2]
+                self.assertEqual(argv[-1], f"/var/lib/hel/profiles/{sid}/sessions")
+                data = (json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                    "type": "CommandExecution", "id": "exec-captured", "command": ["/bin/bash", "-lc", "ls"],
+                    "cwd": f"file:///workspace/{sid}/repo",
+                }}}) + "\n").encode()
+                with tarfile.open(fileobj=kwargs["stdout"], mode="w") as archive:
+                    member = tarfile.TarInfo(rollout_name)
+                    member.size = len(data)
+                    archive.addfile(member, BytesIO(data))
+                return SimpleNamespace(returncode=0)
             if "sessions" in argv:
                 answer = {"sessions": [{"id": sid, "lifecycle": "live", "title": "same title"} for sid in paths]}
             else:
@@ -579,6 +594,7 @@ class PilotTest(unittest.TestCase):
                 receipt = pilot.read_json(path / "receipt.json")
                 self.assertEqual(receipt["session_id"], sid)
                 self.assertTrue(pilot.read_json(path / "audit.json")["passed"])
+                self.assertIn(f"codex-rollout/{rollout_name}", receipt["evidence_sha256"])
                 for name, sha in receipt["evidence_sha256"].items():
                     self.assertEqual(pilot.digest((path / name).read_bytes()), sha)
                 answer = {"session_id": sid, "accepted": True}
@@ -587,8 +603,13 @@ class PilotTest(unittest.TestCase):
         driver.subprocess.run = run
         for kind, model, output in (("writer", "gpt-6.1-sol", "brief.md"),
                                     ("reviewer", "gpt-6.1-terra", "output.md")):
-            sid = f"{kind}-id"
+            sid = "a" * 32 if kind == "writer" else "b" * 32
             path = self.captured_job(kind, sid, model, output)
+            driver.save(path / "placement.json", {"container": sid, "cwd": f"/workspace/{sid}/repo"})
+            driver.save(path / "transcript.json", [{"session_id": sid, "items": [
+                {"seq": 1, "role": "tool", "body": {"call": {"toolCallId": "exec-captured",
+                 "name": "exec_command", "title": "List files", "kind": "read"}}},
+            ]}])
             paths[sid] = path
             params = {"run_root": self.root, "path": path, "inputs": {"rql_tools": []}, "model": (model, "high")}
             sha = pilot.digest((path / output).read_bytes())

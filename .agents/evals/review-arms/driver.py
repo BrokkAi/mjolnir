@@ -17,9 +17,12 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import time
 import traceback
@@ -187,6 +190,55 @@ def durable_pilot_files(root, d, paths):
             os.close(fd)
 
 
+# The Podman worker stages Codex's home at /var/lib/hel/profiles/<session>.
+# Read only its rollout tree. These archives may contain full prompts and tool output.
+PILOT_ROLLOUT_EXPORT = """
+from pathlib import Path
+import sys
+import tarfile
+
+root = Path(sys.argv[1])
+if root.resolve() != root or not root.is_dir():
+    raise SystemExit("missing session rollout root")
+with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as bundle:
+    for path in sorted(root.glob("*/*/*/rollout-*.jsonl")):
+        if path.is_file() and path.resolve() == path:
+            bundle.add(path, arcname=path.name, recursive=False)
+"""
+
+
+def capture_pilot_rollouts(d, sid):
+    from audit import ROLLOUT_DIRECTORY
+
+    destination = d / ROLLOUT_DIRECTORY
+    placement = d / "placement.json"
+    if destination.exists() or (d / "receipt.json").exists() or not placement.is_file():
+        return
+    if not re.fullmatch(r"[0-9a-f]{32}", sid):
+        raise ValueError("pilot rollout capture requires an exact session ID")
+    try:
+        place = json.loads(placement.read_text())
+        source = f"/var/lib/hel/profiles/{sid}/sessions"
+        with tempfile.TemporaryFile() as archive, tempfile.TemporaryDirectory(prefix=".rollouts-", dir=d) as staging:
+            subprocess.run(["podman", "exec", place["container"], "python3", "-c", PILOT_ROLLOUT_EXPORT, source],
+                           stdout=archive, stderr=subprocess.PIPE, timeout=300, check=True)
+            archive.seek(0)
+            private = pathlib.Path(staging) / ROLLOUT_DIRECTORY
+            private.mkdir(mode=0o700)
+            with tarfile.open(fileobj=archive, mode="r|") as bundle:
+                for member in bundle:
+                    if not member.isfile() or not re.fullmatch(r"rollout-[A-Za-z0-9_.-]+\.jsonl", member.name):
+                        raise ValueError("invalid member in pilot Codex rollout capture")
+                    with bundle.extractfile(member) as raw, (private / member.name).open("xb") as out:
+                        os.fchmod(out.fileno(), 0o600)
+                        shutil.copyfileobj(raw, out)
+            if not any(private.iterdir()):
+                raise ValueError("session contains no Codex rollout files")
+            private.rename(destination)
+    except (OSError, KeyError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
+        save(d / "rollout-capture-error.json", {"session_id": sid, "error": str(error)})
+
+
 def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allow_rql=False):
     """Validate and flush the recorded evidence before destroying its exact session."""
     import audit
@@ -194,14 +246,18 @@ def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allo
     launch = json.loads((d / "launch.json").read_text())
     if MJ_INSTANCE_ARGS != ("--instance", launch["instance"]) or launch["session_id"] != sid:
         raise ValueError("pilot teardown requires the recorded launch in a named instance")
+    capture_pilot_rollouts(d, sid)
+    rollout_dir = d / audit.ROLLOUT_DIRECTORY
+    rollouts = sorted(rollout_dir.glob("rollout-*.jsonl"))
     names = ("transcript.json", "usage.json", output, "cache-attestation.json", "mcp-reconnect-result.json",
              "pre-inventory.json", "settings.json", "launch.json", "prompt-completion.json",
              *(p.name for p in sorted(d.glob("fix-*-completion.json"))),
              *((f"queries-{sid}.jsonl",) if allow_rql else ()))
-    paths = [d / name for name in names]
+    paths = [*(d / name for name in names), *rollouts]
     record = {"session_id": sid, "instance": MJ_INSTANCE_ARGS[-1], "profile": profile, "model": model,
               "effort": effort, "output": output,
-              "evidence_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}}
+              "evidence_sha256": {str(path.relative_to(d)): hashlib.sha256(path.read_bytes()).hexdigest()
+                                  for path in paths}}
     if json.loads((d / "cache-attestation.json").read_text())["passed"] is not True:
         raise ValueError(f"pilot check failed: {d / 'cache-attestation.json'}")
     reconnect = json.loads((d / "mcp-reconnect-result.json").read_text())
@@ -225,7 +281,7 @@ def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allo
             raise ValueError(f"pilot capture changed since it was recorded: {receipt}")
     else:
         save(receipt, record)
-    durable_pilot_files(root, d, [*paths, receipt])
+    durable_pilot_files(root, d, [*paths, *([rollout_dir] if rollouts else []), receipt])
     before = json.loads((d / "pre-inventory.json").read_text())
     commits = [*before["commits"], before["head_tree"], before["base_tree"]]
     report = audit.audit_pilot(d / "transcript.json", sid, commits=commits, allow_rql=allow_rql)

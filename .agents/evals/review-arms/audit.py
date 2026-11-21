@@ -13,6 +13,8 @@ import re
 import shlex
 import sys
 
+from urllib.parse import unquote, urlsplit
+
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 
 # Where a command word can start. Inputs are matched as serialized JSON, so a
@@ -50,10 +52,58 @@ def audit_reviewer(transcript_path, own_workspace):
     return scan(json.loads(transcript_path.read_text()), own_workspace)
 
 
-def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None):
+ROLLOUT_DIRECTORY = "codex-rollout"
+
+
+def rollout_commands(paths):
+    """Index Codex's durable command execution IDs, which the ACP bridge reuses."""
+    commands, conflicts = {}, set()
+    try:
+        for path in paths:
+            with path.open(encoding="utf-8") as rows:
+                for line in rows:
+                    entry = json.loads(line)
+                    event = entry.get("payload") or {}
+                    item = event.get("item") or {}
+                    if (entry.get("type") != "event_msg" or event.get("type") != "item_completed"
+                            or item.get("type") != "CommandExecution"):
+                        continue
+                    identifier, argv, directory = item.get("id"), item.get("command"), item.get("cwd")
+                    if not isinstance(identifier, str) or not identifier:
+                        continue
+                    if (not isinstance(argv, list) or not argv or not argv[0]
+                            or not all(isinstance(word, str) and "\0" not in word for word in argv)
+                            or not isinstance(directory, str)):
+                        conflicts.add(identifier)
+                        continue
+                    uri = urlsplit(directory)
+                    if uri.scheme:
+                        if uri.scheme != "file" or uri.netloc or uri.query or uri.fragment:
+                            conflicts.add(identifier)
+                            continue
+                        directory = unquote(uri.path, errors="strict")
+                    if not directory.startswith("/") or "\0" in directory:
+                        conflicts.add(identifier)
+                        continue
+                    command = (argv, directory)
+                    if commands.setdefault(identifier, command) != command:
+                        conflicts.add(identifier)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}  # An unreadable capture cannot supply command evidence.
+    return {identifier: command for identifier, command in commands.items() if identifier not in conflicts}
+
+
+def call_command(call):
+    raw = call.get("rawInput")
+    command = raw.get("command", raw.get("cmd", raw.get("argv"))) if isinstance(raw, dict) else raw
+    if isinstance(command, list) and command and all(isinstance(word, str) for word in command):
+        return shlex.join(command)
+    return command if isinstance(command, str) and command.strip() else None
+
+
+def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None, rollout=None):
     hits, calls = [], 0
     scripts, written = {}, set()
-    observed_cwds = set()
     for page in pages:
         execution = page.get("execution")
         execution = execution if isinstance(execution, dict) else {}
@@ -71,13 +121,20 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
             if allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query") and call.get("kind") != "execute":
                 continue
             if commits is not None:
-                raw = call.get("rawInput")
-                if isinstance(raw, dict) and isinstance(directory := raw.get("cwd") or raw.get("workdir"), str):
-                    if posixpath.isabs(directory):
-                        observed_cwds.add(directory)
-                list_cwd = page_cwd or one_or_many(frozenset(observed_cwds)) or None
+                if rollout is not None and call.get("name") == "exec_command":
+                    if command := call_command(call):
+                        raw = call.get("rawInput")
+                        directory = (raw.get("cwd") or raw.get("workdir")) if isinstance(raw, dict) else None
+                        call = {**call, "kind": "execute", "rawInput": {"command": command, "cwd": directory}}
+                    elif match := rollout.get(call.get("toolCallId")):
+                        argv, directory = match
+                        call = {**call, "kind": "execute", "rawInput": {"argv": argv, "cwd": directory}}
+                    else:
+                        hits.append({"seq": item["seq"], "kind": "needs-inspection", "where": "input",
+                                     "snippet": f"missing Codex command evidence: {call.get('title') or 'exec_command'}"})
+                        continue
                 for name, snippet in dict(pilot_hits(call, own_workspace, commits, single_commit, scripts=scripts, written=written,
-                                                    cwd=page_cwd, home=page_home, list_cwd=list_cwd)).items():
+                                                    cwd=page_cwd, home=page_home)).items():
                     hits.append({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet})
                 continue
             inp, out = call_parts(item)
@@ -1131,6 +1188,84 @@ def jq_paths(args):
         raise InspectionRequired("jq program is missing or can load external code")
 
 
+def file_operands(args, value_options=()):
+    options = True
+    words = iter(args)
+    for arg in words:
+        if options and arg == "--":
+            options = False
+            continue
+        if options and arg in value_options:
+            if next(words, None) is None:
+                raise InspectionRequired(f"missing value for {arg}")
+            continue
+        if options and arg.startswith("-") and arg != "-":
+            name, _, _ = arg.partition("=")
+            if name in value_options:
+                continue
+            if "=" in arg:
+                yield arg.split("=", 1)[1]
+            elif "/" in arg:
+                yield arg
+        else:
+            yield arg
+
+
+def link_hits(args, own_workspace, cwd):
+    operands = []
+    target_dir = None
+    options, symbolic, relative, no_target_dir = True, False, False, False
+    words = iter(args)
+    for arg in words:
+        if options and arg == "--":
+            options = False
+        elif options and (arg in {"-t", "--target-directory"} or arg.startswith("--target-directory=")):
+            target_dir = arg.partition("=")[2] if "=" in arg else next(words, None)
+            if not target_dir:
+                raise InspectionRequired("ln target directory is missing")
+        elif options and arg.startswith("-") and arg != "-":
+            names = {"--symbolic": "s", "--relative": "r", "--no-target-directory": "T", "--force": "f",
+                     "--no-dereference": "n", "--verbose": "v", "--logical": "L", "--physical": "P"}
+            flags = names.get(arg, arg[1:])
+            if not re.fullmatch(r"[srTfnvLP]+", flags):
+                raise InspectionRequired(f"unsupported ln option {arg}")
+            symbolic |= "s" in flags
+            relative |= "r" in flags
+            no_target_dir |= "T" in flags
+        else:
+            operands.append(arg)
+
+    if not operands or (no_target_dir and (target_dir or len(operands) != 2)):
+        raise InspectionRequired("ln target or link destination is ambiguous")
+    if not symbolic or relative:
+        # GNU ln --relative computes its target from the command's cwd.
+        for path in [*operands, *([target_dir] if target_dir else [])]:
+            yield from path_hits(path, own_workspace, cwd)
+        return
+    if target_dir:
+        targets, destination = operands, target_dir
+    elif len(operands) == 1:
+        targets, destination = operands, "."
+    else:
+        targets, destination = operands[:-1], operands[-1]
+    yield from path_hits(destination, own_workspace, cwd)
+    destinations = resolve_paths(destination, cwd) or ()
+    if target_dir or len(operands) != 2 or destination.endswith("/"):
+        directories = set(destinations)
+    else:
+        directories = {posixpath.dirname(path) for path in destinations}
+        if not no_target_dir:
+            # With two operands, an existing directory also receives the link.
+            directories.update(destinations)
+    for target in targets:
+        if posixpath.isabs(target):
+            yield from path_hits(target, own_workspace, cwd)
+        else:
+            if not directories or any(not posixpath.isabs(path) for path in directories):
+                raise InspectionRequired("relative symlink target without a known link directory")
+            yield from path_hits(target, own_workspace, frozenset(directories))
+
+
 def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, written=None, cwd="", home=None,
                  running_scripts=frozenset()):
     executable, *args = words
@@ -1158,9 +1293,15 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
           and args and re.match(r"(?:\./)?(?:tests?|e2e|scripts)/", args[0])):
         yield "build-or-test", shlex.join(words)
     elif program in {"env", "timeout", "nice", "nohup"}:
+        inner = wrapped_command(program, args)
         if program == "nohup":
             yield from path_hits("nohup.out", own_workspace, cwd)
-        yield from command_hits(wrapped_command(program, args), own_workspace, commits, single_commit,
+            if scripts is not None and written is not None:
+                forget_script(scripts, "nohup.out", cwd)
+                written.add("nohup.out")
+        if scripts is not None and written is not None:
+            record_script_write(scripts, written, inner, (), None, cwd)
+        yield from command_hits(inner, own_workspace, commits, single_commit,
                                 scripts=scripts, written=written, cwd=cwd, home=home, running_scripts=running_scripts)
     elif program in {"bash", "sh"} and len(args) == 2 and args[0] in {"-c", "-lc"}:
         yield from shell_hits(args[1], own_workspace, commits, single_commit, scripts=scripts, written=written, cwd=cwd, home=home,
@@ -1180,6 +1321,8 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
     elif program == "find":
         for path in find_paths(args):
             yield from path_hits(path, own_workspace, cwd)
+    elif program == "ln":
+        yield from link_hits(args, own_workspace, cwd)
     elif program == "jq":
         for path in jq_paths(args):
             yield from path_hits(path, own_workspace, cwd)
@@ -1188,12 +1331,13 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
             raise InspectionRequired("printf may assign a shell variable")
         return  # These operands are data. Redirection targets are checked separately.
     elif program in READ_COMMANDS:
-        if program == "sort" and any(arg.startswith("--compress") for arg in args):
-            raise InspectionRequired("sort may start an external program")
-        for arg in args:
-            if arg.startswith("-") and "=" not in arg and "/" not in arg:
-                continue
-            yield from path_hits(arg.split("=", 1)[-1] if arg.startswith("-") else arg, own_workspace, cwd)
+        if program == "sort":
+            end = args.index("--") if "--" in args else len(args)
+            if any(arg.startswith("--compress") for arg in args[:end]):
+                raise InspectionRequired("sort may start an external program")
+        value_options = {"-I", "--ignore", "--hide"} if program == "ls" else ()
+        for path in file_operands(args, value_options):
+            yield from path_hits(path, own_workspace, cwd)
     else:
         raise InspectionRequired(f"unsupported command {program}")
 
@@ -1245,7 +1389,7 @@ def record_script_write(scripts, written, words, redirections, source, cwd):
     if program in {"cp", "mv", "ln"} and len(words) >= 2:
         written.add(posixpath.basename(words[-1]))
     if program == "touch":
-        written.update(posixpath.basename(path) for path in words[1:] if not path.startswith("-"))
+        written.update(posixpath.basename(path) for path in file_operands(words[1:]))
     if program in {"cp", "mv", "rm", "ln"} or program == "git" and words[1:2] in (["checkout"], ["switch"]):
         scripts.clear()  # A destination can name a directory or be a symlink.
     elif program == "sed" or program == "sort":
@@ -1254,10 +1398,9 @@ def record_script_write(scripts, written, words, redirections, source, cwd):
                for word in words[1:]):
             scripts.clear()
     elif program == "tee":
-        for path in words[1:]:
-            if not path.startswith("-"):
-                written.add(posixpath.basename(path))
-                forget_script(scripts, path, cwd)
+        for path in file_operands(words[1:]):
+            written.add(posixpath.basename(path))
+            forget_script(scripts, path, cwd)
     stdout = [(mode, path) for mode, path in redirections if mode in {">", ">>"}]
     target = stdout[0][1] if len(stdout) == 1 and stdout[0][0] == ">" else None
     if source is not None and words == ["cat"] and target is not None:
@@ -1369,7 +1512,7 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
 PATH_KEYS = {"cwd", "path", "paths", "file_path", "filePath", "directory", "workdir", "target_file"}
 
 
-def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written, cwd, home, list_cwd):
+def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written, cwd, home):
     title = call.get("title") or ""
     kind = call.get("kind")
     raw = call.get("rawInput")
@@ -1384,7 +1527,7 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
     base = cwd or ""
     if isinstance(raw, dict) and (directory := raw.get("cwd") or raw.get("workdir")):
         cwd = one_or_many(resolve_paths(directory, base))
-    edit_paths = False
+    target_seen = False
     for fields in [raw, *(call.get("locations") or [])]:
         if isinstance(fields, dict):
             for key in PATH_KEYS & fields.keys():
@@ -1392,18 +1535,22 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
                 for path in paths:
                     if isinstance(path, str):
                         yield from path_hits(path, own_workspace, base if key in {"cwd", "workdir"} else cwd or "")
-                        if kind in {"edit", "delete", "move"} and key not in {"cwd", "workdir"}:
-                            edit_paths = True
-                            written.add(posixpath.basename(path))
-                            forget_script(scripts, path, cwd or "")
-    if kind in {"edit", "delete", "move"} and not edit_paths:
+                        if key not in {"cwd", "workdir"} and path:
+                            target_seen = True
+                            if kind in {"edit", "delete", "move"}:
+                                written.add(posixpath.basename(path))
+                                forget_script(scripts, path, cwd or "")
+    if kind in {"edit", "delete", "move"} and not target_seen:
         scripts.clear()
 
-    if kind == "read" and not raw and not call.get("locations"):
+    listing = kind == "read" and (title == "List files" or title.startswith("List files "))
+    if listing:
+        if match := re.fullmatch(r"""List files in (['"])(.+)\1""", title):
+            yield from path_hits(match[2], own_workspace, cwd or "")
+            target_seen = True
+    elif kind == "read" and not (target_seen or raw or call.get("locations")):
         if match := re.fullmatch(r"Read file ['\"](.*)['\"]", title):
             yield from path_hits(match[1], own_workspace, cwd or "")
-        elif title == "List files" and call.get("name") == "exec_command" and list_cwd:
-            yield from path_hits(".", own_workspace, list_cwd)
         else:
             yield "needs-inspection", f"missing read path: {title[:400]}"
 
@@ -1440,8 +1587,10 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
                         command = parts[0]
     if isinstance(command, list) and command and all(isinstance(word, str) for word in command):
         command = shlex.join(command)
-    if isinstance(command, str) and command.strip() and kind in {None, "execute", "other"}:
+    if isinstance(command, str) and command.strip() and (kind in {None, "execute", "other"} or listing):
         yield from shell_hits(command, own_workspace, commits, single_commit, scripts=scripts, written=written, cwd=cwd or "", home=home)
+    elif listing and not target_seen:
+        yield "needs-inspection", f"missing read path: {title[:400]}"
     elif kind == "execute" or title in {"rql_query", "mcp__rql__rql_query"}:
         yield "needs-inspection", f"missing or unsupported command input: {title[:400]}"
 
@@ -1459,7 +1608,8 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
             cwd = cwd or placement.get("cwd")
             home = home or placement.get("home")
         result = scan(pages, own_workspace, commits=commits, allow_rql=allow_rql, single_commit=single_commit,
-                      cwd=cwd, home=home)
+                      cwd=cwd, home=home, rollout=rollout_commands(
+                          sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))))
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = {"tool_items": 0, "hits": [{"kind": "missing-or-unreadable-transcript", "snippet": str(error)}]}
     return dict(result, passed=all(hit["kind"] == "interpreter-screened" for hit in result["hits"]))

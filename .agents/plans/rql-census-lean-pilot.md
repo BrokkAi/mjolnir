@@ -22,6 +22,8 @@ The study plan says *what* is measured and *why*. This ExecPlan says how the har
 - [ ] Launch on the coordinator's schedule (Decision Log): Codex work from codex3's reset (about 11-22 14Z); Fable work from claude4's reset (about 11-23 05Z); judging through about 11-27.
 - [x] Judge preparation builds the batch and isolation evidence from one snapshot under `pilot.lock` (7865b551f, b9ceb9627).
 - [x] The egress source stays frozen across judge commands, missing evidence reports as missing, and live readouts compute isolation from the selected runs directory (7f53e1e5c, b9ceb9627).
+- [ ] In the N/G smoke at codex3's reset, confirm that the Codex rollout capture finds the session's rollout inside a real pilot Podman container (`/var/lib/hel/profiles/<sid>/sessions/*/*/*/rollout-*.jsonl`), and that summarized exec events join on `CommandExecution.id`. Until then, a wrong path only leaves those events needing inspection.
+- [ ] User decision: whether the audit passes writers' suffix-free `sed -i`/`perl -i` edits of their own brief.md. These are 4 of 30 archived writer sessions, the only remaining writer voids. Asked twice while the user was away; ask again before launch.
 - [ ] Re-freeze the pilot binaries at the last reviewed mj commit before launch (currently `mj-13c4fc559`).
 - [ ] Tracked, no deadline: the recovery wedge when frozen inputs change while a writer waits for input (override on 546ebd478). Two mj host-only edge cases, also overridden: a Move with sub-agents is refused only after its children stop, and a `--base` outside branches and tags is lost on dissociation (overrides on dfb55808a/2ac06cfcc).
 

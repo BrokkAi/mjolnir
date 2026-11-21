@@ -371,9 +371,98 @@ def test_expansion_and_wrappers_keep_protected_access_visible(tmp_path, command,
     assert kind in {hit["kind"] for hit in report["hits"]}
 
 
-def test_title_only_list_uses_recorded_working_directory(tmp_path):
-    list_call = {"name": "exec_command", "kind": "read", "title": "List files"}
+# Hard-won: 23e9afc: title-only list inferred a target from the working directory
+@pytest.mark.parametrize("raw", [None, {"cwd": f"/workspace/{OWN}/repo"}])
+def test_title_only_list_requires_target_evidence(tmp_path, raw):
+    list_call = {"name": "exec_command", "kind": "read", "title": "List files", "rawInput": raw}
     prior = shell("pwd")
     prior["rawInput"]["cwd"] = f"/workspace/{OWN}/repo"
-    report = audit_calls(tmp_path, [prior, list_call])
+    report = audit_calls(tmp_path, [prior, list_call], cwd=f"/workspace/{OWN}/repo")
+    assert not report["passed"]
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(2, "needs-inspection")]
+
+
+@pytest.mark.parametrize("evidence", [
+    {"name": "list_files", "locations": [{"path": "src"}]},
+    {"rawInput": {"argv": ["ls"]}},
+])
+def test_list_with_recorded_target_or_visible_default_passes(tmp_path, evidence):
+    report = audit_calls(tmp_path, [{"name": "exec_command", "kind": "read", "title": "List files", **evidence}],
+                         cwd=f"/workspace/{OWN}/repo")
     assert report["passed"], report["hits"]
+
+
+# Hard-won: 23e9afc: wrapped file writers left a stale recorded script
+@pytest.mark.parametrize("overwrite", ["env cp incoming.py script.py", "timeout 2 env tee script.py"])
+def test_wrapped_writes_invalidate_recorded_scripts(tmp_path, overwrite):
+    report = audit_calls(tmp_path, [
+        shell("cat > script.py <<'PY'\nprint('recorded content')\nPY"),
+        shell(overwrite),
+        shell("python3 script.py"),
+    ])
+    assert not report["passed"]
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(3, "needs-inspection")]
+
+
+# Hard-won: 23e9afc: relative symlink target was screened from the shell directory
+@pytest.mark.parametrize("destination", ["../alias", f"-t /workspace/{OWN}"])
+def test_relative_symbolic_link_target_uses_link_directory(tmp_path, destination):
+    report = audit_calls(tmp_path, [shell(f"ln -s ../{FOREIGN}/x {destination}")], cwd=f"/workspace/{OWN}/repo")
+    assert not report["passed"]
+    assert "other-workspace" in {hit["kind"] for hit in report["hits"]}
+
+
+def test_relative_link_with_unknown_destination_directory_requires_inspection(tmp_path):
+    report = audit_call(tmp_path, shell("ln -s relative-file link-name"))
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+# Hard-won: 23e9afc: dash-prefixed file operands were skipped after --
+@pytest.mark.parametrize("command", ["cat -- -state.db", "sort -- --compress-state.db"])
+def test_dash_prefixed_path_after_end_of_options_is_screened(tmp_path, command):
+    report = audit_call(tmp_path, shell(command))
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"memory-or-sessions"}
+
+
+def summarized_ls(tmp_path, cwd, *, command="ls", title="List files", rollout=True):
+    transcript = {"toolCallId": "exec-terminal-1", "name": "exec_command", "title": title,
+                  "kind": "read", "status": "completed"}
+    if rollout:
+        directory = tmp_path / "codex-rollout"
+        directory.mkdir()
+        item = {"type": "CommandExecution", "id": transcript["toolCallId"],
+                "command": ["/bin/bash", "-lc", command], "cwd": f"file://{cwd}",
+                "parsed_cmd": [{"type": "list_files", "path": "summary only"}]}
+        row = {"type": "event_msg", "payload": {"type": "item_completed", "item": item}}
+        (directory / "rollout-fixture.jsonl").write_text(json.dumps(row) + "\n")
+    return audit_calls(tmp_path, [transcript], cwd=f"/workspace/{OWN}")
+
+
+# Hard-won: 23e9afc: summarized list events hid their target
+def test_summarized_ls_uses_rollout_workdir_instead_of_placement(tmp_path):
+    report = summarized_ls(tmp_path, "/run/hel/git-cache")
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"git-history-escape"}
+
+
+def test_summarized_ls_in_the_session_workspace_passes(tmp_path):
+    report = summarized_ls(tmp_path, f"/workspace/{OWN}/repo")
+    assert report["passed"], report["hits"]
+
+
+@pytest.mark.parametrize(("command", "title"), [
+    ("ls --ignore README.md mj-cli", "List files in 'README.md'"),
+    ("ls --ignore /run/hel/git-cache mj-cli", "List files in '/run/hel/git-cache'"),
+])
+def test_summarized_ls_uses_real_operands_instead_of_the_parsed_title(tmp_path, command, title):
+    report = summarized_ls(tmp_path, f"/workspace/{OWN}/repo", command=command, title=title)
+    assert report["passed"], report["hits"]
+
+
+@pytest.mark.parametrize("title", ["List files", "List files in 'mj-cli'", "Read file 'README.md'"])
+def test_summarized_exec_without_rollout_needs_inspection(tmp_path, title):
+    report = summarized_ls(tmp_path, f"/workspace/{OWN}/repo", title=title, rollout=False)
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
