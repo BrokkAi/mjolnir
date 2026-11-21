@@ -1153,6 +1153,13 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(usage_delta(before, after, "cid", 2, VERSION), {"total_tokens": 19})
         with self.assertRaisesRegex(RuntimeError, "expected provider usage"):
             usage_delta(before, after, "cid", 2, "claude-sonnet-5-4")
+        models = after["turns"][0]["usage"]["provider_details"]
+        models["model_usage"] = {VERSION: {}, "claude-haiku-5-5": {}}
+        self.assertEqual(usage_delta(before, after, "cid", 2, VERSION), {"total_tokens": 19})
+        for reported in ({"claude-haiku-5-5": {}}, {VERSION: {}, "claude-opus-5-5": {}}):
+            with self.subTest(reported=reported), self.assertRaisesRegex(RuntimeError, "expected provider usage"):
+                models["model_usage"] = reported
+                usage_delta(before, after, "cid", 2, VERSION)
 
 
 if __name__ == "__main__":

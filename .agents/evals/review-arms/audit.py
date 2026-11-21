@@ -463,9 +463,10 @@ def shell_commands(command, cwd, home):
             if delimiter and any(mode == "<" for mode, _ in paths):
                 raise InspectionRequired("heredoc combined with another stdin redirection")
             if pending or delimiter:
-                pending.append((argv, targets, delimiter, cwd))
+                unconditional = preceding in {None, ";", "\n"} and token in {";", "\n", "&&"}
+                pending.append((argv, targets, delimiter, cwd, unconditional))
             else:
-                yield argv, targets, None, cwd
+                yield argv, targets, None, cwd, False
             skipped = frozenset()
             if token != preceding and preceding in {"&&", "||"}:
                 # A different connector can rejoin an earlier skipped branch.
@@ -497,9 +498,9 @@ def shell_commands(command, cwd, home):
         if has_command or token != "\n":
             preceding = token
         if token == "\n":
-            for argv, targets, marker, start_dir in pending:
+            for argv, targets, marker, start_dir, unconditional in pending:
                 source, offset = heredoc_body(command, offset, marker) if marker else (None, offset)
-                yield argv, targets, source, start_dir
+                yield argv, targets, source, start_dir, unconditional
             pending.clear()
             if offset >= len(command):
                 return
@@ -1483,10 +1484,40 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
 
 
 def interpreter_arguments(program, args):
-    if program in PYTHON:
-        while args and args[0] in {"-I", "-B", "-E", "-s", "-S", "-u"}:
-            args = args[1:]
-    return args
+    # Only skip flags that cannot load code, read an extra file, or redirect output.
+    offset = 0
+    while offset < len(args):
+        option = args[offset]
+        if program in PYTHON:
+            if re.fullmatch(r"-[IBEsSuO]+", option):
+                offset += 1
+                continue
+            if not option.startswith(("-W", "-X")):
+                break
+            separate = len(option) == 2
+            value = args[offset + 1] if separate and offset + 1 < len(args) else option[2:]
+            if option.startswith("-W"):
+                # A qualified warning category causes Python to import its module.
+                fields = value.split(":")
+                safe = bool(value) and len(fields) <= 5 and (
+                    len(fields) < 3 or re.fullmatch(r"[A-Za-z_0-9]*", fields[2])
+                )
+            else:
+                safe = re.fullmatch(
+                    r"(?:dev|faulthandler|warn_default_encoding|importtime(?:=2)?|"
+                    r"utf8(?:=[01])?|tracemalloc(?:=[0-9]+)?)", value
+                )
+            if not safe:
+                raise InspectionRequired(f"unsupported Python {option[:2]} option")
+            offset += 2 if separate else 1
+        elif program == "node":
+            if option not in {"--no-addons", "--no-deprecation", "--no-warnings", "--pending-deprecation",
+                              "--throw-deprecation", "--trace-deprecation", "--trace-warnings"}:
+                break
+            offset += 1
+        else:
+            break
+    return args[offset:]
 
 
 def forget_script(scripts, path, cwd):
@@ -1550,6 +1581,7 @@ def record_script_write(scripts, written, words, redirections, source, cwd):
     target = stdout[0][1] if len(stdout) == 1 and stdout[0][0] == ">" else None
     if source is not None and words == ["cat"] and target is not None:
         record(target, source)
+        return target
     elif source is not None and program == "tee" and all(not path.startswith("-") for path in words[1:]):
         for path in words[1:] + ([target] if target else []):
             record(path, source)
@@ -1559,7 +1591,7 @@ def record_script_write(scripts, written, words, redirections, source, cwd):
             record(target, text)
 
 
-def recorded_script(words, scripts, written, cwd):
+def recorded_script(words, scripts, written, cwd, preceding_write=None):
     if not words:
         return None
     path, *args = words
@@ -1585,6 +1617,10 @@ def recorded_script(words, scripts, written, cwd):
     else:
         return None
     source = scripts.get(recorded_path(path, cwd))
+    if source is None and preceding_write is not None:
+        write_cwd, target, written_source = preceding_write
+        if cwd == write_cwd and path == target:
+            source = written_source
     if source is None:
         return None
     if re.match(r"(?:\./)?(?:tests?|e2e|scripts)/", path):
@@ -1598,8 +1634,13 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
         scripts = {}
     if written is None:
         written = set()
+    preceding_write = None
     try:
-        for words, redirections, source, start_dir in shell_commands(command, cwd, home):
+        for words, redirections, source, start_dir, unconditional in shell_commands(command, cwd, home):
+            # An unconditional relative write may be followed immediately by
+            # the same relative lookup. Neither absolute candidate is known
+            # to have been written, so the evidence stays local to this pair.
+            last_write, preceding_write = preceding_write, None
             for _, path in redirections:
                 yield from path_hits(path, own_workspace, start_dir)
             if not words and source is None:
@@ -1607,7 +1648,7 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                 continue
             try:
                 if source is None:
-                    script = recorded_script(words, scripts, written, start_dir)
+                    script = recorded_script(words, scripts, written, start_dir, last_write)
                     record_script_write(scripts, written, words, redirections, source, start_dir)
                     if script is None:
                         yield from command_hits(words, own_workspace, commits, single_commit,
@@ -1632,9 +1673,13 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                                                         start_dir, written, edit_paths=edit_paths)
                             scripts.clear()
                 else:
-                    record_script_write(scripts, written, words, redirections, source, start_dir)
+                    target = record_script_write(scripts, written, words, redirections, source, start_dir)
                     if words == ["cat"]:
                         system_program(words[0], written)
+                        if (unconditional and isinstance(start_dir, frozenset) and target
+                                and redirections == [(">", target)] and not posixpath.isabs(target)
+                                and not re.search(r"[*?\[]", target)):
+                            preceding_write = (start_dir, target, source)
                         continue  # Here the body is literal data.
                     if words and posixpath.basename(words[0]) == "tee":
                         yield from command_hits(words, own_workspace, commits, single_commit, written=written, cwd=start_dir)

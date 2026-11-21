@@ -402,6 +402,9 @@ def pilot_weekly_hold(profile, *, scope=None, cost=0, quota=None):
 
 PILOT_CLAUDE_MODEL = "sonnet"
 PILOT_CLAUDE_EFFORT = "high"
+# Claude Code reported this auxiliary model on eight of nine Fable smoke
+# turns and alongside the pinned Sonnet model on the first Sonnet smoke turn.
+PILOT_CLAUDE_AUXILIARY_PROVIDER_ID = "claude-haiku-5-5"
 
 
 def pilot_claude_hold(profile):
@@ -448,8 +451,8 @@ def provider_model(usage, command, turn, expected):
     if usage["turn_selections"].get(command) != {"model": PILOT_CLAUDE_MODEL, "effort": PILOT_CLAUDE_EFFORT}:
         raise ValueError("provider usage does not attribute the turn to Sonnet/high")
     models = turns[0]["usage"]["provider_details"]["model_usage"]
-    reported = {model.split("[", 1)[0] for model in models if model.startswith("claude-")}
-    if reported != {expected}:
+    reported = {model.split("[", 1)[0] for model in models}
+    if expected not in reported or reported - {expected, PILOT_CLAUDE_AUXILIARY_PROVIDER_ID}:
         raise ValueError(f"expected provider usage for {expected}, found {sorted(reported)}")
     return expected
 

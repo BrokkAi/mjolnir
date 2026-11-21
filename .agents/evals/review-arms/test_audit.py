@@ -200,6 +200,100 @@ def test_audit_screens_scripts_written_visibly_in_an_earlier_call(tmp_path, writ
     assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(2, "interpreter-screened")]
 
 
+# Hard-won: e7cee4b: python3 -I script run voided a visible engine script
+@pytest.mark.parametrize(("argument", "extra_hits"), [
+    ("$D/answer.json", set()),
+    (".mj/store.db", {"memory-or-sessions"}),
+])
+def test_engine_correlates_a_relative_scratch_script_and_screens_its_argument(tmp_path, argument, extra_hits):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    command = (
+        f"cd {checkout}; D=.rql-engine-{OWN}; cat > $D/build.py <<'EOF'\n"
+        f"print('safe')\nEOF\npython3 -I $D/build.py {argument}"
+    )
+    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo")
+    assert report["passed"] is (not extra_hits)
+    assert {hit["kind"] for hit in report["hits"]} == {"interpreter-screened"} | extra_hits
+
+
+def test_engine_runs_a_visible_script_in_the_same_success_chain(tmp_path):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    scratch = f"{checkout}/.rql-engine-{OWN}"
+    command = (
+        f"cd {scratch} && cat > build_answer.py <<'EOF' &&\n"
+        "import json\njson.dump({'rows': []}, open('answer.json', 'w'))\nEOF\n"
+        """python3 -I build_answer.py && python3 -I -c "import json; print(json.load(open('answer.json')))" """
+    )
+    report = audit_calls(tmp_path, [shell(command)], cwd=checkout)
+    assert report["passed"], report["hits"]
+    assert {hit["kind"] for hit in report["hits"]} == {"interpreter-screened"}
+
+
+def test_ambiguous_relative_write_cannot_attest_an_absolute_script(tmp_path):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    report = audit_calls(tmp_path, [
+        shell(f"cd {checkout}; cat > build.py <<'EOF'\nprint('safe')\nEOF\npython3 -I {checkout}/build.py"),
+    ], cwd=f"/workspace/{OWN}/repo")
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+def test_script_evidence_does_not_flow_into_a_heredoc_failure_branch(tmp_path):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    report = audit_calls(tmp_path, [
+        shell(f"cd {checkout}; cat > build.py <<'EOF' ||\nprint('safe')\nEOF\npython3 -I build.py"),
+    ], cwd=f"/workspace/{OWN}/repo")
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+def test_engine_script_remains_opaque_after_an_in_place_edit(tmp_path):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    scratch = f"{checkout}/.rql-engine-{OWN}"
+    report = audit_calls(tmp_path, [
+        shell(f"cd {scratch} && cat > build_answer.py <<'EOF'\nprint('before')\nEOF"),
+        shell(f"cd {scratch} && sed -i 's/before/after/g' build_answer.py && python3 -I build_answer.py"),
+    ], cwd=checkout)
+    assert not report["passed"]
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(2, "needs-inspection")]
+
+
+def test_cd_failure_cannot_run_a_script_recorded_only_in_the_target_directory(tmp_path):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    scratch = f"{checkout}/.rql-engine-{OWN}"
+    report = audit_calls(tmp_path, [
+        shell(f"cd {scratch} && cat > build_answer.py <<'EOF'\nprint('safe')\nEOF\npython3 -I build_answer.py"),
+    ], cwd=checkout)
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+@pytest.mark.parametrize(("program", "source"), [
+    ("python3 -IBuEsSO -W ignore::DeprecationWarning -Xutf8 -X dev", "print('safe')"),
+    ("node --no-warnings --no-addons", "console.log('safe')"),
+])
+def test_recorded_script_accepts_safe_interpreter_flags(tmp_path, program, source):
+    report = audit_calls(tmp_path, [
+        shell(f"cat > answer <<'EOF'\n{source}\nEOF\n{program} answer"),
+    ], cwd=f"/workspace/{OWN}/repo")
+    assert report["passed"], report["hits"]
+    assert {hit["kind"] for hit in report["hits"]} == {"interpreter-screened"}
+
+
+@pytest.mark.parametrize("run", [
+    "python3 -I unrecorded.py",
+    "python3 -X presite=other answer",
+    "python3 -W ignore::other.Warning answer",
+    "node --require=./preload.js answer",
+])
+def test_interpreter_options_do_not_hide_unrecorded_code(tmp_path, run):
+    report = audit_calls(tmp_path, [
+        shell(f"cat > answer <<'EOF'\nprint('safe')\nEOF\n{run}"),
+    ], cwd=f"/workspace/{OWN}/repo")
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
 @pytest.mark.parametrize("mutation", [
     shell("printf 'changed' >> f.py"),
     shell("cp other.py f.py"),

@@ -13,6 +13,8 @@ commands for source inspection. Do not inspect harness transcripts, agent state
 or other turn artifacts. Do not run repository code, access Git, or seek any
 information about changes, bugs, study labels, or subsequent revisions.
 Keep temporary files beside the output file in the provided scratch directory.
+Rewrite scratch scripts in full with `cat > file <<'EOF'` instead of editing in place,
+using the same path for the write and run without changing directories.
 
 Write a single JSON object to the specified output path. Use this schema:
 {"rows": [{"kind": "row_kind", "sites": [{"path": "repo/relative", "start_line": 1,
