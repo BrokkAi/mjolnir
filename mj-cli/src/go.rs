@@ -216,24 +216,30 @@ pub(crate) fn resolve_recipe(
         _ => {
             recipe.project_directory = None;
             if recipe.bundle_id.is_none() {
-                let source = directory
-                    .to_str()
-                    .context("repository path must be valid UTF-8")?;
                 // The daemon owns the configuration, and project creation is a
                 // configuration write plus a catalog write. Ask it, rather
                 // than creating the bundle in this client.
-                let created = mj_core::runtime::block_on(async {
-                    crate::daemon::connect_or_start()
-                        .await?
-                        .create_project(vec![source.to_owned()])
-                        .await
-                })??;
-                recipe.bundle_id = Some(created.bundle_id);
+                recipe.bundle_id = Some(mj_core::runtime::block_on(quick_bundle_for_directory(
+                    directory,
+                ))??);
             }
             recipe.create_managed_worktree = Some(false);
         }
     }
     Ok(recipe)
+}
+
+/// Resolve a local project directory into the daemon-owned quick bundle used
+/// by container targets. `mj go` and `mj new` share this interpretation.
+pub(crate) async fn quick_bundle_for_directory(directory: &std::path::Path) -> Result<String> {
+    let source = directory
+        .to_str()
+        .context("project directory must be valid UTF-8")?;
+    crate::daemon::connect_or_start()
+        .await?
+        .create_project(vec![source.to_owned()])
+        .await
+        .map(|created| created.bundle_id)
 }
 
 /// Remote paths are opaque client input; only the daemon may inspect them.

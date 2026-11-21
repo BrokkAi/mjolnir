@@ -1661,20 +1661,28 @@ fn kimi_checkpoint_export_and_restore_succeed_without_workspaces_registry() {
     assert!(!restored_home.join("workspaces.json").exists());
     let expected_state_rel = restored_native_relative_path(
         HarnessKind::Kimi,
-        Path::new(&format!("sessions/{source_workspace}/session_{NATIVE}/state.json")),
+        Path::new(&format!(
+            "sessions/{source_workspace}/session_{NATIVE}/state.json"
+        )),
         Some(&target_cwd),
     )
     .unwrap();
     let restored_state: Value =
         serde_json::from_slice(&fs::read(restored_home.join(&expected_state_rel)).unwrap())
             .unwrap();
-    assert_eq!(restored_state["workDir"], target_cwd.to_string_lossy().as_ref());
+    assert_eq!(
+        restored_state["workDir"],
+        target_cwd.to_string_lossy().as_ref()
+    );
     assert_eq!(restored_state["cwd"], target_cwd.to_string_lossy().as_ref());
 
     let restored_index: Value =
         serde_json::from_slice(&fs::read(restored_home.join("session_index.jsonl")).unwrap())
             .unwrap();
-    assert_eq!(restored_index["workDir"], target_cwd.to_string_lossy().as_ref());
+    assert_eq!(
+        restored_index["workDir"],
+        target_cwd.to_string_lossy().as_ref()
+    );
     assert_eq!(
         restored_index["sessionDir"],
         restored_home
@@ -1712,7 +1720,10 @@ fn kimi_checkpoint_export_and_restore_succeed_without_workspaces_registry() {
         &fs::read(restored_home_no_index.join(&expected_state_rel)).unwrap(),
     )
     .unwrap();
-    assert_eq!(restored_state["workDir"], target_cwd.to_string_lossy().as_ref());
+    assert_eq!(
+        restored_state["workDir"],
+        target_cwd.to_string_lossy().as_ref()
+    );
     assert_eq!(restored_state["cwd"], target_cwd.to_string_lossy().as_ref());
 }
 

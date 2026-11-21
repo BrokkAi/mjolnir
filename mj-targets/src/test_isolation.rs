@@ -93,10 +93,67 @@ impl IsolatedTest {
     }
 
     /// Run the child and return its output without judging it.
-    pub fn output(mut self) -> std::process::Output {
+    pub fn output(self) -> std::process::Output {
+        #[cfg(unix)]
+        {
+            self.output_unix()
+        }
+        #[cfg(not(unix))]
+        {
+            let mut this = self;
+            this.command
+                .output()
+                .unwrap_or_else(|error| panic!("run isolated {}: {error}", this.name))
+        }
+    }
+
+    #[cfg(unix)]
+    fn output_unix(mut self) -> std::process::Output {
+        use std::io::Read;
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+
         self.command
-            .output()
-            .unwrap_or_else(|error| panic!("run isolated {}: {error}", self.name))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut child = self
+            .command
+            .spawn()
+            .unwrap_or_else(|error| panic!("run isolated {}: {error}", self.name));
+        let mut guard = IsolatedProcessGroupGuard::new(child.id());
+        let mut stdout_pipe = child.stdout.take().expect("isolated child stdout");
+        let mut stderr_pipe = child.stderr.take().expect("isolated child stderr");
+        let stdout_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout_pipe.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr_pipe.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        // Wait for the isolated child to exit without reaping it yet so its PID
+        // (and therefore its process group ID) cannot be recycled while we
+        // terminate any surviving members of that process group.
+        wait_for_exit_without_reaping(child.id());
+        guard.terminate();
+        let status = child
+            .wait()
+            .unwrap_or_else(|error| panic!("wait for isolated {}: {error}", self.name));
+        let stdout = stdout_reader
+            .join()
+            .expect("isolated child stdout reader panicked")
+            .unwrap_or_else(|error| panic!("read isolated {} stdout: {error}", self.name));
+        let stderr = stderr_reader
+            .join()
+            .expect("isolated child stderr reader panicked")
+            .unwrap_or_else(|error| panic!("read isolated {} stderr: {error}", self.name));
+        std::process::Output {
+            status,
+            stdout,
+            stderr,
+        }
     }
 
     /// Run the child and fail this test with its output if it did not pass.
@@ -110,5 +167,97 @@ impl IsolatedTest {
             String::from_utf8_lossy(&output.stderr)
         );
         output
+    }
+}
+
+#[cfg(unix)]
+struct IsolatedProcessGroupGuard {
+    pgid: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+impl IsolatedProcessGroupGuard {
+    fn new(pid: u32) -> Self {
+        Self {
+            pgid: i32::try_from(pid).ok().filter(|&pid| pid > 1),
+        }
+    }
+
+    fn terminate(&mut self) {
+        let Some(pgid) = self.pgid.take() else {
+            return;
+        };
+        mj_core::subprocess::terminate_process_group(pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(unix)]
+impl Drop for IsolatedProcessGroupGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_exit_without_reaping(pid: u32) {
+    let id = pid as libc::id_t;
+    loop {
+        // SAFETY: `siginfo_t` is POD and `waitid` writes to it on success.
+        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        let result =
+            unsafe { libc::waitid(libc::P_PID, id, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if result == 0 {
+            return;
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    // Hard-won: #1625: isolated tests leaked surviving process-group members on exit.
+    #[test]
+    fn isolated_test_terminates_its_process_group_on_exit() {
+        const NAME: &str = "isolated_test_terminates_its_process_group_on_exit";
+        const SOCKET: &str = "MJ_TEST_ISOLATED_PGID_LEAK_SOCKET";
+        if let Some(socket_path) = std::env::var_os(SOCKET) {
+            let stream = UnixStream::connect(socket_path).expect("connect leak sentinel");
+            let fd: OwnedFd = stream.into();
+            let mut command = Command::new("sleep");
+            command.arg("600").stdin(Stdio::from(fd));
+            #[allow(clippy::zombie_processes)]
+            // Intentionally left running without wait() to verify IsolatedTest teardown.
+            let _child = command
+                .spawn()
+                .expect("spawn sleep in isolated process group");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("sentinel.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let acceptor = std::thread::spawn(move || listener.accept().expect("accept sentinel").0);
+        IsolatedTest::new(test_name(module_path!(), NAME))
+            .env(SOCKET, &socket_path)
+            .run();
+        let mut sentinel = acceptor.join().expect("sentinel accept thread panicked");
+        // The kernel closes all file descriptors of a killed process even if
+        // container PID 1 does not reap zombies, so EOF confirms termination.
+        sentinel
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        let read = sentinel
+            .read(&mut byte)
+            .expect("isolated process-group member should be terminated on exit");
+        assert_eq!(read, 0, "sentinel stream must hit EOF once sleep is killed");
     }
 }

@@ -45,13 +45,41 @@ impl Drop for RelayClient {
         // shutdown-safe fallback: it may run while Tokio's drivers are already
         // gone, so its bounded reaper cannot use runtime work or Tokio timers.
         drop(self.input.take());
-        let Some(child) = self.child.take() else {
+        let Some(mut child) = self.child.take() else {
             return;
         };
         let session_id = self.session_id.clone();
         // The proxy's SSH session stays leased until the reaper is done with
         // the child.
         let ssh_session = self.ssh_session.take();
+        if !self.handshake_complete {
+            // A proxy dropped before its handshake finished (for example when
+            // connect is cancelled on actor retirement or daemon shutdown) has
+            // no established session to drain. Kill its process group
+            // synchronously so the proxy cannot outlive a shutting-down caller.
+            if let Err(error) = child.start_kill()
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(%session_id, %error, "could not stop dropped relay proxy");
+            }
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            if let Err(error) = std::thread::Builder::new()
+                .name("hel-relay-reaper".into())
+                .spawn(move || {
+                    reap_killed_relay_proxy(child, session_id);
+                    let _lease = ssh_session;
+                })
+            {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    %error,
+                    "could not start dropped relay proxy reaper"
+                );
+            }
+            return;
+        }
         if let Err(error) = std::thread::Builder::new()
             .name("hel-relay-reaper".into())
             .spawn(move || {
@@ -106,6 +134,10 @@ pub fn reap_dropped_relay_proxy(mut child: proxy::ProxyChild, session_id: String
         tracing::warn!(%session_id, %error, "could not stop dropped relay proxy");
         return;
     }
+    reap_killed_relay_proxy(child, session_id);
+}
+
+fn reap_killed_relay_proxy(mut child: proxy::ProxyChild, session_id: String) {
     let deadline = Instant::now() + RELAY_PROXY_DETACH_GRACE;
     loop {
         match child.try_wait() {

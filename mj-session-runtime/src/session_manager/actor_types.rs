@@ -5,6 +5,10 @@ pub enum ManagerCommand {
         session_id: String,
         reply: oneshot::Sender<Option<ManagedSessionHandle>>,
     },
+    WaitForSession {
+        session_id: String,
+        reply: oneshot::Sender<Result<ManagedSessionHandle>>,
+    },
 }
 
 pub enum StartingEvent {
