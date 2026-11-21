@@ -175,15 +175,15 @@ where
 
     // 2. Idempotently hold dispatch and record the pending command IDs.
     let held_ids = relay.send_hold(&operation.operation_id, &expected_store_id)?;
-    if operation.in_place_held_command_ids.is_empty() && !held_ids.is_empty() {
-        operation.in_place_held_command_ids = held_ids;
-        operation.updated_at = now();
-        persist_op(operation)?;
-    }
 
-    // 3-5. Run post-hold steps; on any error, best-effort release the hold so
-    // the worker is never stranded.
+    // 3-5. Run post-hold steps (including persisting held command IDs); on any
+    // error, best-effort release the hold so the worker is never stranded.
     let post_hold: Result<()> = (|| {
+        if operation.in_place_held_command_ids.is_empty() && !held_ids.is_empty() {
+            operation.in_place_held_command_ids = held_ids;
+            operation.updated_at = now();
+            persist_op(operation)?;
+        }
         // 3. Restart only the harness under the new launch configuration.
         if !operation.in_place_harness_restarted {
             let launch_config = launch_config
@@ -538,6 +538,35 @@ mod tests {
         assert_eq!(
             relay.released, 1,
             "dispatch hold must be released on post-hold failure so the worker is never stranded"
+        );
+
+        // Failing while persisting `in_place_held_command_ids` right after
+        // `send_hold` must also release the dispatch hold.
+        let mut op2 = sample_in_place_op(ResumeQueueDisposition::Discard);
+        let mut relay2 = FakeInPlaceRelay::new(81, "store-A", &["cmd-1"]);
+        let mut persist_calls = 0_usize;
+        let err2 = run_in_place_move_state_machine(
+            &mut op2,
+            &mut relay2,
+            None,
+            None,
+            |_| {
+                persist_calls += 1;
+                if persist_calls == 2 {
+                    anyhow::bail!("simulated persist held ids failure");
+                }
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            err2.to_string().contains("simulated persist held ids failure"),
+            "{err2}"
+        );
+        assert_eq!(
+            relay2.released, 1,
+            "dispatch hold must be released when persisting held command IDs fails"
         );
     }
 }

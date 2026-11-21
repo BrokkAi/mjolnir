@@ -103,6 +103,84 @@ fn remove_if_exists(path: &Path) {
     }
 }
 
+/// Prune dead pre-crash Move users from `ec2_move_grants` in one local SQLite
+/// transaction before live Move admission opens.
+///
+/// Any `External` grant left with zero users is dropped immediately; any
+/// `Installed`/`Installing`/`Removing` grant left with zero users remains in
+/// the table with an empty user set so [`reconcile_ec2_grants_live`] can revoke
+/// it safely alongside live Move admissions.
+pub fn prune_stale_ec2_grant_users<S: Ec2GrantStore>(
+    store: &S,
+    active_operation_ids: &BTreeSet<String>,
+) -> Result<usize> {
+    store.with_transaction(|records| {
+        let keys: Vec<_> = records.keys().cloned().collect();
+        let mut pending = 0_usize;
+        for key in keys {
+            let remove = if let Some(record) = records.get_mut(&key) {
+                record.users.retain(|op| active_operation_ids.contains(op));
+                if record.users.is_empty()
+                    && record.state
+                        == super::transport::ec2_grant::Ec2GrantState::External
+                {
+                    true
+                } else {
+                    if record.users.is_empty()
+                        || matches!(
+                            record.state,
+                            super::transport::ec2_grant::Ec2GrantState::Installing
+                                | super::transport::ec2_grant::Ec2GrantState::Removing
+                        )
+                    {
+                        pending += 1;
+                    }
+                    false
+                }
+            } else {
+                false
+            };
+            if remove {
+                records.remove(&key);
+            }
+        }
+        Ok(pending)
+    })
+}
+
+/// Live-safe EC2 grant reconciliation across every recorded security group.
+///
+/// Uses [`Ec2GrantManager::reconcile_group`], which never prunes active users
+/// against an external snapshot, so concurrent Moves admitted after startup
+/// cannot have their active grants revoked.
+pub fn reconcile_ec2_grants_live<S: Ec2GrantStore, C: Ec2SecurityGroupClient>(
+    store: S,
+    client: C,
+    daemon_instance_id: &str,
+) -> Result<ReconcileReport> {
+    let security_groups: BTreeSet<String> = store.with_transaction(|records| {
+        Ok(records
+            .keys()
+            .map(|k| k.security_group_id.clone())
+            .collect())
+    })?;
+    let manager = Ec2GrantManager::new(
+        store,
+        client,
+        daemon_instance_id,
+        Ec2GrantConfig::default(),
+    );
+    let mut total = ReconcileReport::default();
+    for sg in security_groups {
+        let report = manager.reconcile_group(&sg)?;
+        total.revoked_rules += report.revoked_rules;
+        total.dropped_records += report.dropped_records;
+        total.resolved_installed += report.resolved_installed;
+        total.remaining_pending += report.remaining_pending;
+    }
+    Ok(total)
+}
+
 /// Reconcile EC2 Move security-group grants at daemon startup against the set
 /// of still-active Move operation IDs.
 pub fn reconcile_ec2_grants_startup<S: Ec2GrantStore, C: Ec2SecurityGroupClient>(
@@ -135,13 +213,21 @@ pub fn reconcile_ec2_grants_startup<S: Ec2GrantStore, C: Ec2SecurityGroupClient>
     Ok(total)
 }
 
-/// Spawn a background exponential-backoff retry task for any unresolved
-/// `Installing` / `Removing` EC2 Move grants left after startup reconciliation.
+/// Synchronously prune stale pre-crash Move users from `ec2_move_grants` (pure
+/// local SQLite, before live Move admission opens), then spawn a background
+/// exponential-backoff retry task running live-safe reconciliation
+/// (`reconcile_ec2_grants_live`) for any unresolved grants.
 ///
-/// Per `AGENTS.md`, this task does NOT hold daemon handoff admission: if the
-/// daemon upgrades or restarts, the next daemon resumes reconciliation from
-/// `ec2_move_grants`.
+/// Per `AGENTS.md`, the background task does NOT hold daemon handoff admission
+/// and never prunes users against a startup snapshot, so new Moves admitted
+/// concurrently keep their grants intact.
 pub fn spawn_ec2_grant_reconcile_background(active_operation_ids: BTreeSet<String>) {
+    if let Err(err) = prune_stale_ec2_grant_users(&SqliteEc2GrantStore, &active_operation_ids) {
+        tracing::warn!(
+            error = %err,
+            "could not prune stale EC2 Move grant users at startup"
+        );
+    }
     let Ok(daemon_instance_id) = crate::database::daemon_instance_id() else {
         tracing::warn!("could not load daemon_instance_id for EC2 Move grant reconciliation");
         return;
@@ -150,14 +236,12 @@ pub fn spawn_ec2_grant_reconcile_background(active_operation_ids: BTreeSet<Strin
         let mut backoff = Duration::from_secs(5);
         let max_backoff = Duration::from_secs(300);
         loop {
-            let active = active_operation_ids.clone();
             let instance_id = daemon_instance_id.clone();
             let outcome = mj_core::runtime::spawn_blocking(move || {
-                reconcile_ec2_grants_startup(
+                reconcile_ec2_grants_live(
                     SqliteEc2GrantStore,
                     AwsCliEc2Client::default(),
                     &instance_id,
-                    &active,
                 )
             })
             .await;
@@ -352,5 +436,139 @@ mod tests {
             StoredMoveOperation::decode_json(&json).unwrap(),
             StoredMoveOperation::Legacy(_)
         ));
+    }
+
+    #[test]
+    fn startup_prune_and_live_reconcile_preserve_concurrent_new_moves() {
+        use super::super::transport::ec2_grant::{
+            Ec2ApiError, Ec2GrantKey, Ec2GrantRecord, Ec2GrantState, Ec2IngressRule,
+            Ec2SecurityGroupClient, InMemoryGrantStore,
+        };
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct SharedStore(Arc<InMemoryGrantStore>);
+        impl Ec2GrantStore for SharedStore {
+            fn with_transaction<R, F>(&self, f: F) -> Result<R>
+            where
+                F: FnOnce(&mut BTreeMap<Ec2GrantKey, Ec2GrantRecord>) -> Result<R>,
+            {
+                self.0.with_transaction(f)
+            }
+        }
+
+        #[derive(Clone, Default)]
+        struct StubEc2 {
+            rules: Arc<Mutex<Vec<(String, Ec2IngressRule)>>>,
+        }
+        impl Ec2SecurityGroupClient for StubEc2 {
+            fn describe_ingress_rules(
+                &self,
+                group_id: &str,
+            ) -> std::result::Result<Vec<Ec2IngressRule>, Ec2ApiError> {
+                Ok(self
+                    .rules
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(sg, _)| sg == group_id)
+                    .map(|(_, r)| r.clone())
+                    .collect())
+            }
+            fn authorize_ingress(
+                &self,
+                group_id: &str,
+                port: u16,
+                cidr_ip: &str,
+                description: &str,
+            ) -> std::result::Result<(), Ec2ApiError> {
+                self.rules.lock().unwrap().push((
+                    group_id.to_owned(),
+                    Ec2IngressRule {
+                        cidr_ip: cidr_ip.to_owned(),
+                        port,
+                        description: Some(description.to_owned()),
+                    },
+                ));
+                Ok(())
+            }
+            fn revoke_ingress(
+                &self,
+                group_id: &str,
+                port: u16,
+                cidr_ip: &str,
+            ) -> std::result::Result<(), Ec2ApiError> {
+                self.rules.lock().unwrap().retain(|(sg, r)| {
+                    !(sg == group_id && r.cidr_ip == cidr_ip && r.port == port)
+                });
+                Ok(())
+            }
+        }
+
+        let store = SharedStore(Arc::new(InMemoryGrantStore::new()));
+        let client = StubEc2::default();
+        let dead_key = Ec2GrantKey::ssh("sg-1", "10.0.0.1/32");
+        let live_key = Ec2GrantKey::ssh("sg-1", "10.0.0.2/32");
+
+        // Pre-crash grant for an operation no longer active at startup.
+        store
+            .with_transaction(|map| {
+                map.insert(
+                    dead_key.clone(),
+                    Ec2GrantRecord {
+                        key: dead_key.clone(),
+                        state: Ec2GrantState::Installed,
+                        users: BTreeSet::from(["op-dead".to_owned()]),
+                        absent_checks: 0,
+                        attempt_id: 1,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+        client
+            .authorize_ingress("sg-1", 22, "10.0.0.1/32", "mj-move-grant:daemon-1")
+            .unwrap();
+
+        // 1. Startup prunes dead pre-crash users synchronously (before live admission).
+        let pending = prune_stale_ec2_grant_users(&store, &BTreeSet::new()).unwrap();
+        assert_eq!(pending, 1);
+
+        // 2. A new Move is admitted concurrently after startup and acquires `live_key`.
+        store
+            .with_transaction(|map| {
+                map.insert(
+                    live_key.clone(),
+                    Ec2GrantRecord {
+                        key: live_key.clone(),
+                        state: Ec2GrantState::Installed,
+                        users: BTreeSet::from(["op-new-concurrent".to_owned()]),
+                        absent_checks: 0,
+                        attempt_id: 2,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+        client
+            .authorize_ingress("sg-1", 22, "10.0.0.2/32", "mj-move-grant:daemon-1")
+            .unwrap();
+
+        // 3. Background live reconciliation revokes the dead pre-crash rule
+        //    WITHOUT touching the concurrent new Move's grant.
+        let report = reconcile_ec2_grants_live(store.clone(), client.clone(), "daemon-1").unwrap();
+        assert_eq!(report.revoked_rules, 1);
+        assert_eq!(report.remaining_pending, 0);
+        let remaining_rules = client.describe_ingress_rules("sg-1").unwrap();
+        assert_eq!(remaining_rules.len(), 1);
+        assert_eq!(remaining_rules[0].cidr_ip, "10.0.0.2/32");
+        let snapshot = store.0.snapshot();
+        assert!(!snapshot.contains_key(&dead_key));
+        assert!(
+            snapshot
+                .get(&live_key)
+                .is_some_and(|r| r.users.contains("op-new-concurrent"))
+        );
     }
 }
