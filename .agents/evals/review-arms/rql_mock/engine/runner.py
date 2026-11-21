@@ -25,6 +25,36 @@ QUERY_SESSION_PROTOCOL = "sealed-session-per-query-v1"
 TURN_TIMEOUT = 1800
 RUN_ERRORS = (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError)
 
+# Read only the executable override selected by the live ACP bridge.
+# The image's PATH or the SDK's bundled CLI can name a different version.
+CLAUDE_CODE_VERSION_PROBE = r"""
+import os, re, subprocess, sys
+from pathlib import Path
+
+executables = set()
+for process in Path(sys.argv[1]).glob("[0-9]*"):
+    try:
+        args = (process / "cmdline").read_bytes().split(b"\0", 2)[:2]
+        if not any(arg.rsplit(b"/", 1)[-1] == b"claude-agent-acp"
+                   or b"/@agentclientprotocol/claude-agent-acp/dist/" in arg for arg in args):
+            continue
+        entry = next((value for value in (process / "environ").read_bytes().split(b"\0")
+                      if value.startswith(b"CLAUDE_CODE_EXECUTABLE=")), b"")
+    except FileNotFoundError:
+        continue
+    executable = os.fsdecode(entry.partition(b"=")[2])
+    if not os.path.isabs(executable):
+        raise SystemExit("Claude bridge has no absolute CLI override")
+    executables.add(executable)
+if len(executables) != 1:
+    raise SystemExit("could not identify one CLI used by the Claude bridge")
+output = subprocess.check_output([executables.pop(), "--version"], text=True)
+version = re.fullmatch(r"(\d+\.\d+\.\d+) \(Claude Code\)", output.strip())
+if not version:
+    raise SystemExit("unrecognized Claude Code version response")
+print(version[1])
+"""
+
 # Pass the credential over stdin so it stays out of process arguments.
 SYNC_CONTAINER_LOGIN = """
 import json, os, sys
@@ -705,3 +735,8 @@ class EngineRunner(SealedRunner):
         if policy != STAGED_ENGINE_SETTINGS:
             raise RuntimeError("staged Claude engine settings differ from the frozen tool policy")
         save_json(directory / "engine-tool-settings.json", policy)
+        version = subprocess.run(
+            ["podman", "exec", container, "python3", "-c", CLAUDE_CODE_VERSION_PROBE, "/proc"],
+            capture_output=True, text=True, check=True, timeout=300,
+        ).stdout.strip()
+        save_json(directory / "engine-runtime.json", {"session_id": sid, "claude_code_version": version})

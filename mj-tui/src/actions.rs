@@ -2043,26 +2043,21 @@ impl DashboardState {
             CommandId::CloseWorkspace => self.begin_workspace_command(true),
             CommandId::SuspendSession => {
                 if let Some(session) = self.selected_session() {
-                    // A suspend stops the sub-agents without a checkpoint.
-                    // Only the ones still at their task lose anything.
-                    let children_not_handed_back = self.subagents_not_handed_back(&session.id);
-                    let interrupting = self.has_active_work(&session.id);
-                    let unverified_clone = session.publication_state().is_some();
-                    if !interrupting && children_not_handed_back.is_empty() && !unverified_clone {
-                        return DashboardAction::Suspend {
-                            session_id: session.id.clone(),
-                            acknowledge_unpublished_work: false,
-                        };
-                    }
+                    let session_id = session.id.clone();
+                    let children_not_handed_back = self.subagents_not_handed_back(&session_id);
+                    let interrupting = self.has_active_work(&session_id);
                     self.mode = crate::Mode::Confirm(
                         ConfirmDialog::new(Confirmation::SuspendSession {
-                            session_id: session.id.clone(),
+                            session_id: session_id.clone(),
                             children_not_handed_back,
                             interrupting,
-                            unverified_clone,
+                            preflight: None,
+                            checking: true,
+                            viewing_all_untracked: false,
                         })
                         .naming_session(crate::render::session_name(session)),
                     );
+                    return DashboardAction::SuspendPreflight { session_id };
                 }
                 DashboardAction::None
             }
@@ -2262,19 +2257,9 @@ impl DashboardState {
                 }) else {
                     return DashboardAction::None;
                 };
-                let delete_branch_available = self.selected_session().is_some_and(|session| {
-                    matches!(
-                        self.state.checkout(&session.id),
-                        Ok(mj_core::state::Checkout::ManagedWorktree { worktree, .. })
-                            if worktree.kind == mj_core::state::ManagedCheckoutKind::Worktree
-                    )
-                });
                 self.mode = crate::Mode::Confirm(
-                    ConfirmDialog::new(Confirmation::ForceDestroy {
-                        session_id,
-                        delete_branch_available,
-                    })
-                    .naming_session(&name),
+                    ConfirmDialog::new(Confirmation::ForceDestroy { session_id })
+                        .naming_session(&name),
                 );
                 DashboardAction::None
             }

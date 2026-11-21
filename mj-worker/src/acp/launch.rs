@@ -221,6 +221,21 @@ impl LaunchSpec {
             .clone()
             .or_else(|| self.initial_model.clone())
     }
+
+    pub(super) fn apply_reload_accepted_config(
+        &self,
+        launch_config: &mj_core::worker_launch::WorkerLaunchConfig,
+    ) {
+        let mut accepted = self
+            .accepted_config
+            .lock()
+            .expect("accepted session configuration lock poisoned");
+        if self.harness != launch_config.harness {
+            *accepted = Default::default();
+        } else if launch_config.initial_model.is_some() {
+            accepted.model = None;
+        }
+    }
 }
 
 /// The project-history server's name.

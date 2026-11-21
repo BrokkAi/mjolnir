@@ -880,6 +880,7 @@ pub fn export_checkpoint_with_native_state(
         } else {
             crate::archive::UntrackedFiles::Include
         },
+        &spec.consent,
     )?;
     let repositories_ms = repositories_started.elapsed().as_millis() as u64;
     // The export runs while the relay's barrier freezes ACP dispatch, so it
@@ -923,6 +924,7 @@ pub(super) fn collect_checkpoint_repositories(
         None,
         None,
         crate::archive::UntrackedFiles::Include,
+        &crate::snapshot::CaptureConsent::default(),
     )
 }
 
@@ -935,9 +937,14 @@ fn verify_origin_delta_quiescence(
     use mj_core::worker_launch::{WorkerLaunchConfig, WorkerRunMode};
     use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest};
 
-    let [repository] = repositories else {
-        bail!("managed clone suspend requires exactly one repository");
-    };
+    let origin_delta_repos: Vec<_> = repositories
+        .iter()
+        .filter(|repository| repository.capture == CheckpointRepositoryCapture::OriginDelta)
+        .collect();
+    ensure!(
+        !origin_delta_repos.is_empty(),
+        "managed clone suspend requires at least one origin-delta repository"
+    );
     let request: SuspendRequest = wire::read(relay_root, wire::REQUEST)?
         .context("managed clone capture has no quiescence request")?;
     let receipt: SuspendReceipt = wire::read(relay_root, wire::RECEIPT)?
@@ -950,20 +957,32 @@ fn verify_origin_delta_quiescence(
                 == WorkerRunMode::CheckpointOnly,
         "managed clone capture requires a quiesced worker"
     );
-    let location = crate::archive::git::locate_checkout(
-        git,
-        &workspace_root.join(&repository.relative_destination),
-    )?;
-    ensure!(
-        location.top_level.canonicalize()? == request.checkout.canonicalize()?,
-        "quiescence receipt belongs to a different checkout"
-    );
+    let quiesced_checkout = request.checkout.canonicalize()?;
+    for repository in origin_delta_repos {
+        let location = crate::archive::git::locate_checkout(
+            git,
+            &workspace_root.join(&repository.relative_destination),
+        )?;
+        ensure!(
+            location.top_level.canonicalize()?.starts_with(&quiesced_checkout),
+            "quiescence receipt belongs to a different checkout"
+        );
+    }
     Ok(())
+}
+
+/// Canonical `.mj/keep` directory under a managed repository checkout, shared
+/// by preflight inventory and snapshot capture so `Shown` consent paths always
+/// match and protect every file under `.mj/keep/` (both direct files and
+/// per-session subdirectories) before checkout teardown.
+pub fn session_keep_dir(checkout: &Path, _session_id: &str) -> PathBuf {
+    checkout.join(".mj").join("keep")
 }
 
 pub fn managed_clone_snapshot_input(
     id: &str,
     path: &Path,
+    session_id: Option<&str>,
     pack_path: PathBuf,
     origin_override: Option<String>,
 ) -> crate::snapshot::RepositoryInput {
@@ -976,7 +995,7 @@ pub fn managed_clone_snapshot_input(
         origin_override,
         pack_path,
         exclusions: ExclusionSource::Origin,
-        keep_dir: Some(path.join(".mj/keep")),
+        keep_dir: session_id.map(|sid| session_keep_dir(path, sid)),
     }
 }
 
@@ -984,18 +1003,36 @@ fn collect_origin_delta(
     git: &dyn GitCommandRunner,
     path: &Path,
     repository: &CheckpointRepositorySpec,
+    session_id: Option<&str>,
     snapshot_directory: &Path,
+    consent: &crate::snapshot::CaptureConsent,
 ) -> Result<RepositorySnapshot> {
-    use crate::snapshot::{SessionCaptureConsent, SnapshotHead, capture_session_snapshot};
+    use crate::snapshot::{
+        CheckoutKey, SessionCaptureConsent, SnapshotHead, capture_session_snapshot,
+        check_keep_dir_consent,
+    };
 
     let location = crate::archive::git::locate_checkout(git, path)?;
     let input = managed_clone_snapshot_input(
         &repository.id,
         &location.top_level,
+        session_id,
         snapshot_directory.join(&repository.id),
         repository.origin_override.clone(),
     );
-    let mut snapshot = capture_session_snapshot(git, &[input], &SessionCaptureConsent::default())?
+    if let Some(keep_dir) = &input.keep_dir {
+        let checkout = CheckoutKey {
+            repository_id: repository.id.clone(),
+            checkout_path: PathBuf::new(),
+        };
+        check_keep_dir_consent(&checkout, keep_dir, &consent.untracked)?;
+    }
+    let session_consent = SessionCaptureConsent {
+        repositories: [(repository.id.clone(), consent.clone())]
+            .into_iter()
+            .collect(),
+    };
+    let mut snapshot = capture_session_snapshot(git, &[input], &session_consent)?
         .repositories
         .remove(&repository.id)
         .context("origin delta snapshot is missing")?;
@@ -1061,6 +1098,7 @@ fn collect_origin_delta_raw(
     repository: &CheckpointRepositorySpec,
     session_id: &str,
     snapshot_directory: &Path,
+    consent: &crate::snapshot::CaptureConsent,
 ) -> Result<RepositorySnapshot> {
     use crate::snapshot::{
         LaunchRecord, SessionCaptureConsent, SnapshotHead, capture_session_snapshot,
@@ -1075,7 +1113,12 @@ fn collect_origin_delta_raw(
         repository.origin_override.clone(),
         snapshot_directory.join(&repository.id),
     );
-    let mut snapshot = capture_session_snapshot(git, &[input], &SessionCaptureConsent::default())?
+    let session_consent = SessionCaptureConsent {
+        repositories: [(repository.id.clone(), consent.clone())]
+            .into_iter()
+            .collect(),
+    };
+    let mut snapshot = capture_session_snapshot(git, &[input], &session_consent)?
         .repositories
         .remove(&repository.id)
         .context("raw origin delta snapshot is missing")?;
@@ -1115,6 +1158,7 @@ fn collect_origin_delta_raw(
 pub fn cutoff_snapshot_input(
     id: &str,
     path: &Path,
+    session_id: Option<&str>,
     exclude_commits: Vec<String>,
     pack_path: PathBuf,
 ) -> crate::snapshot::RepositoryInput {
@@ -1127,7 +1171,7 @@ pub fn cutoff_snapshot_input(
         origin_override: None,
         pack_path,
         exclusions: ExclusionSource::Commits(exclude_commits),
-        keep_dir: Some(path.join(".mj/keep")),
+        keep_dir: session_id.map(|sid| session_keep_dir(path, sid)),
     }
 }
 
@@ -1135,19 +1179,37 @@ fn collect_origin_delta_cutoff(
     git: &dyn GitCommandRunner,
     path: &Path,
     repository: &CheckpointRepositorySpec,
+    session_id: Option<&str>,
     exclude_commits: Vec<String>,
     snapshot_directory: &Path,
+    consent: &crate::snapshot::CaptureConsent,
 ) -> Result<RepositorySnapshot> {
-    use crate::snapshot::{SessionCaptureConsent, SnapshotHead, capture_session_snapshot};
+    use crate::snapshot::{
+        CheckoutKey, SessionCaptureConsent, SnapshotHead, capture_session_snapshot,
+        check_keep_dir_consent,
+    };
 
     let location = crate::archive::git::locate_checkout(git, path)?;
     let input = cutoff_snapshot_input(
         &repository.id,
         &location.top_level,
+        session_id,
         exclude_commits,
         snapshot_directory.join(&repository.id),
     );
-    let mut snapshot = capture_session_snapshot(git, &[input], &SessionCaptureConsent::default())?
+    if let Some(keep_dir) = &input.keep_dir {
+        let checkout = CheckoutKey {
+            repository_id: repository.id.clone(),
+            checkout_path: PathBuf::new(),
+        };
+        check_keep_dir_consent(&checkout, keep_dir, &consent.untracked)?;
+    }
+    let session_consent = SessionCaptureConsent {
+        repositories: [(repository.id.clone(), consent.clone())]
+            .into_iter()
+            .collect(),
+    };
+    let mut snapshot = capture_session_snapshot(git, &[input], &session_consent)?
         .repositories
         .remove(&repository.id)
         .context("history-cutoff origin delta snapshot is missing")?;
@@ -1191,6 +1253,7 @@ fn collect_checkpoint_repositories_with_policy(
     session_id: Option<&str>,
     snapshot_directory: Option<&Path>,
     untracked_files: crate::archive::UntrackedFiles,
+    consent: &crate::snapshot::CaptureConsent,
 ) -> Result<Vec<RepositorySnapshot>> {
     // Indexed parallel iteration preserves the spec order, which in turn keeps
     // the manifest and ZIP entry order deterministic.
@@ -1205,8 +1268,10 @@ fn collect_checkpoint_repositories_with_policy(
                         git,
                         &path,
                         repository,
+                        session_id,
                         snapshot_directory
                             .context("origin-delta suspend requires a single-shot export")?,
+                        consent,
                     );
                 }
                 CheckpointRepositoryCapture::OriginDeltaRaw => {
@@ -1217,6 +1282,7 @@ fn collect_checkpoint_repositories_with_policy(
                         session_id.context("raw origin-delta export requires a session id")?,
                         snapshot_directory
                             .context("raw origin-delta export requires a single-shot export")?,
+                        consent,
                     );
                 }
                 CheckpointRepositoryCapture::OriginDeltaCutoff { exclude_commits } => {
@@ -1224,9 +1290,11 @@ fn collect_checkpoint_repositories_with_policy(
                         git,
                         &path,
                         repository,
+                        session_id,
                         exclude_commits.clone(),
                         snapshot_directory
                             .context("history-cutoff origin-delta export requires a single-shot export")?,
+                        consent,
                     );
                 }
                 CheckpointRepositoryCapture::PlainDirectory => {

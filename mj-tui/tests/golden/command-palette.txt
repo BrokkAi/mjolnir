@@ -516,7 +516,7 @@ Enter open · /                                                                 
 │                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
-suspend action: Suspend { session_id: "session-1", acknowledge_unpublished_work: false }
+suspend action: SuspendPreflight { session_id: "session-1" }
 === after Suspend (120x44) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -528,29 +528,29 @@ suspend action: Suspend { session_id: "session-1", acknowledge_unpublished_work:
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
-│                                      ││No conversation open.                                                         │
-│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                                                                                                      │
+│                                                                                                                      │
+│                ╭ × Suspend session? ────────────────────────────────────────────────────────────────╮                │
+│                │Session: ACP pretty name                                                            │                │
+│                │Checking workspace…                                                                 │                │
+│                │                                                                                    │                │
+│                │c Cancel                                                                            │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │  ──────────────╯
+│                │                                                                                    │  ──────────────╮
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │  Cancel                                                                            │  ──────────────╯
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯  ─────── ▁   ▄ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
 │                                      ││  claude-1: refreshing…                                                       │

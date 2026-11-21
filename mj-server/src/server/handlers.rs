@@ -1339,6 +1339,29 @@ pub(super) async fn ask_container_upgrade_preview(
         .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))
 }
 
+pub(super) async fn ask_suspend_preflight(
+    state: &ServerState,
+    session_id: String,
+    dry_run: bool,
+    without_checkpoint: bool,
+) -> Result<mj_core::suspend_consent::SuspendPreflight, ApiError> {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    state
+        .client_state_tx
+        .send(ClientStateRequest::SuspendPreflight {
+            session_id,
+            dry_run,
+            without_checkpoint,
+            reply,
+        })
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    answer
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+        .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))
+}
+
 pub fn validate_new_preflight(
     request: &mj_client::daemon::NewSessionPreflightRequest,
     snapshot: &ViewerSnapshot,

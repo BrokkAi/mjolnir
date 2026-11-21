@@ -20,8 +20,16 @@ mod background;
 #[cfg(test)]
 pub(crate) use background::AirTaskFixture;
 mod checkpoint_hold;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InPlaceHarnessRestartDecision {
+    Proceed,
+    AlreadyRestarted,
+}
+
 #[cfg(test)]
 mod checkpoint_hold_tests;
+#[cfg(test)]
+mod in_place_move_tests;
 mod commands;
 mod journal;
 mod native_history;
@@ -253,6 +261,8 @@ pub struct DurableRelay {
     /// journal: every bridge start records its own `AgentInitialized`.
     session_setup: bool,
     checkpoint_only: bool,
+    /// Active in-place harness restart operation ID serialized with the hold.
+    in_place_harness_restart_in_flight: Option<String>,
     /// Live reviewer leases share this owner's atomic checkpoint decision.
     reviewer_admissions: BTreeMap<u64, String>,
     /// Reviewer leases exist only around the Unix reviewer runtime, so this
@@ -435,7 +445,6 @@ impl DurableRelay {
         }
     }
 
-    #[cfg(any(unix, test))]
     pub(crate) fn native_goal_resume_sent(
         &mut self,
         resume_id: u64,
@@ -446,7 +455,6 @@ impl DurableRelay {
             .push(PendingNativeResume { resume_id, goal });
     }
 
-    #[cfg(any(unix, test))]
     pub(crate) fn native_goal_resume_rejected(&mut self, resume_id: u64) {
         self.pending_native_resumes
             .retain(|pending| pending.resume_id != resume_id);
@@ -1010,6 +1018,7 @@ impl DurableRelay {
         )?;
 
         let mut relay = Self {
+            in_place_harness_restart_in_flight: None,
             operator_away: Default::default(),
             root,
             relay_version: relay_version.into(),

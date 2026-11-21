@@ -1759,6 +1759,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
     (
         CheckpointExportSpec {
             ignore_nested_repositories: false,
+            consent: Default::default(),
             report_directories: None,
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
             session: SessionManifest {
@@ -2706,11 +2707,12 @@ fn a_checkout_restore_lands_on_the_branch_the_caller_names() {
         ],
     );
 
-    let restored =
+    let notices =
         restore_single_repository_onto_branch(&archive_path, &checkout, "mj/session", &SystemGit)
             .unwrap();
 
-    assert_eq!(restored.as_deref(), Some(archived_branch.as_str()));
+    assert!(notices.is_empty());
+    let _ = archived_branch;
     assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), head);
     assert_eq!(
         git(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]),

@@ -9,6 +9,7 @@ mod tests;
 #[doc(hidden)]
 pub mod test_fixtures;
 mod transfer;
+pub mod transport;
 mod viewer_recovery;
 pub use viewer_recovery::ViewerMoveRecovery;
 
@@ -2366,7 +2367,12 @@ impl Controller {
         );
         // A move's source stop was admitted by the move itself.
         self.recover_interrupted_close_managed(
-            admission, &id, executor, manager, true, false, None,
+            admission,
+            &id,
+            executor,
+            manager,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            None,
         )
         .await?;
         Ok(())

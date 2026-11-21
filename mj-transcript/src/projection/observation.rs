@@ -214,6 +214,7 @@ pub(super) fn project_observation(
             command_id,
             command,
             created_at_ms,
+            ..
         } => match command {
             RelayCommand::InstallPromptContext { text } => {
                 if let Some(state) = crate::handoff::parse_handoff(text) {

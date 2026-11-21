@@ -6,6 +6,7 @@ verdict: every hit is read by hand before a run is accepted or excluded.
 """
 import ast
 from collections import Counter
+from fnmatch import fnmatchcase
 import json
 import os
 import pathlib
@@ -133,7 +134,7 @@ def tool_succeeded(call, body, rollout_exit):
 
 def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None,
          rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None, engine=False,
-         antigravity=False, tracked_head=None, tracked_symlink_targets=None):
+         antigravity=False, tracked_head=None, tracked_symlink_targets=None, claude_code_version=None):
     first_page = pages[0] if pages else {}
     execution = first_page.get("execution")
     checkout = cwd or first_page.get("cwd") or (execution.get("cwd") if isinstance(execution, dict) else None)
@@ -175,7 +176,8 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                     continue
             if engine:
                 seq = item["seq"]
-                findings = list(engine_hits(call, own_workspace, page_cwd, edit_paths, engine_calls, seq))
+                findings = list(engine_hits(call, own_workspace, page_cwd, edit_paths, engine_calls, seq,
+                                            claude_code_version))
                 hits.extend({"seq": seq, "kind": name, "where": "input", "snippet": snippet}
                             for name, snippet in findings)
                 identifier = call.get("toolCallId")
@@ -1126,21 +1128,27 @@ class FilePathEvidence:
             stack.append((candidate, iter(pathlib.PurePosixPath(target).parts)))
         return tuple(resolved)
 
-    def glob_link_targets(self, root):
-        pending = [root]
-        seen = {root}
+    def glob_link_targets(self, root, pattern):
+        start = (root, frozenset({0}))
+        pending = [start]
+        seen = {start}
+        links = sorted(self.links or ())
         while pending:
-            directory = pending.pop()
-            for link in sorted(self.links or ()):
+            directory, states = pending.pop()
+            for link in links:
                 if link[:len(directory)] != directory:
                     continue
+                remaining = glob_after(pattern, states, link[len(directory):])
+                if not remaining:
+                    continue
                 target = self.resolve(link)
-                if target not in seen:
-                    seen.add(target)
-                    pending.append(target)
-                    yield target
+                next_step = (target, remaining)
+                if next_step not in seen:
+                    seen.add(next_step)
+                    pending.append(next_step)
+                yield target
 
-    def check(self, path, cwd, *, glob=False):
+    def check(self, path, cwd, *, glob_patterns=()):
         if self.blocked:
             raise InspectionRequired("path follows link handling or an unresolved command")
         # Inspect raw prefixes too. A traversal can follow a symlink before
@@ -1165,8 +1173,8 @@ class FilePathEvidence:
         if self.scratch in prefixes and target != self.scratch and not target.startswith(self.scratch + "/"):
             raise InspectionRequired("path leaves the verified scratch directory")
         targets = {target}
-        if glob:
-            targets.update(posixpath.join(self.root, *link) for link in self.glob_link_targets(resolved))
+        for pattern in glob_patterns:
+            targets.update(posixpath.join(self.root, *link) for link in self.glob_link_targets(resolved, pattern))
         return targets - {prefixes[-1]}
 
     def check_in_place(self, path, cwd, own_workspace):
@@ -2181,15 +2189,52 @@ def path_operands(call):
                         yield key, path
 
 
-def symlink_hits(path, cwd, evidence, *, glob=False):
+def symlink_hits(path, cwd, evidence, *, glob_patterns=()):
     try:
-        for target in sorted(evidence.check(path, cwd, glob=glob)):
+        for target in sorted(evidence.check(path, cwd, glob_patterns=glob_patterns)):
             yield from path_hits(target, evidence.workspace)
     except InspectionRequired as error:
         yield "needs-inspection", f"{error}: {path}"
 
 
-def search_pattern_symlink_hits(call, cwd, evidence):
+def engine_glob_patterns(pattern, root):
+    parts = pattern.split("/")
+    if (re.search(r"[\[\]{}!\x00]", pattern)
+            or any(part in {"", "."} or "**" in part and part != "**" for part in parts)):
+        raise InspectionRequired("unsupported Glob pattern")
+    encoded = tuple(os.fsencode(part) for part in parts)
+    # Claude Code 2.1.326 uses ripgrep --glob --hidden by default.
+    # A basename-only glob can match at any depth and '*' can match a dot.
+    yield (b"**", *encoded) if len(parts) == 1 else encoded
+    # Claude can strip a repeated literal prefix from a pattern supplied
+    # with a path. Check both spellings because the rewrite probes the FS.
+    root_parts = pathlib.PurePosixPath(root).parts
+    literal_count = next((i for i, part in enumerate(parts[:-1]) if "*" in part or "?" in part), len(parts) - 1)
+    for size in range(literal_count, 0, -1):
+        if tuple(parts[:size]) == root_parts[-size:]:
+            remaining = encoded[size:]
+            # The spawn path can drop the leading slash of the rewrite.
+            yield (b"**", *remaining) if len(remaining) == 1 else remaining
+            break
+
+
+def glob_after(pattern, states, components):
+    for component in components:
+        name = os.fsencode(component)
+        advancing = set()
+        for index in states:
+            while index < len(pattern) and pattern[index] == b"**":
+                advancing.add(index)  # Consume this component and keep '**' active.
+                index += 1  # Or let '**' match zero components.
+            if index < len(pattern) and fnmatchcase(name, pattern[index]):
+                advancing.add(index + 1)
+        if not advancing:
+            return frozenset()
+        states = advancing
+    return frozenset(states)
+
+
+def search_pattern_symlink_hits(call, cwd, evidence, *, engine=False):
     raw = call.get("rawInput")
     if not isinstance(raw, dict):
         return
@@ -2205,10 +2250,19 @@ def search_pattern_symlink_hits(call, cwd, evidence):
                 or "\\" in pattern or ".." in pattern or pattern.startswith("~")):
             yield "needs-inspection", f"unverified {name} {key}: {pattern!r}"
         elif name == "Glob" and isinstance(root, str) and root:
-            literal = re.split(r"[*?\[{]", pattern, maxsplit=1)[0]
-            if literal != pattern:
-                literal = posixpath.dirname(literal)
-            yield from symlink_hits(posixpath.join(root, literal), cwd, evidence, glob=True)
+            if engine:
+                try:
+                    search_root = recorded_path(root, cwd) or root
+                    patterns = tuple(engine_glob_patterns(pattern, search_root))
+                except InspectionRequired:
+                    yield "needs-inspection", f"unverified {name} {key}: {pattern!r}"
+                else:
+                    yield from symlink_hits(root, cwd, evidence, glob_patterns=patterns)
+            else:
+                literal = re.split(r"[*?\[{]", pattern, maxsplit=1)[0]
+                if literal != pattern:
+                    literal = posixpath.dirname(literal)
+                yield from symlink_hits(posixpath.join(root, literal), cwd, evidence, glob_patterns=((b"**",),))
 
 
 def structured_symlink_hits(call, cwd, evidence):
@@ -2349,7 +2403,21 @@ def engine_saved_result(path, workspace, audited_calls, seq):
     return bool(match and match[1] in audited_calls and audited_calls[match[1]] < seq)
 
 
-def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq):
+def known_engine_grep_input(raw):
+    text = {"pattern", "path", "glob", "type"}
+    counts = {"-A", "-B", "-C", "context", "head_limit", "offset"}
+    switches = {"-n", "-i", "-o", "multiline"}
+    return (
+        "pattern" in raw and raw.keys() <= text | counts | switches | {"output_mode"}
+        and all(isinstance(raw[key], str) and raw[key] and "\0" not in raw[key] for key in raw.keys() & text)
+        and all(type(raw[key]) is int and raw[key] >= 0 for key in raw.keys() & counts)
+        and all(isinstance(raw[key], bool) for key in raw.keys() & switches)
+        and raw.get("output_mode", "files_with_matches") in ("files_with_matches", "content", "count")
+        and ("glob" not in raw or re.fullmatch(r"(?:[^{}\[\]]|\{[^{}\[\]]+\})+", raw["glob"]))
+    )
+
+
+def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq, claude_code_version):
     name = call.get("name") if isinstance(call, dict) else None
     if not isinstance(name, str) or name not in ENGINE_TOOLS or call.get("kind") == "execute":
         yield "needs-inspection", f"tool outside the engine allowlist: {name!r}"
@@ -2361,6 +2429,17 @@ def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq):
     if not isinstance(raw, dict):
         yield "needs-inspection", f"missing or invalid {name} input"
         return
+    if name == "Grep":
+        # Claude Code 2.1.326 linux-x64: y2r starts at byte 317252666,
+        # sets --no-follow at 317252903, and calls ripgrep at 317255012.
+        # Filters do not make it descend through links. The explicit search
+        # path can follow them and must pass the same component check as Read.
+        if claude_code_version != "2.1.326":
+            yield "needs-inspection", f"unverified Claude Code version for engine Grep: {claude_code_version!r}"
+            return
+        if not known_engine_grep_input(raw):
+            yield "needs-inspection", "unrecognized engine Grep input"
+            return
     if name in {"Grep", "Glob"}:
         paths = [raw.get("path", cwd)]
     else:
@@ -2391,7 +2470,7 @@ def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq):
             yield "outside-workspace", path
         else:
             yield from symlink_hits(path, cwd, evidence)
-    yield from search_pattern_symlink_hits(call, cwd, evidence)
+    yield from search_pattern_symlink_hits(call, cwd, evidence, engine=True)
 
 
 def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written, cwd, home,
@@ -2506,11 +2585,15 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
                 before = isolation["checkout"]
                 cwd = cwd or isolation["placement"].get("cwd")
         cwd = cwd or before.get("cwd")
+        runtime = read_record(transcript_path.with_name("engine-runtime.json")) if engine else {}
+        claude_code_version = (runtime.get("claude_code_version")
+                               if isinstance(runtime, dict) and runtime.get("session_id") == own_workspace else None)
         result = scan(pages, own_workspace, commits=commits, allow_rql=allow_rql, single_commit=single_commit,
                       cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits, engine=engine,
                       antigravity=captured_antigravity(transcript_path),
                       tracked_symlinks=clean_tracked_symlinks(before), tracked_head=before.get("head"),
                       tracked_symlink_targets=before.get("tracked_symlink_targets"),
+                      claude_code_version=claude_code_version,
                       tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
                       rollout=rollout_commands(
                           sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))))

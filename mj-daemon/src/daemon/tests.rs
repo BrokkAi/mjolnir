@@ -64,10 +64,6 @@ fn graceful_close_retires_worker_polling_only_during_target_teardown() {
         Some(SessionState::Destroying)
     ));
     assert!(lifecycle_owns_worker_target(
-        LifecycleKind::ForceStop,
-        Some(SessionState::Running)
-    ));
-    assert!(lifecycle_owns_worker_target(
         LifecycleKind::ForceDestroy,
         Some(SessionState::Running)
     ));
@@ -295,7 +291,7 @@ async fn a_close_past_its_verified_checkpoint_cannot_be_cancelled() {
         assert!(!cancellable_on(kind, Some(SessionState::Destroying)).await);
     }
     // Only a graceful close has this gate; a forced teardown keeps none.
-    for kind in [LifecycleKind::ForceStop, LifecycleKind::Create] {
+    for kind in [LifecycleKind::Create] {
         assert!(cancellable_on(kind, Some(SessionState::Destroying)).await);
     }
     // A failed startup's cleanup finishes whichever operation runs it.
@@ -355,7 +351,11 @@ where
     assert!(cancelled.request_cancel("phone cancellation before admission"));
     assert!(
         state
-            .start_suspend_session_controlled(LATCH_RELAY_SESSION.into(), true, false, cancelled,)
+            .start_suspend_session_controlled(
+                LATCH_RELAY_SESSION.into(),
+                mj_core::suspend_consent::SuspendConsent::default(),
+                cancelled,
+            )
             .await
             .is_err()
     );
@@ -371,7 +371,11 @@ where
         let control = control.clone();
         async move {
             let started = state
-                .start_suspend_session_controlled(LATCH_RELAY_SESSION.into(), true, false, control)
+                .start_suspend_session_controlled(
+                    LATCH_RELAY_SESSION.into(),
+                    mj_core::suspend_consent::SuspendConsent::default(),
+                    control,
+                )
                 .await?;
             RuntimeState::wait_lifecycle_result(started.result).await?;
             Ok(())
@@ -2668,7 +2672,7 @@ async fn equivalent_lifecycle_requests_join_one_daemon_operation() {
     let cancel = LifecycleControl::default();
     let mut cancelled_wait = Box::pin(state.start_or_join_lifecycle_controlled(
         "session-1".into(),
-        LifecycleKind::ForceStop,
+        LifecycleKind::Suspend,
         None,
         None,
         Some(cancel.clone()),
@@ -4306,6 +4310,7 @@ async fn a_create_stalled_in_one_stage_fails_its_start_and_names_the_stage() {
 pub(super) fn ready_startup_view() -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let operational = mj_core::relay::RelayOperationalState {
+        in_place_move_hold: None,
         assessment: None,
         open_request: None,
         notification_stack: Default::default(),
@@ -7725,7 +7730,7 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
     // committed and still removing its target, one still checkpointing.
     let committed = LifecycleControl::default();
     let finish_teardown = Arc::new(tokio::sync::Notify::new());
-    let key = serde_json::to_string(&(true, false)).unwrap();
+    let key = serde_json::to_string(&mj_core::suspend_consent::SuspendConsent::default()).unwrap();
     let (committed_acceptance, committed_watch) = tokio::sync::watch::channel(Some(Ok(())));
     let started = state
         .admit_prepared_lifecycle(
@@ -8663,7 +8668,13 @@ esac
                     mj_controller::database::save_move_operation(&pending).unwrap();
                     mj_controller::controller::move_session::restore_move_queue_hold(&pending);
                     let refused = test_runtime_state_loading_the_store();
-                    let error = match refused.start_suspend_session(id.clone(), true, false).await {
+                    let error = match refused
+                        .start_suspend_session(
+                            id.clone(),
+                            mj_core::suspend_consent::SuspendConsent::default(),
+                        )
+                        .await
+                    {
                         Err(error) => error,
                         Ok(mut started) => started.confirm_acceptance().await.unwrap_err(),
                     };
@@ -8729,7 +8740,11 @@ esac
                 cancelled.cancelled.store(true, Ordering::Release);
                 assert!(
                     runtime
-                        .start_suspend_session_controlled(id.clone(), true, false, cancelled)
+                        .start_suspend_session_controlled(
+                            id.clone(),
+                            mj_core::suspend_consent::SuspendConsent::default(),
+                            cancelled,
+                        )
                         .await
                         .is_err()
                 );
@@ -9636,7 +9651,7 @@ async fn a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushe
         Duration::from_secs(60),
         clone
             .state
-            .suspend_session_with_ack(LATCH_RELAY_SESSION.to_owned(), false),
+            .suspend_session(LATCH_RELAY_SESSION.to_owned()),
     )
     .await
     .unwrap()
@@ -9710,7 +9725,7 @@ async fn a_suspend_without_the_acknowledgement_ignores_review_refs_on_a_publishe
         Duration::from_secs(60),
         clone
             .state
-            .suspend_session_with_ack(LATCH_RELAY_SESSION.to_owned(), false),
+            .suspend_session(LATCH_RELAY_SESSION.to_owned()),
     )
     .await
     .unwrap()
@@ -9887,9 +9902,12 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
     std::fs::write(&checkpoint.archive_path, b"corrupt recovery archive").unwrap();
     let rejected = parent
         .state
-        .start_session_lifecycle(SessionLifecycleRequest::Discard {
+        .start_session_lifecycle(SessionLifecycleRequest::Suspend {
             session_id: LATCH_RELAY_SESSION.into(),
-            checkpoint: *checkpoint.clone(),
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
+            abort_operations: mj_core::suspend_consent::OperationConsent::None,
+            without_checkpoint: true,
+            confirm_no_checkpoint: true,
         })
         .await
         .unwrap_err();
@@ -9918,9 +9936,12 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
         Duration::from_secs(30),
         parent
             .state
-            .start_session_lifecycle(SessionLifecycleRequest::Discard {
+            .start_session_lifecycle(SessionLifecycleRequest::Suspend {
                 session_id: LATCH_RELAY_SESSION.into(),
-                checkpoint: *checkpoint.clone(),
+                discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
+                abort_operations: mj_core::suspend_consent::OperationConsent::None,
+                without_checkpoint: true,
+            confirm_no_checkpoint: true,
             }),
     )
     .await
@@ -10018,9 +10039,12 @@ async fn accepted_discard_failure_is_published_without_an_observer() {
     let baseline = acceptance.receiver_count();
     let mut started = parent
         .state
-        .admit_session_lifecycle(SessionLifecycleRequest::Discard {
+        .admit_session_lifecycle(SessionLifecycleRequest::Suspend {
             session_id: LATCH_RELAY_SESSION.into(),
-            checkpoint: *checkpoint.clone(),
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
+            abort_operations: mj_core::suspend_consent::OperationConsent::None,
+            without_checkpoint: true,
+            confirm_no_checkpoint: true,
         })
         .await
         .unwrap();
@@ -10114,12 +10138,7 @@ async fn discard_intent_recovers_without_checkpointing_and_reconciles_children()
         .clone()
         .unwrap();
     mj_controller::controller::test_support::worker_test_scope(LATCH_RELAY_SESSION, || {
-        controller.prepare_discard(
-            LATCH_RELAY_SESSION,
-            &checkpoint,
-            &ProcessExecutor,
-            || Ok(()),
-        )
+        controller.suspend_without_checkpoint(LATCH_RELAY_SESSION, true, &ProcessExecutor)
     })
     .unwrap();
     let durable = Controller::load().unwrap();
@@ -14166,7 +14185,7 @@ async fn fresh_lifecycle_retries_replace_completed_results_but_replays_keep_them
     let first = state
         .admit_prepared_lifecycle(
             "retry-session".into(),
-            LifecycleKind::ForceStop,
+            LifecycleKind::Suspend,
             super::lifecycle::LifecycleStart::request(key.clone(), None, None),
             None,
             |_, _, _, _session_admission| async { bail!("injected operation failure") },
@@ -14182,7 +14201,7 @@ async fn fresh_lifecycle_retries_replace_completed_results_but_replays_keep_them
     let replay = state
         .start_or_join_lifecycle_with_key(
             old.session_id.clone(),
-            LifecycleKind::ForceStop,
+            LifecycleKind::Suspend,
             None,
             Some(key.clone()),
             |_, _, _, _session_admission| async { panic!("replay started duplicate work") },
@@ -14194,7 +14213,7 @@ async fn fresh_lifecycle_retries_replace_completed_results_but_replays_keep_them
     let next = state
         .admit_prepared_lifecycle(
             old.session_id.clone(),
-            LifecycleKind::ForceStop,
+            LifecycleKind::Suspend,
             super::lifecycle::LifecycleStart::request(key, None, None),
             None,
             {
@@ -14212,7 +14231,7 @@ async fn fresh_lifecycle_retries_replace_completed_results_but_replays_keep_them
         state
             .admit_prepared_lifecycle(
                 old.session_id.clone(),
-                LifecycleKind::ForceStop,
+                LifecycleKind::Suspend,
                 super::lifecycle::LifecycleStart {
                     origin: super::lifecycle::LifecycleOrigin::Automatic,
                     ..super::lifecycle::LifecycleStart::request(
@@ -14285,8 +14304,10 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
         Duration::from_secs(30),
         client.start_session_lifecycle(SessionLifecycleRequest::Suspend {
             session_id: LATCH_RELAY_SESSION.into(),
-            acknowledge_unpublished_work: true,
-            ignore_nested_repositories: false,
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
+            abort_operations: mj_core::suspend_consent::OperationConsent::None,
+            without_checkpoint: false,
+            confirm_no_checkpoint: false,
         }),
     )
     .await
@@ -15767,7 +15788,6 @@ async fn queued_lifecycle_requests_release_client_admission_for_handoff_and_stop
     let request = if destroy {
         SessionLifecycleRequest::ForceDestroy {
             session_id: "queued-upgrade".into(),
-            delete_branch: false,
         }
     } else {
         SessionLifecycleRequest::Resume(Box::new(ResumeSessionRequest {
@@ -16574,5 +16594,49 @@ async fn wiki_search_generations_cover_commits_and_running_requests_coalesce() {
             .map(|hit| hit.session_id.as_str())
             .collect::<Vec<_>>(),
         [id]
+    );
+}
+
+#[tokio::test]
+async fn close_without_checkpoint_refusal_leaves_session_running() {
+    const CHILD: &str = "MJ_TEST_CLOSE_WITHOUT_CHECKPOINT_REFUSAL";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "close_without_checkpoint_refusal_leaves_session_running",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let session_id = "daemon-without-checkpoint-refusal";
+    let mut record = runtime_test_session(session_id, "default", SessionState::Running);
+    record.checkpoint = None;
+    mj_controller::database::save_session(&record).unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    let consent = mj_core::suspend_consent::SuspendConsent {
+        without_checkpoint: true,
+        confirm_no_checkpoint: false,
+        ..Default::default()
+    };
+    let err = state
+        .suspend_session_with_consent(session_id.into(), consent)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("No verified checkpoint exists"),
+        "expected refusal, got: {err:#}"
+    );
+    let loaded = Controller::load().unwrap();
+    assert_eq!(
+        loaded.state.sessions[session_id].state,
+        SessionState::Running,
+        "refused without_checkpoint must not transition session to Closing"
     );
 }

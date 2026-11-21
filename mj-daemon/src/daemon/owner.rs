@@ -455,7 +455,7 @@ impl RuntimeStateOwner {
         active.phase = LifecyclePhase::Completed(result);
         if matches!(
             active.kind,
-            LifecycleKind::Suspend | LifecycleKind::ForceStop
+            LifecycleKind::Suspend
         ) {
             self.close_requested.remove(session_id);
         }

@@ -544,6 +544,7 @@ fn only_harness_observations_request_credential_sync() {
                 prompt: vec![ContentBlock::from("explain invalid_grant")],
             },
             created_at_ms: 1,
+            insert_at_front: false,
         })]
     ));
     assert_eq!(

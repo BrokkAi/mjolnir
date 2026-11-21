@@ -199,7 +199,10 @@ pub const RELAY_RAW_ORIGIN_DELTA_PROTOCOL: u32 = 78;
 pub const RELAY_CUTOFF_ORIGIN_DELTA_PROTOCOL: u32 = 79;
 /// 80 reports the worker's native-session-use evidence at a ready checkpoint cut.
 pub const RELAY_NATIVE_USE_EVIDENCE_PROTOCOL: u32 = 80;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_NATIVE_USE_EVIDENCE_PROTOCOL;
+/// 81 supports same-target in-place moves: `store_id`-bound durable dispatch
+/// holds, `SubmitFront`, and harness-only launch-configuration restarts.
+pub const RELAY_IN_PLACE_MOVE_PROTOCOL: u32 = 81;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_IN_PLACE_MOVE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -241,7 +244,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 26 is breaking: an older writer drops `set_aside_through`, so a dismissed ask would count again.
 // Revision 27 is breaking: older writers cannot preserve notification entries or replay their commands.
 // Revision 28 is breaking: older writers lose command pins and native-use evidence.
-pub const RELAY_STATE_VERSION: u32 = 28;
+// Revision 29 is breaking: older writers drop an active in-place move dispatch hold.
+pub const RELAY_STATE_VERSION: u32 = 29;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

@@ -6,102 +6,106 @@ use mj_chat::components::{ButtonColumn, ChoiceList, ColumnSplit, ControlKind, Ta
 /// Button labels for a confirmation dialog, ordered Cancel first and the primary
 /// action last. This is the single declaration used by both key handling and
 /// rendering.
-pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] {
+pub(crate) fn confirmation_buttons(
+    confirmation: &Confirmation,
+) -> Vec<std::borrow::Cow<'static, str>> {
+    use std::borrow::Cow;
+    let borrowed = |labels: &[&'static str]| -> Vec<Cow<'static, str>> {
+        labels.iter().copied().map(Cow::Borrowed).collect()
+    };
     match confirmation {
-        Confirmation::RepairRepositoryRemotes { .. } => &["Cancel", "Repair and continue"],
+        Confirmation::RepairRepositoryRemotes { .. } => borrowed(&["Cancel", "Repair and continue"]),
         Confirmation::ConfigurationRepair { .. } => {
-            &["Dismiss", "Open transcript", "Open settings"]
+            borrowed(&["Dismiss", "Open transcript", "Open settings"])
         }
         Confirmation::LaunchFailed { retry: Some(_), .. } => {
-            &["Dismiss", "Retry launch", "Settings"]
+            borrowed(&["Dismiss", "Retry launch", "Settings"])
         }
-        Confirmation::LaunchFailed { .. } => &["Dismiss", "Settings"],
-        Confirmation::ImportFailed { .. } => &["Dismiss"],
+        Confirmation::LaunchFailed { .. } => borrowed(&["Dismiss", "Settings"]),
+        Confirmation::ImportFailed { .. } => borrowed(&["Dismiss"]),
         Confirmation::Dismiss {
             intent: DismissalIntent::DiscardSetup,
             ..
-        } => &["Keep editing", "Discard settings"],
+        } => borrowed(&["Keep editing", "Discard settings"]),
         Confirmation::Dismiss {
             intent: DismissalIntent::CancelImport,
             ..
-        } => &["Keep importing", "Cancel import"],
+        } => borrowed(&["Keep importing", "Cancel import"]),
         Confirmation::InstallMbx {
             upgrading: true, ..
-        } => &["Cancel", "Upgrade mbx"],
-        Confirmation::InstallMbx { .. } => &["Cancel", "Install mbx"],
-        Confirmation::ConvertRawCheckout { .. } => &["Cancel", "Confirm"],
-        Confirmation::DestroyStopped {
-            delete_branch_available: true,
+        } => borrowed(&["Cancel", "Upgrade mbx"]),
+        Confirmation::InstallMbx { .. } => borrowed(&["Cancel", "Install mbx"]),
+        Confirmation::ConvertRawCheckout { .. } => borrowed(&["Cancel", "Confirm"]),
+        Confirmation::DestroyStopped { .. } => borrowed(&["Cancel", "Destroy session"]),
+        Confirmation::CloseFailed { .. } => {
+            borrowed(&["Cancel", "Retry suspension", "Suspend without checkpoint…"])
+        }
+        Confirmation::SuspendSession {
+            checking: true, ..
+        } => borrowed(&["Cancel"]),
+        Confirmation::SuspendSession {
+            preflight: Some(preflight),
             ..
-        } => &["Cancel", "Destroy session", "Destroy and delete branch"],
-        Confirmation::DestroyStopped { .. } => &["Cancel", "Destroy session"],
-        Confirmation::CloseFailed {
-            can_discard: false,
-            error,
+        } if preflight.has_blockers() => borrowed(&["Cancel"]),
+        Confirmation::SuspendSession {
+            preflight: Some(preflight),
+            children_not_handed_back,
+            interrupting,
             ..
-        } if nested_repository_checkpoint_failure(error) => &["Cancel", "Ignore and Suspend"],
-        Confirmation::CloseFailed {
-            can_discard: true,
-            error,
-            ..
-        } if nested_repository_checkpoint_failure(error) => &[
-            "Cancel",
-            "Discard changes since checkpoint…",
-            "Ignore and Suspend",
-        ],
-        Confirmation::CloseFailed {
-            can_discard: false, ..
-        } => &["Cancel", "Retry suspension"],
-        Confirmation::CloseFailed {
-            can_discard: true, ..
-        } => &[
-            "Cancel",
-            "Discard changes since checkpoint…",
-            "Retry suspension",
-        ],
-        Confirmation::DiscardSinceCheckpoint { .. } => &["Cancel", "Discard changes"],
-        Confirmation::SuspendSession { .. } => &["Cancel", "Suspend session"],
-        Confirmation::InterruptWork { restart: false, .. } => &["Cancel", "Suspend now"],
-        Confirmation::InterruptWork { restart: true, .. } => &["Cancel", "Restart now"],
-        Confirmation::RestartAgent { .. } => &["Cancel", "Restart agent"],
+        } => {
+            let untracked = preflight.untracked_count();
+            if untracked > 0 {
+                vec![
+                    Cow::Borrowed("Cancel"),
+                    Cow::Owned(format!(
+                        "Discard {untracked} {} and continue",
+                        if untracked == 1 { "file" } else { "files" }
+                    )),
+                ]
+            } else if preflight.has_warnings() || *interrupting || !children_not_handed_back.is_empty() {
+                borrowed(&["Cancel", "Continue anyway"])
+            } else {
+                borrowed(&["Cancel", "Suspend session"])
+            }
+        }
+        Confirmation::SuspendSession { .. } => borrowed(&["Cancel", "Suspend session"]),
+        Confirmation::InterruptWork { restart: false, .. } => borrowed(&["Cancel", "Suspend now"]),
+        Confirmation::InterruptWork { restart: true, .. } => borrowed(&["Cancel", "Restart now"]),
+        Confirmation::RestartAgent { .. } => borrowed(&["Cancel", "Restart agent"]),
         Confirmation::RestartContainer {
             preview,
             upgrade_only: true,
             ..
         } => {
             if preview.settings.is_some() {
-                &["Cancel", "Apply settings and restart…"]
+                borrowed(&["Cancel", "Apply settings and restart…"])
             } else {
-                &["Cancel", "Upgrade container and restart…"]
+                borrowed(&["Cancel", "Upgrade container and restart…"])
             }
         }
         Confirmation::RestartContainer { .. } => {
-            &["Cancel", "Restart agent", "Upgrade container and restart…"]
+            borrowed(&["Cancel", "Restart agent", "Upgrade container and restart…"])
         }
-        Confirmation::InterruptAll { .. } => &["Cancel", "Interrupt all"],
+        Confirmation::InterruptAll { .. } => borrowed(&["Cancel", "Interrupt all"]),
         Confirmation::RecoverFailed {
             retry_launch: true, ..
-        } => &["Cancel", "Open transcript", "Retry launch"],
+        } => borrowed(&["Cancel", "Open transcript", "Retry launch"]),
         Confirmation::RecoverFailed {
             recoverable: true, ..
-        } => &["Cancel", "Open transcript", "Recover"],
-        Confirmation::RecoverFailed { .. } => &["Cancel", "Open transcript"],
+        } => borrowed(&["Cancel", "Open transcript", "Recover"]),
+        Confirmation::RecoverFailed { .. } => borrowed(&["Cancel", "Open transcript"]),
         Confirmation::RecoverMove { operation }
             if operation.queue_admission_started && !operation.queue_admission_finished =>
         {
-            &["Cancel", "Open transcript", "Retry move"]
+            borrowed(&["Cancel", "Open transcript", "Retry move"])
         }
-        Confirmation::RecoverMove { .. } => &[
+        Confirmation::RecoverMove { .. } => borrowed(&[
             "Cancel",
             "Open transcript",
             "Retry move",
             "Resume previous settings",
-        ],
-        Confirmation::ForceDestroy {
-            delete_branch_available: true,
-            ..
-        } => &["Cancel", "Destroy session", "Destroy and delete branch"],
-        Confirmation::ForceDestroy { .. } => &["Cancel", "Destroy session"],
+        ]),
+        Confirmation::ForceDestroy { .. } => borrowed(&["Cancel", "Destroy session"]),
     }
 }
 
@@ -112,12 +116,12 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
 ///
 /// `Yes` and `Yes, delete branch` therefore answer `y` and `d`; `Cancel` and
 /// `Confirm` answer `c` and `o`.
-pub(crate) fn confirmation_accelerators(labels: &[&str]) -> Vec<char> {
+pub(crate) fn confirmation_accelerators<S: AsRef<str>>(labels: &[S]) -> Vec<char> {
     let mut taken = Vec::new();
     labels
         .iter()
         .map(|label| {
-            let lower = label.to_lowercase();
+            let lower = label.as_ref().to_lowercase();
             let candidates = lower
                 .split(|character: char| !character.is_alphanumeric())
                 .filter_map(|word| word.chars().next())
@@ -134,7 +138,7 @@ pub(crate) fn confirmation_accelerators(labels: &[&str]) -> Vec<char> {
 
 /// The line under a confirmation's text naming each button's letter, in the
 /// same order the buttons are drawn: `n No · y Yes · d Yes, delete branch`.
-pub(crate) fn confirmation_key_line(labels: &[&str]) -> Line<'static> {
+pub(crate) fn confirmation_key_line<S: AsRef<str>>(labels: &[S]) -> Line<'static> {
     let accelerators = confirmation_accelerators(labels);
     let mut spans = Vec::new();
     for (index, (label, letter)) in labels.iter().zip(accelerators).enumerate() {
@@ -149,17 +153,20 @@ pub(crate) fn confirmation_key_line(labels: &[&str]) -> Line<'static> {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        spans.push(Span::styled((*label).to_owned(), theme::muted()));
+        spans.push(Span::styled(label.as_ref().to_owned(), theme::muted()));
     }
     Line::from(spans)
 }
 
 /// Index of the primary (rightmost) button, which is focused when a dialog opens.
-pub(crate) fn primary_button(labels: &[&str]) -> usize {
+pub(crate) fn primary_button<S: AsRef<str>>(labels: &[S]) -> usize {
     labels.len().saturating_sub(1)
 }
 
-pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &[&str]) -> usize {
+pub(crate) fn initial_confirmation_button<S: AsRef<str>>(
+    confirmation: &Confirmation,
+    labels: &[S],
+) -> usize {
     if matches!(
         confirmation,
         Confirmation::Dismiss { .. }
@@ -169,7 +176,6 @@ pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &
             | Confirmation::ForceDestroy { .. }
             | Confirmation::DestroyStopped { .. }
             | Confirmation::CloseFailed { .. }
-            | Confirmation::DiscardSinceCheckpoint { .. }
             | Confirmation::SuspendSession { .. }
             | Confirmation::InterruptWork { .. }
             | Confirmation::RestartContainer { .. }
@@ -1438,11 +1444,7 @@ pub(crate) fn confirmation_body(
             }
             (" Move this checkout into the target? ", lines)
         }
-        Confirmation::DestroyStopped {
-            session_id,
-            delete_branch_available,
-            ..
-        } => (
+        Confirmation::DestroyStopped { session_id, .. } => (
             " Destroy suspended session? ",
             vec![
                 session_line(session_id, session_name, width),
@@ -1450,11 +1452,9 @@ pub(crate) fn confirmation_body(
                 Line::raw(
                     "Mjolnir will permanently destroy the recovery archive and session record.",
                 ),
-                Line::raw(if *delete_branch_available {
-                    "The legacy worktree is removed. Its branch stays unless you choose to delete it."
-                } else {
-                    "The managed clone and any unpublished work in its recovery copy will be removed."
-                }),
+                Line::raw(
+                    "The managed clone and any unpublished work in its recovery copy will be removed.",
+                ),
             ],
         ),
         Confirmation::CloseFailed {
@@ -1587,21 +1587,77 @@ pub(crate) fn confirmation_body(
             session_id,
             children_not_handed_back,
             interrupting,
-            unverified_clone,
+            preflight,
+            checking,
+            viewing_all_untracked,
         } => {
-            let mut lines = vec![
-                session_line(session_id, session_name, width),
-                Line::raw("Save a recovery copy and release the environment."),
-                Line::raw("You can resume this session later."),
-            ];
+            let mut lines = vec![session_line(session_id, session_name, width)];
+            if *checking {
+                lines.push(Line::raw("Checking workspace…"));
+            } else if let Some(preflight) = preflight {
+                if preflight.has_blockers() {
+                    lines.push(Line::styled(
+                        "Cannot suspend until these blockers are resolved:",
+                        Style::default().fg(theme::palette().error),
+                    ));
+                    for blocker in &preflight.blockers {
+                        lines.push(Line::raw(format!("  {} — {}", blocker.kind, blocker.remedy)));
+                    }
+                } else {
+                    lines.push(Line::raw("Save a recovery copy and release the environment."));
+                    lines.push(Line::raw("You can resume this session later."));
+                    if preflight.raw {
+                        lines.push(Line::styled(
+                            "Raw checkout is kept in place; untracked files do not travel with the snapshot.",
+                            Style::default().fg(theme::palette().warning),
+                        ));
+                    }
+                    if !preflight.operations.is_empty() {
+                        let ops = preflight
+                            .operations
+                            .iter()
+                            .map(|op| op.kind.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        lines.push(Line::styled(
+                            format!("In-progress Git operation ({ops}) will be aborted, discarding conflict resolution."),
+                            Style::default().fg(theme::palette().warning),
+                        ));
+                    }
+                    let untracked_paths = preflight.untracked_display_paths();
+                    if !untracked_paths.is_empty() {
+                        lines.push(Line::styled(
+                            format!(
+                                "{} untracked {} will not be kept (ignored files are never kept):",
+                                untracked_paths.len(),
+                                if untracked_paths.len() == 1 { "file" } else { "files" }
+                            ),
+                            Style::default().fg(theme::palette().warning),
+                        ));
+                        let limit = if *viewing_all_untracked { untracked_paths.len() } else { 5 };
+                        for path in untracked_paths.iter().take(limit) {
+                            lines.push(Line::raw(format!("  {path}")));
+                        }
+                        if !*viewing_all_untracked && untracked_paths.len() > limit {
+                            lines.push(Line::styled(
+                                format!("  and {} more (v to view all)", untracked_paths.len() - limit),
+                                Style::default().fg(theme::palette().muted),
+                            ));
+                        }
+                    }
+                    if preflight.keep_dir_bytes > 0 {
+                        lines.push(Line::raw(format!(
+                            ".mj/keep/ size: {} bytes (not saved on suspend)",
+                            preflight.keep_dir_bytes
+                        )));
+                    }
+                }
+            } else {
+                lines.push(Line::raw("Save a recovery copy and release the environment."));
+                lines.push(Line::raw("You can resume this session later."));
+            }
             if *interrupting {
                 lines.push(Line::raw("The current turn will be interrupted."));
-            }
-            if *unverified_clone {
-                lines.push(Line::styled(
-                    "Publication status is unverified; the recovery copy will keep any unpublished Git work.",
-                    Style::default().fg(theme::palette().warning),
-                ));
             }
             if let Some(warning) =
                 mj_core::subagent::suspend_warning_naming(children_not_handed_back)
@@ -1613,19 +1669,6 @@ pub(crate) fn confirmation_body(
             }
             (" Suspend session? ", lines)
         }
-        Confirmation::DiscardSinceCheckpoint {
-            session_id,
-            checkpoint,
-        } => (
-            " Discard changes since checkpoint? ",
-            vec![
-                session_line(session_id, session_name, width),
-                Line::raw(format!("Recovery copy: {}", checkpoint.created_at)),
-                Line::raw("Release the environment using this older recovery copy."),
-                Line::raw("All work since that copy may be permanently lost."),
-                Line::raw("The recovery copy remains available for Resume."),
-            ],
-        ),
         Confirmation::RecoverFailed {
             session_id,
             error,
@@ -1716,10 +1759,7 @@ pub(crate) fn confirmation_body(
             }
             (" Move recovery ", lines)
         }
-        Confirmation::ForceDestroy {
-            session_id,
-            delete_branch_available,
-        } => (
+        Confirmation::ForceDestroy { session_id } => (
             " Destroy session? ",
             vec![
                 session_line(session_id, session_name, width),
@@ -1730,11 +1770,9 @@ pub(crate) fn confirmation_body(
                 Line::raw(
                     "Cleanup failures warn about remaining resources; the session is still removed.",
                 ),
-                Line::raw(if *delete_branch_available {
-                    "Its legacy managed branch is kept unless explicitly deleted. Work only in the environment is lost."
-                } else {
-                    "The managed clone and any unpublished work in its recovery copy will be removed."
-                }),
+                Line::raw(
+                    "The managed clone and any unpublished work in its recovery copy will be removed.",
+                ),
             ],
         ),
     }
@@ -1757,8 +1795,7 @@ pub(crate) fn render_confirmation(
         Confirmation::InstallMbx { .. } => 12,
         Confirmation::ConvertRawCheckout { .. } => 16,
         Confirmation::CloseFailed { .. } => 12,
-        Confirmation::DiscardSinceCheckpoint { .. } => 12,
-        Confirmation::SuspendSession { .. } => 10,
+        Confirmation::SuspendSession { .. } => 16,
         Confirmation::InterruptWork { .. } => 10,
         Confirmation::RestartContainer { .. } => 15,
         Confirmation::RestartAgent { .. } => 10,
@@ -1777,7 +1814,7 @@ pub(crate) fn render_confirmation(
         confirmation_body(confirmation, dialog.session_name.as_deref(), body_width);
     let buttons = confirmation_buttons(confirmation);
     lines.push(Line::raw(""));
-    lines.push(confirmation_key_line(buttons));
+    lines.push(confirmation_key_line(&buttons));
     lines.push(Line::raw(""));
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let inner_width = crate::widgets::centered_rect(72, 1, area)
@@ -1785,7 +1822,7 @@ pub(crate) fn render_confirmation(
         .saturating_sub(2);
     let buttons_width: usize = buttons
         .iter()
-        .map(|label| Line::raw(*label).width() + 5)
+        .map(|label| Line::raw(label.as_ref()).width() + 5)
         .sum();
     let stacked = buttons_width.saturating_sub(1) > usize::from(inner_width);
     let controls_height = if stacked { buttons.len() as u16 } else { 1 };
@@ -1841,7 +1878,7 @@ pub(crate) fn render_confirmation(
     let actions = buttons
         .iter()
         .enumerate()
-        .map(|(index, label)| (DialogControl::ConfirmButton(index), *label, true))
+        .map(|(index, label)| (DialogControl::ConfirmButton(index), label.as_ref(), true))
         .collect::<Vec<_>>();
     if stacked {
         for (row, action) in actions.iter().enumerate() {
@@ -1857,6 +1894,6 @@ pub(crate) fn render_confirmation(
     }
     form.end_frame(DialogControl::ConfirmButton(initial_confirmation_button(
         confirmation,
-        buttons,
+        &buttons,
     )));
 }

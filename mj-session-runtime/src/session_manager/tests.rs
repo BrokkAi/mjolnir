@@ -1102,6 +1102,7 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational: RelayOperationalState {
+                in_place_move_hold: None,
                 assessment: None,
                 open_request: None,
                 notification_stack: Default::default(),
@@ -2523,7 +2524,7 @@ async fn mailbox_delivery_serializes_clear_completion_and_rechecks_stale_batches
     connection.unwrap().detach().await.unwrap();
     let mut relay =
         mj_worker::relay::DurableRelay::open(root.path(), LEASED_RELAY_SESSION, "test").unwrap();
-    let (text, count) = match relay.drain_mailbox("PostToolBatch").unwrap() {
+    let (text, count) = match relay.drain_mailbox("PostToolBatch", None).unwrap() {
         mj_core::relay::RelayResponsePayload::MailboxDrained { text, count, .. } => (text, count),
         other => panic!("unexpected drain: {other:?}"),
     };

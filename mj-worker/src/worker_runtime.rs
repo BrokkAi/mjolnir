@@ -324,7 +324,7 @@ pub use mj_core::harness_install::ManagedHarness;
 #[cfg(unix)]
 mod gh_rules;
 #[cfg(unix)]
-mod harness_launch;
+pub(crate) mod harness_launch;
 #[cfg(unix)]
 mod json_gh_rules;
 #[cfg(unix)]
@@ -577,4 +577,4 @@ mod startup_record_tests {
 }
 
 #[cfg(all(test, unix))]
-mod relay_tests;
+pub(crate) mod relay_tests;

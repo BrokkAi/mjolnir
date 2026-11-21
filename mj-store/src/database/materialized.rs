@@ -1024,15 +1024,79 @@ pub fn compact_materialized_transcript_through(
     })
 }
 
+/// Compact every eligible tool output at or before `event_frontier`, walking
+/// `(position, stable_id)` batches until no further candidates remain.
+pub fn compact_materialized_transcript_all_through(
+    session_id: &str,
+    event_frontier: u64,
+) -> Result<TranscriptRetention> {
+    let session_id = session_id.to_owned();
+    submit_database_write("compact_materialized_transcript_all", move |_| {
+        compact_materialized_transcript_all_in(
+            &database_path(),
+            &session_id,
+            event_frontier,
+            RETENTION_BATCH_ITEMS,
+        )
+    })
+}
+
 pub(super) fn compact_materialized_transcript_in(
     path: &Path,
     session_id: &str,
     event_frontier: u64,
 ) -> Result<TranscriptRetention> {
+    compact_materialized_transcript_batch_in(
+        path,
+        session_id,
+        event_frontier,
+        None,
+        RETENTION_BATCH_ITEMS,
+    )
+    .map(|(retention, _)| retention)
+}
+
+pub(super) fn compact_materialized_transcript_all_in(
+    path: &Path,
+    session_id: &str,
+    event_frontier: u64,
+    batch_size: usize,
+) -> Result<TranscriptRetention> {
+    let mut total = TranscriptRetention::default();
+    let mut cursor: Option<(i64, String)> = None;
+    loop {
+        let (batch, next_cursor) = compact_materialized_transcript_batch_in(
+            path,
+            session_id,
+            event_frontier,
+            cursor.as_ref().map(|(pos, id)| (*pos, id.as_str())),
+            batch_size,
+        )?;
+        total.items = total.items.saturating_add(batch.items);
+        total.bytes = total.bytes.saturating_add(batch.bytes);
+        if !batch.remaining {
+            total.remaining = false;
+            return Ok(total);
+        }
+        let Some(next) = next_cursor else {
+            total.remaining = false;
+            return Ok(total);
+        };
+        cursor = Some(next);
+    }
+}
+
+fn compact_materialized_transcript_batch_in(
+    path: &Path,
+    session_id: &str,
+    event_frontier: u64,
+    after: Option<(i64, &str)>,
+    batch_size: usize,
+) -> Result<(TranscriptRetention, Option<(i64, String)>)> {
     let mut connection = open(path)?;
     let candidates = {
         let mut statement = connection.prepare(
-            "SELECT stable_id, body_json
+            "SELECT position, stable_id, body_json
              FROM materialized_transcript_items
              WHERE session_id = ?1
                AND position <= ?2
@@ -1041,29 +1105,44 @@ pub(super) fn compact_materialized_transcript_in(
                    CASE WHEN json_valid(body_json) THEN body_json ELSE '{}' END,
                    '$.kind'
                ) = 'tool'
+               AND (?4 IS NULL OR position > ?4 OR (position = ?4 AND stable_id > ?5))
              ORDER BY position, stable_id
-             LIMIT ?4",
+             LIMIT ?6",
         )?;
+        let (after_position, after_stable_id) = match after {
+            Some((pos, id)) => (Some(pos), id),
+            None => (None, ""),
+        };
         statement
             .query_map(
                 params![
                     session_id,
                     event_frontier,
                     RETENTION_BODY_FLOOR_BYTES as i64,
-                    RETENTION_BATCH_ITEMS as i64 + 1
+                    after_position,
+                    after_stable_id,
+                    batch_size as i64 + 1
                 ],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
-    let remaining = candidates.len() > RETENTION_BATCH_ITEMS;
+    let remaining = candidates.len() > batch_size;
     let mut retention = TranscriptRetention {
         remaining,
         ..TranscriptRetention::default()
     };
+    let mut last_cursor = None;
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    for (stable_id, body_json) in candidates.into_iter().take(RETENTION_BATCH_ITEMS) {
+    for (position, stable_id, body_json) in candidates.into_iter().take(batch_size) {
+        last_cursor = Some((position, stable_id.clone()));
         let mut body: TranscriptBody = match serde_json::from_str(&body_json) {
             Ok(body) => body,
             // A row this cannot read is a row it must not rewrite.
@@ -1089,7 +1168,7 @@ pub(super) fn compact_materialized_transcript_in(
         retention.bytes += body_json.len() - compacted.len();
     }
     transaction.commit()?;
-    Ok(retention)
+    Ok((retention, last_cursor))
 }
 
 /// How many transcript items a polled projection carries.

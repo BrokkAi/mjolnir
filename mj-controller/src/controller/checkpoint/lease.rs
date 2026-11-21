@@ -170,8 +170,6 @@ pub(in crate::controller) enum CheckpointExportPolicy {
     OriginDeltaRaw,
     /// Explicit suspend of a history-cutoff session.
     OriginDeltaCutoff,
-    /// Fresh verified export with explicit consent to omit nested repositories.
-    IgnoreNestedRepositories,
     /// Export session state and repository metadata; the lifecycle intent owns
     /// this handoff separately from the full recovery checkpoint.
     SessionHandoff,

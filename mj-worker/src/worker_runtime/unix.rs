@@ -703,6 +703,188 @@ fn unavailable_request(envelope: RelayRequestEnvelope, message: String) -> Relay
     }
 }
 
+struct InPlaceHarnessRestartGuard {
+    relay: Arc<RelayCell>,
+    operation_id: String,
+    expected_store_id: String,
+    completed: bool,
+}
+
+impl InPlaceHarnessRestartGuard {
+    fn complete(mut self) -> Result<()> {
+        let result = self
+            .relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .mark_in_place_harness_restarted(&self.operation_id, &self.expected_store_id);
+        if result.is_ok() {
+            self.completed = true;
+        }
+        result
+    }
+}
+
+impl Drop for InPlaceHarnessRestartGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .cancel_in_place_harness_restart(&self.operation_id);
+        }
+    }
+}
+
+async fn restart_harness_in_place_response(
+    envelope: RelayRequestEnvelope,
+    commands: Option<&mpsc::Sender<CommandRequest>>,
+    relay: &Arc<RelayCell>,
+    relay_root: &std::path::Path,
+) -> RelayResponseEnvelope {
+    if let Some(body) = mj_core::relay::protocol::relay_protocol_rejection(&envelope) {
+        return RelayResponseEnvelope {
+            request_id: envelope.request_id,
+            protocol_version: envelope.protocol_version,
+            body,
+        };
+    }
+    let protocol_version = envelope.protocol_version;
+    let request_id = envelope.request_id;
+    let RelayRequest::RestartHarnessInPlace {
+        operation_id,
+        expected_store_id,
+        launch_config,
+    } = envelope.request
+    else {
+        unreachable!("restart_harness_in_place_response only serves RestartHarnessInPlace")
+    };
+    let decision = relay
+        .lock()
+        .expect("relay state lock poisoned")
+        .admit_in_place_harness_restart(&operation_id, &expected_store_id);
+    let restart_guard = match decision {
+        Err(error) => {
+            return RelayResponseEnvelope {
+                request_id,
+                protocol_version,
+                body: RelayResponseBody::Error { error: *error },
+            };
+        }
+        Ok(crate::relay::InPlaceHarnessRestartDecision::AlreadyRestarted) => {
+            return RelayResponseEnvelope {
+                request_id,
+                protocol_version,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::HarnessRestartedInPlace,
+                },
+            };
+        }
+        Ok(crate::relay::InPlaceHarnessRestartDecision::Proceed) => InPlaceHarnessRestartGuard {
+            relay: relay.clone(),
+            operation_id,
+            expected_store_id,
+            completed: false,
+        },
+    };
+    let Some(commands) = commands else {
+        return RelayResponseEnvelope {
+            request_id,
+            protocol_version,
+            body: compaction_error(
+                RelayErrorCode::InvalidState,
+                "session is closed; no ACP runtime can restart the harness in place",
+            ),
+        };
+    };
+    let supervisor_path = relay_root.join("acp-supervisor.json");
+    let mut prepared = match super::prepare_harness_launch(
+        launch_config.harness,
+        launch_config.harness_runtime,
+        launch_config.execution_policy,
+        super::harness_launch::primary_supervisor_spec(&launch_config),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return RelayResponseEnvelope {
+                request_id,
+                protocol_version,
+                body: compaction_error(
+                    RelayErrorCode::Internal,
+                    &format!("prepare updated harness launch: {error:#}"),
+                ),
+            };
+        }
+    };
+    if let Err(error) = super::harness_launch::freeze_node_entrypoints(relay_root, &mut prepared).await
+    {
+        return RelayResponseEnvelope {
+            request_id,
+            protocol_version,
+            body: compaction_error(
+                RelayErrorCode::Internal,
+                &format!("freeze updated harness entrypoints: {error:#}"),
+            ),
+        };
+    }
+    let mut additional_directories = acp_additional_directories(&launch_config);
+    super::tool_cache::extend_writable_directories(
+        launch_config.harness,
+        &prepared.environment,
+        &mut additional_directories,
+    );
+    let persisted_launch_config = launch_config.clone();
+    let (resolved, resolution) = tokio::sync::oneshot::channel();
+    let body = match commands
+        .send(CommandRequest::ReloadLaunchConfig {
+            launch_config,
+            environment: prepared.environment,
+            command: None,
+            args: None,
+            additional_directories,
+            supervisor_spec: Some(Box::new((supervisor_path, prepared.spec))),
+            leases: Some(Box::new((prepared.managed, prepared.managed_node))),
+            resolved,
+        })
+        .await
+    {
+        Ok(()) => match resolution.await {
+            Ok(Ok(())) => {
+                if let Err(error) = persisted_launch_config.write(&relay_root.join("launch.json")) {
+                    compaction_error(
+                        RelayErrorCode::Internal,
+                        &format!("persist updated launch.json: {error:#}"),
+                    )
+                } else if let Err(error) = restart_guard.complete() {
+                    compaction_error(
+                        RelayErrorCode::Internal,
+                        &format!("persist in-place harness restart state: {error:#}"),
+                    )
+                } else {
+                    RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::HarnessRestartedInPlace,
+                    }
+                }
+            }
+            Ok(Err(message)) => compaction_error(RelayErrorCode::InvalidState, &message),
+            Err(_) => compaction_error(
+                RelayErrorCode::InvalidState,
+                "ACP runtime stopped before completing in-place harness restart",
+            ),
+        },
+        Err(_) => compaction_error(
+            RelayErrorCode::InvalidState,
+            "ACP runtime is unavailable for in-place harness restart",
+        ),
+    };
+    RelayResponseEnvelope {
+        request_id,
+        protocol_version,
+        body,
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ProjectMemoryEndpoint {
     config: Option<super::ProjectMemoryLaunchConfig>,
@@ -3108,9 +3290,34 @@ pub(super) async fn serve_client_with_memory(
                     .await?;
                 continue;
             }
+            if let RelayRequest::RestartHarnessInPlace { .. } = &envelope.request {
+                let response = if let Some(message) =
+                    preparation_error(&prep_snapshot, "in-place harness restart")
+                {
+                    unavailable_request(envelope, message)
+                } else {
+                    restart_harness_in_place_response(
+                        envelope,
+                        request_commands.as_ref(),
+                        &relay,
+                        &relay_root,
+                    )
+                    .await
+                };
+                write_logged_response(
+                    &mut writer,
+                    &response,
+                    &session_id,
+                    "restart_harness_in_place",
+                )
+                .await?;
+                continue;
+            }
             let wakes_dispatch = matches!(
                 &envelope.request,
-                RelayRequest::Submit { .. } | RelayRequest::ReserveIdle { .. }
+                RelayRequest::Submit { .. }
+                    | RelayRequest::ReserveIdle { .. }
+                    | RelayRequest::ReleaseInPlaceMoveDispatch { .. }
             );
             let mailbox_lease_changed = matches!(
                 &envelope.request,
@@ -4189,5 +4396,196 @@ mod preparation_tests {
         drop(dispatch_wakes);
         writer.shutdown().await.unwrap();
         accept.abort();
+    }
+
+    #[tokio::test]
+    async fn restart_harness_in_place_does_not_overwrite_supervisor_spec_when_rejected() {
+        let _ = mj_core::login_environment::initialize_from_parent();
+        let root = tempfile::tempdir().unwrap();
+        let supervisor_path = root.path().join("acp-supervisor.json");
+        let launch_path = root.path().join("launch.json");
+        std::fs::write(&supervisor_path, "original-supervisor-spec").unwrap();
+        std::fs::write(&launch_path, "original-launch-json").unwrap();
+
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap(),
+        ));
+        let store_id = relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .store_id
+            .clone()
+            .expect("store_id");
+
+        // No hold active -> rejected without touching acp-supervisor.json.
+        let launch_config =
+            super::super::relay_tests::launch_config(root.path().to_str().unwrap());
+        let (commands_tx, mut commands_rx) = mpsc::channel(4);
+        let response = restart_harness_in_place_response(
+            RelayRequestEnvelope {
+                request_id: "r-restart-unheld".into(),
+                protocol_version: mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL,
+                request: RelayRequest::RestartHarnessInPlace {
+                    operation_id: "move-op-1".into(),
+                    expected_store_id: store_id.clone(),
+                    launch_config: Box::new(launch_config.clone()),
+                },
+            },
+            Some(&commands_tx),
+            &relay,
+            root.path(),
+        )
+        .await;
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Error {
+                error: mj_core::relay::RelayProtocolError {
+                    code: RelayErrorCode::InvalidState,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&supervisor_path).unwrap(),
+            "original-supervisor-spec"
+        );
+        assert!(commands_rx.try_recv().is_err());
+
+        // Hold active, but ACP rejects the reload -> still does not overwrite acp-supervisor.json.
+        let _ = relay.lock().unwrap().handle(RelayRequestEnvelope {
+            request_id: "r-hold".into(),
+            protocol_version: mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL,
+            request: RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move-op-1".into(),
+                expected_store_id: store_id.clone(),
+            },
+        });
+        let rejector = mj_core::runtime::spawn(async move {
+            if let Some(CommandRequest::ReloadLaunchConfig { resolved, .. }) =
+                commands_rx.recv().await
+            {
+                let _ = resolved.send(Err("turn active".into()));
+            }
+        });
+        let response = restart_harness_in_place_response(
+            RelayRequestEnvelope {
+                request_id: "r-restart-rejected".into(),
+                protocol_version: mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL,
+                request: RelayRequest::RestartHarnessInPlace {
+                    operation_id: "move-op-1".into(),
+                    expected_store_id: store_id.clone(),
+                    launch_config: Box::new(launch_config),
+                },
+            },
+            Some(&commands_tx),
+            &relay,
+            root.path(),
+        )
+        .await;
+        drop(commands_tx);
+        rejector.await.unwrap();
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Error {
+                error: mj_core::relay::RelayProtocolError {
+                    code: RelayErrorCode::InvalidState,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&supervisor_path).unwrap(),
+            "original-supervisor-spec"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&launch_path).unwrap(),
+            "original-launch-json"
+        );
+        // When ACP accepts the reload, launch.json IS updated and harness_restarted is marked.
+        let (ok_tx, mut ok_rx) = mpsc::channel(4);
+        let acceptor = mj_core::runtime::spawn(async move {
+            if let Some(CommandRequest::ReloadLaunchConfig { resolved, .. }) = ok_rx.recv().await {
+                let _ = resolved.send(Ok(()));
+            }
+        });
+        let mut updated_launch =
+            super::super::relay_tests::launch_config(root.path().to_str().unwrap());
+        updated_launch.initial_model = Some("reloaded-model".into());
+        let ok_response = restart_harness_in_place_response(
+            RelayRequestEnvelope {
+                request_id: "r-restart-ok".into(),
+                protocol_version: mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL,
+                request: RelayRequest::RestartHarnessInPlace {
+                    operation_id: "move-op-1".into(),
+                    expected_store_id: store_id,
+                    launch_config: Box::new(updated_launch),
+                },
+            },
+            Some(&ok_tx),
+            &relay,
+            root.path(),
+        )
+        .await;
+        drop(ok_tx);
+        acceptor.await.unwrap();
+        assert!(matches!(
+            ok_response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::HarnessRestartedInPlace
+            }
+        ));
+        let persisted = std::fs::read_to_string(&launch_path).unwrap();
+        assert!(
+            persisted.contains("reloaded-model"),
+            "expected updated launch.json on disk, got: {persisted}"
+        );
+    }
+
+    #[test]
+    fn in_place_harness_restart_guard_clears_reservation_when_complete_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap(),
+        ));
+        let store_id = relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .store_id
+            .clone()
+            .expect("store_id");
+        let _ = relay.lock().unwrap().handle(RelayRequestEnvelope {
+            request_id: "r-hold".into(),
+            protocol_version: mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL,
+            request: RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move-op-1".into(),
+                expected_store_id: store_id.clone(),
+            },
+        });
+        assert_eq!(
+            relay
+                .lock()
+                .unwrap()
+                .admit_in_place_harness_restart("move-op-1", &store_id)
+                .unwrap(),
+            crate::relay::InPlaceHarnessRestartDecision::Proceed
+        );
+        let guard = InPlaceHarnessRestartGuard {
+            relay: relay.clone(),
+            operation_id: "move-op-1".into(),
+            expected_store_id: "mismatched-store-id".into(),
+            completed: false,
+        };
+        assert!(guard.complete().is_err());
+        // Drop must have cleared in_place_harness_restart_in_flight so a retry can proceed.
+        assert_eq!(
+            relay
+                .lock()
+                .unwrap()
+                .admit_in_place_harness_restart("move-op-1", &store_id)
+                .unwrap(),
+            crate::relay::InPlaceHarnessRestartDecision::Proceed
+        );
     }
 }

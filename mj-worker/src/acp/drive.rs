@@ -36,6 +36,7 @@ pub(super) async fn drive<T: ConnectTo<Client>>(
             replacing_previous_bridge,
             replace_unused_codex_thread,
             first_replaced_unused_native_session_id: &mut None,
+            pending_reload_ack: &mut None,
         },
     )
     .await
@@ -2033,6 +2034,12 @@ pub(super) fn drain_requests_from_the_previous_bridge(
             CommandRequest::StopBackgroundTask { resolved, .. } => {
                 let _ = resolved.send(Err("ACP bridge restarted before stopping task".into()));
                 ("StopBackgroundTask", None)
+            }
+            CommandRequest::ReloadLaunchConfig { resolved, .. } => {
+                let _ = resolved.send(Err(
+                    "ACP bridge restarted before applying launch configuration".into(),
+                ));
+                ("ReloadLaunchConfig", None)
             }
         };
         tracing::debug!(

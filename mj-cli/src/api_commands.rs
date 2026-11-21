@@ -935,6 +935,10 @@ async fn stop_tasks(client: &ApiClient, args: &StopTaskArgs) -> Result<StopTaskR
     Ok(report)
 }
 
+/// Suspend a session, keeping only its Git state (branches, tags, stashes, commits,
+/// staged and unstaged changes to tracked files, and linked worktrees inside the checkout).
+/// Untracked files are lost unless you `git add` them first; Git-ignored files are never kept.
+/// Scratch in `$MJ_KEEP_DIR` travels with Move but is not saved when the session is suspended.
 #[derive(Debug, Args)]
 pub(crate) struct SuspendArgs {
     /// Session id, as `mj sessions` lists it.
@@ -946,9 +950,21 @@ pub(crate) struct SuspendArgs {
     /// the person guessing which option it wanted.
     #[arg(value_name = "SESSION", hide = true)]
     misplaced_session: Option<String>,
-    /// Confirm releasing a clone whose saved Git work is not verified as pushed.
+    /// Discard untracked files, nested repositories, untracked stashes, and `.mj/keep/` contents.
     #[arg(long)]
-    acknowledge_unpublished_work: bool,
+    discard_untracked: bool,
+    /// Abort any in-progress Git operation (merge, rebase, cherry-pick, revert, am, bisect).
+    #[arg(long)]
+    abort_operation: bool,
+    /// Stop the session without taking a fresh checkpoint.
+    #[arg(long)]
+    without_checkpoint: bool,
+    /// Confirm `--without-checkpoint` when no verified checkpoint exists to resume from.
+    #[arg(long)]
+    yes: bool,
+    /// Inspect what would be saved and what would be lost without changing anything.
+    #[arg(long)]
+    dry_run: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -960,9 +976,6 @@ pub(crate) struct DestroyArgs {
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
-    /// Also delete the managed branch. Work held only in the environment is lost either way.
-    #[arg(long)]
-    delete_branch: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -2365,9 +2378,45 @@ fn wiki_session_lines(info: &mj_client::daemon::WikiSessionInfo) -> Vec<String> 
 /// Save a recovery copy and release the environment. Acceptance is not completion.
 pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     let session = suspend_session_id(&args)?;
-    let accepted = ApiClient::connect()
-        .await?
-        .suspend(session, args.acknowledge_unpublished_work)
+    let client = ApiClient::connect().await?;
+    if args.dry_run {
+        let preflight = client
+            .suspend_preflight(session, true, args.without_checkpoint)
+            .await?;
+        if args.json {
+            return print_json(&preflight);
+        }
+        print!("{}", format_suspend_dry_run(&preflight));
+        return Ok(());
+    }
+    if args.without_checkpoint {
+        let preflight = client.suspend_preflight(session, false, true).await?;
+        let has_verified = preflight
+            .existing_checkpoint
+            .as_ref()
+            .is_some_and(|cp| cp.verified);
+        if !has_verified && !args.yes {
+            bail!(
+                "Session {session} has no verified checkpoint, so suspending without a checkpoint cannot be resumed. The session is still running; pass `--yes` to confirm stopping {session} with no resumable checkpoint."
+            );
+        }
+    }
+    let consent = mj_core::suspend_consent::SuspendConsent {
+        discard_untracked: if args.discard_untracked {
+            mj_core::suspend_consent::UntrackedConsent::Any
+        } else {
+            mj_core::suspend_consent::UntrackedConsent::None
+        },
+        abort_operations: if args.abort_operation {
+            mj_core::suspend_consent::OperationConsent::Any
+        } else {
+            mj_core::suspend_consent::OperationConsent::None
+        },
+        without_checkpoint: args.without_checkpoint,
+        confirm_no_checkpoint: args.yes,
+    };
+    let accepted = client
+        .suspend(session, &consent)
         .await
         .map_err(name_suspend_flags)?;
     if args.json {
@@ -2389,12 +2438,81 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     }
 }
 
+fn format_human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+pub(crate) fn format_suspend_dry_run(
+    preflight: &mj_core::suspend_consent::SuspendPreflight,
+) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(out, "dry run for session {}", preflight.session_id);
+    if let Some(est) = &preflight.dry_run {
+        match (est.git_delta_bytes, &est.git_delta_unavailable_reason) {
+            (Some(bytes), _) => {
+                let _ = writeln!(out, "git delta: {}", format_human_bytes(bytes));
+            }
+            (None, Some(reason)) => {
+                let _ = writeln!(out, "git delta: {reason}");
+            }
+            (None, None) => {
+                let _ = writeln!(out, "git delta: unavailable");
+            }
+        }
+        match est.session_state_bytes {
+            Some(bytes) => {
+                let _ = writeln!(out, "session state: {}", format_human_bytes(bytes));
+            }
+            None => {
+                let _ = writeln!(out, "session state: unavailable");
+            }
+        }
+        let _ = writeln!(
+            out,
+            ".mj/keep/: {}",
+            format_human_bytes(est.keep_dir_bytes)
+        );
+        if let Some(route) = &est.transfer_route {
+            let _ = writeln!(out, "transfer route: {route}");
+        }
+    }
+    if !preflight.blockers.is_empty() {
+        let _ = writeln!(out, "blockers:");
+        for b in &preflight.blockers {
+            let _ = writeln!(out, "  - {}: {}", b.kind, b.remedy);
+        }
+    }
+    if !preflight.operations.is_empty() {
+        let _ = writeln!(out, "in-progress operations (would be aborted):");
+        for op in &preflight.operations {
+            let _ = writeln!(out, "  - {} ({})", op.kind, op.checkout.repository_id);
+        }
+    }
+    let lost = preflight.untracked_display_paths();
+    if !lost.is_empty() {
+        let _ = writeln!(out, "would be lost (ignored files are never kept):");
+        for path in &lost {
+            let _ = writeln!(out, "  - {path}");
+        }
+    }
+    out
+}
+
 /// Permanently destroy the session, environment, and recovery archive.
 pub(crate) async fn destroy(args: DestroyArgs) -> Result<()> {
-    ApiClient::connect()
-        .await?
-        .destroy(&args.session, args.delete_branch)
-        .await?;
+    ApiClient::connect().await?.destroy(&args.session).await?;
     if args.json {
         print_json(
             &serde_json::json!({"session_id": args.session, "accepted": true, "operation": "destroy", "notices_url": format!("/api/v1/sessions/{}/notices", args.session)}),
@@ -5017,12 +5135,12 @@ mod tests {
         };
         assert_eq!(args.kind, ExportKindArg::Patch);
 
-        let cli =
-            Cli::try_parse_from(["mj", "destroy", "--session", "s1", "--delete-branch"]).unwrap();
+        let cli = Cli::try_parse_from(["mj", "destroy", "--session", "s1"]).unwrap();
         let Some(Command::Destroy(args)) = cli.command else {
             panic!("expected the destroy subcommand");
         };
-        assert!(args.delete_branch);
+        assert_eq!(args.session, "s1");
+        assert!(Cli::try_parse_from(["mj", "destroy", "--session", "s1", "--delete-branch"]).is_err());
 
         let cli = Cli::try_parse_from(["mj", "suspend", "--session", "s1"]).unwrap();
         let Some(Command::Suspend(args)) = cli.command else {
@@ -5737,5 +5855,77 @@ mod tests {
                 .to_string(),
         );
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-hosts", &output);
+    }
+
+    #[test]
+    fn golden_suspend_refusal_and_dry_run_output() {
+        let refusal = mj_core::suspend_consent::format_untracked_refusal(
+            6,
+            &[
+                "a.txt".into(),
+                "b.txt".into(),
+                "c.txt".into(),
+                "d.txt".into(),
+                "e.txt".into(),
+                "f.txt".into(),
+            ],
+        );
+        let dry_run_clean = format_suspend_dry_run(&mj_core::suspend_consent::SuspendPreflight {
+            session_id: "session-1".into(),
+            untracked: vec![mj_core::suspend_consent::UntrackedPath {
+                checkout: mj_core::suspend_consent::CheckoutKey::default(),
+                path: std::path::PathBuf::from("scratch.txt"),
+                bytes: 512,
+                identity: mj_core::suspend_consent::FileIdentity::new("abc".into()),
+            }],
+            keep_dir_bytes: 2048,
+            dry_run: Some(mj_core::suspend_consent::DryRunEstimate {
+                git_delta_bytes: Some(1024 * 64),
+                git_delta_unavailable_reason: None,
+                session_state_bytes: Some(4096),
+                keep_dir_bytes: 2048,
+                transfer_route: None,
+            }),
+            ..Default::default()
+        });
+        let dry_run_rebase = format_suspend_dry_run(&mj_core::suspend_consent::SuspendPreflight {
+            session_id: "session-2".into(),
+            operations: vec![mj_core::suspend_consent::ShownOperation {
+                checkout: mj_core::suspend_consent::CheckoutKey::default(),
+                kind: mj_core::suspend_consent::GitOperationKind::Rebase,
+            }],
+            dry_run: Some(mj_core::suspend_consent::DryRunEstimate {
+                git_delta_bytes: None,
+                git_delta_unavailable_reason: Some(
+                    "Git size estimate unavailable during rebase".into(),
+                ),
+                session_state_bytes: None,
+                keep_dir_bytes: 0,
+                transfer_route: None,
+            }),
+            ..Default::default()
+        });
+        let output = format!(
+            "=== untracked refusal ===\n{refusal}\n\n=== dry run ===\n{dry_run_clean}\n=== dry run during rebase ===\n{dry_run_rebase}"
+        );
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "api-suspend-consent",
+            &output,
+        );
+    }
+
+    #[test]
+    fn suspend_preflight_query_includes_without_checkpoint() {
+        assert_eq!(ApiClient::suspend_preflight_query(false, false), "");
+        assert_eq!(ApiClient::suspend_preflight_query(true, false), "?dry_run=true");
+        assert_eq!(
+            ApiClient::suspend_preflight_query(false, true),
+            "?without_checkpoint=true"
+        );
+        assert_eq!(
+            ApiClient::suspend_preflight_query(true, true),
+            "?dry_run=true&without_checkpoint=true"
+        );
     }
 }

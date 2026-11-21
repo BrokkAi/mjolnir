@@ -284,6 +284,42 @@ pub enum RelayRequest {
         command_id: String,
         command: RelayCommand,
     },
+    /// Atomically hold queue dispatch for a same-target in-place Move, bound to
+    /// `expected_store_id`, and return the pending command IDs captured when
+    /// the hold was taken. Idempotent by `operation_id`. Protocol 81.
+    HoldInPlaceMoveDispatch {
+        operation_id: String,
+        expected_store_id: String,
+    },
+    /// Idempotently discard held pending commands for an active in-place Move
+    /// hold matching `operation_id` and `expected_store_id`. Protocol 81.
+    DiscardHeldMoveCommands {
+        operation_id: String,
+        expected_store_id: String,
+        command_ids: Vec<String>,
+    },
+    /// Submit a continuation command to the head (index 0) of the pending queue
+    /// while `operation_id` holds dispatch on `expected_store_id`. Protocol 81.
+    SubmitFront {
+        operation_id: String,
+        expected_store_id: String,
+        command_id: String,
+        command: RelayCommand,
+    },
+    /// Idempotently release an in-place Move dispatch hold for `operation_id`
+    /// on `expected_store_id` and resume queue promotion. Protocol 81.
+    ReleaseInPlaceMoveDispatch {
+        operation_id: String,
+        expected_store_id: String,
+    },
+    /// Restart only the harness bridge process under a new launch configuration
+    /// without stopping the worker daemon or its non-harness processes.
+    /// Protocol 81.
+    RestartHarnessInPlace {
+        operation_id: String,
+        expected_store_id: String,
+        launch_config: Box<crate::worker_launch::WorkerLaunchConfig>,
+    },
     CommandRetentionStatus,
     /// Freeze a coherent current-state recovery cut on this connection.
     BeginLiveBaseline,
@@ -613,6 +649,11 @@ impl RelayRequest {
             Self::Attach { .. } => "attach",
             Self::Acknowledge { .. } => "acknowledge",
             Self::Submit { .. } => "submit",
+            Self::HoldInPlaceMoveDispatch { .. } => "hold_in_place_move_dispatch",
+            Self::DiscardHeldMoveCommands { .. } => "discard_held_move_commands",
+            Self::SubmitFront { .. } => "submit_front",
+            Self::ReleaseInPlaceMoveDispatch { .. } => "release_in_place_move_dispatch",
+            Self::RestartHarnessInPlace { .. } => "restart_harness_in_place",
             Self::ReadPendingElicitation { .. } => "read_pending_elicitation",
             Self::ReadQueuedCommand { .. } => "read_queued_command",
             Self::ReadCheckpointMailbox { .. } => "read_checkpoint_mailbox",
@@ -710,6 +751,11 @@ impl RelayRequest {
             | Self::UpdateCommandRetention { .. } => super::RELAY_COMMAND_RETENTION_PROTOCOL,
             Self::ReadCheckpointMailbox { .. } => super::RELAY_CHECKPOINT_MAILBOX_PROTOCOL,
             Self::ReadCheckpointNativeUse { .. } => super::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL,
+            Self::HoldInPlaceMoveDispatch { .. }
+            | Self::DiscardHeldMoveCommands { .. }
+            | Self::SubmitFront { .. }
+            | Self::ReleaseInPlaceMoveDispatch { .. }
+            | Self::RestartHarnessInPlace { .. } => super::RELAY_IN_PLACE_MOVE_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
             Self::Reviewer {
                 request:
@@ -1004,6 +1050,12 @@ pub enum RelayResponsePayload {
         command_id: String,
         ordinal: u64,
     },
+    InPlaceMoveDispatchHeld {
+        captured_pending_command_ids: Vec<String>,
+    },
+    HeldMoveCommandsDiscarded,
+    InPlaceMoveDispatchReleased,
+    HarnessRestartedInPlace,
     Status(RelayOperationalState),
     LiveBaselineWaiting {
         blockers: Vec<String>,
@@ -1182,6 +1234,10 @@ pub enum RelayErrorDetail {
         earliest_digest: String,
         latest: u64,
         latest_digest: String,
+    },
+    StoreMismatch {
+        expected_store_id: String,
+        actual_store_id: Option<String>,
     },
 }
 

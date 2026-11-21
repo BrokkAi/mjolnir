@@ -107,13 +107,42 @@ impl Controller {
     /// wait for its processes can last indefinitely, so startup recovery of
     /// it must not hold daemon handoff admission.
     pub fn suspend_wait_is_worker_owned(&self, session_id: &str) -> bool {
-        OriginDeltaSuspend::load(self, session_id).is_ok_and(|attempt| attempt.accepted())
+        let Ok((backend, _)) = self.worker_placement(session_id) else {
+            return false;
+        };
+        if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
+            return OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)
+                .is_ok_and(|attempt| attempt.accepted());
+        }
+        // Remote and container suspend waits are resumable from durable
+        // Closing state and must never block daemon startup or hold handoff
+        // admission on synchronous SSH/container I/O.
+        let Ok(checkout) = self.state.checkout(session_id) else {
+            return false;
+        };
+        match checkout {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                worktree.uses_origin_delta_suspend()
+            }
+            mj_core::state::Checkout::ManagedWorkspace => {
+                !self.state.is_subagent_session(session_id)
+            }
+            _ => false,
+        }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn explicit_suspend_export_policy(
         &self,
         session_id: &str,
-        ignore_nested_repositories: bool,
+    ) -> Result<CheckpointExportPolicy> {
+        self.explicit_suspend_export_policy_with_executor(session_id, &ProcessExecutor)
+    }
+
+    fn explicit_suspend_export_policy_with_executor(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<CheckpointExportPolicy> {
         let session = self
             .state
@@ -121,20 +150,27 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
         let checkout = self.state.checkout(session_id)?;
-        let origin_delta = match checkout
-            .managed_worktree()
-            .filter(|worktree| worktree.uses_origin_delta_suspend())
-        {
-            Some(worktree) => OriginDeltaSuspend::applies(self, session_id, worktree)?,
-            None => false,
-        };
-        if origin_delta {
-            Ok(CheckpointExportPolicy::OriginDelta)
-        } else if !self.state.is_subagent_session(session_id)
+        if !self.state.is_subagent_session(session_id)
             && checkout.project_directory().is_none()
             && super::backend::session_history_cutoff(session)?.is_some()
         {
-            Ok(CheckpointExportPolicy::OriginDeltaCutoff)
+            return Ok(CheckpointExportPolicy::OriginDeltaCutoff);
+        }
+        let origin_delta = match checkout {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. }
+                if worktree.uses_origin_delta_suspend() =>
+            {
+                OriginDeltaSuspend::applies(self, session_id, executor)?
+            }
+            mj_core::state::Checkout::ManagedWorkspace
+                if !self.state.is_subagent_session(session_id) && session.target.is_some() =>
+            {
+                OriginDeltaSuspend::applies(self, session_id, executor)?
+            }
+            _ => false,
+        };
+        if origin_delta {
+            Ok(CheckpointExportPolicy::OriginDelta)
         } else if matches!(checkout, mj_core::state::Checkout::Attached { .. })
             && !session
                 .project
@@ -142,57 +178,452 @@ impl Controller {
                 .is_some_and(|project| project.primary_is_plain_directory())
         {
             Ok(CheckpointExportPolicy::OriginDeltaRaw)
-        } else if ignore_nested_repositories {
-            Ok(CheckpointExportPolicy::IgnoreNestedRepositories)
         } else {
             Ok(CheckpointExportPolicy::ReuseUnchangedArchive)
         }
     }
 
+    /// Run read-only workspace inventory (and optional dry-run size estimate) off
+    /// the async worker so CLI, TUI, and Web UI can show blockers, untracked files,
+    /// in-progress operations, `.mj/keep/`, and existing checkpoint status.
+    pub fn suspend_preflight(
+        &self,
+        session_id: &str,
+        dry_run: bool,
+        without_checkpoint: bool,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?
+            .clone();
+        let children_not_handed_back: Vec<String> = self
+            .state
+            .subagents
+            .values()
+            .filter(|sub| sub.parent_session_id == session_id)
+            .filter(|sub| {
+                self.state
+                    .sessions
+                    .get(&sub.child_session_id)
+                    .is_some_and(|child| child.state.is_active())
+            })
+            .map(|sub| sub.child_session_id.clone())
+            .collect();
+        let existing_checkpoint = session.checkpoint.as_deref().map(|checkpoint| {
+            let verified = verify_installed_checkpoint_gate(session_id, checkpoint).is_ok();
+            let age_seconds = chrono::DateTime::parse_from_rfc3339(&checkpoint.created_at)
+                .ok()
+                .map(|created| {
+                    chrono::Utc::now()
+                        .signed_duration_since(created.with_timezone(&chrono::Utc))
+                        .num_seconds()
+                        .max(0) as u64
+                });
+            mj_core::suspend_consent::ExistingCheckpointSummary {
+                verified,
+                created_at: Some(checkpoint.created_at.clone()),
+                age_seconds,
+            }
+        });
+
+        let mut preflight = mj_core::suspend_consent::SuspendPreflight {
+            session_id: session_id.to_owned(),
+            children_not_handed_back,
+            existing_checkpoint,
+            ..Default::default()
+        };
+
+        if without_checkpoint {
+            return Ok(preflight);
+        }
+
+        let checkout = self.state.checkout(session_id)?;
+        let export_policy = self.explicit_suspend_export_policy_with_executor(session_id, executor)?;
+
+        let is_remote_target = session
+            .target
+            .as_deref()
+            .is_some_and(|locator| !matches!(locator, mj_core::state::TargetLocator::LocalBare { .. }));
+
+        let repo_specs: Vec<mj_core::suspend_consent::WorkerPreflightRepo> = match export_policy {
+            CheckpointExportPolicy::OriginDelta => match checkout {
+                mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                    vec![mj_core::suspend_consent::WorkerPreflightRepo {
+                        id: "workspace".to_owned(),
+                        path: worktree.worktree_root.clone(),
+                        raw: false,
+                        exclude_commits: None,
+                        keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
+                            &worktree.worktree_root,
+                            session_id,
+                        )),
+                        origin_override: origin_delta::managed_origin_override(worktree),
+                    }]
+                }
+                mj_core::state::Checkout::ManagedWorkspace => {
+                    let bundle = session
+                        .project_bundle(&self.config)
+                        .context("session bundle is missing")?;
+                    let (backend, _) = self.worker_placement(session_id)?;
+                    let workspace_root = PathBuf::from(crate::controller::network_git::workspace_root(
+                        &backend,
+                        session.container_workspace.as_deref(),
+                    ));
+                    bundle
+                        .repositories
+                        .iter()
+                        .map(|repository| {
+                            let path = workspace_root.join(&repository.destination);
+                            mj_core::suspend_consent::WorkerPreflightRepo {
+                                id: repository.id.clone(),
+                                keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
+                                    &path,
+                                    session_id,
+                                )),
+                                path,
+                                raw: false,
+                                exclude_commits: None,
+                                origin_override: None,
+                            }
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            },
+            CheckpointExportPolicy::OriginDeltaCutoff => {
+                let cutoff = super::backend::session_history_cutoff(&session)?;
+                let mut exclude_commits = Vec::new();
+                if let Some(cutoff) = cutoff {
+                    exclude_commits.push(cutoff.head);
+                    if let Some(base) = cutoff.base
+                        && !exclude_commits.contains(&base)
+                    {
+                        exclude_commits.push(base);
+                    }
+                }
+                let root = checkout
+                    .managed_worktree()
+                    .map(|wt| wt.worktree_root.clone())
+                    .or_else(|| checkout.project_directory().map(std::path::Path::to_path_buf))
+                    .or_else(|| {
+                        session.target.as_deref().and_then(|locator| {
+                            backend_locator(locator, &session, &self.config)
+                                .ok()
+                                .map(|backend| PathBuf::from(targets::workspace_root(&backend, None)))
+                        })
+                    });
+                root.into_iter()
+                    .map(|path| mj_core::suspend_consent::WorkerPreflightRepo {
+                        id: "workspace".to_owned(),
+                        keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(&path, session_id)),
+                        path,
+                        raw: false,
+                        exclude_commits: Some(exclude_commits.clone()),
+                        origin_override: None,
+                    })
+                    .collect()
+            }
+            CheckpointExportPolicy::OriginDeltaRaw => checkout
+                .project_directory()
+                .into_iter()
+                .map(|dir| mj_core::suspend_consent::WorkerPreflightRepo {
+                    id: "workspace".to_owned(),
+                    path: dir.to_path_buf(),
+                    raw: true,
+                    exclude_commits: None,
+                    keep_dir: None,
+                    origin_override: None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        if !repo_specs.is_empty() {
+            if is_remote_target {
+                let locator = session
+                    .target
+                    .as_deref()
+                    .context("remote target locator missing")?;
+                let backend = backend_locator(locator, &session, &self.config)?;
+                let worker_spec = mj_core::suspend_consent::WorkerSuspendPreflightSpec {
+                    session_id: session_id.to_owned(),
+                    repositories: repo_specs,
+                    dry_run,
+                };
+                let spec_bytes = serde_json::to_vec(&worker_spec)?;
+                let worker_result: mj_core::suspend_consent::WorkerSuspendPreflightResult =
+                    mj_core::runtime::off_async_worker(|| -> Result<_> {
+                        let command = crate::checkpoint_transfer::suspend_preflight_stdin_command(
+                            &backend,
+                            session_id,
+                        )?;
+                        let mut reader = std::io::Cursor::new(&spec_bytes);
+                        let mut output = executor.execute_with_stdin(&command, &mut reader)?;
+                        if output.status != 0 {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            if stderr.contains("unrecognized subcommand")
+                                && stderr.contains("suspend-preflight")
+                            {
+                                // Pre-upgrade SSH/container workers lack `suspend-preflight`.
+                                // Stage the current worker binary beside `{root}/hel` without
+                                // disturbing the running worker, run preflight once, and let
+                                // `PreparedWorkerBinary`'s drop guard remove the temporary copy.
+                                let worker = super::worker_binary::WorkerInstall::for_target(
+                                    &backend, executor,
+                                )
+                                .context("resolve current worker binary for suspend preflight")?;
+                                let staging =
+                                    super::worker_binary::stage_worker_binary_for_upgrade(
+                                        executor,
+                                        &backend,
+                                        session_id,
+                                        &worker,
+                                    )
+                                    .context(
+                                        "stage current worker binary for suspend preflight",
+                                    )?;
+                                let staged_command = crate::checkpoint_transfer::suspend_preflight_stdin_command_with_binary(
+                                    &backend,
+                                    session_id,
+                                    &staging,
+                                )?;
+                                let mut retry_reader = std::io::Cursor::new(&spec_bytes);
+                                output = executor
+                                    .execute_with_stdin(&staged_command, &mut retry_reader)?;
+                            }
+                        }
+                        if output.status != 0 {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            bail!(
+                                "target suspend-preflight failed (status {}): {}",
+                                output.status,
+                                stderr.trim()
+                            );
+                        }
+                        serde_json::from_slice(&output.stdout)
+                            .context("decode target suspend-preflight result")
+                    })?;
+                preflight.untracked = worker_result.untracked;
+                preflight.nested_repositories = worker_result.nested_repositories;
+                preflight.untracked_stashes = worker_result.untracked_stashes;
+                preflight.keep_dir_entries = worker_result.keep_dir_entries;
+                preflight.keep_dir_bytes = worker_result.keep_dir_bytes;
+                preflight.operations = worker_result.operations;
+                preflight.raw = worker_result.raw;
+                preflight.blockers = worker_result.blockers;
+                preflight.dry_run = worker_result.dry_run;
+            } else {
+                let git = super::worktree::ExecutorGit::local(executor);
+                let mut git_delta_total: Option<u64> = if dry_run { Some(0) } else { None };
+                let mut git_delta_unavailable: Option<String> = None;
+                let mut total_keep_bytes: u64 = 0;
+
+                mj_core::runtime::off_async_worker(|| -> Result<_> {
+                    for repo in &repo_specs {
+                        let mut input = if repo.raw {
+                            mj_checkpoint::checkpoint::raw_snapshot_input(
+                                &repo.id,
+                                &repo.path,
+                                None,
+                                None,
+                                PathBuf::new(),
+                            )
+                        } else if let Some(exclude_commits) = &repo.exclude_commits {
+                            mj_checkpoint::checkpoint::cutoff_snapshot_input(
+                                &repo.id,
+                                &repo.path,
+                                Some(session_id),
+                                exclude_commits.clone(),
+                                PathBuf::new(),
+                            )
+                        } else {
+                            mj_checkpoint::checkpoint::managed_clone_snapshot_input(
+                                &repo.id,
+                                &repo.path,
+                                Some(session_id),
+                                PathBuf::new(),
+                                repo.origin_override.clone(),
+                            )
+                        };
+                        input.keep_dir = repo.keep_dir.clone();
+                        let inventories = mj_checkpoint::snapshot::session_inventory(
+                            &git,
+                            std::slice::from_ref(&input),
+                        )?;
+                        let (_, inventory) = inventories
+                            .into_iter()
+                            .next()
+                            .context("session inventory returned no repository")?;
+                        if let Some(keep_dir) = &input.keep_dir {
+                            let (keep_entries, keep_bytes) =
+                                mj_checkpoint::snapshot::scan_keep_dir(
+                                    &inventory.checkout,
+                                    keep_dir,
+                                )?;
+                            preflight.keep_dir_entries.extend(keep_entries);
+                            total_keep_bytes = total_keep_bytes.saturating_add(keep_bytes);
+                        }
+                        if dry_run && git_delta_unavailable.is_none() {
+                            if let Some(op) = &inventory.operation {
+                                git_delta_total = None;
+                                git_delta_unavailable = Some(format!(
+                                    "Git size estimate unavailable during {}",
+                                    op.kind
+                                ));
+                            } else {
+                                match mj_checkpoint::snapshot::estimate_repository_delta(
+                                    &git, &input,
+                                ) {
+                                    Ok(est) => {
+                                        if let (Some(acc), Some(bytes)) =
+                                            (git_delta_total, est.total_bytes)
+                                        {
+                                            git_delta_total = Some(acc.saturating_add(bytes));
+                                        } else {
+                                            git_delta_total = None;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        git_delta_total = None;
+                                        git_delta_unavailable = Some(format!(
+                                            "Git size estimate unavailable: {err}"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+
+                        preflight.untracked.extend(inventory.untracked);
+                        preflight.nested_repositories.extend(inventory.nested_repositories);
+                        preflight.untracked_stashes.extend(
+                            inventory.untracked_stashes.into_iter().map(|s| {
+                                mj_core::suspend_consent::SuspendUntrackedStash {
+                                    checkout: s.checkout,
+                                    commit: s.value.commit,
+                                    message: s.value.message,
+                                }
+                            }),
+                        );
+                        if let Some(op) = inventory.operation {
+                            preflight.operations.push(op);
+                        }
+                        preflight.raw |= inventory.raw;
+                        preflight.blockers.extend(inventory.blockers.into_iter().map(|b| {
+                            mj_core::suspend_consent::SuspendBlocker {
+                                kind: format!("{:?}", b.kind),
+                                paths: b
+                                    .paths
+                                    .into_iter()
+                                    .map(|p| p.value.display().to_string())
+                                    .collect(),
+                                remedy: b.remedy,
+                            }
+                        }));
+                    }
+                    Ok(())
+                })?;
+
+                preflight.keep_dir_bytes = total_keep_bytes;
+                if dry_run {
+                    preflight.dry_run = Some(mj_core::suspend_consent::DryRunEstimate {
+                        git_delta_bytes: git_delta_total,
+                        git_delta_unavailable_reason: git_delta_unavailable,
+                        session_state_bytes: None,
+                        keep_dir_bytes: total_keep_bytes,
+                        transfer_route: None,
+                    });
+                }
+            }
+        } else if dry_run {
+            preflight.dry_run = Some(mj_core::suspend_consent::DryRunEstimate {
+                git_delta_bytes: None,
+                git_delta_unavailable_reason: None,
+                session_state_bytes: None,
+                keep_dir_bytes: 0,
+                transfer_route: None,
+            });
+        }
+
+        Ok(preflight)
+    }
+
     pub fn preflight_origin_delta_suspension(
         &self,
         session_id: &str,
+        consent: &mj_core::suspend_consent::SuspendConsent,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        if self.explicit_suspend_export_policy(session_id, false)?
-            != CheckpointExportPolicy::OriginDelta
-        {
+        if consent.without_checkpoint {
             return Ok(());
         }
-        let checkout = self.state.checkout(session_id)?;
-        let worktree = checkout
-            .managed_worktree()
-            .context("managed checkout is missing")?;
-        let origin_override = origin_delta::managed_origin_override(worktree);
-        let input = mj_checkpoint::checkpoint::managed_clone_snapshot_input(
-            "workspace",
-            &worktree.worktree_root,
-            PathBuf::new(),
-            origin_override,
-        );
-        mj_core::runtime::off_async_worker(|| {
-            use mj_checkpoint::snapshot::{
-                SnapshotRefused, require_managed_snapshot_without_consent,
-            };
-            require_managed_snapshot_without_consent(
-                &super::worktree::ExecutorGit::local(executor),
-                &input,
+        if !matches!(
+            self.explicit_suspend_export_policy_with_executor(session_id, executor)?,
+            CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
+        ) {
+            return Ok(());
+        }
+        let preflight = self.suspend_preflight(session_id, false, false, executor)?;
+        if preflight.has_blockers() {
+            let summary = preflight
+                .blockers
+                .iter()
+                .map(|b| b.remedy.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(mj_core::refusal::Refusal::precondition(summary).into());
+        }
+        for op in &preflight.operations {
+            if !consent.abort_operations.covers(op) {
+                return Err(mj_core::refusal::Refusal::precondition(format!(
+                    "in-progress {} requires `--abort-operation` consent before suspending",
+                    op.kind
+                ))
+                .into());
+            }
+        }
+        let mut uncovered_paths = Vec::new();
+        for item in match preflight.shown_untracked_consent() {
+            mj_core::suspend_consent::UntrackedConsent::Shown(items) => items,
+            _ => Vec::new(),
+        } {
+            if !consent.discard_untracked.covers(&item) {
+                let display = match &item {
+                    mj_core::suspend_consent::UntrackedItem::Path { path, .. }
+                    | mj_core::suspend_consent::UntrackedItem::NestedRepository { path, .. } => {
+                        path.display().to_string()
+                    }
+                    mj_core::suspend_consent::UntrackedItem::KeepDirFile { path, .. } => {
+                        format!(".mj/keep/{}", path.display())
+                    }
+                    mj_core::suspend_consent::UntrackedItem::Stash { commit, message, .. } => {
+                        format!("stash {} ({message})", &commit[..commit.len().min(8)])
+                    }
+                };
+                uncovered_paths.push(display);
+            }
+        }
+        if !uncovered_paths.is_empty() {
+            return Err(mj_core::refusal::Refusal::precondition(
+                mj_core::suspend_consent::format_untracked_refusal(
+                    uncovered_paths.len(),
+                    &uncovered_paths,
+                ),
             )
-            .map_err(|error| {
-                if let Some(reason) = error.downcast_ref::<SnapshotRefused>() {
-                    mj_core::refusal::Refusal::precondition(reason.to_string()).into()
-                } else {
-                    error
-                }
-            })
-        })
+            .into());
+        }
+        Ok(())
     }
 
     pub fn record_origin_delta_suspend_acceptance(&self, session_id: &str) -> Result<()> {
-        if self.explicit_suspend_export_policy(session_id, false)?
-            == CheckpointExportPolicy::OriginDelta
-        {
-            OriginDeltaSuspend::load(self, session_id)?.accept()?;
+        if matches!(
+            self.explicit_suspend_export_policy_with_executor(session_id, &ProcessExecutor)?,
+            CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
+        ) {
+            OriginDeltaSuspend::load(self, session_id, &ProcessExecutor)?
+                .accept(&ProcessExecutor)?;
         }
         Ok(())
     }
@@ -222,7 +653,9 @@ impl Controller {
                 .await
                 .map(|_| ());
         }
-        let export_policy = self.explicit_suspend_export_policy(session_id, false)?;
+        let export_policy =
+            self.explicit_suspend_export_policy_with_executor(session_id, executor)?;
+        let default_consent = mj_core::suspend_consent::SuspendConsent::default();
         if self
             .suspend_session_controlled_with_manager(
                 admission,
@@ -232,7 +665,7 @@ impl Controller {
                 None,
                 SourceTargetDisposition::Destroy,
                 export_policy,
-                true,
+                &default_consent,
                 None,
                 None,
                 LatchExclusivity::HoldThroughClose,
@@ -252,12 +685,43 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
-        acknowledge_unpublished_work: bool,
-        ignore_nested_repositories: bool,
+        consent: &mj_core::suspend_consent::SuspendConsent,
         before_close: Option<BeforeClose>,
     ) -> Result<bool> {
+        if consent.without_checkpoint {
+            return crate::worker_lifecycle::run_admitted(admission, session_id, async {
+                self.verify_existing_checkpoint_for_without_checkpoint(
+                    session_id,
+                    consent.confirm_no_checkpoint,
+                    executor,
+                )?;
+                if let Some(before_close) = before_close
+                    && let Err(error) = before_close.await
+                {
+                    if executor.cancellation_requested() {
+                        return Err(error);
+                    }
+                    let warning = format!(
+                        "Stopping sub-agents before suspend without checkpoint failed for session {session_id}: {error:#}. Continuing best-effort teardown."
+                    );
+                    tracing::warn!(session_id, warning, "suspend without checkpoint warning");
+                    executor.notify_notice(&warning);
+                }
+                let outcome = self.suspend_without_checkpoint(
+                    session_id,
+                    consent.confirm_no_checkpoint,
+                    executor,
+                )?;
+                for warning in &outcome.warnings {
+                    tracing::warn!(session_id, warning, "suspend without checkpoint warning");
+                    executor.notify_notice(warning);
+                }
+                Ok(outcome.deferred)
+            })
+            .await;
+        }
         let export_policy =
-            self.explicit_suspend_export_policy(session_id, ignore_nested_repositories)?;
+            self.explicit_suspend_export_policy_with_executor(session_id, executor)?;
         self.suspend_session_controlled_with_manager(
             admission,
             session_id,
@@ -266,7 +730,7 @@ impl Controller {
             None,
             SourceTargetDisposition::Destroy,
             export_policy,
-            acknowledge_unpublished_work,
+            consent,
             before_close,
             None,
             LatchExclusivity::HoldThroughClose,
@@ -302,7 +766,7 @@ impl Controller {
             } else {
                 CheckpointExportPolicy::SessionHandoff
             },
-            true,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             before_close,
             None,
             if automatic {
@@ -365,7 +829,7 @@ impl Controller {
                     Some((operation, preparation)),
                     disposition,
                     export_policy,
-                    true,
+                    &mj_core::suspend_consent::SuspendConsent::default(),
                     None,
                     source_relay.take(),
                     exclusivity,
@@ -390,7 +854,7 @@ impl Controller {
         )>,
         disposition: SourceTargetDisposition,
         checkpoint_export_policy: CheckpointExportPolicy,
-        acknowledge_unpublished_work: bool,
+        consent: &mj_core::suspend_consent::SuspendConsent,
         before_close: Option<BeforeClose>,
         mut held_relay: Option<super::checkpoint::ControllerRelayLease>,
         exclusivity: LatchExclusivity,
@@ -404,13 +868,30 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        let mut origin_delta = (checkpoint_export_policy == CheckpointExportPolicy::OriginDelta)
-            .then(|| OriginDeltaSuspend::load(self, session_id))
-            .transpose()?;
-        if before_close.is_none()
-            && origin_delta.as_ref().is_some_and(|attempt| !attempt.request_recorded())
-            && let Err(error) = self.preflight_origin_delta_suspension(session_id, executor)
+        let mut origin_delta = matches!(
+            checkpoint_export_policy,
+            CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
+        )
+        .then(|| OriginDeltaSuspend::load(self, session_id, executor))
+        .transpose()?;
+        let legacy_closing_intent = previous.state == SessionState::Closing
+            && origin_delta.as_ref().is_some_and(|attempt| !attempt.accepted());
+        if matches!(
+            checkpoint_export_policy,
+            CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
+        ) && origin_delta.as_ref().is_some_and(|attempt| {
+            !attempt.accepted() || (before_close.is_none() && !attempt.request_recorded())
+        }) && let Err(error) =
+            self.preflight_origin_delta_suspension(session_id, consent, executor)
         {
+            let error = if legacy_closing_intent {
+                mj_core::refusal::Refusal::precondition(format!(
+                    "suspend requested before the upgrade needs consent: {error:#}"
+                ))
+                .into()
+            } else {
+                error
+            };
             if previous.state == SessionState::Closing {
                 let record = self.state.sessions.get_mut(session_id).unwrap();
                 apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
@@ -421,7 +902,7 @@ impl Controller {
         if let Some(attempt) = origin_delta.as_mut()
             && !attempt.accepted()
         {
-            attempt.accept()?;
+            attempt.accept(executor)?;
         }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         // Persist the close intent before beginning its checkpoint. A process
@@ -439,7 +920,7 @@ impl Controller {
             mj_core::runtime::off_async_worker(|| mj_core::test_hooks::reach_test_hook("origin_delta_after_preflight"))?;
             // An accepted suspend owns this Closing record. The worker's
             // receipt carries the stop across a controller handoff.
-            if let Some(reason) = attempt.restart_reason()? {
+            if let Some(reason) = attempt.restart_reason(executor)? {
                 if attempt.request_recorded() {
                     attempt.wait_for_stop(executor).await?;
                 }
@@ -457,6 +938,136 @@ impl Controller {
                     return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
                 }
             }
+            if !attempt.request_recorded() && !attempt.worker_capable(executor)? {
+                let mut already_recovered_worker = false;
+                let recovery_result: Result<()> = if let Some(pending) =
+                    crate::database::load_worker_restart(session_id)?
+                    && self.state.sessions[session_id].target.as_deref() == Some(&pending.target)
+                {
+                    // A prior suspend worker swap crashed mid-flight. Finish or
+                    // recover it through `start_worker` (reattaching a live
+                    // replacement or spawning the installed binary if the old
+                    // worker was stopped) before checking whether an upgrade is
+                    // still needed.
+                    match attempt
+                        .start_worker(
+                            self,
+                            admission,
+                            session_id,
+                            executor,
+                            manager,
+                            mj_core::worker_launch::WorkerRunMode::Harness,
+                        )
+                        .await
+                    {
+                        Ok(relay) => {
+                            relay.release();
+                            retire_worker_restart_intent(session_id)
+                        }
+                        Err(error) => {
+                            already_recovered_worker = true;
+                            Err(error)
+                        }
+                    }
+                } else {
+                    Ok(())
+                };
+                let upgrade_result = match recovery_result {
+                    Err(error) => Err(error),
+                    Ok(()) if attempt.worker_capable(executor)? => Ok(()),
+                    Ok(()) => {
+                        if let Some(manager) = manager {
+                            self.upgrade_session_worker_for_suspend(
+                                admission, session_id, executor, manager,
+                            )
+                            .await
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "older worker cannot be upgraded for origin-delta suspend without a session manager"
+                            ))
+                        }
+                    }
+                };
+                if let Err(error) = upgrade_result {
+                    let final_error = if !already_recovered_worker
+                        && WorkerRestartLeftNoWorker::marks(&error)
+                    {
+                        // Swap failed after stopping the old worker: attempt ONE
+                        // in-place recovery restart with the installed binary.
+                        match attempt
+                            .start_worker(
+                                self,
+                                admission,
+                                session_id,
+                                executor,
+                                manager,
+                                mj_core::worker_launch::WorkerRunMode::Harness,
+                            )
+                            .await
+                        {
+                            Ok(relay) => {
+                                relay.release();
+                                if let Err(cleanup) = retire_worker_restart_intent(session_id) {
+                                    tracing::warn!(
+                                        session_id,
+                                        %cleanup,
+                                        "could not clear worker restart intent after in-place recovery"
+                                    );
+                                }
+                                // Recovery succeeded: strip WorkerRestartLeftNoWorker so
+                                // apply_close_checkpoint_failure leaves the session Running.
+                                anyhow::anyhow!("{error:#}")
+                            }
+                            Err(recovery_error) => error
+                                .context(format!(
+                                    "in-place worker recovery also failed; retry suspend or use --without-checkpoint: {recovery_error:#}"
+                                ))
+                                .context(WorkerRestartLeftNoWorker),
+                        }
+                    } else {
+                        error
+                    };
+                    if let Err(cleanup) = attempt.clear_after_restart(executor) {
+                        tracing::warn!(
+                            session_id,
+                            %cleanup,
+                            "could not clear worker suspend records after failed worker upgrade"
+                        );
+                    }
+                    let record = self.state.sessions.get_mut(session_id).unwrap();
+                    apply_close_checkpoint_failure(
+                        record,
+                        &previous,
+                        &final_error,
+                        now(),
+                        harness_failure,
+                    );
+                    return Err(self.persist_failed_checkpoint_state_or_restore(
+                        session_id,
+                        &previous,
+                        final_error,
+                    ));
+                }
+                if !attempt.worker_capable(executor)? {
+                    let error = anyhow::anyhow!(
+                        "upgraded worker did not advertise origin-delta suspend capability"
+                    );
+                    if let Err(cleanup) = attempt.clear_after_restart(executor) {
+                        tracing::warn!(
+                            session_id,
+                            %cleanup,
+                            "could not clear worker suspend records after missing capability"
+                        );
+                    }
+                    let record = self.state.sessions.get_mut(session_id).unwrap();
+                    apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
+                    return Err(self.persist_failed_checkpoint_state_or_restore(
+                        session_id,
+                        &previous,
+                        error,
+                    ));
+                }
+            }
             if !attempt.request_recorded() && let Some(manager) = manager {
                 let handle = manager.wait_for_session(session_id, Duration::from_secs(5)).await?;
                 let mut lease = handle.lease_connection(admission).await?;
@@ -467,7 +1078,7 @@ impl Controller {
             if let Err(error) = attempt.request_stop(executor) {
                 // If delivery was lost after the durable request was written,
                 // recovery will ask its owner for the stop receipt.
-                if !OriginDeltaSuspend::load(self, session_id)?.request_recorded() {
+                if !OriginDeltaSuspend::load(self, session_id, executor)?.request_recorded() {
                     let record = self.state.sessions.get_mut(session_id).unwrap();
                     apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
                     return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
@@ -475,7 +1086,13 @@ impl Controller {
                 tracing::warn!(session_id, %error, "waiting for the worker's durable suspend request");
             }
             let receipt = attempt.wait_for_stop(executor).await?;
-            if let Some(reason) = attempt.restart_reason()? {
+            let post_stop_restart_reason =
+                if executor.cancellation_requested() && !executor.shutdown_interrupted() {
+                    attempt.restart_reason(&ProcessExecutor)?
+                } else {
+                    attempt.restart_reason(executor)?
+                };
+            if let Some(reason) = post_stop_restart_reason {
                 return Err(self.restart_after_refused_origin_delta(
                     admission, session_id, executor, manager, attempt, &previous, anyhow::anyhow!(reason),
                 ).await);
@@ -503,8 +1120,10 @@ impl Controller {
 
         // Close seals the relay at the exact latched cursor, so this checkpoint
         // keeps its exclusive connection until the relay reports Closed.
+        let capture_consent = consent.capture_consent();
         let checkpoint = self
-            .checkpoint_session_latched_for_operation(admission,
+            .checkpoint_session_latched_for_operation_with_consent(
+                admission,
                 session_id,
                 executor,
                 manager,
@@ -512,6 +1131,7 @@ impl Controller {
                 checkpoint_export_policy,
                 move_intent.as_ref().map(|(operation, _)| operation.operation_id.as_str()),
                 held_relay,
+                &capture_consent,
             )
             .await;
         if origin_delta.is_some() {
@@ -601,29 +1221,6 @@ impl Controller {
                 | mj_core::state::Checkout::Borrowed { .. } => None,
             }
         };
-        if !acknowledge_unpublished_work
-            && publication
-                .as_ref()
-                .is_some_and(|result| result.state != mj_core::state::PublicationState::Published)
-        {
-            latched.relay.cancel_abandoned_barrier(admission).await?;
-            // The relay is still open, so the session is running again. Left
-            // `Closing`, the record would be an interrupted close, which the
-            // next start finishes without the acknowledgement.
-            let mut restored = previous.clone();
-            restored.state = state_after_unsealed_close(&previous);
-            restored.updated_at = now();
-            self.state.sessions.insert(session_id.to_owned(), restored);
-            self.persist_session_transition_or_restore(
-                session_id,
-                &previous,
-                "restore session after unpublished-work preflight",
-            )?;
-            let _ = std::fs::remove_file(&artifact.metadata.archive_path);
-            return Err(mj_core::refusal::Refusal::precondition(
-                "the checkout has unpublished or unverified work; confirm suspension with acknowledge_unpublished_work=true",
-            ).into());
-        }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.state = SessionState::Closing;
         record.native_session_id = Some(artifact.native_session_id.clone());
@@ -844,9 +1441,14 @@ impl Controller {
         error: anyhow::Error,
     ) -> anyhow::Error {
         let recovered = async {
-            attempt.record_restart(&error)?;
+            let cancelled = executor.cancellation_requested() && !executor.shutdown_interrupted();
+            if cancelled {
+                attempt.record_restart(&error, &ProcessExecutor)?;
+            } else {
+                attempt.record_restart(&error, executor)?;
+            }
             executor.notify_notice("Restarting the agent in the retained checkout");
-            if executor.cancellation_requested() && !executor.shutdown_interrupted() {
+            if cancelled {
                 // Cancellation ends the suspend. The retained checkout still
                 // needs its agent back after quiescence finished.
                 executor.begin_resumable_work()?;
@@ -884,7 +1486,12 @@ impl Controller {
             record.last_checkpoint_error = Some(format!("{error:#}"));
             record.updated_at = now();
             self.persist_session_state(session_id)?;
-            if let Err(cleanup) = attempt.clear_after_restart() {
+            let cleanup = if cancelled {
+                attempt.clear_after_restart(&ProcessExecutor)
+            } else {
+                attempt.clear_after_restart(executor)
+            };
+            if let Err(cleanup) = cleanup {
                 tracing::warn!(session_id, %cleanup, "could not clear worker suspend records");
             }
             anyhow::Ok(())
@@ -920,10 +1527,41 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
-        acknowledge_unpublished_work: bool,
-        ignore_nested_repositories: bool,
+        consent: &mj_core::suspend_consent::SuspendConsent,
         before_close: Option<BeforeClose>,
     ) -> Result<bool> {
+        if consent.without_checkpoint {
+            return crate::worker_lifecycle::run_admitted(admission, session_id, async {
+                self.verify_existing_checkpoint_for_without_checkpoint(
+                    session_id,
+                    consent.confirm_no_checkpoint,
+                    executor,
+                )?;
+                if let Some(before_close) = before_close
+                    && let Err(error) = before_close.await
+                {
+                    if executor.cancellation_requested() {
+                        return Err(error);
+                    }
+                    let warning = format!(
+                        "Stopping sub-agents before suspend without checkpoint failed for session {session_id}: {error:#}. Continuing best-effort teardown."
+                    );
+                    tracing::warn!(session_id, warning, "suspend without checkpoint warning");
+                    executor.notify_notice(&warning);
+                }
+                let outcome = self.suspend_without_checkpoint(
+                    session_id,
+                    consent.confirm_no_checkpoint,
+                    executor,
+                )?;
+                for warning in &outcome.warnings {
+                    tracing::warn!(session_id, warning, "suspend without checkpoint warning");
+                    executor.notify_notice(warning);
+                }
+                Ok(outcome.deferred)
+            })
+            .await;
+        }
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
         let (state, verified) = {
             let session = self
@@ -976,14 +1614,20 @@ impl Controller {
             anyhow::Ok((relay, execution))
         }
         .await;
-        let origin_delta = if before_close.is_some()
-            && self.explicit_suspend_export_policy(session_id, ignore_nested_repositories)?
-                == CheckpointExportPolicy::OriginDelta
-        {
-            Some(OriginDeltaSuspend::load(self, session_id)?)
+        let suspend_policy = if before_close.is_some() {
+            let policy =
+                self.explicit_suspend_export_policy_with_executor(session_id, executor)?;
+            matches!(
+                policy,
+                CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
+            )
+            .then_some(policy)
         } else {
             None
         };
+        let origin_delta = suspend_policy
+            .map(|_| OriginDeltaSuspend::load(self, session_id, executor))
+            .transpose()?;
         let accepted_origin_delta = origin_delta.as_ref().is_some_and(OriginDeltaSuspend::accepted);
         let resumable_origin_delta = origin_delta.as_ref().is_some_and(OriginDeltaSuspend::request_recorded);
         let (mut relay, execution, harness_failure) = match connection {
@@ -992,9 +1636,17 @@ impl Controller {
             // worker may have exited for the stop: continue that suspend.
             Err(_) if resumable_origin_delta => {
                 return Box::pin(self.suspend_session_controlled_with_manager(
-                    admission, session_id, executor, Some(manager), None,
-                    SourceTargetDisposition::Destroy, CheckpointExportPolicy::OriginDelta,
-                    acknowledge_unpublished_work, before_close, None, LatchExclusivity::HoldThroughClose,
+                    admission,
+                    session_id,
+                    executor,
+                    Some(manager),
+                    None,
+                    SourceTargetDisposition::Destroy,
+                    suspend_policy.unwrap_or(CheckpointExportPolicy::OriginDelta),
+                    consent,
+                    before_close,
+                    None,
+                    LatchExclusivity::HoldThroughClose,
                     None,
                 )).await;
             }
@@ -1042,6 +1694,11 @@ impl Controller {
             "suspension recovery read the worker's execution state"
         );
         let closed = async {
+            // Legacy sealed-intent compatibility branch (removable only once
+            // the upgrade floor guarantees no older daemon could have left a
+            // sealed legacy Closing intent; also serves crashes after seal on
+            // the current release): wait out Closing and complete teardown from
+            // the already-installed verified checkpoint without any new export.
             match execution {
                 RelayExecutionState::Closed => {}
                 RelayExecutionState::Closing => {
@@ -1058,14 +1715,14 @@ impl Controller {
                             None,
                             SourceTargetDisposition::Destroy,
                             if accepted_origin_delta {
-                                CheckpointExportPolicy::OriginDelta
+                                suspend_policy.unwrap_or(CheckpointExportPolicy::OriginDelta)
                             } else {
-                                self.explicit_suspend_export_policy(
+                                self.explicit_suspend_export_policy_with_executor(
                                     session_id,
-                                    ignore_nested_repositories,
+                                    executor,
                                 )?
                             },
-                            acknowledge_unpublished_work,
+                            consent,
                             before_close,
                             None,
                             LatchExclusivity::HoldThroughClose,
@@ -1349,51 +2006,199 @@ impl Controller {
     }
 
     /// Close a session that has nothing to checkpoint.
-    ///
-    /// A record still provisioning never reached a running worker, and a
-    /// record with no target locator has no target to read a workspace from,
-    /// so in both cases there is no relay to latch and no harness state to
-    /// archive. Waiting for a relay that does not exist is what left a stuck
-    /// provisioning session unclosable. Any target the session did leave
-    /// behind is still torn down, and the checkpoint it already had is kept,
-    /// so this is a close, not a forced destroy.
-    ///
-    /// Returns whether target storage cleanup was deferred, like the graceful
-    /// close does.
-    pub fn suspend_session_without_checkpoint(
+    /// Suspend a session without taking a fresh checkpoint:
+    /// 1. Verify any existing checkpoint first. If verified, keep it as the
+    ///    Resume source; if missing or corrupt, clear it so it is never
+    ///    presented as a Resume source.
+    /// 2. Stop worker and environment with best-effort cleanup (completes with
+    ///    warnings if the target is unreachable; respects cancellation).
+    /// 3. Keep the session record, history, and verified checkpoint (if any),
+    ///    preserving `target` if cleanup failed or was deferred, and settle as `Stopped`.
+    pub fn suspend_without_checkpoint(
         &mut self,
         session_id: &str,
+        confirm_no_checkpoint: bool,
         executor: &(impl CommandExecutor + Sync),
-    ) -> Result<bool> {
-        self.suspend_session_without_checkpoint_with(
+    ) -> Result<SuspendWithoutCheckpointOutcome> {
+        self.suspend_without_checkpoint_with(
             session_id,
+            confirm_no_checkpoint,
             executor,
             crate::database::save_lifecycle_session,
         )
     }
 
-    fn suspend_session_without_checkpoint_with(
+    pub fn ensure_without_checkpoint_allowed(
+        &self,
+        session_id: &str,
+        confirm_no_checkpoint: bool,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        self.verify_existing_checkpoint_for_without_checkpoint(
+            session_id,
+            confirm_no_checkpoint,
+            executor,
+        )
+        .map(|_| ())
+    }
+
+    fn verify_existing_checkpoint_for_without_checkpoint(
+        &self,
+        session_id: &str,
+        confirm_no_checkpoint: bool,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<(
+        Option<mj_core::state::CheckpointMetadata>,
+        super::worktree::CloneRetirementPrerequisite,
+    )> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        ensure!(
+            session.state.is_active(),
+            "session {session_id} is already inactive"
+        );
+        let (verified_checkpoint, clone_prerequisite) = match session.checkpoint.as_deref() {
+            Some(checkpoint) => {
+                let verified = {
+                    let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
+                    verify_installed_checkpoint_gate(session_id, checkpoint).is_ok()
+                };
+                if verified {
+                    let prereq =
+                        super::worktree::clone_retirement_prerequisite_for_checkpoint(checkpoint);
+                    (Some(checkpoint.clone()), prereq)
+                } else {
+                    tracing::warn!(
+                        session_id,
+                        "existing checkpoint failed verification during suspend --without-checkpoint; clearing it so Resume will not offer it"
+                    );
+                    (None, super::worktree::CloneRetirementPrerequisite::None)
+                }
+            }
+            None => (None, super::worktree::CloneRetirementPrerequisite::None),
+        };
+        if verified_checkpoint.is_none() && !confirm_no_checkpoint {
+            return Err(mj_core::refusal::Refusal::precondition(
+                "No verified checkpoint exists for this session; suspending without a checkpoint cannot be resumed. Confirm explicitly (CLI: pass --yes) to proceed.",
+            )
+            .into());
+        }
+        Ok((verified_checkpoint, clone_prerequisite))
+    }
+
+    fn suspend_without_checkpoint_with(
         &mut self,
         session_id: &str,
+        confirm_no_checkpoint: bool,
         executor: &(impl CommandExecutor + Sync),
         persist: impl Fn(&SessionRecord) -> Result<()>,
-    ) -> Result<bool> {
+    ) -> Result<SuspendWithoutCheckpointOutcome> {
+        let (verified_checkpoint, clone_prerequisite) = self
+            .verify_existing_checkpoint_for_without_checkpoint(
+                session_id,
+                confirm_no_checkpoint,
+                executor,
+            )?;
         let session = self
             .state
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        ensure!(
-            has_nothing_to_checkpoint(&session, self.state.subagents.contains_key(session_id)),
-            "session {session_id} has a workspace to checkpoint; suspend it instead"
-        );
-        self.stop_target_and_settle(
+        crate::worker_lifecycle::run_blocking(
             session_id,
-            &session,
+            "suspend without checkpoint",
             executor,
-            super::worktree::CloneRetirementPrerequisite::None,
-            &persist,
+            || {
+                let mut deferred = false;
+                let mut cleanup_failed = false;
+                let mut warnings = Vec::new();
+                if let Some(locator) = &session.target {
+                    match backend_locator(locator, &session, &self.config) {
+                        Ok(backend) => {
+                            let cleanup_result = if self.state.subagents.contains_key(session_id) {
+                                super::environment::stop_borrower(
+                                    session_id,
+                                    &self.config,
+                                    executor,
+                                )
+                                .and_then(|()| retire_worker_restart_intent(session_id))
+                            } else if targets::quiesce_plan(&backend, session_id)
+                                .ok()
+                                .flatten()
+                                .is_some()
+                            {
+                                deferred = true;
+                                super::environment::quiesce_session_environment(
+                                    &session,
+                                    &self.config,
+                                    executor,
+                                )
+                            } else {
+                                execute_target_cleanup(
+                                    &session,
+                                    &self.config,
+                                    executor,
+                                    clone_prerequisite,
+                                )
+                            };
+                            if let Err(error) = cleanup_result {
+                                if executor.cancellation_requested() {
+                                    return Err(error);
+                                }
+                                deferred = false;
+                                cleanup_failed = true;
+                                tracing::warn!(
+                                    session_id,
+                                    target_id = %session.target_template_id,
+                                    error = format!("{error:#}"),
+                                    "best-effort target cleanup failed during suspend --without-checkpoint; settling session as Stopped"
+                                );
+                                warnings.push(format!(
+                                    "Cleanup of the environment on target {} failed during suspend without checkpoint for session {session_id}. Resources may remain; details are in the daemon logs.",
+                                    session.target_template_id
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            if executor.cancellation_requested() {
+                                return Err(error);
+                            }
+                            cleanup_failed = true;
+                            tracing::warn!(
+                                session_id,
+                                target_id = %session.target_template_id,
+                                error = format!("{error:#}"),
+                                "could not resolve target backend during suspend --without-checkpoint; settling session as Stopped"
+                            );
+                            warnings.push(format!(
+                                "Cleanup of the environment on target {} failed during suspend without checkpoint for session {session_id}. Resources may remain; details are in the daemon logs.",
+                                session.target_template_id
+                            ));
+                        }
+                    }
+                }
+                let record = self.state.sessions.get_mut(session_id).unwrap();
+                record.state = SessionState::Stopped;
+                record.checkpoint = verified_checkpoint.map(Box::new);
+                if !deferred && !cleanup_failed {
+                    record.target = None;
+                }
+                record.updated_at = now();
+                record.last_error = None;
+                record.last_checkpoint_error = None;
+                persist_session_record_transition_or_restore(
+                    &mut self.state,
+                    session_id,
+                    &session,
+                    "persist stopped state after suspend without checkpoint",
+                    &persist,
+                )?;
+                Ok(SuspendWithoutCheckpointOutcome { deferred, warnings })
+            },
         )
     }
 
@@ -1595,105 +2400,8 @@ impl Controller {
         )
     }
 
-    /// Commit the verified recovery copy before discarding the current target.
-    pub fn prepare_discard(
-        &mut self,
-        session_id: &str,
-        confirmed: &CheckpointMetadata,
-        executor: &(impl CommandExecutor + Sync),
-        commit: impl FnOnce() -> Result<()>,
-    ) -> Result<()> {
-        crate::worker_lifecycle::run_blocking(session_id, "prepare discard", executor, || {
-            let previous = self
-                .state
-                .sessions
-                .get(session_id)
-                .with_context(|| format!("unknown session {session_id}"))?
-                .clone();
-            ensure!(
-                previous.state.is_active(),
-                "session {session_id} is already inactive"
-            );
-            ensure!(
-                previous.checkpoint.as_deref() == Some(confirmed),
-                "the recovery copy changed; review it before discarding changes"
-            );
-            {
-                let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
-                verify_installed_checkpoint_gate(session_id, confirmed)
-                    .context("verify the recovery archive before accepting discard")?;
-            }
-            commit()?;
-            let record = self.state.sessions.get_mut(session_id).unwrap();
-            record.state = SessionState::Destroying;
-            record.updated_at = now();
-            record.last_error = None;
-            persist_session_record_transition_or_restore(
-                &mut self.state,
-                session_id,
-                &previous,
-                "persist verified discard before target teardown",
-                &crate::database::save_lifecycle_session,
-            )
-        })
-    }
-
-    /// Tear down the current target without taking a fresh checkpoint, then
-    /// leave the logical session resumable from its latest verified archive.
-    pub fn force_stop(
-        &mut self,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<bool> {
-        self.force_stop_with(
-            session_id,
-            executor,
-            crate::database::save_lifecycle_session,
-        )
-    }
-
-    fn force_stop_with(
-        &mut self,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-        persist: impl Fn(&SessionRecord) -> Result<()>,
-    ) -> Result<bool> {
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?
-            .clone();
-        ensure!(
-            session.state.is_active(),
-            "session {session_id} is already inactive"
-        );
-        let checkpoint = session
-            .checkpoint
-            .as_ref()
-            .context("force stop requires an existing recovery archive")?;
-        // Force stop skips a new checkpoint, never the checksum gate on the
-        // archive that makes the logical session resumable afterwards.
-        {
-            let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
-            verify_installed_checkpoint_gate(session_id, checkpoint)
-                .context("verify the recovery archive before force stopping")?;
-        }
-        let clone_prerequisite =
-            super::worktree::clone_retirement_prerequisite_for_checkpoint(checkpoint);
-        self.stop_target_and_settle(
-            session_id,
-            &session,
-            executor,
-            clone_prerequisite,
-            &persist,
-        )
-    }
-
     /// Tear down whatever target the session holds and settle its record in
-    /// `Stopped`. Shared by force stop and by a close that has nothing to
-    /// checkpoint; neither takes a fresh archive, so neither may decide on its
-    /// own whether the session still has one.
+    /// `Stopped`.
     fn stop_target_and_settle(
         &mut self,
         session_id: &str,
@@ -2018,6 +2726,16 @@ impl Controller {
                     session_id,
                     session.checkpoint.as_deref(),
                 )?;
+                match super::checkpoint::cleanup_session_host_snapshot_cache(session_id, executor) {
+                    Ok(warnings) => outcome.warnings.extend(warnings),
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id,
+                            error = %format!("{error:#}"),
+                            "could not list host snapshot cache entries during Destroy"
+                        );
+                    }
+                }
                 mj_core::attachment::AttachmentStore::controller(session_id)?
                     .remove_session_data()
                     .context("remove session image attachments")?;
@@ -2106,6 +2824,12 @@ impl Controller {
             _ => Ok(()),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SuspendWithoutCheckpointOutcome {
+    pub deferred: bool,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Default)]

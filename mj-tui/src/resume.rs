@@ -2131,24 +2131,10 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
             return DashboardAction::None;
         };
-        let delete_branch_available = match &dialog.history {
-            HistoryLoad::Loaded(history) => history.candidates.get(&session_id),
-            HistoryLoad::Loading | HistoryLoad::Failed(_) => None,
-        }
-        .map(|candidate| candidate.worktree_checkout)
-        .or_else(|| {
-            self.session_record(&session_id).map(|session| {
-                session.checkout().managed_worktree().is_some_and(|owned| {
-                    owned.kind == mj_core::state::ManagedCheckoutKind::Worktree
-                })
-            })
-        })
-        .unwrap_or(false);
         // The row is named as listed; the dashboard may not hold the record.
         self.mode = Mode::Confirm(
             ConfirmDialog::new(Confirmation::DestroyStopped {
                 session_id,
-                delete_branch_available,
                 reopen: Some(Box::new(dialog)),
             })
             .naming_session(&row.title),

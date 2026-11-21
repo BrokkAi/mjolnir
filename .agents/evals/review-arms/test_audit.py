@@ -949,6 +949,12 @@ def symlink_inventory(tmp_path, targets):
     }))
 
 
+def record_engine_runtime(tmp_path, version="2.1.326", *, session_id=OWN):
+    (tmp_path / "engine-runtime.json").write_text(json.dumps({
+        "session_id": session_id, "claude_code_version": version,
+    }))
+
+
 # Hard-won: 92aaa39c0: an in-repo CLAUDE.md symlink voided every root search
 def test_engine_root_glob_accepts_internal_symlinks(tmp_path):
     symlink_inventory(tmp_path, {"CLAUDE.md": "AGENTS.md"})
@@ -961,7 +967,7 @@ def test_file_tools_and_root_globs_reject_escaping_symlink_targets(tmp_path, tar
     symlink_inventory(tmp_path, {"alias": target})
     for name, kind, raw in (
         ("Read", "read", {"file_path": "alias/input"}),
-        ("Glob", "search", {"pattern": ".rql-engine-*/answer.json"}),
+        ("Glob", "search", {"pattern": "**/*.rs"}),
     ):
         report = audit_call(tmp_path, {"name": name, "kind": kind, "rawInput": raw}, engine=True)
         assert not report["passed"]
@@ -983,6 +989,83 @@ def test_glob_finds_an_escaping_link_under_an_internal_directory_alias(tmp_path)
     report = audit_call(tmp_path, call, engine=True)
     assert not report["passed"]
     assert any("tracked symlink" in hit["snippet"] for hit in report["hits"])
+    call["rawInput"]["pattern"] = "alias/safe/*"
+    assert audit_call(tmp_path, call, engine=True)["passed"]
+
+
+@pytest.fixture
+def engine_cache_links(tmp_path):
+    prefix = ".agents/records/tract-warm-latency"
+    links = {f"{prefix}/{name}/target": "/mnt/optane/mbx-targets/v1/scrubbed" for name in (
+        "codeql-h2h/fixture",
+        "rust-sql-taint-gap/fixtures/api-wrapper-sink",
+        "rust-sql-taint-gap/fixtures/direct-postgres",
+        "rust-sql-taint-gap/fixtures/minimal-postgres",
+    )}
+    symlink_inventory(tmp_path, {**links, "CLAUDE.md": "AGENTS.md"})
+    return tuple(links)
+
+
+# Hard-won: 1d9846951: a scratch-only Glob voided a live turn because of unrelated cache links
+@pytest.mark.parametrize(("pattern", "passed"), [
+    (".rql-engine-*/*", True),
+    ("**/*.rs", False),
+    (".agents/records/**", False),
+    ("*/records/**", False),
+    (".agents/records/tract-warm-latency/codeql-h2h/*/target/*", False),
+    (".agents/records/tract-warm-latency/codeql-h2h/*/notes/*", True),
+    (".agents/records/tract-warm-latency/codeql-h2h/*", True),
+    (".rql-engine-[a-z]/*", False),
+    ("answers.json", False),
+])
+def test_engine_glob_checks_only_reachable_links(tmp_path, engine_cache_links, pattern, passed):
+    call = {"name": "Glob", "kind": "search", "rawInput": {"pattern": pattern, "path": ENGINE_CWD},
+            "locations": [{"path": ENGINE_CWD}]}
+    report = audit_call(tmp_path, call, engine=True)
+    assert report["passed"] is passed, report["hits"]
+    if not passed:
+        assert any(hit["kind"] == "needs-inspection" for hit in report["hits"])
+
+
+def test_engine_grep_checks_explicit_links_and_leaves_descendants_to_no_follow(tmp_path, engine_cache_links):
+    record_engine_runtime(tmp_path)
+    link = engine_cache_links[0]
+    call = {"name": "Grep", "kind": "search", "rawInput": {"pattern": "data", "path": ENGINE_CWD}}
+    assert audit_call(tmp_path, call, engine=True)["passed"]
+    call["rawInput"]["glob"] = f"{link}/sample.rs"
+    assert audit_call(tmp_path, call, engine=True)["passed"]
+    for path in (link, f"{link}/sample.rs"):
+        call["rawInput"]["path"] = path
+        report = audit_call(tmp_path, call, engine=True)
+        assert not report["passed"]
+        assert any("tracked symlink" in hit["snippet"] for hit in report["hits"])
+
+
+@pytest.mark.parametrize(("version", "session"), [(None, OWN), ("2.1.327", OWN), ("2.1.326", FOREIGN)])
+def test_engine_grep_requires_verified_session_runtime(tmp_path, engine_cache_links, version, session):
+    if version is not None:
+        record_engine_runtime(tmp_path, version, session_id=session)
+    call = {"name": "Grep", "kind": "search", "rawInput": {"pattern": "data", "path": ENGINE_CWD}}
+    report = audit_call(tmp_path, call, engine=True)
+    assert not report["passed"]
+    assert any("unverified Claude Code version" in hit["snippet"] for hit in report["hits"])
+
+
+@pytest.mark.parametrize("extra", [{"follow": True}, {"glob": "{unclosed"}])
+def test_engine_grep_rejects_unrecognized_arguments(tmp_path, engine_cache_links, extra):
+    record_engine_runtime(tmp_path)
+    call = {"name": "Grep", "kind": "search", "rawInput": {"pattern": "data", **extra}}
+    report = audit_call(tmp_path, call, engine=True)
+    assert not report["passed"]
+    assert any("unrecognized engine Grep input" in hit["snippet"] for hit in report["hits"])
+
+
+def test_engine_glob_checks_claudes_rewritten_root_prefix(tmp_path):
+    symlink_inventory(tmp_path, {"src/cache": "/mnt/optane/mbx-targets"})
+    call = {"name": "Glob", "kind": "search", "rawInput": {"path": f"{ENGINE_CWD}/src", "pattern": "src/*"}}
+    report = audit_call(tmp_path, call, engine=True)
+    assert not report["passed"]
+    assert any("tracked symlink" in hit["snippet"] for hit in report["hits"])
 
 
 def test_cyclic_and_overlong_link_chains_need_inspection(tmp_path):
@@ -1000,7 +1083,7 @@ def test_old_inventory_without_targets_keeps_the_strict_glob_check(tmp_path):
     (tmp_path / "pre-inventory.json").write_text(json.dumps({
         "cwd": ENGINE_CWD, "tracked_symlinks": ["CLAUDE.md"],
     }))
-    call = {"name": "Glob", "kind": "search", "rawInput": {"pattern": ".rql-engine-*/answer.json"}}
+    call = {"name": "Glob", "kind": "search", "rawInput": {"pattern": "**/*.rs"}}
     report = audit_call(tmp_path, call, engine=True)
     assert not report["passed"]
     assert any("tracked symlink" in hit["snippet"] for hit in report["hits"])
@@ -1041,6 +1124,8 @@ def test_git_inventory_records_the_pinned_symlink_blob_bytes(tmp_path):
     ("Glob", "search", "path", True),
 ])
 def test_structured_file_tools_require_link_free_paths(tmp_path, name, kind, key, engine):
+    if name == "Grep":
+        record_engine_runtime(tmp_path)
     (tmp_path / "pre-inventory.json").write_text(json.dumps({
         "cwd": ENGINE_CWD, "tracked_symlinks": ["src/outside"],
     }))
@@ -1057,6 +1142,7 @@ def test_structured_file_tools_require_link_free_paths(tmp_path, name, kind, key
 
 
 def test_engine_glob_checks_path_patterns_and_grep_checks_its_search_root(tmp_path):
+    record_engine_runtime(tmp_path)
     (tmp_path / "pre-inventory.json").write_text(json.dumps({
         "cwd": ENGINE_CWD, "tracked_symlinks": ["src/outside"],
     }))
@@ -1115,6 +1201,7 @@ def test_engine_audit_requires_the_native_tool_name(tmp_path, name):
     ("Grep", "glob", "/etc/*"),
 ])
 def test_engine_audit_inspects_search_pattern_escapes(tmp_path, name, key, escape):
+    record_engine_runtime(tmp_path)
     call = {"name": name, "kind": "search", "rawInput": {"pattern": "*.rs", key: escape}}
     (tmp_path / "pre-inventory.json").write_text(json.dumps({"tracked_symlinks": []}))
     report = audit_call(tmp_path, call, cwd=ENGINE_CWD, engine=True)
@@ -1126,6 +1213,7 @@ def test_engine_audit_inspects_search_pattern_escapes(tmp_path, name, key, escap
 # Hard-won: 3a68d9227: Grep's content regex was audited as a path, voiding searches for path-like text
 @pytest.mark.parametrize("pattern", ["/etc/passwd", "../", "include_str!\\(\"../"])
 def test_engine_audit_treats_grep_pattern_as_content(tmp_path, pattern):
+    record_engine_runtime(tmp_path)
     (tmp_path / "pre-inventory.json").write_text(json.dumps({"cwd": ENGINE_CWD, "tracked_symlinks": []}))
     call = {"name": "Grep", "kind": "search", "rawInput": {"pattern": pattern, "path": ENGINE_CWD}}
     assert audit_call(tmp_path, call, engine=True)["passed"]
@@ -1133,6 +1221,7 @@ def test_engine_audit_treats_grep_pattern_as_content(tmp_path, pattern):
 
 @pytest.mark.parametrize("name", ["Glob", "Grep"])
 def test_engine_audit_resolves_search_without_path_from_recorded_cwd(tmp_path, name):
+    record_engine_runtime(tmp_path)
     call = {"name": name, "kind": "search", "rawInput": {"pattern": "main"}}
     assert not audit_call(tmp_path, call, engine=True)["passed"]
     (tmp_path / "pre-inventory.json").write_text(json.dumps({"cwd": ENGINE_CWD, "tracked_symlinks": []}))
@@ -1192,6 +1281,7 @@ def saved_engine_result():
 
 def audit_engine_result(tmp_path, calls, *, session_id=OWN):
     symlink_inventory(tmp_path, {})
+    record_engine_runtime(tmp_path)
     transcript = tmp_path / "transcript.json"
     transcript.write_text(json.dumps([{"session_id": session_id, "items": [
         {"seq": seq, "role": "tool", "body": {"call": call}}

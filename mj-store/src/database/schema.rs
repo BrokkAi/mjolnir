@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 146;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 147;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2822,6 +2822,57 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (146, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
              PRAGMA user_version = 146;
+             COMMIT;",
+        )?;
+    }
+    // Breaking: persists typed suspend consent (`closing_consent`) on `sessions`
+    // when entering `Closing`. Older daemons do not read this column, so crash
+    // recovery on a pre-147 daemon would checkpoint a `without_checkpoint` close
+    // or discard without the user's `Shown` consent list.
+    if version < 147 {
+        let add_col = if !super::legacy_schema::table_has_column(
+            connection,
+            "sessions",
+            "closing_consent",
+        )? {
+            "ALTER TABLE sessions ADD COLUMN closing_consent TEXT CHECK(closing_consent IS NULL OR json_valid(closing_consent));"
+        } else {
+            ""
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_col}
+             UPDATE schema_compatibility SET minimum_compatible_version = 147 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (147, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 147;
+             COMMIT;"
+        ))?;
+    }
+    // Compatible: adds the `host_snapshot_cache` table to track host-side
+    // snapshot archive copies for resume reuse, Destroy cleanup, and 48-hour
+    // expiry. Older revision-147 daemons ignore the new table and no existing
+    // schema or data changes.
+    if version < 148 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS host_snapshot_cache (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 session_id TEXT NOT NULL,
+                 host TEXT NOT NULL,
+                 sha256 TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 written_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS host_snapshot_cache_host_sha256
+             ON host_snapshot_cache(host, sha256);
+             CREATE INDEX IF NOT EXISTS host_snapshot_cache_session
+             ON host_snapshot_cache(session_id);
+             CREATE INDEX IF NOT EXISTS host_snapshot_cache_written_at
+             ON host_snapshot_cache(written_at);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (148, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 148;
              COMMIT;",
         )?;
     }
@@ -5765,8 +5816,8 @@ mod reader_tests {
 
         let upgraded = open_writer(&path).unwrap();
         let schema = read_schema_state(&upgraded).unwrap();
-        assert_eq!(schema.revision, 146);
-        assert_eq!(schema.minimum_compatible, Some(146));
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(matches!(
             schema
                 .ensure_supported_by(145)
@@ -5775,8 +5826,8 @@ mod reader_tests {
                 .unwrap()
                 .reason,
             StoreSchemaMismatchReason::Incompatible {
-                minimum_compatible: 146
-            }
+                minimum_compatible
+            } if minimum_compatible >= 146
         ));
     }
 
@@ -7078,6 +7129,77 @@ mod reader_tests {
                 .chain()
                 .any(|cause| cause.downcast_ref::<StoreSchemaMismatch>().is_some()),
             "a reused connection checks compatibility like a new one: {error:#}"
+        );
+    }
+
+    #[test]
+    fn closing_consent_migration_persists_consent_and_refuses_revision_146() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        {
+            let connection = open_writer(&path).unwrap();
+            connection
+                .execute_batch(
+                    "ALTER TABLE sessions DROP COLUMN closing_consent;
+                     UPDATE schema_compatibility SET minimum_compatible_version = 146 WHERE singleton = 1;
+                     DELETE FROM schema_migrations WHERE version >= 147;
+                     PRAGMA user_version = 146;",
+                )
+                .unwrap();
+        }
+        forget_verified_schema(&path);
+        let connection = open_writer(&path).unwrap();
+        assert!(
+            super::legacy_schema::table_has_column(&connection, "sessions", "closing_consent")
+                .unwrap(),
+            "migration 147 must add sessions.closing_consent"
+        );
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        let err = state.ensure_supported_by(146).unwrap_err();
+        let mismatch = err.downcast_ref::<StoreSchemaMismatch>().unwrap();
+        assert_eq!(
+            mismatch.reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
+            }
+        );
+    }
+
+    #[test]
+    fn host_snapshot_cache_migration_148_stays_compatible_with_revision_147() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        {
+            let connection = open_writer(&path).unwrap();
+            connection
+                .execute_batch(
+                    "DROP TABLE host_snapshot_cache;
+                     DELETE FROM schema_migrations WHERE version >= 148;
+                     PRAGMA user_version = 147;",
+                )
+                .unwrap();
+        }
+        forget_verified_schema(&path);
+        let connection = open_writer(&path).unwrap();
+        let table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'host_snapshot_cache')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            table_exists,
+            "migration 148 must create host_snapshot_cache"
+        );
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(147));
+        assert!(
+            state.ensure_supported_by(147).is_ok(),
+            "revision 148 must remain compatible with revision 147 readers and writers"
         );
     }
 }

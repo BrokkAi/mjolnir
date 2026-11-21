@@ -240,6 +240,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
         latest_credential_sync_signal: None,
         worker_build: None,
         operational: mj_core::relay::RelayOperationalState {
+            in_place_move_hold: None,
             assessment: None,
             open_request: None,
             notification_stack: Default::default(),
@@ -426,6 +427,7 @@ fn exported_checkpoint_json() -> Vec<u8> {
 fn export_spec_fixture() -> CheckpointExportSpec {
     CheckpointExportSpec {
         ignore_nested_repositories: false,
+        consent: Default::default(),
         report_directories: None,
         protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
         session: mj_checkpoint::archive::SessionManifest {
@@ -3435,8 +3437,7 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
-            true,
-            false,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             None,
         )
         .await;
@@ -3516,8 +3517,7 @@ async fn ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardow
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,
-            true,
-            true,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             None,
         )
         .await
@@ -3976,8 +3976,7 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
-            true,
-            false,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             None,
         )
         .await;
@@ -4051,6 +4050,7 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
     let entry_size = std::mem::size_of_val(&entry);
     drop(entry);
     let executor = RefusingExecutor("not used");
+    let consent = mj_core::suspend_consent::CaptureConsent::default();
     let latched = controller.checkpoint_session_latched_with_recovery_stage(
         &admission,
         "session-1",
@@ -4061,6 +4061,7 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
         false,
         None,
         None,
+        &consent,
     );
     let latched_size = std::mem::size_of_val(&latched);
     drop(latched);

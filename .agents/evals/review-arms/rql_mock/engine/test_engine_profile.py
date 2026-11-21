@@ -24,6 +24,22 @@ def oauth(token, seconds_left=3600):
 QUOTA = {"claude5": (90, 80), "claude4": (80, 90), "claude7": (25, 99)}
 
 
+def test_version_probe_uses_the_bridge_selected_executable(tmp_path):
+    proc = tmp_path / "proc"
+    bridge = proc / "100"
+    bridge.mkdir(parents=True)
+    cli = tmp_path / "selected-claude"
+    cli.write_text(f"#!{sys.executable}\nimport sys\nassert sys.argv[1:] == ['--version']\n"
+                   "print('2.1.326 (Claude Code)')\n")
+    cli.chmod(0o700)
+    (bridge / "cmdline").write_bytes(b"node\0/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js\0")
+    (bridge / "environ").write_bytes(f"CLAUDE_CODE_EXECUTABLE={cli}\0".encode())
+    result = subprocess.check_output(
+        [sys.executable, "-B", "-c", runner_module.CLAUDE_CODE_VERSION_PROBE, str(proc)], text=True,
+    )
+    assert result.strip() == "2.1.326"
+
+
 @pytest.fixture
 def engine_profiles(tmp_path, monkeypatch):
     import driver

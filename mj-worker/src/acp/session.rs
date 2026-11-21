@@ -793,6 +793,9 @@ pub(super) async fn serve_session(
         resumed,
         native_session_used,
     });
+    if let Some(resolved) = session_open.pending_reload_ack.take() {
+        let _ = resolved.send(Ok(()));
+    }
     // Drop anything the worker queued for the bridge this one replaced. The
     // worker dispatches only while it believes the session is configured; it
     // clears that flag on `HarnessRestarting` and sets it again only after this
@@ -1612,6 +1615,12 @@ pub(super) async fn serve_session(
                                 )
                                 .await;
                             }
+                            Some(CommandRequest::ReloadLaunchConfig { resolved, .. }) => {
+                                let _ = resolved.send(Err(
+                                    "cannot reload launch configuration while a turn is active"
+                                        .into(),
+                                ));
+                            }
                         },
                         restored = async {
                             mode_restoration.as_mut().expect("mode restoration branch is guarded").await
@@ -2003,6 +2012,29 @@ pub(super) async fn serve_session(
             CommandRequest::StopBackgroundTask { target, resolved } => {
                 resolve_background_task_stop(connection, &session_id, terminals, target, resolved)
                     .await;
+            }
+            CommandRequest::ReloadLaunchConfig {
+                launch_config,
+                environment,
+                command,
+                args,
+                additional_directories,
+                supervisor_spec,
+                leases,
+                resolved,
+            } => {
+                let preserve_native_session = launch_config.harness == spec.harness;
+                return Ok(Some(SessionRestart::ReloadLaunchConfig {
+                    launch_config,
+                    environment,
+                    command,
+                    args,
+                    additional_directories,
+                    supervisor_spec,
+                    leases,
+                    resume_session: preserve_native_session.then(|| session_id.to_string()),
+                    resolved,
+                }));
             }
             CommandRequest::Close { request_id } => {
                 let outcome = connection

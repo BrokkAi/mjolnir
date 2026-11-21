@@ -351,7 +351,6 @@ pub(crate) enum Confirmation {
     CloseFailed {
         session_id: String,
         error: String,
-        can_discard: bool,
     },
     SuspendSession {
         session_id: String,
@@ -359,11 +358,9 @@ pub(crate) enum Confirmation {
         /// suspend stops.
         children_not_handed_back: Vec<String>,
         interrupting: bool,
-        unverified_clone: bool,
-    },
-    DiscardSinceCheckpoint {
-        session_id: String,
-        checkpoint: mj_core::state::CheckpointMetadata,
+        preflight: Option<mj_core::suspend_consent::SuspendPreflight>,
+        checking: bool,
+        viewing_all_untracked: bool,
     },
     /// Stop or restart asked for while the agent is mid-turn. An idle session
     /// stops without asking; this exists for the one case a mis-click costs
@@ -387,11 +384,9 @@ pub(crate) enum Confirmation {
     },
     ForceDestroy {
         session_id: String,
-        delete_branch_available: bool,
     },
     DestroyStopped {
         session_id: String,
-        delete_branch_available: bool,
         /// The resume dialog to restore afterwards, so confirming or
         /// cancelling destruction leaves the user where they were.
         reopen: Option<Box<crate::resume::ResumeDialog>>,
@@ -507,7 +502,7 @@ fn confirmation_form(confirmation: &Confirmation) -> RefCell<Dialog<DialogContro
     for index in 0..buttons.len() {
         form.declare(DialogControl::ConfirmButton(index), ControlKind::Button);
     }
-    let initial = initial_confirmation_button(confirmation, buttons);
+    let initial = initial_confirmation_button(confirmation, &buttons);
     form.end_frame(DialogControl::ConfirmButton(initial));
     RefCell::new(form)
 }
@@ -584,7 +579,6 @@ impl Confirmation {
             Self::ConfigurationRepair { session_id, .. }
             | Self::CloseFailed { session_id, .. }
             | Self::SuspendSession { session_id, .. }
-            | Self::DiscardSinceCheckpoint { session_id, .. }
             | Self::InterruptWork { session_id, .. }
             | Self::RestartContainer { session_id, .. }
             | Self::RestartAgent { session_id, .. }
@@ -1143,11 +1137,6 @@ impl DashboardState {
     pub fn show_close_failure(&mut self, session_id: String, error: impl Into<String>) {
         self.mode = Mode::Confirm(
             self.confirm_dialog(Confirmation::CloseFailed {
-                can_discard: self
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .is_some_and(|s| s.checkpoint.is_some()),
                 session_id,
                 error: error.into(),
             }),
@@ -1621,8 +1610,18 @@ impl DashboardState {
             )
             && let crossterm::event::KeyCode::Char(letter) = key.code
         {
+            if letter.eq_ignore_ascii_case(&'v')
+                && let Confirmation::SuspendSession {
+                    viewing_all_untracked,
+                    ..
+                } = &mut dialog.confirmation
+            {
+                *viewing_all_untracked = !*viewing_all_untracked;
+                self.mode = Mode::Confirm(dialog);
+                return DashboardAction::None;
+            }
             let buttons = crate::dialogs::render::confirmation_buttons(&dialog.confirmation);
-            let accelerators = crate::dialogs::render::confirmation_accelerators(buttons);
+            let accelerators = crate::dialogs::render::confirmation_accelerators(&buttons);
             if let Some(index) = accelerators
                 .iter()
                 .position(|accelerator| *accelerator == letter.to_ascii_lowercase())
@@ -1637,6 +1636,7 @@ impl DashboardState {
                 | Confirmation::ImportFailed { .. }
                 | Confirmation::RepairRepositoryRemotes { .. }
                 | Confirmation::ConvertRawCheckout { .. }
+                | Confirmation::SuspendSession { .. }
         ) && let Event::Key(key) = &event
             && key.kind != crossterm::event::KeyEventKind::Release
         {
@@ -1805,115 +1805,55 @@ impl DashboardState {
                     self.restore_dismissed_mode(previous)
                 }
             }
-            // Button 1 destroys the session and leaves its branch alone;
-            // button 2 is the explicit opt-in to delete the branch too.
-            (
-                Confirmation::ForceDestroy {
-                    session_id,
-                    delete_branch_available,
-                },
-                index @ (1 | 2),
-            ) if index == 1 || delete_branch_available => {
+            (Confirmation::ForceDestroy { session_id }, 1) => {
                 self.cancel_modal();
-                DashboardAction::ForceDestroy {
-                    session_id,
-                    delete_branch: index == 2,
-                }
+                DashboardAction::ForceDestroy { session_id }
             }
             (
                 Confirmation::DestroyStopped {
                     session_id,
                     reopen,
-                    delete_branch_available,
                 },
-                index @ (1 | 2),
-            ) if index == 1 || delete_branch_available => {
+                1,
+            ) => {
                 self.restore_after_confirmation(reopen);
-                DashboardAction::DestroyStopped {
-                    session_id,
-                    delete_branch: index == 2,
-                }
+                DashboardAction::DestroyStopped { session_id }
             }
-            (
-                Confirmation::CloseFailed {
-                    session_id,
-                    can_discard: true,
-                    ..
-                },
-                1,
-            ) => {
-                if let Some(checkpoint) = self
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .and_then(|s| s.checkpoint.clone())
-                {
-                    self.mode =
-                        Mode::Confirm(self.confirm_dialog(Confirmation::DiscardSinceCheckpoint {
-                            session_id,
-                            checkpoint: *checkpoint,
-                        }));
-                } else {
-                    self.set_notice("No recovery copy is available. Retry suspension.");
-                }
-                DashboardAction::None
-            }
-            (
-                Confirmation::DiscardSinceCheckpoint {
-                    session_id,
-                    checkpoint,
-                },
-                1,
-            ) => {
-                if self
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .and_then(|s| s.checkpoint.as_deref())
-                    != Some(&checkpoint)
-                {
-                    self.cancel_modal();
-                    self.set_notice(
-                        "The recovery copy changed. Review it before discarding changes.",
-                    );
-                    return DashboardAction::None;
-                }
-                self.cancel_modal();
-                DashboardAction::DiscardSinceCheckpoint {
-                    session_id,
-                    checkpoint,
-                }
-            }
-            (
-                Confirmation::CloseFailed {
-                    session_id, error, ..
-                },
-                2,
-            )
-            | (
-                Confirmation::CloseFailed {
-                    session_id,
-                    error,
-                    can_discard: false,
-                    ..
-                },
-                1,
-            ) => {
-                self.cancel_modal();
-                if nested_repository_checkpoint_failure(&error) {
-                    DashboardAction::IgnoreNestedRepositoriesAndSuspend { session_id }
-                } else {
-                    DashboardAction::Suspend {
-                        session_id,
-                        acknowledge_unpublished_work: true,
-                    }
-                }
-            }
-            (Confirmation::SuspendSession { session_id, .. }, 1) => {
+            (Confirmation::CloseFailed { session_id, .. }, 1) => {
                 self.cancel_modal();
                 DashboardAction::Suspend {
                     session_id,
-                    acknowledge_unpublished_work: true,
+                    consent: mj_core::suspend_consent::SuspendConsent::default(),
+                }
+            }
+            (Confirmation::CloseFailed { session_id, .. }, 2) => {
+                self.cancel_modal();
+                DashboardAction::Suspend {
+                    session_id,
+                    consent: mj_core::suspend_consent::SuspendConsent {
+                        without_checkpoint: true,
+                        confirm_no_checkpoint: true,
+                        ..Default::default()
+                    },
+                }
+            }
+            (
+                Confirmation::SuspendSession {
+                    session_id,
+                    preflight,
+                    checking: false,
+                    ..
+                },
+                1,
+            ) if !preflight.as_ref().is_some_and(|p| p.has_blockers()) => {
+                self.cancel_modal();
+                let consent = preflight
+                    .as_ref()
+                    .map(|p| p.shown_consent())
+                    .unwrap_or_default();
+                DashboardAction::Suspend {
+                    session_id,
+                    consent,
                 }
             }
             (Confirmation::RestartAgent { session_id, .. }, 1) => {
@@ -1967,7 +1907,7 @@ impl DashboardState {
                 } else {
                     DashboardAction::Suspend {
                         session_id,
-                        acknowledge_unpublished_work: true,
+                        consent: mj_core::suspend_consent::SuspendConsent::default(),
                     }
                 }
             }

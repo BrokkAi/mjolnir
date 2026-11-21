@@ -66,6 +66,7 @@ pub mod state;
 pub mod storage;
 pub mod subagent;
 pub mod subprocess;
+pub mod suspend_consent;
 pub mod target_path;
 pub mod targets;
 pub mod test_hooks;

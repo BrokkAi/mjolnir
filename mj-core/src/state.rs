@@ -1161,12 +1161,13 @@ impl ManagedCheckoutKind {
 impl ManagedWorktree {
     #[must_use]
     pub fn uses_origin_delta_suspend(&self) -> bool {
-        cfg!(any(target_os = "linux", target_os = "macos"))
-            && matches!(
-                self.kind,
-                ManagedCheckoutKind::Clone | ManagedCheckoutKind::Worktree
-            )
-            && matches!(self.target, ManagedWorktreeTarget::Local)
+        matches!(
+            self.kind,
+            ManagedCheckoutKind::Clone | ManagedCheckoutKind::Worktree
+        ) && match self.target {
+            ManagedWorktreeTarget::Local => cfg!(any(target_os = "linux", target_os = "macos")),
+            ManagedWorktreeTarget::Ssh { .. } => true,
+        }
     }
 
     fn validate(&self, session_id: &str, project_directory: Option<&Path>) -> Result<()> {

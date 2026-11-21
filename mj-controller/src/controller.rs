@@ -127,7 +127,8 @@ pub use worker_binary::{
 pub use checkpoint::{
     CheckpointArtifact, CheckpointDeferred, IdleWorkspaceLease, SessionExportLayout,
     checkpoint_was_deferred, reconcile_managed_checkpoint_archives,
-    sweep_local_checkpoint_leftovers,
+    sweep_expired_host_snapshot_cache, sweep_local_checkpoint_leftovers,
+    HOST_SNAPSHOT_CACHE_TTL, host_snapshot_cache_wakeup,
 };
 pub use lifecycle::{
     BeforeClose, BranchDisposition, CheckoutDisposition, DestroyOutcome, has_nothing_to_checkpoint,

@@ -401,7 +401,6 @@ pub(crate) enum LifecycleKind {
     Restart,
     UpgradeContainer,
     Move,
-    ForceStop,
     DestroyStopped,
     /// The archive job's destruction: the same teardown as `DestroyStopped`,
     /// with the session's git branch kept unless another branch already
@@ -457,7 +456,6 @@ impl LifecycleKind {
             LifecycleKind::Restart => "restart",
             LifecycleKind::UpgradeContainer => "container upgrade",
             LifecycleKind::Move => "move",
-            LifecycleKind::ForceStop => "force stop",
             LifecycleKind::DestroyStopped => "destroy",
             LifecycleKind::ArchiveStopped => "archive",
             LifecycleKind::ForceDestroy => "force destroy",
@@ -863,7 +861,6 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
             LifecycleKind::Resume => Self::Resume,
             LifecycleKind::Restart | LifecycleKind::UpgradeContainer => Self::Resume,
             LifecycleKind::Move => Self::Move,
-            LifecycleKind::ForceStop => Self::ForceStop,
             LifecycleKind::DestroyStopped | LifecycleKind::ArchiveStopped => Self::DestroyStopped,
             LifecycleKind::ForceDestroy => Self::ForceDestroy,
             // A park is shown as the sub-agent stop it is, and an unpark as

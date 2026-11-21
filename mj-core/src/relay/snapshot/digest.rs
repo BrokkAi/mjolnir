@@ -110,6 +110,7 @@ impl<'a> LegacyMailboxObservation<'a> {
                 command_id,
                 command,
                 created_at_ms,
+                ..
             } => {
                 let command = match command {
                     super::RelayCommand::DeliverMailboxEvent { event } => {

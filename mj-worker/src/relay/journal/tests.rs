@@ -527,6 +527,7 @@ fn restart_finishes_a_durably_accepted_queue_removal() {
                     queued_command_id: "queued-prompt".into(),
                 },
                 created_at_ms: epoch_millis(),
+                insert_at_front: false,
             },
         )
         .unwrap();
@@ -558,6 +559,7 @@ fn restart_finishes_a_durably_accepted_queue_clear() {
                 command_id: "clear-after-crash".into(),
                 command: RelayCommand::ClearQueuedPrompts,
                 created_at_ms: epoch_millis(),
+                insert_at_front: false,
             },
         )
         .unwrap();
@@ -590,6 +592,7 @@ fn restart_finishes_checkpoint_completion_before_releasing_ownerless_barriers() 
                     barrier_command_id: "barrier-command".into(),
                 },
                 created_at_ms: epoch_millis(),
+                insert_at_front: false,
             },
         )
         .unwrap();
@@ -2336,6 +2339,7 @@ fn interrupt_queued_recovery_finishes_locally_across_partial_completion() {
                         command_id: "interrupt-reload".into(),
                         command: RelayCommand::CancelTurn,
                         created_at_ms: 1,
+                insert_at_front: false,
                     },
                 )
                 .unwrap();
@@ -2704,6 +2708,7 @@ fn restart_continuation_reports_queue_exhaustion_without_wedging_open() {
                 command_id: "fill-remainder".into(),
                 command: prompt(&"z".repeat(length)),
                 created_at_ms: epoch_millis(),
+                insert_at_front: false,
             },
         };
         event.digest = relay_event_digest(&event).unwrap();
@@ -2750,6 +2755,7 @@ fn restart_continuation_reports_operational_queue_exhaustion() {
                 command_id: "original-turn".into(),
                 command: prompt("finish task"),
                 created_at_ms: epoch_millis(),
+                insert_at_front: false,
             },
         )
         .unwrap();

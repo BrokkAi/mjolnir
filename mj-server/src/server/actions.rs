@@ -232,7 +232,13 @@ pub enum ControllerAction {
     Suspend {
         session_id: String,
         #[serde(default)]
-        acknowledge_unpublished_work: bool,
+        discard_untracked: mj_core::suspend_consent::UntrackedConsent,
+        #[serde(default)]
+        abort_operations: mj_core::suspend_consent::OperationConsent,
+        #[serde(default)]
+        without_checkpoint: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        confirm_no_checkpoint: bool,
     },
     /// Destroy a session without checkpointing it: the live target is torn
     /// down, the recovery archive is removed, and sub-agent children are
@@ -244,9 +250,6 @@ pub enum ControllerAction {
     #[serde(skip)]
     Destroy {
         session_id: String,
-        /// Whether the managed worktree's branch goes with the session.
-        /// Destruction keeps it unless the request asks for the deletion.
-        delete_branch: bool,
     },
     Cancel {
         session_id: String,
@@ -556,6 +559,13 @@ pub enum ClientStateRequest {
         session_id: String,
         reply:
             tokio::sync::oneshot::Sender<Result<mj_core::state::ContainerUpgradePreview, String>>,
+    },
+    SuspendPreflight {
+        session_id: String,
+        dry_run: bool,
+        without_checkpoint: bool,
+        reply:
+            tokio::sync::oneshot::Sender<Result<mj_core::suspend_consent::SuspendPreflight, String>>,
     },
     Read {
         client_id: String,

@@ -112,8 +112,7 @@ pub(super) fn viewer_operation(
             crate::daemon::RuntimeLifecycleKind::Move => ViewerOperationKind::Move,
             // Stop, destroy, and retained cleanup remain distinct so a phone
             // can describe which part of teardown owns the session.
-            crate::daemon::RuntimeLifecycleKind::Suspend
-            | crate::daemon::RuntimeLifecycleKind::ForceStop => ViewerOperationKind::Suspend,
+            crate::daemon::RuntimeLifecycleKind::Suspend => ViewerOperationKind::Suspend,
             crate::daemon::RuntimeLifecycleKind::DestroyStopped
             | crate::daemon::RuntimeLifecycleKind::ForceDestroy => ViewerOperationKind::Destroy,
             crate::daemon::RuntimeLifecycleKind::StopSubagent => ViewerOperationKind::Stop,

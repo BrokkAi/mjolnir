@@ -1,64 +1,123 @@
-=== nested repository failure, checkpoint=false (100x28) ===
+=== close failure (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
-╭ Sessions ─                                                                                       │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
 │ Create   O                                                                            on.        │
-│hel ───────  ╭ × Suspension could not complete ─────────────────────────────────────╮             │
-│› ■ ACP pre  │Session: ACP pretty name                                              │             │
-│  Stopped    │                                                                      │             │
-│  │ No mess  │Suspension failed: export target checkpoint failed with status 1:     │             │
-│  │          │repository 'bifrost': cannot checkpoint nested Git repository         │  ───────────╯
-│             │directory at /workspace/bifrost/.scratch/s47-landing/master-check/:   │  ───────────╮
-│             │for a disposable scratch worktree, exclude this path using the outer  │             │
-│             │repository's .git/info/exclude; otherwise preserve its work separately│  o open.    │
+│hel ───────                                                                                       │
+│› · ACP pre  ╭ × Suspension could not complete ─────────────────────────────────────╮             │
+│  Idle  pod  │Session: ACP pretty name                                              │             │
+│  │ No mess  │                                                                      │             │
+│  │          │Suspension failed: archive unavailable                                │  ───────────╯
+│             │                                                                      │  ───────────╮
+│             │c Cancel  ·  r Retry suspension  ·  s Suspend without checkpoint…     │             │
+│             │                                                                      │  o open.    │
 ╰───────────  │                                                                      │  ───────────╯
-╭ Targets ▾   │Ignore and Suspend omits untracked nested Git repositories from the   │  ──── ▁   ▄ ╮
-│  Host / fl  │recovery copy.                                                        │             │
-╰───────────  │Files inside them will not be recoverable after suspension removes the│  ───────────╯
-╭ Profiles ▾  │environment.                                                          │  ──── ▁   ▄ ╮
+╭ Targets ▾   │                                                                      │  ──── ▁   ▄ ╮
+│  Host / fl  │                                                                      │             │
+╰───────────  │                                                                      │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
 │ANTHROPIC    │                                                                      │             │
-│  claude-1:  │c Cancel  ·  i Ignore and Suspend                                     │             │
+│  claude-1:  │  Cancel     Retry suspension     Suspend without checkpoint…         │             │
+│OPENAI       ╰──────────────────────────────────────────────────────────────────────╯             │
+│  codex-1:                                                                                        │
+│  codex-2:                                                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
+action: Suspend { session_id: "session-1", consent: SuspendConsent { discard_untracked: None, abort_operations: None, without_checkpoint: false, confirm_no_checkpoint: false } }
+
+=== suspend dialog with untracked files (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─                                                                                       │
+│ Create   O  ╭ × Suspend session? ──────────────────────────────────────────────────╮  on.        │
+│hel ───────  │Session: session-1                                                    │             │
+│› · ACP pre  │Save a recovery copy and release the environment.                     │             │
+│  Idle  pod  │You can resume this session later.                                    │             │
+│  │ No mess  │7 untracked files will not be kept (ignored files are never kept):    │             │
+│  │          │  scratch-1.txt                                                       │  ───────────╯
+│             │  scratch-2.txt                                                       │  ───────────╮
+│             │  scratch-3.txt                                                       │             │
+│             │  scratch-4.txt                                                       │  o open.    │
+╰───────────  │  scratch-5.txt                                                       │  ───────────╯
+╭ Targets ▾   │  and 2 more (v to view all)                                          │  ──── ▁   ▄ ╮
+│  Host / fl  │                                                                      │             │
+╰───────────  │c Cancel  ·  d Discard 7 files and continue                           │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
+│  claude-1:  │                                                                      │             │
 │OPENAI       │                                                                      │             │
-│  codex-1:   │  Cancel     Ignore and Suspend                                       │             │
+│  codex-1:   │  Cancel     Discard 7 files and continue                             │             │
 │  codex-2:   ╰──────────────────────────────────────────────────────────────────────╯             │
 ╰───────────                                                                            ───────────╯
 ╭ Notificati                                                                            ──── ▁   ▄ ╮
 │Nothing needs you                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
-action: IgnoreNestedRepositoriesAndSuspend { session_id: "session-1" }
 
-=== nested repository failure, checkpoint=true (100x28) ===
+=== suspend dialog with in-progress operation (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                                                                                          │
+│ default                            ≡ ││                                                          │
 ╰───────────                                                                                       │
-╭ Sessions ─  ╭ × Suspension could not complete ─────────────────────────────────────╮             │
-│ Create   O  │Session: ACP pretty name                                              │  on.        │
-│hel ───────  │                                                                      │             │
-│› ■ ACP pre  │Suspension failed: export target checkpoint failed with status 1:     │             │
-│  Stopped    │repository 'bifrost': cannot checkpoint nested Git repository         │             │
-│  │ No mess  │directory at /workspace/bifrost/.scratch/s47-landing/master-check/:   │             │
-│  │          │for a disposable scratch worktree, exclude this path using the outer  │  ───────────╯
-│             │repository's .git/info/exclude; otherwise preserve its work separately│  ───────────╮
-│             │                                                                      │             │
-│             │Ignore and Suspend omits untracked nested Git repositories from the   │  o open.    │
-╰───────────  │recovery copy.                                                        │  ───────────╯
-╭ Targets ▾   │Files inside them will not be recoverable after suspension removes the│  ──── ▁   ▄ ╮
-│  Host / fl  │environment.                                                          │             │
+╭ Sessions ─                                                                                       │
+│ Create   O  ╭ × Suspend session? ──────────────────────────────────────────────────╮  on.        │
+│hel ───────  │Session: session-1                                                    │             │
+│› · ACP pre  │Save a recovery copy and release the environment.                     │             │
+│  Idle  pod  │You can resume this session later.                                    │             │
+│  │ No mess  │In-progress Git operation (rebase) will be aborted, discarding        │             │
+│  │          │conflict resolution.                                                  │  ───────────╯
+│             │                                                                      │  ───────────╮
+│             │c Cancel  ·  a Continue anyway                                        │             │
+│             │                                                                      │  o open.    │
 ╰───────────  │                                                                      │  ───────────╯
-╭ Profiles ▾  │c Cancel  ·  d Discard changes since checkpoint…  ·  i Ignore and     │  ──── ▁   ▄ ╮
-│ANTHROPIC    │Suspend                                                               │             │
+╭ Targets ▾   │                                                                      │  ──── ▁   ▄ ╮
+│  Host / fl  │                                                                      │             │
+╰───────────  │                                                                      │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
 │  claude-1:  │                                                                      │             │
-│OPENAI       │  Cancel                                                              │             │
-│  codex-1:   │  Discard changes since checkpoint…                                   │             │
-│  codex-2:   │  Ignore and Suspend                                                  │             │
-╰───────────  ╰──────────────────────────────────────────────────────────────────────╯  ───────────╯
+│OPENAI       │                                                                      │             │
+│  codex-1:   │  Cancel     Continue anyway                                          │             │
+│  codex-2:   ╰──────────────────────────────────────────────────────────────────────╯             │
+╰───────────                                                                            ───────────╯
 ╭ Notificati                                                                            ──── ▁   ▄ ╮
-│Nothing nee                                                                                       │
+│Nothing needs you                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
-action: IgnoreNestedRepositoriesAndSuspend { session_id: "session-1" }
+
+=== suspend dialog with raw checkout (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰───────────                                                                                       │
+╭ Sessions ─                                                                                       │
+│ Create   O  ╭ × Suspend session? ──────────────────────────────────────────────────╮  on.        │
+│hel ───────  │Session: session-1                                                    │             │
+│› · ACP pre  │Save a recovery copy and release the environment.                     │             │
+│  Idle  pod  │You can resume this session later.                                    │             │
+│  │ No mess  │Raw checkout is kept in place; untracked files do not travel with the │             │
+│  │          │snapshot.                                                             │  ───────────╯
+│             │                                                                      │  ───────────╮
+│             │c Cancel  ·  a Continue anyway                                        │             │
+│             │                                                                      │  o open.    │
+╰───────────  │                                                                      │  ───────────╯
+╭ Targets ▾   │                                                                      │  ──── ▁   ▄ ╮
+│  Host / fl  │                                                                      │             │
+╰───────────  │                                                                      │  ───────────╯
+╭ Profiles ▾  │                                                                      │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
+│  claude-1:  │                                                                      │             │
+│OPENAI       │                                                                      │             │
+│  codex-1:   │  Cancel     Continue anyway                                          │             │
+│  codex-2:   ╰──────────────────────────────────────────────────────────────────────╯             │
+╰───────────                                                                            ───────────╯
+╭ Notificati                                                                            ──── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 action: None
 
 === target actions (120x34) ===

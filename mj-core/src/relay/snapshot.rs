@@ -733,8 +733,21 @@ pub struct RelayCursor {
     pub digest: String,
 }
 
+/// Durable dispatch hold taken by a same-target in-place Move, bound to the
+/// relay's `store_id`. While present, queued prompts and config entries are not
+/// promoted or claimed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InPlaceMoveHold {
+    pub operation_id: String,
+    pub captured_pending_command_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub harness_restarted: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_place_move_hold: Option<InPlaceMoveHold>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1362,6 +1375,8 @@ pub enum RelayObservation {
         command_id: String,
         command: RelayCommand,
         created_at_ms: i64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        insert_at_front: bool,
     },
     CommandStarted {
         command_id: String,
@@ -1905,6 +1920,9 @@ pub struct RelaySnapshot {
     pub cancelled_command_admissions: BTreeSet<String>,
     pub handled_commands: BTreeMap<String, HandledRelayCommand>,
     pub dispatches: BTreeMap<String, RelayDispatchRecord>,
+    /// Active same-target in-place Move dispatch hold, bound to this relay's `store_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_place_move_hold: Option<InPlaceMoveHold>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1946,6 +1964,7 @@ impl RelaySnapshot {
     }
     pub fn new(session_id: String) -> Self {
         Self {
+            in_place_move_hold: None,
             handback_checks: Default::default(),
             assessment_questions: Default::default(),
             pending_elicitations: Default::default(),
@@ -2088,6 +2107,7 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            in_place_move_hold: self.in_place_move_hold.clone(),
             assessment: self.assessment.clone(),
             open_request: self.open_request().cloned(),
             notification_stack: self.notification_stack.clone(),
