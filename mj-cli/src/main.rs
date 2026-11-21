@@ -335,12 +335,18 @@ struct DaemonStopArgs {
     /// daemon running and is named.
     #[arg(long)]
     suspend_sessions: bool,
-    /// Confirm suspending sessions whose saved Git work is not verified as
-    /// pushed.
+    /// Discard untracked files, nested repositories, untracked stashes, and
+    /// `.mj/keep/` contents when suspending sessions.
     #[arg(long, requires = "suspend_sessions")]
-    acknowledge_unpublished_work: bool,
+    discard_untracked: bool,
 }
 
+/// Move a session to another target or profile.
+///
+/// Cross-target moves keep only Git state (branches, tags, stashes, commits,
+/// staged and unstaged changes to tracked files, and linked worktrees inside the
+/// checkout) plus scratch in `$MJ_KEEP_DIR`. Untracked files are lost unless you
+/// `git add` them first; Git-ignored files are never kept.
 #[derive(Debug, Args)]
 #[command(group(
     ArgGroup::new("destination")
@@ -378,6 +384,15 @@ struct MoveArgs {
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_model: Option<String>,
+    /// Discard untracked files, nested repositories, and untracked stashes on cross-target Move.
+    #[arg(long)]
+    discard_untracked: bool,
+    /// Abort any in-progress Git operation before moving.
+    #[arg(long)]
+    abort_operation: bool,
+    /// Inspect what would be moved and what would be lost without changing anything.
+    #[arg(long)]
+    dry_run: bool,
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_effort: Option<String>,
@@ -799,7 +814,7 @@ async fn await_stopping_session(session_id: &str) -> Result<&'static str> {
 /// stopped, so running the command again picks up only what is left. The
 /// sessions are those active when it is asked: one another client starts
 /// meanwhile is not among them. Returns how many sessions it stopped.
-async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usize> {
+async fn suspend_all_sessions(discard_untracked: bool) -> Result<usize> {
     // Workers outlive a stopped daemon, so this starts one when none is
     // running: only a daemon can suspend them.
     let sessions = active_sessions(&mut daemon::connect_or_start().await?).await?;
@@ -824,7 +839,17 @@ async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usiz
                     async {
                         daemon::connect_existing()
                             .await?
-                            .suspend_session_with_ack(id, acknowledge_unpublished_work)
+                            .suspend_session_with_consent(
+                                id,
+                                mj_core::suspend_consent::SuspendConsent {
+                                    discard_untracked: if discard_untracked {
+                                        mj_core::suspend_consent::UntrackedConsent::Any
+                                    } else {
+                                        mj_core::suspend_consent::UntrackedConsent::None
+                                    },
+                                    ..Default::default()
+                                },
+                            )
                             .await
                     }
                     .await
@@ -2499,7 +2524,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 "stop the Mjolnir daemon",
             )?;
             if stop.suspend_sessions {
-                let stopped = suspend_all_sessions(stop.acknowledge_unpublished_work).await?;
+                let stopped = suspend_all_sessions(stop.discard_untracked).await?;
                 daemon::stop_instance().await?;
                 match stopped {
                     0 => println!("Mjolnir daemon stopped; no sessions were active."),

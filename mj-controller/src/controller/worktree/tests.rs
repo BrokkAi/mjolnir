@@ -3266,6 +3266,7 @@ fn legacy_linked_worktree_origin_delta_capture_and_restore_as_clone() {
         let input = managed_clone_snapshot_input(
             "workspace",
             &worktree_root,
+            None,
             pack_path,
             origin_override,
         );

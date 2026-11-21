@@ -2395,6 +2395,7 @@ mod tests {
         let export = export_checkpoint(&CheckpointExportSpec {
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
             ignore_nested_repositories: false,
+            consent: Default::default(),
             session: input.session,
             target: input.target,
             bundle: input.bundle,

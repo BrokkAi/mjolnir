@@ -50,19 +50,15 @@ pub(super) fn reconcile_managed_checkpoint_archives_in(
     if !directory.exists() {
         return Ok(0);
     }
-    let referenced_names = state
-        .sessions
-        .values()
-        .filter_map(|session| session.checkpoint.as_deref())
-        .chain(
-            operations
-                .iter()
-                .flat_map(mj_core::state::MoveOperation::retained_archives),
-        )
-        .chain(restarts.iter().filter_map(|intent| intent.handoff.as_ref()))
-        .filter_map(|checkpoint| checkpoint.archive_path.file_name())
-        .map(ToOwned::to_owned)
-        .collect::<BTreeSet<_>>();
+    let mut referenced_names = recovery_referenced_archive_names(operations, restarts);
+    referenced_names.extend(
+        state
+            .sessions
+            .values()
+            .filter_map(|session| session.checkpoint.as_deref())
+            .filter_map(|checkpoint| checkpoint.archive_path.file_name())
+            .map(ToOwned::to_owned),
+    );
     let mut removed = 0;
     for entry in std::fs::read_dir(directory)
         .with_context(|| format!("scan checkpoint directory {}", directory.display()))?
@@ -84,6 +80,24 @@ pub(super) fn reconcile_managed_checkpoint_archives_in(
         removed += 1;
     }
     Ok(removed)
+}
+
+/// Archive file names a durable Move or Restart still restores from.
+///
+/// A session's own checkpoint row is not in this set. Startup reconciliation
+/// unions that row in before it deletes anything; purge uses this set alone
+/// so it can replace the row and only then delete the previous file.
+pub(super) fn recovery_referenced_archive_names(
+    operations: &[mj_core::state::MoveOperation],
+    restarts: &[crate::database::SessionRestartIntent],
+) -> BTreeSet<std::ffi::OsString> {
+    operations
+        .iter()
+        .flat_map(mj_core::state::MoveOperation::retained_archives)
+        .chain(restarts.iter().filter_map(|intent| intent.handoff.as_ref()))
+        .filter_map(|checkpoint| checkpoint.archive_path.file_name())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 pub(crate) use mj_store::managed_archive::managed_checkpoint_archive_name;
@@ -142,4 +156,101 @@ pub(crate) fn remove_session_checkpoint_archives(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mj_core::state::{MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition};
+
+    fn checkpoint(name: &str) -> CheckpointMetadata {
+        CheckpointMetadata {
+            archive_path: PathBuf::from(name),
+            sha256: "a".repeat(64),
+            created_at: "2026-08-14T12:00:00Z".into(),
+            event_frontier: 7,
+        }
+    }
+
+    fn move_holding(checkpoint: CheckpointMetadata, phase: MovePhase) -> MoveOperation {
+        MoveOperation {
+            quota_stop_reason: None,
+            quota_continuation: None,
+            prepared_destination: None,
+            accepted_preparation: None,
+            acknowledge_interruption: false,
+            workspace_transfer: None,
+            handoff: None,
+            in_place: false,
+            source_checkpoint_only: false,
+            operation_id: "move-purge".into(),
+            selection: MoveSelection {
+                oracle: None,
+                oracle_choice: None,
+                subagents: None,
+                workspace: Default::default(),
+                clear_resource_allocation: false,
+                session_id: "1123456789abcdef0123456789abcdef".into(),
+                profile_id: None,
+                target_template_id: None,
+                additional_mounts: None,
+                resource_allocation: None,
+            },
+            source_profile_id: "codex".into(),
+            source_target_template_id: "local".into(),
+            source_target: None,
+            source_native_session_id: None,
+            inherited_resource_allocation: None,
+            inherited_additional_mounts: Vec::new(),
+            source_additional_mounts: Vec::new(),
+            source_resource_allocation: None,
+            destination_target: None,
+            destination_native_session_id: None,
+            destination_store_id: None,
+            configuration_fingerprint: "purge-test".into(),
+            checkpoint: Some(checkpoint),
+            recovery_session: None,
+            queue: ResumeQueueDisposition::Discard,
+            phase,
+            queue_admission_started: false,
+            queue_admission_finished: false,
+            cancellation_requested: false,
+            created_at: "2026-08-14T12:00:00Z".into(),
+            updated_at: "2026-08-14T12:00:00Z".into(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn recovery_referenced_names_are_move_and_restart_archives_only() {
+        let held = checkpoint("sessions/held-7-archive-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.hel.zip");
+        let handoff =
+            checkpoint("sessions/restart-7-archive-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.hel.zip");
+        let own = checkpoint("sessions/own-7-archive-cccccccccccccccccccccccccccccccc.hel.zip");
+        let forgotten =
+            checkpoint("sessions/done-7-archive-dddddddddddddddddddddddddddddddd.hel.zip");
+        let restart = crate::database::SessionRestartIntent {
+            session_id: "restart".into(),
+            operation_id: "restart-op".into(),
+            phase: crate::database::SessionRestartPhase::Stopping,
+            checkpoint_sha256: Some(handoff.sha256.clone()),
+            handoff: Some(handoff.clone()),
+            checkpoint_started: true,
+            container_recreation_acknowledged: false,
+            automatic: false,
+            container_upgrade: None,
+        };
+        let names = recovery_referenced_archive_names(
+            &[
+                move_holding(held.clone(), MovePhase::Preparing),
+                move_holding(forgotten.clone(), MovePhase::Completed),
+            ],
+            &[restart],
+        );
+        assert!(names.contains(held.archive_path.file_name().unwrap()));
+        assert!(names.contains(handoff.archive_path.file_name().unwrap()));
+        assert!(!names.contains(own.archive_path.file_name().unwrap()));
+        assert!(!names.contains(forgotten.archive_path.file_name().unwrap()));
+        assert_eq!(names.len(), 2);
+    }
 }

@@ -3418,7 +3418,10 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     let error = validate_action(
         &ControllerAction::Suspend {
             session_id: "not-managed".into(),
-            acknowledge_unpublished_work: false,
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
+            abort_operations: mj_core::suspend_consent::OperationConsent::None,
+            without_checkpoint: false,
+            confirm_no_checkpoint: false,
         },
         &snapshot,
     )

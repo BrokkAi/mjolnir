@@ -974,13 +974,30 @@ impl Controller {
                     || {
                         let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
                         if should_upload_restore_archive(&backend) {
-                            upload_checkpoint_spec(
-                                restoring,
-                                backend_ref,
-                                session_id,
+                            let reused = mj_checkpoint::checkpoint::checkpoint_sha256(
                                 restored_archive,
-                                &remote_archive,
-                            )?;
+                            )
+                            .ok()
+                            .and_then(|sha256| {
+                                super::checkpoint::try_stage_host_snapshot_cache(
+                                    restoring,
+                                    backend_ref,
+                                    session_id,
+                                    &sha256,
+                                    &remote_archive,
+                                )
+                                .ok()
+                            })
+                            .unwrap_or(false);
+                            if !reused {
+                                upload_checkpoint_spec(
+                                    restoring,
+                                    backend_ref,
+                                    session_id,
+                                    restored_archive,
+                                    &remote_archive,
+                                )?;
+                            }
                         }
                         upload_checkpoint_spec(
                             restoring,
@@ -997,6 +1014,11 @@ impl Controller {
                         restoring,
                         restore_command(&backend, session_id, &remote_spec)?,
                     )?;
+                    super::checkpoint::load_snapshot_pack_into_clone_cache_best_effort(
+                        &backend,
+                        restored_archive,
+                        restoring,
+                    );
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let trimmed = stdout.trim();
                     if !trimmed.is_empty() {

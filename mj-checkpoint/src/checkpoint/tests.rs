@@ -1759,6 +1759,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
     (
         CheckpointExportSpec {
             ignore_nested_repositories: false,
+            consent: Default::default(),
             report_directories: None,
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
             session: SessionManifest {

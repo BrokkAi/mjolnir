@@ -132,6 +132,9 @@ pub struct CheckpointExportSpec {
     /// One suspension's explicit consent; ordinary checkpoints remain strict.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ignore_nested_repositories: bool,
+    /// Typed consent for untracked files, keep-dir files, and in-progress operations.
+    #[serde(default)]
+    pub consent: mj_core::suspend_consent::CaptureConsent,
     pub session: SessionManifest,
     pub target: TargetManifest,
     pub bundle: BundleManifest,

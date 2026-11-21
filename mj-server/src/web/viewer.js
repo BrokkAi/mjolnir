@@ -6670,26 +6670,130 @@ function confirmSessionDestruction(session) {
     dialog.append(el('p', '', session.title || session.id));
     dialog.append(el('p', '', 'Permanently remove this session, its environment, and its recovery archive. Work held only in the environment will be lost. This also destroys its sub-agents.'));
     dialog.append(el('p', '', 'If environment cleanup fails, the session is still removed and a warning reports resources that may remain.'));
-    const label = el('label');
-    const branch = el('input');
-    branch.type = 'checkbox';
-    branch.checked = false;
-    if (session.managed_checkout_kind === 'worktree') {
-      label.append(branch, document.createTextNode(' Also delete the managed branch'));
-      dialog.append(label, el('p', 'dim', 'Keeping the managed branch does not preserve work held only inside the environment.'));
-    }
     const controls = el('div', 'row');
     const cancel = button('Cancel', 'secondary');
     const destroy = button('Destroy session', 'danger');
     const finish = choice => { dialog.close(); dialog.remove(); resolve(choice); };
     cancel.onclick = () => finish(null);
-    destroy.onclick = () => finish(branch.checked);
+    destroy.onclick = () => finish(true);
     dialog.oncancel = event => { event.preventDefault(); finish(null); };
     controls.append(cancel, destroy);
     dialog.append(controls);
     document.body.append(dialog);
     dialog.showModal();
     cancel.focus();
+  });
+}
+
+function buildShownSuspendConsent(preflight) {
+  const untrackedItems = [];
+  for (const entry of preflight.untracked || []) {
+    untrackedItems.push({ Path: { checkout: entry.checkout, path: entry.path, identity: entry.identity } });
+  }
+  for (const entry of preflight.nested_repositories || []) {
+    untrackedItems.push({ NestedRepository: { checkout: entry.checkout, path: entry.path, identity: entry.identity } });
+  }
+  for (const entry of preflight.untracked_stashes || []) {
+    untrackedItems.push({ Stash: { checkout: entry.checkout, commit: entry.commit, message: entry.message } });
+  }
+  for (const entry of preflight.keep_dir_entries || []) {
+    untrackedItems.push({ KeepDirFile: { checkout: entry.checkout, path: entry.path, identity: entry.identity } });
+  }
+  const ops = preflight.operations || [];
+  return {
+    discard_untracked: untrackedItems.length ? { Shown: untrackedItems } : 'None',
+    abort_operations: ops.length ? { Shown: ops } : 'None',
+    without_checkpoint: false,
+  };
+}
+
+function confirmSessionSuspension(session) {
+  if (!session) return Promise.resolve(null);
+  return new Promise(resolve => {
+    const dialog = openSessionDialog('session-suspend-dialog', 'Suspend session');
+    const finish = choice => { dialog.close(); resolve(choice); };
+    dialog.oncancel = event => { event.preventDefault(); finish(null); };
+    dialog.append(el('h2', '', 'Suspend session?'));
+    dialog.append(el('p', '', session.title || session.id));
+    const statusNode = el('p', 'dim', 'Checking workspace…');
+    dialog.append(statusNode);
+    const controls = el('div', 'row');
+    const cancel = button('Cancel', 'secondary');
+    cancel.onclick = () => finish(null);
+    controls.append(cancel);
+    dialog.append(controls);
+    cancel.focus();
+
+    request(`/api/v1/sessions/${encodeURIComponent(session.id)}/suspend-preflight`)
+      .then(preflight => {
+        statusNode.remove();
+        const blockers = preflight.blockers || [];
+        const untrackedCount = (preflight.untracked?.length || 0)
+          + (preflight.nested_repositories?.length || 0)
+          + (preflight.untracked_stashes?.length || 0)
+          + (preflight.keep_dir_entries?.length || 0);
+        const ops = preflight.operations || [];
+        if (blockers.length) {
+          dialog.insertBefore(el('p', 'danger', 'Cannot suspend until these blockers are resolved:'), controls);
+          const list = el('ul');
+          for (const b of blockers) {
+            list.append(el('li', '', `${b.kind}: ${b.remedy}`));
+          }
+          dialog.insertBefore(list, controls);
+          return;
+        }
+        dialog.insertBefore(el('p', '', 'Save a recovery copy and release the environment. You can resume this session later.'), controls);
+        if (preflight.raw) {
+          dialog.insertBefore(el('p', 'dim', 'Raw checkout is kept in place; untracked files and unsupported Git state do not travel with the snapshot.'), controls);
+        }
+        if (ops.length) {
+          const names = ops.map(op => op.kind).join(', ');
+          dialog.insertBefore(el('p', 'danger', `In-progress Git operation (${names}) will be aborted, discarding conflict resolution.`), controls);
+        }
+        if (untrackedCount > 0) {
+          dialog.insertBefore(el('p', 'danger', `${untrackedCount} untracked ${untrackedCount === 1 ? 'item' : 'items'} will not be kept (ignored files are never kept).`), controls);
+          const list = el('ul');
+          const paths = [
+            ...(preflight.untracked || []).map(e => e.path),
+            ...(preflight.nested_repositories || []).map(e => `${e.path} (nested repository)`),
+            ...(preflight.untracked_stashes || []).map(e => `stash ${(e.commit || '').slice(0, 8)} (${e.message || ''})`),
+            ...(preflight.keep_dir_entries || []).map(e => `.mj/keep/${e.path}`),
+          ];
+          for (const p of paths.slice(0, 10)) list.append(el('li', '', p));
+          dialog.insertBefore(list, controls);
+          if (paths.length > 10) {
+            const remaining = paths.slice(10);
+            const details = el('details');
+            details.append(el('summary', 'dim', `and ${remaining.length} more (click to view all)`));
+            const moreList = el('ul');
+            for (const p of remaining) moreList.append(el('li', '', p));
+            details.append(moreList);
+            dialog.insertBefore(details, controls);
+          }
+        }
+        if (preflight.keep_dir_bytes > 0) {
+          dialog.insertBefore(el('p', 'dim', `.mj/keep/ size: ${preflight.keep_dir_bytes} bytes (not saved on suspend).`), controls);
+        }
+        if (session?.chat_phase === 'running' || preflight.interrupting) {
+          dialog.insertBefore(el('p', '', 'The current turn will be interrupted.'), controls);
+        }
+        const unfinishedChildren = preflight.children_not_handed_back?.length ?? session.verdict?.unfinished_children ?? 0;
+        if (unfinishedChildren > 0) {
+          dialog.insertBefore(el('p', '', unfinishedChildren === 1
+            ? '1 sub-agent has not handed back; suspending stops it.'
+            : `${unfinishedChildren} sub-agents have not handed back; suspending stops them.`), controls);
+        }
+        const hasWarnings = untrackedCount > 0 || ops.length > 0 || preflight.raw || preflight.interrupting || unfinishedChildren > 0;
+        const confirmLabel = untrackedCount > 0
+          ? `Discard ${untrackedCount} ${untrackedCount === 1 ? 'file' : 'files'} and continue`
+          : (hasWarnings ? 'Continue anyway' : 'Suspend session');
+        const confirmBtn = button(confirmLabel, hasWarnings ? 'danger' : 'primary');
+        confirmBtn.onclick = () => finish(buildShownSuspendConsent(preflight));
+        controls.append(confirmBtn);
+      })
+      .catch(err => {
+        statusNode.textContent = `Could not check workspace: ${err?.message || err}`;
+      });
   });
 }
 
@@ -10305,21 +10409,14 @@ async function runSessionAction(dataset, errorNode, extra) {
   }
   if (dataset.action === 'suspend') {
     const session = sessionById(dataset.id);
-    // A suspend stops the sub-agents without a checkpoint. Only the ones
-    // still at their task lose anything; an idle one has handed back.
-    const unfinishedChildren = session.verdict?.unfinished_children ?? 0;
-    const question = 'Suspend session?\n\nSave a recovery copy and release the environment. You can resume this session later.'
-      + '\n\nAny unpublished or unverified Git work will be kept in the recovery copy until you resume.'
-      + (session?.chat_phase === 'running' ? '\n\nThe current turn will be interrupted.' : '')
-      + (unfinishedChildren === 1 ? '\n\n1 sub-agent has not handed back; suspending stops it.' : '')
-      + (unfinishedChildren > 1 ? `\n\n${unfinishedChildren} sub-agents have not handed back; suspending stops them.` : '');
-    if (!confirm(question)) return false;
+    const consent = await confirmSessionSuspension(session);
+    if (consent === null) return false;
+    extra = { ...extra, suspend_consent: consent };
   }
   if (dataset.action === 'destroy') {
     const session = sessionById(dataset.id);
     const choice = await confirmSessionDestruction(session);
     if (choice === null) return false;
-    extra = { ...extra, delete_branch: choice };
   }
   if (dataset.action === 'dismiss-notification') {
     extra = { ...extra, target: JSON.parse(dataset.notificationDismissal) };
@@ -10357,7 +10454,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     if (lifecycle) {
       await request(`/api/v1/sessions/${dataset.id}/${dataset.action}`, {
         method: 'POST', body: JSON.stringify(dataset.action === 'suspend'
-          ? { acknowledge_active_subagents: true, acknowledge_unpublished_work: true } : { delete_branch: extra.delete_branch }),
+          ? (extra.suspend_consent || {}) : {}),
       });
     } else if (dataset.action === 'dismiss-notification') {
       await sendNotificationDismissal({ session_id: body.session_id, target: body.target });

@@ -838,8 +838,7 @@ impl RuntimeState {
                     session_id,
                     controller,
                     executor,
-                    true,
-                    false,
+                    &mj_core::suspend_consent::SuspendConsent::default(),
                     None,
                 )
                 .await?

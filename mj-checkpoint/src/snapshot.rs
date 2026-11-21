@@ -17,19 +17,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CheckoutKey {
-    pub repository_id: String,
-    pub checkout_path: PathBuf,
-}
-impl Default for CheckoutKey {
-    fn default() -> Self {
-        Self {
-            repository_id: "workspace".into(),
-            checkout_path: PathBuf::new(),
-        }
-    }
-}
+pub use mj_core::suspend_consent::{
+    CaptureConsent, CheckoutKey, FileIdentity, GitOperation, GitOperationKind, OperationConsent,
+    ShownOperation, UntrackedConsent, UntrackedItem, UntrackedPath,
+};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Scoped<T> {
     pub checkout: CheckoutKey,
@@ -75,50 +66,85 @@ pub struct LaunchRecord {
     pub stash: Vec<SnapshotStashEntry>,
     pub worktrees: Vec<PathBuf>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(transparent)]
-pub struct FileIdentity(String);
 /// Use the same metadata observation for this identity and the displayed size.
 /// The controller can use this for .mj/keep entries as well as untracked files.
 pub fn file_identity(metadata: &fs::Metadata) -> Result<FileIdentity> {
     let mut identity = blake3::Hasher::new();
     hash_file_metadata(&mut identity, metadata)?;
-    Ok(FileIdentity(identity.finalize().to_hex().to_string()))
+    Ok(FileIdentity::new(identity.finalize().to_hex().to_string()))
 }
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum UntrackedItem {
-    Path {
-        checkout: CheckoutKey,
-        path: PathBuf,
-        identity: FileIdentity,
-    },
-    NestedRepository {
-        checkout: CheckoutKey,
-        path: PathBuf,
-        identity: FileIdentity,
-    },
-    Stash {
-        checkout: CheckoutKey,
-        commit: String,
-        message: String,
-    },
+
+/// Scan `.mj/keep/` (or a session's keep directory) for regular files and symlinks,
+/// returning each entry with its byte size and file identity plus the total size.
+pub fn scan_keep_dir(
+    checkout: &CheckoutKey,
+    keep_dir: &Path,
+) -> Result<(Vec<mj_core::suspend_consent::KeepDirEntry>, u64)> {
+    if !keep_dir.exists() {
+        return Ok((Vec::new(), 0));
+    }
+    let mut entries = Vec::new();
+    let mut total_bytes = 0u64;
+    let mut stack = vec![keep_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut children: Vec<PathBuf> = fs::read_dir(&dir)
+            .with_context(|| format!("read keep directory {}", dir.display()))?
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|entry| entry.path())
+            .collect();
+        children.sort();
+        for path in children {
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("stat keep entry {}", path.display()))?;
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path
+                .strip_prefix(keep_dir)
+                .unwrap_or(&path)
+                .to_path_buf();
+            let bytes = metadata.len();
+            total_bytes = total_bytes.saturating_add(bytes);
+            entries.push(mj_core::suspend_consent::KeepDirEntry {
+                checkout: checkout.clone(),
+                path: relative,
+                bytes,
+                identity: file_identity(&metadata)?,
+            });
+        }
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((entries, total_bytes))
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UntrackedConsent {
-    None,
-    Any,
-    Shown(Vec<UntrackedItem>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OperationConsent {
-    None,
-    Any,
-    Shown(Vec<ShownOperation>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CaptureConsent {
-    pub untracked: UntrackedConsent,
-    pub operations: OperationConsent,
+
+/// Verify that every file currently inside `.mj/keep/` is covered by `consent`.
+/// Called immediately before capture under the barrier so scratch files created
+/// after preflight are never silently discarded.
+pub fn check_keep_dir_consent(
+    checkout: &CheckoutKey,
+    keep_dir: &Path,
+    consent: &UntrackedConsent,
+) -> Result<()> {
+    let (entries, _) = scan_keep_dir(checkout, keep_dir)?;
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let uncovered: Vec<UntrackedItem> = entries
+        .into_iter()
+        .map(|entry| UntrackedItem::KeepDirFile {
+            checkout: entry.checkout,
+            path: entry.path,
+            identity: entry.identity,
+        })
+        .filter(|item| !consent.covers(item))
+        .collect();
+    if uncovered.is_empty() {
+        Ok(())
+    } else {
+        Err(SnapshotRefused::Untracked(uncovered).into())
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnrepresentedWorktree {
@@ -294,6 +320,13 @@ impl std::fmt::Display for SnapshotRefused {
                             checkout.repository_id,
                             checkout.checkout_path.display()
                         )?,
+                        UntrackedItem::KeepDirFile { checkout, path, .. } => write!(
+                            f,
+                            " {}:{} .mj/keep/{}",
+                            checkout.repository_id,
+                            checkout.checkout_path.display(),
+                            path.display()
+                        )?,
                     }
                 }
                 write!(f, ". Commit wanted files, move them outside the clone, or remove them before suspending. Preserve wanted stash contents outside the clone before dropping those stashes.")
@@ -302,28 +335,6 @@ impl std::fmt::Display for SnapshotRefused {
     }
 }
 impl std::error::Error for SnapshotRefused {}
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum GitOperationKind {
-    Merge,
-    Rebase,
-    CherryPick,
-    Revert,
-    Am,
-    Bisect,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GitOperation {
-    pub checkout: CheckoutKey,
-    pub kind: GitOperationKind,
-}
-pub type ShownOperation = GitOperation;
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UntrackedPath {
-    pub checkout: CheckoutKey,
-    pub path: PathBuf,
-    pub bytes: u64,
-    pub identity: FileIdentity,
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceInventory {
     pub notices: Vec<String>,
@@ -2684,7 +2695,7 @@ fn nested_repository_inventory(root: &Path) -> Result<(u64, FileIdentity)> {
         let encoded = relative.as_os_str().as_encoded_bytes();
         identity.update(&(encoded.len() as u64).to_be_bytes());
         identity.update(encoded);
-        identity.update(file_identity(&metadata)?.0.as_bytes());
+        identity.update(file_identity(&metadata)?.as_str().as_bytes());
         if metadata.is_dir() {
             let mut children = fs::read_dir(&path)?
                 .map(|entry| entry.map(|entry| entry.path()))
@@ -2702,7 +2713,7 @@ fn nested_repository_inventory(root: &Path) -> Result<(u64, FileIdentity)> {
     }
     Ok((
         bytes,
-        FileIdentity(identity.finalize().to_hex().to_string()),
+        FileIdentity::new(identity.finalize().to_hex().to_string()),
     ))
 }
 fn keep_relative(repository: &RepositoryInput) -> Result<Option<PathBuf>> {
@@ -7227,6 +7238,75 @@ mod tests {
                 Some(SnapshotRefused::DirtySubmodule(_))
             ),
             "expected DirtySubmodule refusal, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn consent_staleness_refuses_new_untracked_or_keep_dir_file_after_clean_preflight() {
+        let r = Repo::new();
+        let keep_dir = r.checkout.join(".mj/keep");
+        let input = RepositoryInput {
+            id: "workspace".to_owned(),
+            checkout: r.checkout.clone(),
+            ownership: CheckoutOwnership::Managed,
+            origin_override: None,
+            pack_path: r.temp.path().join("stale.pack"),
+            exclusions: ExclusionSource::Origin,
+            keep_dir: Some(keep_dir.clone()),
+        };
+        // 1. Preflight sees a clean workspace (no untracked files, no keep-dir files).
+        let inv = session_inventory(&FileGit, std::slice::from_ref(&input)).unwrap();
+        assert!(inv["workspace"].untracked.is_empty());
+        assert!(scan_keep_dir(&inv["workspace"].checkout, &keep_dir).unwrap().0.is_empty());
+
+        // 2. A file appears before the capture cut. Capture with UntrackedConsent::None refuses.
+        fs::write(r.checkout.join("late-scratch.txt"), "created after preflight\n").unwrap();
+        let err = capture_session_snapshot(&FileGit, std::slice::from_ref(&input), &SessionCaptureConsent::default())
+            .expect_err("capture must refuse untracked file created after clean preflight");
+        assert!(
+            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            "expected Untracked refusal, got: {err:#}"
+        );
+
+        // 3. Even if the user approved `late-scratch.txt` via Shown, modifying it or adding a
+        //    keep-dir file after preflight refuses because the file identity / keep-dir changed.
+        let inv2 = session_inventory(&FileGit, std::slice::from_ref(&input)).unwrap();
+        let shown_item = UntrackedItem::Path {
+            checkout: inv2["workspace"].checkout.clone(),
+            path: inv2["workspace"].untracked[0].path.clone(),
+            identity: inv2["workspace"].untracked[0].identity.clone(),
+        };
+        fs::write(r.checkout.join("late-scratch.txt"), "different content and size!\n").unwrap();
+        let stale_consent = SessionCaptureConsent {
+            repositories: [(
+                "workspace".to_owned(),
+                CaptureConsent {
+                    untracked: UntrackedConsent::Shown(vec![shown_item]),
+                    operations: OperationConsent::None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let err = capture_session_snapshot(&FileGit, std::slice::from_ref(&input), &stale_consent)
+            .expect_err("capture must refuse when approved file identity changed");
+        assert!(
+            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            "expected Untracked refusal for changed identity, got: {err:#}"
+        );
+
+        // 4. A file created in `.mj/keep/` after preflight is refused by check_keep_dir_consent.
+        fs::create_dir_all(&keep_dir).unwrap();
+        fs::write(keep_dir.join("note.txt"), "keep note\n").unwrap();
+        let err = check_keep_dir_consent(
+            &inv2["workspace"].checkout,
+            &keep_dir,
+            &UntrackedConsent::None,
+        )
+        .expect_err("keep-dir check must refuse unapproved keep file");
+        assert!(
+            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            "expected Untracked refusal for keep-dir file, got: {err:#}"
         );
     }
 }

@@ -105,6 +105,10 @@ pub(super) fn restart_falls_back_to_checkpoint_only(
 
 mod archives;
 pub use archives::*;
+mod host_cache;
+pub use host_cache::*;
+mod purge;
+pub use purge::*;
 mod leftovers;
 pub use leftovers::*;
 mod lease;
