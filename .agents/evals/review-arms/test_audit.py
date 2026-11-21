@@ -1,6 +1,8 @@
 """Audit recorded commands without treating searched or edited text as access."""
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -939,6 +941,90 @@ def test_in_place_edit_requires_root_and_tracked_link_inventory(tmp_path, tracke
 
 
 ENGINE_CWD = f"/workspace/{OWN}/engine-trees"
+
+
+def symlink_inventory(tmp_path, targets):
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({
+        "cwd": ENGINE_CWD, "tracked_symlinks": list(targets), "tracked_symlink_targets": targets,
+    }))
+
+
+# Hard-won: 92aaa39c0: an in-repo CLAUDE.md symlink voided every root search
+def test_engine_root_glob_accepts_internal_symlinks(tmp_path):
+    symlink_inventory(tmp_path, {"CLAUDE.md": "AGENTS.md"})
+    call = {"name": "Glob", "kind": "search", "rawInput": {"pattern": ".rql-engine-*/answer.json"}}
+    assert audit_call(tmp_path, call, engine=True)["passed"]
+
+
+@pytest.mark.parametrize("target", ["/etc", f"{ENGINE_CWD}/src", "../outside"])
+def test_file_tools_and_root_globs_reject_escaping_symlink_targets(tmp_path, target):
+    symlink_inventory(tmp_path, {"alias": target})
+    for name, kind, raw in (
+        ("Read", "read", {"file_path": "alias/input"}),
+        ("Glob", "search", {"pattern": ".rql-engine-*/answer.json"}),
+    ):
+        report = audit_call(tmp_path, {"name": name, "kind": kind, "rawInput": raw}, engine=True)
+        assert not report["passed"]
+        assert any("tracked symlink" in hit["snippet"] for hit in report["hits"])
+
+
+def test_symlink_chain_resolves_relative_to_each_link(tmp_path):
+    call = {"name": "Read", "kind": "read", "rawInput": {"file_path": "docs/first/input"}}
+    symlink_inventory(tmp_path, {"docs/first": "../links/next", "links/next": "../src"})
+    assert audit_call(tmp_path, call, engine=True)["passed"]
+    symlink_inventory(tmp_path, {"docs/first": "../links/next", "links/next": "../.mj"})
+    report = audit_call(tmp_path, call, engine=True)
+    assert [finding["kind"] for finding in report["hits"]] == ["memory-or-sessions"]
+
+
+def test_glob_finds_an_escaping_link_under_an_internal_directory_alias(tmp_path):
+    symlink_inventory(tmp_path, {"src/alias": "../other", "other/escape": "/etc"})
+    call = {"name": "Glob", "kind": "search", "rawInput": {"path": "src", "pattern": "**/example"}}
+    report = audit_call(tmp_path, call, engine=True)
+    assert not report["passed"]
+    assert any("tracked symlink" in hit["snippet"] for hit in report["hits"])
+
+
+def test_cyclic_and_overlong_link_chains_need_inspection(tmp_path):
+    call = {"name": "Read", "kind": "read", "rawInput": {"file_path": "link0/file"}}
+    symlink_inventory(tmp_path, {"link0": "link1", "link1": "link0"})
+    assert not audit_call(tmp_path, call, engine=True)["passed"]
+    links = {f"link{i}": f"link{i + 1}" for i in range(40)}
+    symlink_inventory(tmp_path, links)
+    assert audit_call(tmp_path, call, engine=True)["passed"]
+    symlink_inventory(tmp_path, {**links, "link40": "src"})
+    assert not audit_call(tmp_path, call, engine=True)["passed"]
+
+
+def test_old_inventory_without_targets_keeps_the_strict_glob_check(tmp_path):
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({
+        "cwd": ENGINE_CWD, "tracked_symlinks": ["CLAUDE.md"],
+    }))
+    call = {"name": "Glob", "kind": "search", "rawInput": {"pattern": ".rql-engine-*/answer.json"}}
+    report = audit_call(tmp_path, call, engine=True)
+    assert not report["passed"]
+    assert any("tracked symlink" in hit["snippet"] for hit in report["hits"])
+
+
+def test_git_inventory_records_the_pinned_symlink_blob_bytes(tmp_path):
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(tmp_path), *args], stderr=subprocess.PIPE)
+
+    git("init", "-q")
+    (tmp_path / "first").symlink_to("source\n")
+    (tmp_path / "second").symlink_to("source\n")
+    (tmp_path / "source\n").write_text("data")
+    git("add", "--", "first", "second", "source\n")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "snapshot")
+    git("update-ref", "refs/mj/session-start/fixture", "HEAD")
+    # A modified link on disk must not replace the target from the pinned blob.
+    (tmp_path / "first").unlink()
+    (tmp_path / "first").symlink_to("../outside")
+    request = {"mode": "pin", "cwd": str(tmp_path), "base": "HEAD"}
+    inventory = subprocess.check_output(
+        [sys.executable, "-B", str(Path(__file__).with_name("inventory.py"))], input=json.dumps(request).encode(),
+    )
+    assert json.loads(inventory)["tracked_symlink_targets"] == {"first": "source\n", "second": "source\n"}
 
 
 # Hard-won: dd934cd54: structured paths followed tracked links outside the checkout
