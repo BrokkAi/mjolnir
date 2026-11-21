@@ -1037,12 +1037,15 @@ pub enum RelayResponsePayload {
         state_digest: Option<String>,
     },
     /// The answer to [`RelayRequest::WaitForChange`]: the worker's latest event
-    /// ordinal and state digest now, and whether this connection's sub-agent
-    /// queue has changes to poll. Equal values mean the wait ran out.
+    /// ordinal and state digest now, and whether the sub-agent or guardian
+    /// queue has changes to poll. An unchanged frontier with no queue changes
+    /// means the wait ran out.
     ChangeObserved {
         latest_ordinal: u64,
         state_digest: String,
         subagent_queue_changed: bool,
+        #[serde(default, skip_serializing_if = "crate::transcript::is_false")]
+        guardian_queue_changed: bool,
     },
     /// An attach whose `known_state_digest` still matches: the state is the
     /// one the controller holds, so only the events are sent. Protocol 57.
@@ -1189,6 +1192,7 @@ pub enum RelayResponsePayload {
         result: crate::history::HistoryResult,
     },
     HistoryRequestCompleted,
+    GuardianRequestCompleted,
     /// What every workspace repository changed since the stored baselines.
     ReviewDelta {
         repositories: Vec<RepoDelta>,

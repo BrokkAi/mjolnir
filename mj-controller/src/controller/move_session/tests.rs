@@ -300,6 +300,7 @@ fn move_queue_relay_child() {
                     latest_ordinal: *after_ordinal,
                     state_digest: state_digest.clone().unwrap_or_default(),
                     subagent_queue_changed: false,
+                    guardian_queue_changed: false,
                 })
             }
             _ => None,

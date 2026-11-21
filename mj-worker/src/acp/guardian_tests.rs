@@ -16,6 +16,7 @@ use std::path::Path;
 const SCRIPTED_HARNESS: &str = r#"
 import json, os, sys, time
 root, commands, replies = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3])
+mode = sys.argv[4]
 role = 'session'
 buffered = []
 def send(message): print(json.dumps(message), flush=True)
@@ -60,6 +61,7 @@ while True:
         session = 'main' if role == 'session' else 'review-%d' % len(recorded_lines('reviewer_session_new'))
         if role == 'reviewer': record('reviewer_session_new', params)
         result = {'sessionId': session}
+        if mode: result['modes'] = {'currentModeId':mode,'availableModes':[{'id':mode,'name':mode}]}
     elif method == 'session/prompt' and role == 'session':
         for index, command in enumerate(commands):
             outcome = ask('permission-%d' % index, 'main', 'call-%d' % index, 'Bash', 'execute', {'command': command})
@@ -126,28 +128,51 @@ fn start_scripted_kimi_with(
     instructions: &[&str],
     approval_choices: mj_core::config::ApprovalChoices,
 ) -> ScriptedSession {
+    start_scripted_harness(root, commands, replies, instructions, None, |spec| {
+        spec.harness = HarnessKind::Kimi;
+        spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+        spec.approval_choices = approval_choices;
+    })
+}
+
+fn start_scripted_harness(
+    root: &Path,
+    commands: &[&str],
+    replies: &[&str],
+    instructions: &[&str],
+    endpoint: Option<Arc<crate::worker_runtime::guardian_endpoint::GuardianEndpoint>>,
+    configure: impl FnOnce(&mut LaunchSpec),
+) -> ScriptedSession {
     let script = root.join("harness.py");
     std::fs::write(&script, SCRIPTED_HARNESS).unwrap();
     let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
         silence: None,
         tool_call: None,
     });
+    configure(&mut spec);
     spec.command = "python3".into();
+    let mode = session_enforcement(&spec)
+        .and_then(|enforcement| enforcement.acp_mode())
+        .unwrap_or_default();
     spec.args = vec![
         script.to_string_lossy().into_owned(),
         root.to_string_lossy().into_owned(),
         serde_json::to_string(commands).unwrap(),
         serde_json::to_string(replies).unwrap(),
+        mode.to_owned(),
     ];
     spec.cwd = root.to_path_buf();
-    spec.harness = HarnessKind::Kimi;
-    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
-    spec.approval_choices = approval_choices;
     let context = spec.turn_context.clone();
     context.set_authorization_context(Some(person_wrote(instructions)));
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, events) = mpsc::channel(256);
-    let runtime = mj_core::runtime::spawn(run(spec, request_rx, event_tx));
+    let runtime = mj_core::runtime::spawn(run_with_guardian(
+        spec,
+        request_rx,
+        event_tx,
+        Default::default(),
+        endpoint,
+    ));
     request_tx
         .try_send(CommandRequest::Prompt {
             request_id: "turn".into(),
@@ -446,5 +471,162 @@ async fn a_verdict_reached_while_the_person_wrote_again_is_reviewed_again() {
         "{}",
         prompts[1]
     );
+    runtime.abort();
+}
+
+async fn wait_for_guardian_request(
+    endpoint: &crate::worker_runtime::guardian_endpoint::GuardianEndpoint,
+) -> GuardianReviewRequest {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(request) = endpoint.requests().into_iter().next() {
+                break request;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn native_guardian_harnesses_send_surfaced_requests_to_the_daemon_only_with_configured_approvals()
+ {
+    use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
+    use mj_core::guardian::{GuardianReviewOutcome, GuardianReviewResult};
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Codex,
+        HarnessKind::Antigravity,
+    ] {
+        for policy in [
+            ExecutionPolicy::ConfiguredApprovals,
+            ExecutionPolicy::Unconstrained,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let endpoint = Arc::new(GuardianEndpoint::default());
+            let (_requests, _events, runtime, _) = start_scripted_harness(
+                temp.path(),
+                &["cargo test"],
+                &[],
+                &[],
+                Some(endpoint.clone()),
+                |spec| {
+                    spec.harness = harness;
+                    spec.execution_policy = policy;
+                    spec.approval_choices = Default::default();
+                    harness.configure_staged_home_environment(temp.path(), &mut spec.environment);
+                },
+            );
+            if policy == ExecutionPolicy::ConfiguredApprovals {
+                let request = wait_for_guardian_request(&endpoint).await;
+                assert_eq!(request.harness, harness);
+                assert_eq!(request.action["input"]["command"], "cargo test");
+                endpoint.complete(GuardianReviewResult {
+                    request_id: request.request_id,
+                    decision: GuardianReviewOutcome::Allow {
+                        stage: "utility_llm".into(),
+                        stage1_score: None,
+                    },
+                });
+            }
+            assert_eq!(
+                await_recorded(temp.path(), "session_outcomes", 1).await,
+                [
+                    json!({"command": "cargo test", "outcome": {"outcome": "selected", "optionId": "approve"}})
+                ]
+            );
+            assert!(endpoint.requests().is_empty());
+            assert!(recorded(temp.path(), "reviewer_initialize").is_empty());
+            runtime.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_pending_entry() {
+    use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
+    use mj_core::guardian::{
+        GuardianReviewOutcome, GuardianReviewResult, RiskLevel, UserAuthorization,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let endpoint = Arc::new(GuardianEndpoint::default());
+    let (requests, _events, runtime, context) = start_scripted_harness(
+        temp.path(),
+        &["make deploy"],
+        &[],
+        &["Tidy the repository."],
+        Some(endpoint.clone()),
+        |spec| {
+            spec.harness = HarnessKind::Kimi;
+            spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+            spec.approval_choices = Default::default();
+        },
+    );
+    let old = wait_for_guardian_request(&endpoint).await;
+    context.set_authorization_context(Some(person_wrote(&[
+        "Tidy the repository.",
+        "Then deploy.",
+    ])));
+    endpoint.complete(GuardianReviewResult {
+        request_id: old.request_id.clone(),
+        decision: GuardianReviewOutcome::Deny {
+            rationale: "Nobody asked to deploy".into(),
+            risk_level: RiskLevel::High,
+            user_authorization: UserAuthorization::Unknown,
+            stage: "utility_llm".into(),
+            stage1_score: None,
+        },
+    });
+    let fresh = wait_for_guardian_request(&endpoint).await;
+    assert_ne!(fresh.request_id, old.request_id);
+    assert_eq!(fresh.user_instructions.last().unwrap(), "Then deploy.");
+    requests
+        .send(CommandRequest::Cancel {
+            request_id: "cancel".into(),
+            steering_prompt: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        await_recorded(temp.path(), "session_outcomes", 1).await,
+        [json!({"command": "make deploy", "outcome": {"outcome": "cancelled"}})]
+    );
+    assert!(endpoint.requests().is_empty());
+    assert!(recorded(temp.path(), "reviewer_initialize").is_empty());
+    runtime.abort();
+}
+
+#[tokio::test]
+async fn guardian_uses_acp_when_the_daemon_requests_fallback() {
+    use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
+    use mj_core::guardian::{GuardianReviewOutcome, GuardianReviewResult};
+    let temp = tempfile::tempdir().unwrap();
+    let endpoint = Arc::new(GuardianEndpoint::default());
+    let (_requests, _events, runtime, _) = start_scripted_harness(
+        temp.path(),
+        &["cargo test"],
+        &[r#"{"outcome":"allow"}"#],
+        &[],
+        Some(endpoint.clone()),
+        |spec| {
+            spec.harness = HarnessKind::Kimi;
+            spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+            spec.approval_choices = Default::default();
+        },
+    );
+    let request = wait_for_guardian_request(&endpoint).await;
+    assert!(recorded(temp.path(), "reviewer_initialize").is_empty());
+    endpoint.complete(GuardianReviewResult {
+        request_id: request.request_id,
+        decision: GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+    });
+    assert_eq!(
+        await_recorded(temp.path(), "session_outcomes", 1).await,
+        [
+            json!({"command": "cargo test", "outcome": {"outcome": "selected", "optionId": "approve"}})
+        ]
+    );
+    assert_eq!(recorded(temp.path(), "reviewer_initialize").len(), 1);
     runtime.abort();
 }

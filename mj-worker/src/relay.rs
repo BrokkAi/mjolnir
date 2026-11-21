@@ -28,9 +28,9 @@ pub(crate) enum InPlaceHarnessRestartDecision {
 
 #[cfg(test)]
 mod checkpoint_hold_tests;
+mod commands;
 #[cfg(test)]
 mod in_place_move_tests;
-mod commands;
 mod journal;
 mod native_history;
 mod replay;
@@ -157,6 +157,8 @@ struct PendingNativeResume {
 pub struct RelayCell {
     relay: std::sync::Mutex<DurableRelay>,
     released: tokio::sync::watch::Sender<u64>,
+    #[cfg(unix)]
+    pub(crate) guardian: std::sync::Arc<crate::worker_runtime::guardian_endpoint::GuardianEndpoint>,
 }
 
 impl RelayCell {
@@ -164,6 +166,8 @@ impl RelayCell {
         Self {
             relay: std::sync::Mutex::new(relay),
             released: tokio::sync::watch::Sender::new(0),
+            #[cfg(unix)]
+            guardian: Default::default(),
         }
     }
 

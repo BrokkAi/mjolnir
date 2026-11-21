@@ -75,7 +75,13 @@ pub fn reviewer_instructions_tool_free() -> String {
     let (context, investigation) = policy_template()
         .split_once("# Investigation Guidelines")
         .expect("guardian template contains investigation guidelines");
-    let (_, outcome_policy) = investigation
+    let (_, environment) = investigation
+        .split_once("# Execution Environment")
+        .expect("guardian template contains execution environment");
+    let (agent_environment, restrictions) = environment
+        .split_once("## Your Restrictions")
+        .expect("guardian template contains reviewer restrictions");
+    let (_, outcome_policy) = restrictions
         .split_once("# Outcome Policy")
         .expect("guardian template contains outcome policy");
     let context = context
@@ -90,12 +96,15 @@ pub fn reviewer_instructions_tool_free() -> String {
             "Use read-only tool calls when the target is not clear from the conversation.",
             "If the evidence does not identify the target, account for that uncertainty.",
         );
+    let agent_environment = agent_environment
+        .replace("You share the execution environment with the agent, but you have different restrictions on your actions.\n\n", "");
     let instructions = render_policy(&context, &policy);
     let schema = assessment_json_schema();
     format!(
         "{instructions}\n\n# Investigation Guidelines\n\
-         You have no tools and cannot read files or inspect the environment. Review the action using only the supplied evidence.\n\
          If important context is missing and cannot be verified, lean conservative and explain the uncertainty in your rationale.\n\n\
+         # Execution Environment{agent_environment}## Your Restrictions\n\
+         You have no tools and cannot read files, run commands, make network requests, or call MCP tools. Review the action using only the supplied evidence.\n\n\
          # Outcome Policy{outcome_policy}\n\
          Reply with only strict JSON matching this JSON Schema. Include all four required fields.\n{schema}\n"
     )

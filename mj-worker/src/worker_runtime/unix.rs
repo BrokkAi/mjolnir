@@ -522,11 +522,12 @@ fn start_bridge(
         subagents,
         shell_cleanup: Some(shell_cleanup),
     };
-    started.acp_task = Some(runtime.spawn(acp::run_with_shutdown(
+    started.acp_task = Some(runtime.spawn(acp::run_with_guardian(
         acp_spec,
         commands_rx,
         events_tx,
         acp_shutdown,
+        Some(relay.guardian.clone()),
     )));
     started.event_task = Some(runtime.spawn(run_relay_coordinator_with_shells(
         relay,
@@ -612,10 +613,12 @@ pub(crate) async fn wait_for_change(
     preparation: Option<&watch::Receiver<PreparationSnapshot>>,
     subagents: Option<&super::subagents::SubagentEndpoint>,
     feed: &super::subagents::SubagentFeed,
+    guardian_generation: &mut u64,
     after_ordinal: u64,
     state_digest: Option<&str>,
 ) -> Result<RelayResponseBody> {
     let mut releases = Some(relay.releases());
+    let mut guardian = relay.guardian.changes();
     let mut jev = mj_core::jev::rate_limit_changes();
     let mut preparation = preparation.cloned();
     // A finished preparation closes its channel but keeps its last value,
@@ -645,7 +648,11 @@ pub(crate) async fn wait_for_change(
         let latest_ordinal = state.latest_ordinal;
         let digest = mj_core::relay::relay_state_digest(&state)?;
         let subagent_queue_changed = subagents.is_some_and(|endpoint| feed.has_unpolled(endpoint));
-        let changed = latest_ordinal != after_ordinal
+        let generation = *guardian.borrow_and_update();
+        let guardian_queue_changed = generation != *guardian_generation;
+        *guardian_generation = generation;
+        let changed = guardian_queue_changed
+            || latest_ordinal != after_ordinal
             || state_digest != Some(digest.as_str())
             || subagent_queue_changed;
         let observed = RelayResponseBody::Ok {
@@ -653,6 +660,7 @@ pub(crate) async fn wait_for_change(
                 latest_ordinal,
                 state_digest: digest,
                 subagent_queue_changed,
+                guardian_queue_changed,
             },
         };
         if changed {
@@ -680,6 +688,7 @@ pub(crate) async fn wait_for_change(
                 }
             } => if !changed { preparation_open = false },
             _ = jev.changed() => {}
+            _ = guardian.changed() => {}
             () = tokio::time::sleep_until(deadline) => return Ok(observed),
         }
     }
@@ -817,7 +826,8 @@ async fn restart_harness_in_place_response(
             };
         }
     };
-    if let Err(error) = super::harness_launch::freeze_node_entrypoints(relay_root, &mut prepared).await
+    if let Err(error) =
+        super::harness_launch::freeze_node_entrypoints(relay_root, &mut prepared).await
     {
         return RelayResponseEnvelope {
             request_id,
@@ -912,6 +922,32 @@ mod history_tests {
     use mj_core::history::{HistoryQuery, HistoryResult};
     use mj_core::relay::RELAY_PROTOCOL_VERSION;
 
+    async fn send(connection: &mut BufReader<UnixStream>, request: RelayRequest) {
+        let mut bytes = serde_json::to_vec(&RelayRequestEnvelope {
+            request_id: "request".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request,
+        })
+        .unwrap();
+        bytes.push(b'\n');
+        connection.get_mut().write_all(&bytes).await.unwrap();
+    }
+    async fn receive(connection: &mut BufReader<UnixStream>) -> RelayResponsePayload {
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connection.read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+        match response.body {
+            RelayResponseBody::Ok { payload } => payload,
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn history_round_trips_large_replies_without_delegation_or_durable_events() {
         let temp = tempfile::tempdir().unwrap();
@@ -944,31 +980,6 @@ mod history_tests {
                 fatal.clone(),
             )));
             connections.push(BufReader::new(client));
-        }
-        async fn send(connection: &mut BufReader<UnixStream>, request: RelayRequest) {
-            let mut bytes = serde_json::to_vec(&RelayRequestEnvelope {
-                request_id: "request".into(),
-                protocol_version: RELAY_PROTOCOL_VERSION,
-                request,
-            })
-            .unwrap();
-            bytes.push(b'\n');
-            connection.get_mut().write_all(&bytes).await.unwrap();
-        }
-        async fn receive(connection: &mut BufReader<UnixStream>) -> RelayResponsePayload {
-            let mut line = String::new();
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                connection.read_line(&mut line),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
-            match response.body {
-                RelayResponseBody::Ok { payload } => payload,
-                other => panic!("{other:?}"),
-            }
         }
         send(
             &mut connections[0],
@@ -1039,6 +1050,154 @@ mod history_tests {
         assert_eq!(
             relay.lock().unwrap().operational_state().session_id,
             "history-test"
+        );
+    }
+    #[tokio::test]
+    async fn guardian_relay_wakes_and_preserves_pending_requests_across_disconnect() {
+        use mj_core::guardian::{
+            GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult, RiskLevel,
+            UserAuthorization,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(temp.path(), "guardian-test", "1.0.0").unwrap(),
+        ));
+        let (wake, _received) = mpsc::channel(1);
+        let (fatal, _errors) = mpsc::channel(1);
+        let connect = || {
+            let (server, client) = UnixStream::pair().unwrap();
+            let task = mj_core::runtime::spawn(serve_client_with_memory(
+                server,
+                Arc::clone(&relay),
+                wake.clone(),
+                Err("no credentials".into()),
+                ConnectionRuntime::default(),
+                fatal.clone(),
+            ));
+            (BufReader::new(client), task)
+        };
+        let (mut connection, server) = connect();
+        let state = relay.observe().unwrap().operational_state();
+        send(
+            &mut connection,
+            RelayRequest::WaitForChange {
+                after_ordinal: state.latest_ordinal,
+                state_digest: Some(mj_core::relay::relay_state_digest(&state).unwrap()),
+            },
+        )
+        .await;
+
+        // Exercise a real reply larger than a pipe buffer, and all four
+        // decisions the daemon can make.
+        let request = GuardianReviewRequest {
+            request_id: String::new(),
+            harness: HarnessKind::Claude,
+            session_id: "guardian-test".into(),
+            tool_call_id: "call".into(),
+            action: serde_json::json!({"input": "x".repeat(70_000)}),
+            user_instructions: vec![],
+            user_instructions_omitted: false,
+            transcript: String::new(),
+        };
+        let pending = || {
+            let endpoint = relay.guardian.clone();
+            let request = request.clone();
+            mj_core::runtime::spawn(async move {
+                endpoint
+                    .review(
+                        request,
+                        tokio::time::Instant::now() + mj_core::guardian::GUARDIAN_REVIEW_TIMEOUT,
+                    )
+                    .await
+                    .unwrap()
+            })
+        };
+        let first = pending();
+        assert!(matches!(
+            receive(&mut connection).await,
+            RelayResponsePayload::ChangeObserved {
+                guardian_queue_changed: true,
+                ..
+            },
+        ));
+        send(&mut connection, RelayRequest::GuardianRequests).await;
+        let RelayResponsePayload::GuardianRequests { requests } = receive(&mut connection).await
+        else {
+            panic!("guardian requests")
+        };
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].action, request.action);
+        let request_id = requests[0].request_id.clone();
+        drop(connection);
+        server.await.unwrap().unwrap();
+        assert!(!first.is_finished());
+
+        let (mut replacement, server) = connect();
+        let decisions = [
+            GuardianReviewOutcome::Allow {
+                stage: "utility_llm".into(),
+                stage1_score: None,
+            },
+            GuardianReviewOutcome::Deny {
+                rationale: "risk".into(),
+                risk_level: RiskLevel::High,
+                user_authorization: UserAuthorization::Low,
+                stage: "utility_llm".into(),
+                stage1_score: None,
+            },
+            GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+            GuardianReviewOutcome::AskPerson {
+                reason: "missing evidence".into(),
+            },
+        ];
+        let mut first = Some(first);
+        for decision in decisions {
+            let reconnecting = first.is_some();
+            let task = first.take().unwrap_or_else(pending);
+            let requests = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    send(&mut replacement, RelayRequest::GuardianRequests).await;
+                    let RelayResponsePayload::GuardianRequests { requests } =
+                        receive(&mut replacement).await
+                    else {
+                        panic!("guardian requests")
+                    };
+                    if !requests.is_empty() {
+                        break requests;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(requests.len(), 1);
+            let pending_id = requests[0].request_id.clone();
+            if reconnecting {
+                assert_eq!(request_id, pending_id);
+            }
+            let result = GuardianReviewResult {
+                request_id: pending_id,
+                decision,
+            };
+            send(
+                &mut replacement,
+                RelayRequest::CompleteGuardianRequest {
+                    result: result.clone(),
+                },
+            )
+            .await;
+            assert!(matches!(
+                receive(&mut replacement).await,
+                RelayResponsePayload::GuardianRequestCompleted
+            ));
+            assert_eq!(task.await.unwrap(), result);
+        }
+        drop(replacement);
+        server.await.unwrap().unwrap();
+        assert!(relay.guardian.requests().is_empty());
+        assert_eq!(
+            relay.observe().unwrap().operational_state().latest_ordinal,
+            state.latest_ordinal
         );
     }
 }
@@ -2814,6 +2973,7 @@ pub(super) async fn serve_client_with_memory(
     let mut reader = BufReader::new(reader);
     let mut checkpoint_barriers = BTreeSet::new();
     let mut subagent_feed = super::subagents::SubagentFeed::default();
+    let mut guardian_generation = 0;
     let mut project_memory_transfer = ConnectionProjectMemoryTransfer::default();
     let mut live_baseline_download = None;
     let serving_result = async {
@@ -2882,6 +3042,7 @@ pub(super) async fn serve_client_with_memory(
                     preparation.as_ref(),
                     request_subagents.as_ref(),
                     &subagent_feed,
+                    &mut guardian_generation,
                     *after_ordinal,
                     state_digest.as_deref(),
                 )
@@ -3126,6 +3287,22 @@ pub(super) async fn serve_client_with_memory(
                 };
                 let Some(response) = response else { return Ok(()) };
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
+                continue;
+            }
+            let guardian_payload = match &envelope.request {
+                RelayRequest::GuardianRequests => Some(RelayResponsePayload::GuardianRequests {
+                    requests: relay.guardian.requests(),
+                }),
+                RelayRequest::CompleteGuardianRequest { result } => {
+                    relay.guardian.complete(result.clone());
+                    Some(RelayResponsePayload::GuardianRequestCompleted)
+                }
+                _ => None,
+            };
+            if let Some(payload) = guardian_payload {
+                let operation = envelope.request.method_name();
+                let body = RelayResponseBody::Ok { payload };
+                write_logged_response(&mut writer, &RelayResponseEnvelope { request_id: envelope.request_id, protocol_version: envelope.protocol_version, body }, &session_id, operation).await?;
                 continue;
             }
             if matches!(&envelope.request, RelayRequest::HistoryQuery { .. } | RelayRequest::HistoryRequests | RelayRequest::CompleteHistoryRequest { .. }) {
@@ -4419,8 +4596,7 @@ mod preparation_tests {
             .expect("store_id");
 
         // No hold active -> rejected without touching acp-supervisor.json.
-        let launch_config =
-            super::super::relay_tests::launch_config(root.path().to_str().unwrap());
+        let launch_config = super::super::relay_tests::launch_config(root.path().to_str().unwrap());
         let (commands_tx, mut commands_rx) = mpsc::channel(4);
         let response = restart_harness_in_place_response(
             RelayRequestEnvelope {

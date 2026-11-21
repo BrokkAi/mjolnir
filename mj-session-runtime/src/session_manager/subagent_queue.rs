@@ -13,9 +13,10 @@ pub struct SubagentQueueObserver {
     view: watch::Receiver<Observation>,
     task: tokio::task::JoinHandle<()>,
     active: watch::Sender<bool>,
-    /// Counts the relay changes this connection's waits observed and the
-    /// queue changes it published, for the session actor to sync on.
-    relay_changes: watch::Receiver<u64>,
+    /// Counts relay and delegation updates, with a separate counter for
+    /// guardian requests that should interrupt even the busy sync cadence.
+    relay_changes: watch::Receiver<(u64, u64)>,
+    guardian_seen: u64,
     /// Whether this connection is waiting for changes on a worker that
     /// supports it, so the actor need not poll.
     waiting: watch::Receiver<bool>,
@@ -49,7 +50,7 @@ impl SubagentQueueObserver {
             error: Some("delegation queue is connecting".into()),
         });
         let (active, activity) = watch::channel(true);
-        let (relay_changed, relay_changes) = watch::channel(0_u64);
+        let (relay_changed, relay_changes) = watch::channel((0_u64, 0_u64));
         let (waiting_tx, waiting) = watch::channel(false);
         let (synced, synced_rx) = watch::channel(None::<(u64, String)>);
         let target = target.clone();
@@ -97,7 +98,8 @@ impl SubagentQueueObserver {
                         // The actor reads the queue on its next sync, which
                         // a quiet session no longer runs on a short timer.
                         if published {
-                            relay_changed.send_modify(|count| *count = count.wrapping_add(1));
+                            relay_changed
+                                .send_modify(|(ordinary, _)| *ordinary = ordinary.wrapping_add(1));
                         }
                     }
                     if !waits {
@@ -127,8 +129,13 @@ impl SubagentQueueObserver {
                                 let relay = observed.as_ref() != Some(&now);
                                 if relay {
                                     observed = Some(now);
-                                    relay_changed
-                                        .send_modify(|count| *count = count.wrapping_add(1));
+                                }
+                                if relay || change.guardian_queue_changed {
+                                    relay_changed.send_modify(|(ordinary, guardian)| {
+                                        *ordinary = ordinary.wrapping_add(u64::from(relay));
+                                        *guardian = guardian
+                                            .wrapping_add(u64::from(change.guardian_queue_changed));
+                                    });
                                 }
                                 queue_due = change.subagent_queue_changed;
                                 if relay || queue_due {
@@ -146,7 +153,8 @@ impl SubagentQueueObserver {
                         waiting_tx.send_if_modified(|waiting| std::mem::replace(waiting, false));
                         // The actor polls again until a wait works, so it
                         // must not miss whatever the lost wait would have seen.
-                        relay_changed.send_modify(|count| *count = count.wrapping_add(1));
+                        relay_changed
+                            .send_modify(|(ordinary, _)| *ordinary = ordinary.wrapping_add(1));
                         // Reachability belongs to the control actor. A lost wait
                         // is also normal when its lifecycle owner stops a worker.
                         let transport_dead =
@@ -175,6 +183,7 @@ impl SubagentQueueObserver {
             task,
             active,
             relay_changes,
+            guardian_seen: 0,
             waiting,
             synced,
         }
@@ -201,10 +210,12 @@ impl SubagentQueueObserver {
 
     /// Resolves when a wait observed a relay change, the queue changed, or the
     /// waits failed.
-    pub async fn relay_changed(&mut self) {
+    pub async fn relay_changed(&mut self) -> bool {
         if self.relay_changes.changed().await.is_err() {
-            std::future::pending::<()>().await;
+            return std::future::pending().await;
         }
+        let (_, guardian) = *self.relay_changes.borrow_and_update();
+        guardian != std::mem::replace(&mut self.guardian_seen, guardian)
     }
 
     pub fn observe(

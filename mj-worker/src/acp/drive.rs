@@ -54,7 +54,7 @@ pub(super) async fn drive_bridge<T>(
 where
     T: ConnectTo<Client>,
 {
-    let guardian = guardian::Guardian::for_launch(&spec);
+    let guardian = guardian::Guardian::for_launch(&spec, None);
     let result = drive_with_terminals(
         transport,
         spec,
@@ -488,8 +488,8 @@ where
                         );
                         return responder.respond(response);
                     }
-                    // A harness without its own guardian: the Mjolnir guardian
-                    // answers the request, or hands it to the person's form.
+                    // Review permissions that reached ACP after the existing
+                    // native and owned-tool approvals.
                     let mut guardian_preface = None;
                     if !plan_permission
                         && !claude_plan_approval

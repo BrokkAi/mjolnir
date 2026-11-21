@@ -7,6 +7,7 @@ use mj_core::guardian::{
 };
 
 mod reviewer;
+mod reviewer_profile;
 
 pub(super) use mj_core::guardian::{ask_person_preface, denial_notice};
 pub(super) use reviewer::Guardian;

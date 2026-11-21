@@ -345,6 +345,8 @@ impl DurableRelay {
             RelayRequest::HistoryRequests => RelayResponsePayload::HistoryRequests {
                 requests: Vec::new(),
             },
+            // The live connection owns the worker's pending reviews. A
+            // sealed relay serving only the journal has none.
             RelayRequest::GuardianRequests => RelayResponsePayload::GuardianRequests {
                 requests: Vec::new(),
             },
