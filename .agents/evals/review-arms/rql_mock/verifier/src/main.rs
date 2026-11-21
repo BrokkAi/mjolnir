@@ -97,10 +97,13 @@ struct Parsed {
 
 impl Parsed {
     fn new(query: &Query, source: Source, ast: &syn::File, declarations: &Declarations) -> Self {
-        let syntax = syntax::scan(&source, ast, declarations);
+        let in_scope = query.selects_path(&source.path);
+        let call_seed_name =
+            (in_scope && query.selects_calls_as_seed()).then_some(query.name.as_str());
+        let syntax = syntax::scan(&source, ast, declarations, call_seed_name);
         let mut seeds = BTreeSet::new();
-        if query.selects_path(&source.path) {
-            if query.procedure_of_call || query.call_seed {
+        if in_scope {
+            if query.selects_calls_as_seed() {
                 seeds.extend(syntax.constructs.iter().filter_map(|construct| {
                     (construct.kind == Kind::Call && construct.name.as_deref() == Some(&query.name))
                         .then_some(construct.owner)
@@ -216,7 +219,7 @@ fn verify(input: Input) -> io::Result<Output> {
     };
     let Some(query) = Query::parse(step, &input.query) else {
         out.unchecked(
-            "query",
+            format!("query {}", query::render_pattern(&input.query)),
             "seed, selector or enclosing RQL form needs semantic resolution",
         );
         rows::unchecked_seed_exclusions(&input.answer, &mut out);
@@ -243,10 +246,12 @@ fn verify(input: Input) -> io::Result<Output> {
         .collect();
     let seed_found = !seed_names.is_empty();
     if !seed_found {
-        out.unchecked(
-            "seed",
-            format!("no supported authored seed named {:?}", query.name),
-        );
+        let reason = if query.selects_calls_as_seed() {
+            "no matching call in an authored procedure"
+        } else {
+            "no matching function declaration"
+        };
+        out.unchecked(format!("seed {}", query.seed_pattern), reason);
     }
 
     for file in &files {

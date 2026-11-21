@@ -35,6 +35,7 @@ impl Step {
 pub struct Query {
     pub step: Step,
     pub name: String,
+    pub seed_pattern: String,
     pub call_seed: bool,
     pub procedure_of_call: bool,
     pub incoming: bool,
@@ -70,6 +71,20 @@ fn unwrap<'a>(value: &'a Value, paths: &mut Option<BTreeSet<String>>) -> Option<
     }
 }
 
+pub fn render_pattern(value: &Value) -> String {
+    match value {
+        Value::Array(form) => format!(
+            "({})",
+            form.iter()
+                .map(render_pattern)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        Value::String(text) => text.clone(),
+        _ => value.to_string(),
+    }
+}
+
 impl Query {
     pub fn parse(step: Step, value: &Value) -> Option<Self> {
         let mut paths = None;
@@ -101,7 +116,8 @@ impl Query {
             return None;
         }
 
-        let mut seed = unwrap(form.last()?, &mut paths)?;
+        let seed_form = form.last()?;
+        let mut seed = unwrap(seed_form, &mut paths)?;
         let is_procedure = matches!(
             seed.first()?.as_str()?,
             "procedure-of" | "procedure_of" | "enclosing-decl" | "enclosing_decl"
@@ -131,6 +147,7 @@ impl Query {
         Some(Self {
             step,
             name,
+            seed_pattern: render_pattern(seed_form),
             call_seed: call_seed && !is_procedure,
             procedure_of_call,
             incoming,
@@ -139,6 +156,10 @@ impl Query {
             selector,
             paths,
         })
+    }
+
+    pub fn selects_calls_as_seed(&self) -> bool {
+        self.call_seed || self.procedure_of_call
     }
 
     pub fn selects_path(&self, path: &str) -> bool {

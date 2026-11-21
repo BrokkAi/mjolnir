@@ -88,11 +88,17 @@ struct Scanner<'a> {
     indirect_names: BTreeSet<String>,
     wildcard_import: bool,
     declarations: &'a Declarations,
+    call_seed_name: Option<&'a str>,
     inline_modules: Vec<String>,
     self_type: Option<syn::Path>,
 }
 
-pub fn scan(source: &Source, file: &syn::File, declarations: &Declarations) -> Syntax {
+pub fn scan(
+    source: &Source,
+    file: &syn::File,
+    declarations: &Declarations,
+    call_seed_name: Option<&str>,
+) -> Syntax {
     let mut imports = Imports::default();
     imports.visit_file(file);
     let mut scanner = Scanner {
@@ -106,6 +112,7 @@ pub fn scan(source: &Source, file: &syn::File, declarations: &Declarations) -> S
         indirect_names: imports.aliases,
         wildcard_import: imports.wildcard,
         declarations,
+        call_seed_name,
         inline_modules: Vec::new(),
         self_type: None,
     };
@@ -420,13 +427,18 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                         self.self_type.as_ref(),
                     )
                 });
-                if declaration.is_none() && name.as_deref().is_some_and(upper_camel_case) {
-                    let span = self.source.bytes(expr.span());
-                    self.syntax.uncertain_constructors.push(span);
-                    self.syntax.opaque.push(span);
-                // The non_camel_case_types lint is the basis for the pilot's
-                // override: unresolved lowercase callees remain required calls.
-                } else if declaration != Some(Declaration::Constructor) {
+                let explicitly_selected = self
+                    .call_seed_name
+                    .is_some_and(|seed| name.as_deref() == Some(seed));
+                let unresolved_uppercase =
+                    declaration.is_none() && name.as_deref().is_some_and(upper_camel_case);
+                // A call seed names the written callee even when its
+                // declaration is unresolved or identifies a constructor.
+                if explicitly_selected
+                    || (declaration != Some(Declaration::Constructor) && !unresolved_uppercase)
+                {
+                    // The non_camel_case_types lint is the basis for the pilot's
+                    // override: unresolved lowercase callees remain required calls.
                     self.add_at(Kind::Call, expr, anchor, name);
                     self.syntax
                         .constructs
@@ -436,6 +448,10 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                     for argument in &call.args {
                         self.add(Kind::Argument, argument, None);
                     }
+                } else if unresolved_uppercase {
+                    let span = self.source.bytes(expr.span());
+                    self.syntax.uncertain_constructors.push(span);
+                    self.syntax.opaque.push(span);
                 }
                 if let Some(base) = formal_base(&call.func)
                     && self.formals.contains(&base)

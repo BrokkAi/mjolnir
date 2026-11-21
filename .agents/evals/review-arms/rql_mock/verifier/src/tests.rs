@@ -226,6 +226,65 @@ fn incoming_and_call_seeds_use_the_written_invocation() {
     }
 }
 
+// Hard-won: 14d25f7: unresolved UpperCamelCase call seed passed empty
+#[test]
+fn explicit_call_seeds_match_before_constructor_classification() {
+    let text = "fn caller() {\n    unavailable::Upper();\n    Some(1);\n    state = 1;\n}\n";
+    for name in ["Upper", "Some"] {
+        let pattern = json!(["call", ":name", format!("\"{name}\"")]);
+        let call = query("guarded-paths", &[":event", "\"call\""], pattern.clone());
+        let out = accounting(&call, text, json!({"rows": []}));
+        assert_eq!(out.candidates.len(), 1);
+        assert_eq!(codes(&out), ["unaccounted-candidate"]);
+        let procedure = query(
+            "value-transfers",
+            &[":port", "\"write\""],
+            json!(["procedure-of", pattern]),
+        );
+        assert_eq!(
+            by_kind(&file(&procedure, text), &procedure)["write"],
+            ["state"]
+        );
+    }
+}
+
+#[test]
+fn missing_seed_reports_its_pattern_and_expected_match() {
+    let root = std::env::temp_dir().join(format!("rql-missing-seed-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("fixture.rs"), "fn present() { invoke(); }").unwrap();
+    for (pattern, label, reason) in [
+        (
+            json!(["function", ":name", "\"Missing\""]),
+            "(function :name \"Missing\")",
+            "no matching function declaration",
+        ),
+        (
+            json!(["call", ":name", "\"Missing\""]),
+            "(call :name \"Missing\")",
+            "no matching call in an authored procedure",
+        ),
+        (
+            json!(["procedure-of", ["call", ":name", "\"Missing\""]]),
+            "(procedure-of (call :name \"Missing\"))",
+            "no matching call in an authored procedure",
+        ),
+    ] {
+        let out = verify(Input {
+            root: root.clone(),
+            step: "guarded-paths".into(),
+            query: form("guarded-paths", &[], pattern),
+            answer: json!({"rows": []}),
+        })
+        .unwrap();
+        assert!(out.candidates.is_empty() && out.errors.is_empty());
+        assert_eq!(out.unchecked.len(), 1);
+        assert_eq!(out.unchecked[0].what, format!("seed {label}"));
+        assert_eq!(out.unchecked[0].why, reason);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn procedure_of_call_selects_the_callers_body_only() {
     let query = query(
