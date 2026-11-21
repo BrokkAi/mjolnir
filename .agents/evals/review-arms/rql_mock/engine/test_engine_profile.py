@@ -30,6 +30,9 @@ def engine_profiles(tmp_path, monkeypatch):
 
     for name in ("INSTANCE", "MJ_INSTANCE_ARGS", "STORE"):
         monkeypatch.setattr(driver, name, getattr(driver, name))
+    # Admission logic is tested under the study's default floors for every login;
+    # claude5's own exemption has its own test.
+    monkeypatch.setattr(driver, "PILOT_CLAUDE_FLOORS", {})
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("REVIEW_ARMS_INSTANCE", "default")
     logins, paths, config = [], {}, []
@@ -336,3 +339,19 @@ def test_admission_skips_a_login_whose_owner_credentials_cannot_start_a_session(
         with pytest.raises(LaunchHeld) as held:
             runner.select_login()
     assert all(f"{profile} access credentials must stay valid" in str(held.value) for profile in scores)
+
+
+def test_claude5_runs_to_the_provider_limit_while_other_logins_keep_their_floors(engine_profiles, monkeypatch):
+    import driver
+
+    runner, _, scores, _ = engine_profiles
+    monkeypatch.setattr(driver, "PILOT_CLAUDE_FLOORS", {"claude5": (0, 0)})
+    scores.update({"claude5": (5, 3), "claude4": (24, 99), "claude7": (99, 20)})
+    with patch("time.time", return_value=NOW):
+        assert runner.select_login().login_profile == "claude5"
+        scores["claude5"] = (0, 50)
+        with pytest.raises(LaunchHeld) as held:
+            runner.select_login()
+    assert "claude5: 0% weekly remaining" in str(held.value)
+    assert "claude4: 24% weekly remaining" in str(held.value)
+    assert "claude7: 20% 5-hour remaining" in str(held.value)
