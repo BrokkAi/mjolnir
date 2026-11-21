@@ -2450,7 +2450,11 @@ def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq, claude_c
             yield "needs-inspection", f"invalid {name} locations"
             return
         paths.extend(location.get("path") for location in locations)
-    if (name == "Read" and raw.keys() <= {"file_path", "offset", "limit", "pages"}
+    # A Read of the session's own saved tool output, or a Grep whose explicit
+    # path is exactly that one file, reads only an earlier audited call's result.
+    # A search of the tool-results directory itself still needs inspection.
+    if ((name == "Read" and raw.keys() <= {"file_path", "offset", "limit", "pages"}
+            or name == "Grep" and isinstance(raw.get("path"), str))
             and all(path == paths[0] for path in paths)
             and engine_saved_result(paths[0], own_workspace, audited_calls, seq)):
         return
