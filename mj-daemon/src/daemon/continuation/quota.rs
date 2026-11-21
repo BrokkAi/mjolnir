@@ -32,6 +32,7 @@ pub(super) type StartMove = Arc<
         + Sync,
 >;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn destinations(
     config: &mj_core::config::Config,
     source: &str,
@@ -39,10 +40,16 @@ pub(super) fn destinations(
     model: &str,
     mut candidates: Vec<SubagentCandidate>,
     now: i64,
+    execution_policy: mj_core::config::ExecutionPolicy,
+    placement: mj_controller::profile_scheduler::Placement,
+    category: Option<&str>,
+    telemetry: &mj_controller::quota_telemetry::QuotaTelemetrySnapshot,
+    power_ranking: &mj_controller::power_ranking::PowerRankingSnapshot,
 ) -> Result<Vec<SubagentCandidate>> {
     candidates.retain(|c| {
         c.profile_id != source
             && c.harness == harness
+            && mj_controller::profile_scheduler::guardian_eligible(c.harness, execution_policy)
             && config
                 .native_continuity(harness, source, &c.profile_id)
                 .unwrap_or(false)
@@ -50,15 +57,45 @@ pub(super) fn destinations(
             && !c.unhealthy.contains_key(model)
             && mj_controller::profile_scheduler::ineligibility(c, model, now).is_none()
     });
-    mj_controller::profile_scheduler::draw_candidates(
-        &mut candidates,
-        None,
-        &config.quota.prefer,
-        model,
-        now,
-        mj_controller::profile_scheduler::Placement::TopLevel,
-    )?;
-    Ok(candidates)
+    struct DestinationCandidate {
+        candidate: SubagentCandidate,
+        scheduled: mj_controller::profile_scheduler::ScheduledCandidate,
+    }
+    impl AsRef<mj_controller::profile_scheduler::ScheduledCandidate> for DestinationCandidate {
+        fn as_ref(&self) -> &mj_controller::profile_scheduler::ScheduledCandidate {
+            &self.scheduled
+        }
+    }
+    let mut wrapped: Vec<DestinationCandidate> = candidates
+        .into_iter()
+        .map(|candidate| {
+            let scheduled = mj_controller::profile_scheduler::ScheduledCandidate {
+                profile_id: candidate.profile_id.clone(),
+                harness: candidate.harness,
+                model: model.to_owned(),
+                effort: None,
+                quota: candidate.quota.clone(),
+                may_consume_credits: candidate.may_consume_credits,
+                cache_identity: candidate.cache_identity.clone(),
+            };
+            DestinationCandidate {
+                candidate,
+                scheduled,
+            }
+        })
+        .collect();
+    let ctx = mj_controller::profile_scheduler::SchedulingContext {
+        execution_policy,
+        placement,
+        category,
+        ranking_anchor: None,
+        prefer: &config.quota.prefer,
+        telemetry,
+        power_ranking,
+        now_seconds: now,
+    };
+    mj_controller::profile_scheduler::draw_scheduled_candidates(&mut wrapped, &ctx)?;
+    Ok(wrapped.into_iter().map(|w| w.candidate).collect())
 }
 
 fn local_reset(ms: i64) -> Option<String> {
@@ -328,11 +365,61 @@ pub(super) async fn prepare(
                 ),
                 None => format!("the quota for profile {source} has no known reset time"),
             };
-            let mut refused = false;
-            for candidate in
-                destinations(&config, &source, harness, &model, candidates, now_ms / 1000)?
+            let execution_policy = if state
+                .owner()
+                .controller()
+                .state
+                .sessions
+                .get(id)
+                .is_some_and(|session| session.is_yolo_target(&config))
             {
+                mj_core::config::ExecutionPolicy::Unconstrained
+            } else {
+                mj_core::config::ExecutionPolicy::ConfiguredApprovals
+            };
+            let placement = if child {
+                mj_controller::profile_scheduler::Placement::Child
+            } else {
+                mj_controller::profile_scheduler::Placement::TopLevel
+            };
+            let category: &'static str = if child {
+                match state
+                    .owner()
+                    .controller()
+                    .state
+                    .subagents
+                    .get(id)
+                    .map(|record| record.kind)
+                {
+                    Some(mj_core::subagent::SubagentKind::Oracle) => "oracle",
+                    Some(mj_core::subagent::SubagentKind::Reviewer) => "reviewer",
+                    _ => "straightforward",
+                }
+            } else {
+                "primary"
+            };
+            let telemetry = state.quota_telemetry.snapshot();
+            let power_ranking = state.power_ranking.snapshot();
+            let mut refused = false;
+            for candidate in destinations(
+                &config,
+                &source,
+                harness,
+                &model,
+                candidates,
+                now_ms / 1000,
+                execution_policy,
+                placement,
+                Some(category),
+                &telemetry,
+                &power_ranking,
+            )? {
                 if child {
+                    state.quota_telemetry.record_placement(
+                        &candidate.profile_id,
+                        category,
+                        now_ms / 1000,
+                    );
                     return Ok(Plan::ChildSwitch {
                         destination: candidate.profile_id,
                         fallback,
@@ -340,6 +427,11 @@ pub(super) async fn prepare(
                 }
                 match state.prepare_quota_move(id, &candidate.profile_id).await {
                     Ok(request) => {
+                        state.quota_telemetry.record_placement(
+                            &candidate.profile_id,
+                            category,
+                            now_ms / 1000,
+                        );
                         // The record keeps the fallback's times, so a Move that
                         // fails leaves the retry on the source profile in place.
                         // A completed Move changes the profile, which clears it.

@@ -218,6 +218,54 @@ fn spawn_power_ranking_refresh(state: &Arc<RuntimeState>, cancellation: Cancella
     });
 }
 
+fn spawn_quota_telemetry_refresh(
+    state: &Arc<RuntimeState>,
+    reports: Arc<std::sync::Mutex<BTreeMap<String, mj_controller::quota::QuotaReportPublication>>>,
+    cancellation: CancellationToken,
+) {
+    let state = state.clone();
+    mj_core::runtime::spawn(async move {
+        let mut poll_tick = tokio::time::interval(Duration::from_secs(10 * 60));
+        poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut category_tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        category_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                _ = poll_tick.tick() => {
+                    let profiles: Vec<(String, String)> = reports
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .iter()
+                        .map(|(profile_id, pub_record)| {
+                            (profile_id.clone(), pub_record.cache_identity.clone())
+                        })
+                        .collect();
+                    let telemetry = state.quota_telemetry.clone();
+                    let now = mj_core::clock::epoch_seconds() as i64;
+                    if let Ok(Err(error)) = mj_core::runtime::spawn_blocking(move || {
+                        telemetry.refresh_from_store(&profiles, now)
+                    })
+                    .await
+                    {
+                        tracing::warn!(%error, "quota telemetry refresh failed");
+                    }
+                }
+                _ = category_tick.tick() => {
+                    let telemetry = state.quota_telemetry.clone();
+                    if let Ok(Err(error)) = mj_core::runtime::spawn_blocking(move || {
+                        telemetry.refresh_category_stats_from_store()
+                    })
+                    .await
+                    {
+                        tracing::warn!(%error, "category burn observation refresh failed");
+                    }
+                }
+            }
+        }
+    });
+}
+
 async fn run(
     state: Arc<RuntimeState>,
     mut updates: DelegationUpdates,
@@ -226,6 +274,7 @@ async fn run(
 ) -> Result<()> {
     let backend = policy.services.backend.clone();
     spawn_power_ranking_refresh(&state, cancellation.clone());
+    spawn_quota_telemetry_refresh(&state, policy.reports.clone(), cancellation.clone());
     // Housekeeping for stores written by builds that kept acknowledged rows.
     if let Err(error) =
         mj_core::runtime::spawn_blocking(mj_controller::database::prune_acknowledged_delegations)

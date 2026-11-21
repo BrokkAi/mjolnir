@@ -1,7 +1,11 @@
-use mj_controller::profile_scheduler::Placement;
-use mj_controller::profile_scheduler::draw_candidates;
+use mj_controller::profile_scheduler::{
+    Placement, ScheduledCandidate, SchedulingContext, draw_scheduled_candidates, guardian_eligible,
+};
 #[cfg(test)]
-use mj_controller::profile_scheduler::{order_by_draw, rank_candidates};
+use mj_controller::profile_scheduler::{
+    order_scheduled_candidates_by_draw, rank_scheduled_candidates,
+};
+use mj_core::config::ExecutionPolicy;
 use mj_core::model_catalog;
 
 use super::*;
@@ -32,11 +36,21 @@ pub(super) async fn spawn_subagent(
     if request.task_name.trim().is_empty() {
         return Err(ApiFailure::bad_request("task_name cannot be empty"));
     }
+    let execution_policy = if backend
+        .session_is_yolo_target(parent_session_id.clone())
+        .await?
+    {
+        ExecutionPolicy::Unconstrained
+    } else {
+        ExecutionPolicy::ConfiguredApprovals
+    };
+    let task_type = request.task_type.unwrap_or_default();
     let selection = resolve_subagent_policy_selection(
         &backend,
         &parent.profile_id,
         &parent.subagents,
-        request.task_type.unwrap_or_default(),
+        task_type,
+        execution_policy,
     )
     .await?;
 
@@ -47,7 +61,7 @@ pub(super) async fn spawn_subagent(
             reviewer_launch: None,
             parent_session_id: parent_session_id.clone(),
             task_name: request.task_name,
-            profile_id: selection.profile_id,
+            profile_id: selection.profile_id.clone(),
             model: Some(selection.model.clone()),
             effort: selection.effort.clone(),
             fast_mode: selection.fast_mode,
@@ -58,10 +72,11 @@ pub(super) async fn spawn_subagent(
             request_key: mj_core::state::new_session_id().map_err(ApiFailure::from)?,
             // The daemon creates the report root when it registers the child.
             report_root: None,
-            category: request.task_type.unwrap_or_default().id().to_owned(),
+            category: task_type.id().to_owned(),
         })
         .await
         .map_err(|error| ApiFailure::conflict(format!("sub-agent creation failed: {error:#}")))?;
+    backend.record_placement(&selection.profile_id, task_type.id());
     let session = await_session_record(&state, &relation.child_session_id).await?;
     Ok((
         StatusCode::CREATED,
@@ -86,11 +101,18 @@ pub struct SubagentSelection {
 struct ModelCandidate {
     candidate: SubagentCandidate,
     model: model_catalog::ModelOffer,
+    scheduled: ScheduledCandidate,
 }
 
 impl AsRef<SubagentCandidate> for ModelCandidate {
     fn as_ref(&self) -> &SubagentCandidate {
         &self.candidate
+    }
+}
+
+impl AsRef<ScheduledCandidate> for ModelCandidate {
+    fn as_ref(&self) -> &ScheduledCandidate {
+        &self.scheduled
     }
 }
 
@@ -106,11 +128,34 @@ struct ChoiceCandidate {
     candidate: SubagentCandidate,
     model: model_catalog::ModelOffer,
     choice_effort: Option<String>,
+    scheduled: ScheduledCandidate,
 }
 
 impl AsRef<SubagentCandidate> for ChoiceCandidate {
     fn as_ref(&self) -> &SubagentCandidate {
         &self.candidate
+    }
+}
+
+impl AsRef<ScheduledCandidate> for ChoiceCandidate {
+    fn as_ref(&self) -> &ScheduledCandidate {
+        &self.scheduled
+    }
+}
+
+fn scheduled_candidate(
+    candidate: &SubagentCandidate,
+    model: &str,
+    effort: Option<String>,
+) -> ScheduledCandidate {
+    ScheduledCandidate {
+        profile_id: candidate.profile_id.clone(),
+        harness: candidate.harness,
+        model: model.to_owned(),
+        effort,
+        quota: candidate.quota.clone(),
+        may_consume_credits: candidate.may_consume_credits,
+        cache_identity: candidate.cache_identity.clone(),
     }
 }
 
@@ -120,6 +165,7 @@ pub async fn resolve_subagent_policy_selection(
     parent_profile: &str,
     policy: &mj_core::subagent::SubagentPolicy,
     task_type: mj_core::subagent::SubagentTaskType,
+    execution_policy: ExecutionPolicy,
 ) -> Result<SubagentSelection, ApiFailure> {
     if task_type == mj_core::subagent::SubagentTaskType::Oracle {
         return Err(ApiFailure::bad_request(
@@ -157,6 +203,8 @@ pub async fn resolve_subagent_policy_selection(
         backend,
         choices,
         ModelProfileCandidateSource::Subagents { parent_profile },
+        execution_policy,
+        Some(task_type.id()),
     )
     .await
     .map_err(|error| {
@@ -175,11 +223,14 @@ pub async fn resolve_oracle_selection(
     backend: &Arc<dyn SubagentBackend>,
     parent_profile: &str,
     choices: &[mj_core::config::SubagentChoice],
+    execution_policy: ExecutionPolicy,
 ) -> Result<SubagentSelection, ApiFailure> {
     resolve_choices_selection(
         backend,
         choices,
         ModelProfileCandidateSource::Subagents { parent_profile },
+        execution_policy,
+        Some("oracle"),
     )
     .await
 }
@@ -190,11 +241,14 @@ pub(crate) async fn resolve_primary_session_selection(
     backend: &Arc<dyn SubagentBackend>,
     ranking_anchor: Option<&str>,
     choices: &[mj_core::config::SubagentChoice],
+    execution_policy: ExecutionPolicy,
 ) -> Result<SubagentSelection, ApiFailure> {
     resolve_choices_selection(
         backend,
         choices,
         ModelProfileCandidateSource::Session { ranking_anchor },
+        execution_policy,
+        Some("primary"),
     )
     .await
 }
@@ -203,6 +257,8 @@ async fn resolve_choices_selection(
     backend: &Arc<dyn SubagentBackend>,
     choices: &[mj_core::config::SubagentChoice],
     source: ModelProfileCandidateSource<'_>,
+    execution_policy: ExecutionPolicy,
+    category: Option<&str>,
 ) -> Result<SubagentSelection, ApiFailure> {
     for choice in choices {
         if choice.effort.as_deref() == Some("adaptive") {
@@ -223,6 +279,8 @@ async fn resolve_choices_selection(
                 .unwrap_or(EffortRequirement::Default),
             None,
             source,
+            execution_policy,
+            category,
         )
         .await;
     }
@@ -265,6 +323,14 @@ async fn resolve_choices_selection(
                 continue;
             };
             matched_any = true;
+            if !guardian_eligible(candidate.harness, execution_policy) {
+                excluded.push(format!(
+                    "profile {} ({}) does not support native guardian approvals on this target",
+                    candidate.profile_id,
+                    candidate.harness.display_name()
+                ));
+                continue;
+            }
             if let Some(reason) =
                 mj_controller::profile_scheduler::ineligibility(candidate, &identity, now)
             {
@@ -277,10 +343,12 @@ async fn resolve_choices_selection(
                 choice.effort.clone(),
             );
             if seen_pairs.insert(key) {
+                let scheduled = scheduled_candidate(candidate, &identity, choice.effort.clone());
                 eligible.push(ChoiceCandidate {
                     candidate: candidate.clone(),
                     model: offer,
                     choice_effort: choice.effort.clone(),
+                    scheduled,
                 });
             }
         }
@@ -305,13 +373,29 @@ async fn resolve_choices_selection(
             .collect::<Vec<_>>()
             .join(", ");
         return Err(ApiFailure::conflict(format!(
-            "every {} profile that can run configured models ({names}) is out of subscription quota: {}. \
-             Try again after the quota resets.",
+            "every {} profile that can run configured models ({names}) is ineligible: {}.",
             source.profile_description(),
             excluded.join("; ")
         )));
     }
+    let mut unhealthy = Vec::new();
+    eligible.retain(|entry| {
+        if let Some(note) = unhealthy_note(&entry.candidate, &entry.model.value) {
+            unhealthy.push(note);
+            false
+        } else {
+            true
+        }
+    });
+    if eligible.is_empty() {
+        return Err(ApiFailure::conflict(format!(
+            "every eligible profile is marked unhealthy: {}",
+            unhealthy.join("; ")
+        )));
+    }
     let prefer = backend.quota_preferences().await?;
+    let telemetry = backend.quota_telemetry().await?;
+    let power_ranking = backend.power_ranking().await?;
     let (anchor, placement) = match source {
         ModelProfileCandidateSource::Subagents { parent_profile } => {
             (Some(parent_profile), Placement::Child)
@@ -322,22 +406,19 @@ async fn resolve_choices_selection(
         ModelProfileCandidateSource::Reviewers
         | ModelProfileCandidateSource::ReviewersReady => (None, Placement::Child),
     };
-    let representative_identity = eligible[0].model.identity.clone();
-    draw_candidates(
-        &mut eligible,
-        anchor,
-        &prefer,
-        &representative_identity,
-        now_epoch_seconds(),
+    let ctx = SchedulingContext {
+        execution_policy,
         placement,
-    )?;
+        category,
+        ranking_anchor: anchor,
+        prefer: &prefer,
+        telemetry: &telemetry,
+        power_ranking: &power_ranking,
+        now_seconds: now_epoch_seconds(),
+    };
+    draw_scheduled_candidates(&mut eligible, &ctx)?;
     let mut selection_errors = Vec::new();
-    let mut unhealthy = Vec::new();
     for entry in &eligible {
-        if let Some(note) = unhealthy_note(&entry.candidate, &entry.model.value) {
-            unhealthy.push(note);
-            continue;
-        }
         let efforts = match model_efforts(backend, &entry.candidate, &entry.model.value).await {
             Ok(efforts) => efforts,
             Err(error) => {
@@ -384,6 +465,7 @@ pub(crate) async fn resolve_session_model_profile_selection(
     ranking_anchor: Option<&str>,
     model: &str,
     effort: Option<&str>,
+    execution_policy: ExecutionPolicy,
 ) -> Result<SubagentSelection, ApiFailure> {
     if effort == Some("adaptive") {
         return Err(ApiFailure::bad_request(
@@ -400,6 +482,8 @@ pub(crate) async fn resolve_session_model_profile_selection(
         requirement,
         None,
         ModelProfileCandidateSource::Session { ranking_anchor },
+        execution_policy,
+        Some("primary"),
     )
     .await
 }
@@ -434,6 +518,8 @@ pub async fn resolve_reviewer_model_profile_selection(
     backend: &Arc<dyn SubagentBackend>,
     model: &str,
     effort: Option<&str>,
+    execution_policy: ExecutionPolicy,
+    category: &str,
 ) -> Result<SubagentSelection, ApiFailure> {
     let requirement = effort
         .map(EffortRequirement::Exact)
@@ -446,6 +532,8 @@ pub async fn resolve_reviewer_model_profile_selection(
             requirement,
             None,
             ModelProfileCandidateSource::ReviewersReady,
+            execution_policy,
+            Some(category),
         )
         .await
         {
@@ -487,6 +575,8 @@ pub async fn resolve_reviewer_model_profile_selection(
                 requirement,
                 None,
                 ModelProfileCandidateSource::Reviewers,
+                execution_policy,
+                Some(category),
             )
             .await
             {
@@ -535,6 +625,7 @@ pub async fn resolve_pinned_reviewer_model_profile_selection(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_model_profile_selection_matching(
     backend: &Arc<dyn SubagentBackend>,
     profile_id: Option<&str>,
@@ -542,6 +633,8 @@ async fn resolve_model_profile_selection_matching(
     requirement: EffortRequirement<'_>,
     inherited_effort: Option<&str>,
     source: ModelProfileCandidateSource<'_>,
+    execution_policy: ExecutionPolicy,
+    category: Option<&str>,
 ) -> Result<SubagentSelection, ApiFailure> {
     let candidates = match source {
         ModelProfileCandidateSource::Session { .. } => backend.session_profile_candidates().await?,
@@ -567,10 +660,13 @@ async fn resolve_model_profile_selection_matching(
         requirement,
         inherited_effort,
         source,
+        execution_policy,
+        category,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_model_profile_selection_from(
     backend: &Arc<dyn SubagentBackend>,
     candidates: SubagentCandidates,
@@ -579,6 +675,8 @@ async fn resolve_model_profile_selection_from(
     requirement: EffortRequirement<'_>,
     inherited_effort: Option<&str>,
     source: ModelProfileCandidateSource<'_>,
+    execution_policy: ExecutionPolicy,
+    category: Option<&str>,
 ) -> Result<SubagentSelection, ApiFailure> {
     let SubagentCandidates {
         mut offered,
@@ -613,11 +711,21 @@ async fn resolve_model_profile_selection_from(
         .flat_map(|candidate| candidate.choices.models.iter().cloned())
         .collect::<Vec<_>>();
     let identity = model_catalog::model_id(&models, model);
+    let requested_effort = match requirement {
+        EffortRequirement::Exact(e) => Some(e.to_owned()),
+        EffortRequirement::Default | EffortRequirement::Any => inherited_effort.map(str::to_owned),
+    };
     let mut offered = offered
         .into_iter()
         .filter_map(|candidate| {
-            model_catalog::offer(&candidate.choices.models, &identity, model)
-                .map(|model| ModelCandidate { candidate, model })
+            model_catalog::offer(&candidate.choices.models, &identity, model).map(|model| {
+                let scheduled = scheduled_candidate(&candidate, &identity, requested_effort.clone());
+                ModelCandidate {
+                    candidate,
+                    model,
+                    scheduled,
+                }
+            })
         })
         .collect::<Vec<_>>();
     if offered.is_empty() {
@@ -631,19 +739,33 @@ async fn resolve_model_profile_selection_from(
             source.profile_description(),
         )));
     }
+    let mut unhealthy = Vec::new();
     if profile_id.is_none() {
         // Load balancing offers only profiles that may still run the model
-        // from their own allowance (or credits they may spend). A named
-        // profile is not load balancing and keeps its pin.
+        // from their own allowance (or credits they may spend) and satisfy the
+        // target's guardian policy. A named profile is not load balancing and
+        // keeps its pin.
         let now = now_epoch_seconds();
         let mut excluded = Vec::new();
+        let mut guardian_excluded = false;
+        let mut quota_excluded = false;
         offered.retain(|candidate| {
+            if !guardian_eligible(candidate.harness, execution_policy) {
+                guardian_excluded = true;
+                excluded.push(format!(
+                    "profile {} ({}) does not support native guardian approvals on this target",
+                    candidate.profile_id,
+                    candidate.harness.display_name()
+                ));
+                return false;
+            }
             match mj_controller::profile_scheduler::ineligibility(
                 &candidate.candidate,
                 &identity,
                 now,
             ) {
                 Some(reason) => {
+                    quota_excluded = true;
                     excluded.push(reason.describe(&candidate.profile_id, &identity));
                     false
                 }
@@ -651,14 +773,36 @@ async fn resolve_model_profile_selection_from(
             }
         });
         if offered.is_empty() {
-            return Err(ApiFailure::conflict(format!(
-                "every {} profile that can run model {model:?} is out of subscription quota: {}. \
-                 Try again after the quota resets.",
-                source.profile_description(),
-                excluded.join("; ")
-            )));
+            let headline = if quota_excluded && !guardian_excluded {
+                format!(
+                    "every {} profile that can run model {model:?} is out of subscription quota: {}. \
+                     Try again after the quota resets.",
+                    source.profile_description(),
+                    excluded.join("; ")
+                )
+            } else {
+                format!(
+                    "every {} profile that can run model {model:?} is ineligible: {}.",
+                    source.profile_description(),
+                    excluded.join("; ")
+                )
+            };
+            return Err(ApiFailure::conflict(headline));
+        }
+        offered.retain(|candidate| {
+            if let Some(note) = unhealthy_note(&candidate.candidate, &candidate.model.value) {
+                unhealthy.push(note);
+                false
+            } else {
+                true
+            }
+        });
+        if offered.is_empty() {
+            return Err(all_unhealthy(model, &unhealthy, source.profile_description()));
         }
         let prefer = backend.quota_preferences().await?;
+        let telemetry = backend.quota_telemetry().await?;
+        let power_ranking = backend.power_ranking().await?;
         let (anchor, placement) = match source {
             ModelProfileCandidateSource::Subagents { parent_profile } => {
                 (Some(parent_profile), Placement::Child)
@@ -669,14 +813,17 @@ async fn resolve_model_profile_selection_from(
             ModelProfileCandidateSource::Reviewers
             | ModelProfileCandidateSource::ReviewersReady => (None, Placement::Child),
         };
-        draw_candidates(
-            &mut offered,
-            anchor,
-            &prefer,
-            &identity,
-            now_epoch_seconds(),
+        let ctx = SchedulingContext {
+            execution_policy,
             placement,
-        )?;
+            category,
+            ranking_anchor: anchor,
+            prefer: &prefer,
+            telemetry: &telemetry,
+            power_ranking: &power_ranking,
+            now_seconds: now_epoch_seconds(),
+        };
+        draw_scheduled_candidates(&mut offered, &ctx)?;
     }
     let reviewer_source = matches!(
         source,
@@ -684,16 +831,7 @@ async fn resolve_model_profile_selection_from(
     );
     let mut offered_any_effort = false;
     let mut selection_errors = Vec::new();
-    let mut unhealthy = Vec::new();
     for candidate in &offered {
-        // A pinned profile runs even while marked: someone chose it. Other
-        // profiles must be skipped before probing a login that just failed.
-        if profile_id.is_none()
-            && let Some(note) = unhealthy_note(&candidate.candidate, &candidate.model.value)
-        {
-            unhealthy.push(note);
-            continue;
-        }
         // A reviewer's effort is configured, not chosen: start with it as
         // configured and let the harness report a value it rejects, rather
         // than launching every candidate harness to list its efforts first.
@@ -899,19 +1037,44 @@ fn now_epoch_seconds() -> i64 {
 /// offers different models is never hidden behind another.
 #[cfg(test)]
 pub(crate) fn merge_same_models(
-    mut candidates: Vec<SubagentCandidate>,
+    candidates: Vec<SubagentCandidate>,
     parent_profile: &str,
     model: &str,
     now_seconds: i64,
 ) -> Vec<SubagentCandidate> {
-    rank_candidates(
-        &mut candidates,
-        Some(parent_profile),
-        &[],
-        model,
+    struct Wrapped {
+        candidate: SubagentCandidate,
+        scheduled: ScheduledCandidate,
+    }
+    impl AsRef<ScheduledCandidate> for Wrapped {
+        fn as_ref(&self) -> &ScheduledCandidate {
+            &self.scheduled
+        }
+    }
+    let telemetry = mj_controller::quota_telemetry::QuotaTelemetrySnapshot::default();
+    let power_ranking = mj_controller::power_ranking::PowerRankingSnapshot::baseline();
+    let ctx = SchedulingContext {
+        execution_policy: ExecutionPolicy::Unconstrained,
+        placement: Placement::Child,
+        category: Some("straightforward"),
+        ranking_anchor: Some(parent_profile),
+        prefer: &[],
+        telemetry: &telemetry,
+        power_ranking,
         now_seconds,
-        Placement::Child,
-    );
+    };
+    let mut wrapped: Vec<Wrapped> = candidates
+        .into_iter()
+        .map(|candidate| {
+            let scheduled = scheduled_candidate(&candidate, model, None);
+            Wrapped {
+                candidate,
+                scheduled,
+            }
+        })
+        .collect();
+    rank_scheduled_candidates(&mut wrapped, &ctx);
+    let mut candidates: Vec<SubagentCandidate> = wrapped.into_iter().map(|w| w.candidate).collect();
     let mut seen = std::collections::BTreeSet::new();
     candidates.retain(|candidate| {
         let mut models = candidate
@@ -1133,6 +1296,87 @@ pub async fn build_legacy_subagent_prompt(
 
 #[cfg(test)]
 mod tests {
+    fn rank_test_candidates(
+        candidates: &mut Vec<SubagentCandidate>,
+        ranking_anchor: Option<&str>,
+        prefer: &[String],
+        model: &str,
+        now_seconds: i64,
+        placement: Placement,
+    ) {
+        struct Wrapped {
+            candidate: SubagentCandidate,
+            scheduled: ScheduledCandidate,
+        }
+        impl AsRef<ScheduledCandidate> for Wrapped {
+            fn as_ref(&self) -> &ScheduledCandidate {
+                &self.scheduled
+            }
+        }
+        let telemetry = mj_controller::quota_telemetry::QuotaTelemetrySnapshot::default();
+        let power_ranking = mj_controller::power_ranking::PowerRankingSnapshot::baseline();
+        let ctx = SchedulingContext {
+            execution_policy: ExecutionPolicy::Unconstrained,
+            placement,
+            category: Some("straightforward"),
+            ranking_anchor,
+            prefer,
+            telemetry: &telemetry,
+            power_ranking,
+            now_seconds,
+        };
+        let mut wrapped: Vec<Wrapped> = std::mem::take(candidates)
+            .into_iter()
+            .map(|candidate| {
+                let scheduled = scheduled_candidate(&candidate, model, None);
+                Wrapped { candidate, scheduled }
+            })
+            .collect();
+        rank_scheduled_candidates(&mut wrapped, &ctx);
+        candidates.extend(wrapped.into_iter().map(|w| w.candidate));
+    }
+
+    fn draw_test_candidates(
+        candidates: &mut Vec<SubagentCandidate>,
+        ranking_anchor: Option<&str>,
+        prefer: &[String],
+        units: &[f64],
+        model: &str,
+        now_seconds: i64,
+        placement: Placement,
+    ) {
+        struct Wrapped {
+            candidate: SubagentCandidate,
+            scheduled: ScheduledCandidate,
+        }
+        impl AsRef<ScheduledCandidate> for Wrapped {
+            fn as_ref(&self) -> &ScheduledCandidate {
+                &self.scheduled
+            }
+        }
+        let telemetry = mj_controller::quota_telemetry::QuotaTelemetrySnapshot::default();
+        let power_ranking = mj_controller::power_ranking::PowerRankingSnapshot::baseline();
+        let ctx = SchedulingContext {
+            execution_policy: ExecutionPolicy::Unconstrained,
+            placement,
+            category: Some("straightforward"),
+            ranking_anchor,
+            prefer,
+            telemetry: &telemetry,
+            power_ranking,
+            now_seconds,
+        };
+        let mut wrapped: Vec<Wrapped> = std::mem::take(candidates)
+            .into_iter()
+            .map(|candidate| {
+                let scheduled = scheduled_candidate(&candidate, model, None);
+                Wrapped { candidate, scheduled }
+            })
+            .collect();
+        order_scheduled_candidates_by_draw(&mut wrapped, units, &ctx);
+        candidates.extend(wrapped.into_iter().map(|w| w.candidate));
+    }
+
     use super::*;
 
     #[test]
@@ -1254,6 +1498,7 @@ mod tests {
             }),
             may_consume_credits: false,
             unhealthy: Default::default(),
+            cache_identity: None,
         }
     }
 
@@ -1279,7 +1524,7 @@ mod tests {
             candidate("high", Some(90), &["luna"]),
             candidate("empty", Some(0), &["luna"]),
         ];
-        rank_candidates(
+        rank_test_candidates(
             &mut candidates,
             Some("parent"),
             &[],
@@ -1289,103 +1534,15 @@ mod tests {
         );
         assert_eq!(
             ids(&candidates),
-            vec![
-                "high", "parent", "a-other", "b-other", "unknown", "api", "empty"
-            ]
+            vec!["high", "parent", "a-other", "b-other", "unknown", "api"]
         );
     }
 
-    fn five_hour_candidate(
-        profile_id: &str,
-        remaining: Option<u8>,
-        models: &[&str],
-    ) -> SubagentCandidate {
-        let mut candidate = candidate(profile_id, remaining, models);
-        if let CandidateQuota::Subscription { windows, .. } = &mut candidate.quota {
-            windows[0].label = "5h".into();
-        }
-        candidate
-    }
 
     // A top-level launch ranks a profile inside a five-hour window below
     // unwindowed and unknown quota but above paid credits and usage-priced
     // profiles, which bill per request; a five-hour window that has already
     // reset, or an idle one with no reset time, is not in force. Child placements keep the plain quota order.
-    #[test]
-    fn top_level_ranking_places_five_hour_windowed_profiles_above_billed_ones() {
-        let build = || {
-            let mut paid = candidate("paid", Some(0), &["luna"]);
-            if let CandidateQuota::Subscription { paid_credits, .. } = &mut paid.quota {
-                *paid_credits = mj_client::quota::PaidCredits::limited(1e12);
-            }
-            let mut lapsed = five_hour_candidate("windowed-lapsed", Some(30), &["luna"]);
-            if let CandidateQuota::Subscription { windows, .. } = &mut lapsed.quota {
-                windows[0].resets_at_epoch_seconds = Some(0);
-            }
-            vec![
-                SubagentCandidate {
-                    quota: CandidateQuota::UsagePriced,
-                    ..candidate("api", None, &["luna"])
-                },
-                paid,
-                five_hour_candidate("windowed-high", Some(90), &["luna"]),
-                candidate("weekly-low", Some(40), &["luna"]),
-                lapsed,
-                // Codex reports an idle five-hour window with no reset time.
-                five_hour_candidate("windowed-idle", Some(100), &["luna"]),
-                // An undated reading older than the window: that window ended.
-                five_hour_candidate("windowed-stale", Some(50), &["luna"]),
-                candidate("unknown", None, &["luna"]),
-                five_hour_candidate("windowed-empty", Some(0), &["luna"]),
-            ]
-            .into_iter()
-            .map(|mut candidate| {
-                if candidate.profile_id != "windowed-stale"
-                    && let CandidateQuota::Subscription {
-                        refreshed_at_epoch_seconds,
-                        ..
-                    } = &mut candidate.quota
-                {
-                    *refreshed_at_epoch_seconds = NOW as u64;
-                }
-                candidate
-            })
-            .collect::<Vec<_>>()
-        };
-        const NOW: i64 = 6 * 60 * 60;
-        let mut children = build();
-        rank_candidates(&mut children, None, &[], "luna", NOW, Placement::Child);
-        assert_eq!(
-            ids(&children),
-            vec![
-                "windowed-idle",
-                "windowed-high",
-                "windowed-lapsed",
-                "windowed-stale",
-                "weekly-low",
-                "unknown",
-                "paid",
-                "api",
-                "windowed-empty"
-            ]
-        );
-        let mut top_level = build();
-        rank_candidates(&mut top_level, None, &[], "luna", NOW, Placement::TopLevel);
-        assert_eq!(
-            ids(&top_level),
-            vec![
-                "windowed-idle",
-                "windowed-lapsed",
-                "windowed-stale",
-                "weekly-low",
-                "unknown",
-                "windowed-high",
-                "paid",
-                "api",
-                "windowed-empty"
-            ]
-        );
-    }
 
     #[test]
     fn load_balancing_preferences_lead_among_quota_equals_in_list_order() {
@@ -1394,7 +1551,7 @@ mod tests {
             candidate("b-preferred", Some(50), &["luna"]),
             candidate("c-preferred-first", Some(50), &["luna"]),
         ];
-        rank_candidates(
+        rank_test_candidates(
             &mut candidates,
             None,
             &["c-preferred-first".into(), "b-preferred".into()],
@@ -1411,7 +1568,7 @@ mod tests {
             candidate("plain", Some(50), &["luna"]),
             candidate("preferred-out", Some(0), &["luna"]),
         ];
-        rank_candidates(
+        rank_test_candidates(
             &mut candidates,
             None,
             &["preferred-out".into()],
@@ -1419,7 +1576,7 @@ mod tests {
             0,
             Placement::Child,
         );
-        assert_eq!(ids(&candidates), ["plain", "preferred-out"]);
+        assert_eq!(ids(&candidates), ["plain"]);
     }
 
     #[test]
@@ -1451,7 +1608,7 @@ mod tests {
         let other = candidate("other", Some(40), &["claude-fable-5-1", "claude-opus-5"]);
 
         let mut for_fable = vec![fable.clone(), other.clone()];
-        rank_candidates(
+        rank_test_candidates(
             &mut for_fable,
             None,
             &[],
@@ -1459,10 +1616,10 @@ mod tests {
             1_000,
             Placement::Child,
         );
-        assert_eq!(ids(&for_fable), ["other", "fable-profile"]);
+        assert_eq!(ids(&for_fable), ["other"]);
 
         let mut for_opus = vec![fable, other];
-        rank_candidates(
+        rank_test_candidates(
             &mut for_opus,
             None,
             &[],
@@ -1473,75 +1630,6 @@ mod tests {
         assert_eq!(ids(&for_opus), ["fable-profile", "other"]);
     }
 
-    #[test]
-    fn five_hour_burn_projected_to_run_out_sorts_last_within_its_tier() {
-        let now = 1_000_000;
-        let with_five_hour = |id: &str, remaining: u8| {
-            let mut profile = candidate(id, Some(90), &["luna"]);
-            let CandidateQuota::Subscription {
-                windows,
-                refreshed_at_epoch_seconds,
-                ..
-            } = &mut profile.quota
-            else {
-                unreachable!("the fixture has a reading");
-            };
-            // Read one hour into the window, so using more than 20% outpaces it.
-            *refreshed_at_epoch_seconds = now as u64;
-            windows.push(mj_controller::quota::QuotaWindow {
-                label: "5H".into(),
-                remaining_percent: Some(remaining),
-                duration_seconds: None,
-                model_scope: None,
-                used: None,
-                limit: None,
-                resets: None,
-                resets_at_epoch_seconds: Some(now + 4 * 60 * 60),
-            });
-            profile
-        };
-        let profiles = vec![
-            candidate("unknown", None, &["luna"]),
-            // Scores 1.4, ahead of "steady" on pace alone.
-            with_five_hour("burning", 70),
-            candidate("steady", Some(40), &["luna"]),
-            with_five_hour("pacing", 85),
-        ];
-
-        let mut ranked = profiles.clone();
-        rank_candidates(&mut ranked, None, &[], "luna", now, Placement::Child);
-        assert_eq!(ids(&ranked), ["pacing", "steady", "burning", "unknown"]);
-
-        for unit in [1e-9, 0.5, 1.0] {
-            let mut drawn = profiles.clone();
-            let units = vec![unit; drawn.len()];
-            order_by_draw(&mut drawn, None, &[], &units, "luna", now, Placement::Child);
-            assert_eq!(ids(&drawn)[2..], ["burning", "unknown"]);
-        }
-
-        // The pace was measured at the reading: an unchanged reading still
-        // projects later, until the window resets.
-        let mut stale = profiles.clone();
-        rank_candidates(
-            &mut stale,
-            None,
-            &[],
-            "luna",
-            now + 30 * 60,
-            Placement::Child,
-        );
-        assert_eq!(ids(&stale), ["pacing", "steady", "burning", "unknown"]);
-        let mut reset = profiles.clone();
-        rank_candidates(
-            &mut reset,
-            None,
-            &[],
-            "luna",
-            now + 4 * 60 * 60,
-            Placement::Child,
-        );
-        assert_eq!(ids(&reset), ["burning", "pacing", "steady", "unknown"]);
-    }
 
     #[test]
     fn drawing_picks_in_proportion_to_subscription_dollars_and_quota_then_paid_balances() {
@@ -1592,6 +1680,7 @@ mod tests {
                 } else {
                     f64::from(amount)
                 });
+                profile.may_consume_credits = !included;
                 profiles.push(profile);
             }
             let draws = 40_000;
@@ -1599,7 +1688,7 @@ mod tests {
             for _ in 0..draws {
                 let mut candidates = profiles.clone();
                 let units = (0..candidates.len()).map(|_| unit()).collect::<Vec<_>>();
-                order_by_draw(
+                draw_test_candidates(
                     &mut candidates,
                     Some("thirty-b"),
                     &[],
@@ -1609,19 +1698,31 @@ mod tests {
                     Placement::Child,
                 );
                 let chosen = if included {
-                    assert_eq!(ids(&candidates)[3..], ["unknown", "api", "empty"]);
+                    assert_eq!(ids(&candidates)[3..], ["unknown", "api"]);
                     &candidates[0]
                 } else {
                     assert_eq!(candidates[0].profile_id, "unknown");
-                    assert_eq!(ids(&candidates)[4..], ["api", "empty"]);
+                    assert_eq!(ids(&candidates)[4..], ["api"]);
                     &candidates[1]
                 };
                 *first.entry(chosen.profile_id.clone()).or_default() += 1;
             }
             let share = |id: &str| f64::from(first[id]) / f64::from(draws);
-            assert!((share("sixty") - 0.5).abs() < 0.01, "{first:?}");
-            assert!((share("thirty-a") - 0.25).abs() < 0.01, "{first:?}");
-            assert!((share("thirty-b") - 0.25).abs() < 0.01, "{first:?}");
+            if included && !price_weighted {
+                // Included subscriptions with equal prices and 60% vs 30% vs 30% remaining
+                // use 1% reserve floor and pace exponent alpha = 2.0:
+                // 59^2 : 29^2 : 29^2 => 0.6742 : 0.1629 : 0.1629.
+                let w60 = 59.0_f64.powi(2);
+                let w30 = 29.0_f64.powi(2);
+                let total = w60 + 2.0 * w30;
+                assert!((share("sixty") - w60 / total).abs() < 0.01, "{first:?}");
+                assert!((share("thirty-a") - w30 / total).abs() < 0.01, "{first:?}");
+                assert!((share("thirty-b") - w30 / total).abs() < 0.01, "{first:?}");
+            } else {
+                assert!((share("sixty") - 0.5).abs() < 0.01, "{first:?}");
+                assert!((share("thirty-a") - 0.25).abs() < 0.01, "{first:?}");
+                assert!((share("thirty-b") - 0.25).abs() < 0.01, "{first:?}");
+            }
         }
     }
 
@@ -1652,7 +1753,7 @@ mod tests {
                     ModelProfileCandidateSource::Subagents {
                         parent_profile: "codex",
                     },
-                )
+                 ExecutionPolicy::Unconstrained, None)
                 .await
             }
         };
@@ -1993,7 +2094,7 @@ mod tests {
                 subtle: None,
             },
             SubagentTaskType::Straightforward,
-        )
+         ExecutionPolicy::Unconstrained)
         .await
         .unwrap_err();
         for detail in [
@@ -2022,7 +2123,7 @@ mod tests {
         });
         let selected = tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high")),
+            resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"), ExecutionPolicy::Unconstrained, "reviewer"),
         )
         .await
         .unwrap()
@@ -2081,7 +2182,7 @@ mod tests {
             EffortRequirement::Exact("high"),
             None,
             ModelProfileCandidateSource::ReviewersReady,
-        )
+         ExecutionPolicy::Unconstrained, None)
         .await
         .unwrap();
         assert_eq!(selected.profile_id, "subscription");
@@ -2112,7 +2213,7 @@ mod tests {
                 requirement,
                 None,
                 ModelProfileCandidateSource::ReviewersReady,
-            )
+             ExecutionPolicy::Unconstrained, None)
             .await
             .unwrap();
             assert_eq!(selected.profile_id, "stalled-default");
@@ -2157,7 +2258,7 @@ mod tests {
                 EffortRequirement::Exact("high"),
                 None,
                 ModelProfileCandidateSource::ReviewersReady,
-            )
+             ExecutionPolicy::Unconstrained, None)
             .await
             .unwrap();
             assert_eq!(selected.profile_id, "unknown");
@@ -2180,11 +2281,11 @@ mod tests {
                 unavailable: Vec::new(),
             },
         });
-        let selected = resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"))
+        let selected = resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"), ExecutionPolicy::Unconstrained, "reviewer")
             .await
             .unwrap();
         assert_eq!(selected.effort.as_deref(), Some("high"));
-        let error = resolve_reviewer_model_profile_selection(&backend, "missing", None)
+        let error = resolve_reviewer_model_profile_selection(&backend, "missing", None, ExecutionPolicy::Unconstrained, "reviewer")
             .await
             .unwrap_err();
         assert!(
@@ -2194,10 +2295,10 @@ mod tests {
         );
         let mut saw_different_profiles = false;
         for _ in 0..48 {
-            let first = resolve_reviewer_model_profile_selection(&backend, "no-effort", None)
+            let first = resolve_reviewer_model_profile_selection(&backend, "no-effort", None, ExecutionPolicy::Unconstrained, "reviewer")
                 .await
                 .unwrap();
-            let second = resolve_reviewer_model_profile_selection(&backend, "no-effort", None)
+            let second = resolve_reviewer_model_profile_selection(&backend, "no-effort", None, ExecutionPolicy::Unconstrained, "reviewer")
                 .await
                 .unwrap();
             assert_eq!(first.effort, None);
@@ -2273,7 +2374,7 @@ mod tests {
                         model: request.into(),
                         effort: Some("high".into()),
                     }),
-                )
+                 ExecutionPolicy::Unconstrained)
                 .await
                 .unwrap();
                 assert_eq!(
@@ -2285,7 +2386,7 @@ mod tests {
                     (expected, value, Some("high"))
                 );
                 let reviewer =
-                    resolve_reviewer_model_profile_selection(&backend, request, Some("high"))
+                    resolve_reviewer_model_profile_selection(&backend, request, Some("high"), ExecutionPolicy::Unconstrained, "reviewer")
                         .await
                         .unwrap();
                 assert_eq!(reviewer, selected);
@@ -2298,7 +2399,7 @@ mod tests {
                     subtle: None,
                 },
                 SubagentTaskType::Straightforward,
-            )
+             ExecutionPolicy::Unconstrained)
             .await
             .unwrap();
             assert_eq!(
@@ -2342,7 +2443,7 @@ mod tests {
             "claude-exhausted",
             &policy,
             SubagentTaskType::Straightforward,
-        )
+         ExecutionPolicy::Unconstrained)
         .await
         .unwrap();
         assert_eq!(selected.profile_id, "codex-ready");
@@ -2392,7 +2493,7 @@ mod tests {
                     subtle: None,
                 },
                 task_type,
-            )
+             ExecutionPolicy::Unconstrained)
             .await
             .unwrap();
             assert_eq!(
@@ -2440,7 +2541,7 @@ mod tests {
             "parent",
             &any_policy,
             SubagentTaskType::Subtle,
-        )
+         ExecutionPolicy::Unconstrained)
         .await
         .unwrap();
         assert_eq!(selected.profile_id, "parent");
@@ -2449,7 +2550,7 @@ mod tests {
             "parent",
             &any_policy,
             SubagentTaskType::Subtle,
-        )
+         ExecutionPolicy::Unconstrained)
         .await
         .unwrap_err();
         assert!(
@@ -2482,7 +2583,7 @@ mod tests {
                 "parent",
                 &mixed_policy,
                 task_type,
-            )
+             ExecutionPolicy::Unconstrained)
             .await
             .unwrap();
             assert_eq!(
@@ -2502,7 +2603,7 @@ mod tests {
                 subtle: None,
             },
             SubagentTaskType::Subtle,
-        )
+         ExecutionPolicy::Unconstrained)
         .await
         .unwrap_err();
         assert!(error.message.contains("[subagents.subtle]"));
@@ -2535,7 +2636,7 @@ mod tests {
             "parent",
             &policy,
             SubagentTaskType::Subtle,
-        )
+         ExecutionPolicy::Unconstrained)
         .await
         .unwrap_err();
         assert!(
@@ -2548,9 +2649,60 @@ mod tests {
             "parent",
             &policy,
             SubagentTaskType::Straightforward,
-        )
+         ExecutionPolicy::Unconstrained)
         .await
         .unwrap();
         assert_eq!(selected.model, "no-effort");
+    }
+
+    #[tokio::test]
+    async fn unhealthy_higher_value_model_on_shared_pool_falls_back_to_healthy_sibling() {
+        let mut unhealthy_map = std::collections::BTreeMap::new();
+        unhealthy_map.insert(
+            "gpt-6.1-luna".to_owned(),
+            mj_controller::profile_health::Unhealthy {
+                fault: mj_controller::profile_health::ProfileFault::RateLimited,
+                message: "rate limited".to_owned(),
+                until: std::time::SystemTime::now() + std::time::Duration::from_secs(300),
+            },
+        );
+        let mut shared_profile = candidate("codex1", Some(80), &["gpt-6.1-luna", "gpt-6.1-sol"]);
+        shared_profile.unhealthy = unhealthy_map;
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            staged: None,
+            discovery_fails: false,
+            config: mj_core::config::SubagentConfig {
+                straightforward: vec![
+                    mj_core::config::SubagentChoice {
+                        model: "gpt-6.1-luna".to_owned(),
+                        effort: None,
+                    },
+                    mj_core::config::SubagentChoice {
+                        model: "gpt-6.1-sol".to_owned(),
+                        effort: None,
+                    },
+                ],
+                ..Default::default()
+            },
+            candidates: SubagentCandidates {
+                offered: vec![shared_profile],
+                unavailable: Vec::new(),
+            },
+        });
+        let selected = resolve_subagent_policy_selection(
+            &backend,
+            "parent",
+            &mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+            mj_core::subagent::SubagentTaskType::Straightforward,
+            ExecutionPolicy::Unconstrained,
+        )
+        .await
+        .expect("healthy sibling model on the same pool must still be selected");
+        assert_eq!(selected.profile_id, "codex1");
+        assert_eq!(selected.model, "gpt-6.1-sol");
     }
 }

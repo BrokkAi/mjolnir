@@ -96,6 +96,16 @@ pub trait ExportRuntime: Send + Sync {
         Vec::new()
     }
 
+    fn quota_telemetry(&self) -> mj_controller::quota_telemetry::QuotaTelemetrySnapshot {
+        Default::default()
+    }
+
+    fn power_ranking(&self) -> mj_controller::power_ranking::PowerRankingSnapshot {
+        mj_controller::power_ranking::PowerRankingSnapshot::baseline().clone()
+    }
+
+    fn record_placement(&self, _profile_id: &str, _category: &str) {}
+
     /// Whether a child is still waiting for its review's verdict. A child's
     /// handback or ended turn is not final while it is.
     fn child_review(&self, _child_session_id: String) -> BoxFuture<'_, crate::daemon::ChildReview> {
@@ -365,6 +375,22 @@ impl ExportRuntime for RuntimeState {
 
     fn quota_preferences(&self) -> Vec<String> {
         self.with_config(|config| config.quota.prefer.clone())
+    }
+
+    fn quota_telemetry(&self) -> mj_controller::quota_telemetry::QuotaTelemetrySnapshot {
+        self.quota_telemetry.snapshot()
+    }
+
+    fn power_ranking(&self) -> mj_controller::power_ranking::PowerRankingSnapshot {
+        self.power_ranking.snapshot()
+    }
+
+    fn record_placement(&self, profile_id: &str, category: &str) {
+        self.quota_telemetry.record_placement(
+            profile_id,
+            category,
+            mj_core::clock::epoch_seconds() as i64,
+        );
     }
 
     fn child_review(&self, child_session_id: String) -> BoxFuture<'_, crate::daemon::ChildReview> {
@@ -753,6 +779,9 @@ impl ApiBackend {
                     let may_consume_credits = config
                         .enabled_profile(&profile_id)
                         .is_some_and(|profile| profile.load_balancing_may_consume_credits);
+                    let cache_identity = quota_reports
+                        .get(&profile_id)
+                        .map(|publication| publication.cache_identity.clone());
                     candidates
                         .offered
                         .push(crate::server::api::SubagentCandidate {
@@ -762,6 +791,7 @@ impl ApiBackend {
                             quota,
                             may_consume_credits,
                             unhealthy,
+                            cache_identity,
                         });
                 }
                 Ok(None) => candidates
@@ -1291,15 +1321,24 @@ impl ApiBackend {
                         .exports
                         .session_record(parent_session_id)
                         .context("parent session disappeared")?;
+                    let execution_policy = if self.exports.session_is_yolo_target(parent_session_id)
+                    {
+                        mj_core::config::ExecutionPolicy::Unconstrained
+                    } else {
+                        mj_core::config::ExecutionPolicy::ConfiguredApprovals
+                    };
                     let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                     let selection = crate::server::api::resolve_subagent_policy_selection(
                         &backend,
                         &parent.last_profile,
                         &parent.subagents.clone().unwrap_or_default(),
                         *task_type,
+                        execution_policy,
                     )
                     .await
                     .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                    self.exports
+                        .record_placement(&selection.profile_id, task_type.id());
                     // This wire queue can contain requests accepted by older workers.
                     let ranges = files
                         .iter()
@@ -3981,6 +4020,22 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move { Ok(self.exports.quota_preferences()) })
     }
 
+    fn quota_telemetry(
+        &self,
+    ) -> BoxFuture<'_, Result<mj_controller::quota_telemetry::QuotaTelemetrySnapshot>> {
+        Box::pin(async move { Ok(self.exports.quota_telemetry()) })
+    }
+
+    fn power_ranking(
+        &self,
+    ) -> BoxFuture<'_, Result<mj_controller::power_ranking::PowerRankingSnapshot>> {
+        Box::pin(async move { Ok(self.exports.power_ranking()) })
+    }
+
+    fn record_placement(&self, profile_id: &str, category: &str) {
+        self.exports.record_placement(profile_id, category);
+    }
+
     fn wait_revision(&self, session_id: &str) -> Result<Option<u64>> {
         Ok(
             mj_controller::database::committed_state()?.map(|committed| {
@@ -4296,6 +4351,7 @@ impl SubagentBackend for ApiBackend {
                             .map(|mark| (model.value.clone(), mark))
                     })
                     .collect();
+                let publication = quota_reports.get(&profile_id);
                 candidates
                     .offered
                     .push(crate::server::api::SubagentCandidate {
@@ -4303,12 +4359,13 @@ impl SubagentBackend for ApiBackend {
                         harness,
                         choices: choices.clone(),
                         quota: crate::server::api::CandidateQuota::from_publication(
-                            quota_reports.get(&profile_id),
+                            publication,
                             harness,
                             now_seconds,
                         ),
                         may_consume_credits: profile.load_balancing_may_consume_credits,
                         unhealthy,
+                        cache_identity: publication.map(|p| p.cache_identity.clone()),
                     });
             }
             Ok(candidates)

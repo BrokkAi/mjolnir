@@ -40,14 +40,22 @@ impl ApiBackend {
                 if let Some(oracle) = self.live_oracle(primary_id).await? {
                     return self.ask_live_oracle(&oracle, question, request).await;
                 }
+                let execution_policy = if self.exports.session_is_yolo_target(primary_id) {
+                    mj_core::config::ExecutionPolicy::Unconstrained
+                } else {
+                    mj_core::config::ExecutionPolicy::ConfiguredApprovals
+                };
                 let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                 let selection = crate::server::api::resolve_oracle_selection(
                     &backend,
                     &primary.last_profile,
                     &choices,
+                    execution_policy,
                 )
                 .await
                 .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                self.exports
+                    .record_placement(&selection.profile_id, "oracle");
                 let selected = mj_controller::database::PreparedSpawn {
                     profile_id: selection.profile_id,
                     model: selection.model,

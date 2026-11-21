@@ -156,6 +156,19 @@ pub(super) async fn start_session(
         validate_prompt_text(prompt, false)?;
     }
     let (profile_hint, target_id) = resolve_launch(&state, &request)?;
+    let execution_policy = {
+        let snapshot = state.snapshot_rx.borrow();
+        let yolo = snapshot
+            .targets
+            .iter()
+            .find(|target| target.id == target_id)
+            .is_some_and(|target| target.yolo);
+        if yolo {
+            mj_core::config::ExecutionPolicy::Unconstrained
+        } else {
+            mj_core::config::ExecutionPolicy::ConfiguredApprovals
+        }
+    };
     // An unnamed profile plus a named model is the CLI's model-first path.
     // Consider every configured, usable profile; a saved default profile is
     // only the ordering anchor for candidates without a usable draw weight.
@@ -167,6 +180,7 @@ pub(super) async fn start_session(
                     profile_hint.as_deref(),
                     model,
                     request.effort.as_deref(),
+                    execution_policy,
                 )
                 .await?,
             ),
@@ -178,6 +192,7 @@ pub(super) async fn start_session(
                             &backend,
                             profile_hint.as_deref(),
                             subagents.primary_choices(),
+                            execution_policy,
                         )
                         .await?,
                     )
@@ -310,7 +325,7 @@ pub(super) async fn start_session(
         no_github_credentials: request.no_github_credentials,
         notifications_ignored: request.notifications_ignored,
         workspace_id,
-        profile_id,
+        profile_id: profile_id.clone(),
         bundle_id,
         target_id,
         resource_allocation: resource_allocation.map(Box::new),
@@ -345,14 +360,19 @@ pub(super) async fn start_session(
         ));
     };
 
+    backend.record_placement(&profile_id, "primary");
     backend
         .start_followup(
             session_id.clone(),
             StartFollowup {
                 model: model_selection
-                    .map(|selection| selection.model)
+                    .as_ref()
+                    .map(|selection| selection.model.clone())
                     .or(request.model),
-                effort: request.effort,
+                effort: model_selection
+                    .as_ref()
+                    .and_then(|selection| selection.effort.clone())
+                    .or(request.effort),
                 prompt: request.prompt,
                 ..Default::default()
             },
@@ -501,7 +521,7 @@ pub(super) async fn resume(
             ResumeSessionResponse {
                 session_id: session_id.clone(),
                 workspace_id,
-                profile_id,
+                profile_id: profile_id.clone(),
                 target_id,
             },
         )

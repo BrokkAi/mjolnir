@@ -478,6 +478,204 @@ fn merge_summary(target: &mut UsageSummary, source: &UsageSummary) -> Result<()>
     Ok(())
 }
 
+/// One durable session placement loaded from SQLite for quota reservation
+/// accounting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentPlacementRow {
+    pub profile_id: String,
+    pub category: String,
+    pub created_at_epoch_seconds: i64,
+}
+
+/// Locally observed category burn statistics from completed sessions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CategoryBurnObservation {
+    pub mean_api_usd: f64,
+    pub p90_duration_hours: f64,
+    pub sample_count: usize,
+}
+
+const OBSERVED_CATEGORIES: &[&str] = &[
+    "straightforward",
+    "subtle",
+    "reviewer",
+    "brief_writer",
+    "oracle",
+    "supervisor",
+    "primary",
+];
+
+/// Load session placements created at or after `since_epoch_seconds` from
+/// `sessions` + `session_contexts` + `subagent_accounting`.
+pub fn load_recent_placements_since(since_epoch_seconds: i64) -> Result<Vec<RecentPlacementRow>> {
+    load_recent_placements_since_from(&database_path(), since_epoch_seconds)
+}
+
+pub fn load_recent_placements_since_from(
+    path: &Path,
+    since_epoch_seconds: i64,
+) -> Result<Vec<RecentPlacementRow>> {
+    let connection = open_reader(path)?;
+    recent_placements_since(&connection, since_epoch_seconds)
+}
+
+fn recent_placements_since(
+    connection: &Connection,
+    since_epoch_seconds: i64,
+) -> Result<Vec<RecentPlacementRow>> {
+    let since_rfc3339 = chrono::DateTime::from_timestamp(since_epoch_seconds, 0)
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut stmt = connection.prepare(
+        "SELECT
+            s.last_profile,
+            COALESCE(sa.category, 'primary'),
+            sc.created_at
+         FROM sessions s
+         JOIN session_contexts sc ON sc.session_id = s.session_id
+         LEFT JOIN subagent_accounting sa ON sa.child_session_id = s.session_id
+         WHERE sc.created_at >= ?1
+         ORDER BY sc.created_at ASC",
+    )?;
+    let rows = stmt
+        .query_map([since_rfc3339], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut placements = Vec::with_capacity(rows.len());
+    for (profile_id, category, created_at) in rows {
+        let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&created_at) else {
+            continue;
+        };
+        let ts = parsed.timestamp();
+        if ts >= since_epoch_seconds {
+            placements.push(RecentPlacementRow {
+                profile_id,
+                category,
+                created_at_epoch_seconds: ts,
+            });
+        }
+    }
+    Ok(placements)
+}
+
+/// Bounded query for local category burn switchover (`N >= min_samples`).
+/// Intended for lazy startup / hourly background refresh, never hot paths.
+pub fn load_category_burn_observations(
+    min_samples: usize,
+    max_per_category: usize,
+) -> Result<BTreeMap<String, CategoryBurnObservation>> {
+    load_category_burn_observations_from(&database_path(), min_samples, max_per_category)
+}
+
+pub fn load_category_burn_observations_from(
+    path: &Path,
+    min_samples: usize,
+    max_per_category: usize,
+) -> Result<BTreeMap<String, CategoryBurnObservation>> {
+    let connection = open_reader(path)?;
+    category_burn_observations(&connection, min_samples, max_per_category)
+}
+
+fn category_burn_observations(
+    connection: &Connection,
+    min_samples: usize,
+    max_per_category: usize,
+) -> Result<BTreeMap<String, CategoryBurnObservation>> {
+    let mut results = BTreeMap::new();
+    let limit = i64::try_from(max_per_category).unwrap_or(1000);
+    let mut session_stmt = connection.prepare(
+        "SELECT s.session_id, sc.created_at, s.updated_at
+         FROM sessions s
+         JOIN session_contexts sc ON sc.session_id = s.session_id
+         WHERE s.state IN ('stopped', 'error', 'lost')
+           AND EXISTS (
+               SELECT 1 FROM session_turn_selections sts
+               WHERE sts.session_id = s.session_id AND sts.category = ?1
+           )
+         ORDER BY sc.created_at DESC
+         LIMIT ?2",
+    )?;
+    let mut turn_stmt = connection.prepare(
+        "SELECT u.body, sts.model
+         FROM session_turn_usage u
+         LEFT JOIN session_turn_selections sts
+           ON sts.session_id = u.session_id AND sts.command_id = u.command_id
+         WHERE u.session_id = ?1",
+    )?;
+
+    for &category in OBSERVED_CATEGORIES {
+        let sessions = session_stmt
+            .query_map(params![category, limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if sessions.len() < min_samples {
+            continue;
+        }
+        let mut usd_samples = Vec::with_capacity(sessions.len());
+        let mut duration_hours = Vec::with_capacity(sessions.len());
+        for (session_id, created_at, updated_at) in &sessions {
+            if let (Ok(start), Ok(end)) = (
+                chrono::DateTime::parse_from_rfc3339(created_at),
+                chrono::DateTime::parse_from_rfc3339(updated_at),
+            ) {
+                let secs = end.timestamp().saturating_sub(start.timestamp()).max(60);
+                duration_hours.push(secs as f64 / 3600.0);
+            }
+            let turns = turn_stmt
+                .query_map([session_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut session_ticks: u64 = 0;
+            let mut has_cost = false;
+            for (body, model) in turns {
+                let Ok(outcome) = serde_json::from_str::<mj_core::event_outcome::ApiTurnOutcome>(&body)
+                else {
+                    continue;
+                };
+                if let Some(usage) = outcome.usage.as_ref() {
+                    let mut totals = BTreeMap::new();
+                    let values = counters(usage);
+                    let _ = add_counters(&mut totals, &values);
+                    if let Ok(Some(est)) = estimate_model_cost(usage, model.as_deref(), &totals) {
+                        session_ticks = session_ticks.saturating_add(est);
+                        has_cost = true;
+                    }
+                }
+            }
+            if has_cost {
+                usd_samples.push(session_ticks as f64 / 1_000_000_000.0);
+            }
+        }
+        if usd_samples.len() >= min_samples && duration_hours.len() >= min_samples {
+            let mean_api_usd = usd_samples.iter().sum::<f64>() / usd_samples.len() as f64;
+            duration_hours.sort_by(f64::total_cmp);
+            let p90_idx = ((duration_hours.len() as f64 * 0.90).ceil() as usize)
+                .saturating_sub(1)
+                .min(duration_hours.len() - 1);
+            results.insert(
+                category.to_owned(),
+                CategoryBurnObservation {
+                    mean_api_usd,
+                    p90_duration_hours: duration_hours[p90_idx],
+                    sample_count: usd_samples.len().min(duration_hours.len()),
+                },
+            );
+        }
+    }
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1000,6 +1198,57 @@ mod tests {
         );
         assert_eq!(last.next_after_seq, last.latest_seq);
         assert_eq!(last.totals, first.totals);
+        Ok(())
+    }
+
+    #[test]
+    fn recent_placements_rebuild_identically_from_sqlite() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("placements.sqlite3");
+        let conn = open(&path)?;
+        let ws: String = conn.query_row("SELECT workspace_id FROM workspaces LIMIT 1", [], |r| r.get(0))?;
+        let base_ts = 1_795_000_000i64;
+        let insert_session = |id: &str, profile: &str, ts: i64| -> Result<()> {
+            let rfc = chrono::DateTime::from_timestamp(ts, 0)
+                .unwrap()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            conn.execute(
+                "INSERT INTO session_contexts(session_id, bundle_id, workspace_id, created_at) VALUES (?1, 'b1', ?2, ?3)",
+                params![id, ws, rfc],
+            )?;
+            conn.execute(
+                "INSERT INTO sessions(session_id, title, harness_kind, last_profile, target_template_id, state, updated_at)
+                 VALUES (?1, 't', 'codex', ?2, 'local', 'running', ?3)",
+                params![id, profile, rfc],
+            )?;
+            Ok(())
+        };
+        insert_session("old-primary", "codex1", base_ts - 100)?;
+        insert_session("new-primary", "codex1", base_ts + 10)?;
+        insert_session("new-child", "codex1", base_ts + 20)?;
+        conn.execute(
+            "INSERT INTO subagent_accounting(child_session_id, parent_session_id, task_name, category)
+             VALUES ('new-child', 'new-primary', 'worker', 'subtle')",
+            [],
+        )?;
+        drop(conn);
+
+        let rebuilt = load_recent_placements_since_from(&path, base_ts)?;
+        assert_eq!(
+            rebuilt,
+            vec![
+                RecentPlacementRow {
+                    profile_id: "codex1".into(),
+                    category: "primary".into(),
+                    created_at_epoch_seconds: base_ts + 10,
+                },
+                RecentPlacementRow {
+                    profile_id: "codex1".into(),
+                    category: "subtle".into(),
+                    created_at_epoch_seconds: base_ts + 20,
+                },
+            ]
+        );
         Ok(())
     }
 }

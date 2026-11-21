@@ -163,6 +163,7 @@ impl RuntimeState {
                 &mj_core::config::data_dir(),
                 mj_core::clock::epoch_seconds(),
             ),
+            quota_telemetry: mj_controller::quota_telemetry::QuotaTelemetryStore::new(),
         }
     }
 

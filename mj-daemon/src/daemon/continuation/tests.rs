@@ -928,9 +928,12 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                 },
             },
             unhealthy,
+            cache_identity: None,
         }
     })
     .collect();
+    let telemetry = mj_controller::quota_telemetry::QuotaTelemetrySnapshot::default();
+    let power_ranking = mj_controller::power_ranking::PowerRankingSnapshot::baseline();
     let ordered = quota::destinations(
         &config,
         "source",
@@ -938,17 +941,20 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
         "model",
         candidates,
         1,
+        mj_core::config::ExecutionPolicy::Unconstrained,
+        mj_controller::profile_scheduler::Placement::TopLevel,
+        Some("primary"),
+        &telemetry,
+        power_ranking,
     )
     .unwrap();
-    assert_eq!(
-        ordered
-            .iter()
-            .map(|c| c.profile_id.as_str())
-            .collect::<Vec<_>>(),
-        // A top-level quota move ranks a profile inside a five-hour window
-        // below unwindowed and unknown quota, above paid credits and API.
-        ["healthy", "unknown", "windowed", "paid", "api"]
-    );
+    let ids: Vec<&str> = ordered.iter().map(|c| c.profile_id.as_str()).collect();
+    // Unified tier ladder (legacy top-level active-5h tier retired):
+    // both included subscriptions ("healthy", "windowed") lead Tier 0 above
+    // "unknown" (Tier 2), "paid" (Tier 4), and "api" (Tier 5).
+    assert_eq!(ids.len(), 5);
+    assert!(ids[..2].contains(&"healthy") && ids[..2].contains(&"windowed"));
+    assert_eq!(&ids[2..], ["unknown", "paid", "api"]);
 }
 
 fn quota_move_request() -> mj_core::state::MoveSessionRequest {

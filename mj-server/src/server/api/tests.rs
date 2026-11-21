@@ -1561,6 +1561,7 @@ impl SubagentBackend for FakeBackend {
                     quota: crate::server::api::CandidateQuota::Unknown,
                     may_consume_credits: false,
                     unhealthy: Default::default(),
+                    cache_identity: None,
                 }],
                 unavailable: Vec::new(),
             })
@@ -2794,7 +2795,57 @@ fn model_candidate_with_efforts(
             }],
         },
         unhealthy: Default::default(),
+        cache_identity: None,
     }
+}
+
+#[tokio::test]
+async fn bare_session_start_with_primary_forwards_model_and_effort_to_followup() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences_path = directory.path().join("go.json");
+    save_global_default(&preferences_path, "codex-1", "podman");
+    let backend = Arc::new(FakeBackend {
+        subagent_configuration: Some(mj_core::config::SubagentConfig {
+            primary: vec![mj_core::config::SubagentChoice {
+                model: "gpt-6.1-sol".into(),
+                effort: Some("xhigh".into()),
+            }],
+            ..Default::default()
+        }),
+        session_model_candidates: Some(SubagentCandidates {
+            offered: vec![model_candidate_with_efforts(
+                "codex-1",
+                80,
+                "gpt-6.1-sol",
+                &["high", "xhigh"],
+            )],
+            unavailable: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) =
+        api_app_with_preferences(backend.clone(), |_| {}, preferences_path);
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(
+        r#"{"bundle_id":"hel"}"#.into(),
+    )));
+    let request = actions.recv().await.unwrap();
+    assert!(matches!(
+        request.action,
+        ControllerAction::New { ref profile_id, .. } if profile_id == "codex-1"
+    ));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("sess-primary-1".into()),
+            notice: None,
+        })
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let followups = backend.followups.lock().unwrap();
+    assert_eq!(followups.len(), 1);
+    assert_eq!(followups[0].1.model.as_deref(), Some("gpt-6.1-sol"));
+    assert_eq!(followups[0].1.effort.as_deref(), Some("xhigh"));
 }
 
 #[tokio::test]
@@ -3188,6 +3239,7 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
             subtle: None,
         },
         mj_core::subagent::SubagentTaskType::Straightforward,
+        mj_core::config::ExecutionPolicy::Unconstrained,
     )
     .await
     .unwrap();

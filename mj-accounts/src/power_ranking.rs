@@ -52,6 +52,37 @@ pub struct PowerRankingSnapshot {
     pub entries: Vec<PowerRankingEntry>,
 }
 
+impl PowerRankingSnapshot {
+    /// Compiled-in baseline snapshot, available offline and in isolated tests.
+    pub fn baseline() -> &'static Self {
+        baseline()
+    }
+
+    /// Match `model_identity` and `effort` for `harness` against this snapshot.
+    pub fn lookup(
+        &self,
+        model_identity: &str,
+        effort: Option<&str>,
+        harness: mj_core::config::HarnessKind,
+    ) -> Option<PowerRankingLookup> {
+        let aliases = model_aliases(model_identity);
+        let matched_model: Vec<&PowerRankingEntry> = aliases.into_iter().find_map(|alias| {
+            let hits: Vec<&PowerRankingEntry> = self
+                .entries
+                .iter()
+                .filter(|entry| entry.model.to_ascii_lowercase() == alias)
+                .collect();
+            (!hits.is_empty()).then_some(hits)
+        })?;
+        let owned: Vec<PowerRankingEntry> = matched_model.into_iter().cloned().collect();
+        let matched = entries_for_harness(&owned, harness);
+        if matched.is_empty() {
+            return None;
+        }
+        pick_effort(&matched, effort.map(str::to_ascii_lowercase))
+    }
+}
+
 /// A row chosen for a model, or the geometric mean of its ranked efforts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PowerRankingLookup {

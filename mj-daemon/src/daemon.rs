@@ -336,7 +336,10 @@ pub struct RuntimeState {
     wiki: mj_controller::sessionwiki::WikiIndexer,
     /// Power-ranking table. Loaded from disk or the compiled baseline without
     /// waiting on the network; a background task refreshes it.
-    power_ranking: mj_controller::power_ranking::PowerRankingStore,
+    pub(crate) power_ranking: mj_controller::power_ranking::PowerRankingStore,
+    /// Trailing-60m quota velocity, durable placement reservations, and local
+    /// category burn observations.
+    pub(crate) quota_telemetry: mj_controller::quota_telemetry::QuotaTelemetryStore,
 }
 
 /// One monotonic cursor shared by daemon snapshots and their wake-up feed.

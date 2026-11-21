@@ -26,7 +26,7 @@ pub(super) struct Policy {
     state: Arc<RuntimeState>,
     pub quota_source_reader: super::QuotaSourceReader,
     catalog: Arc<ProfileCatalog>,
-    reports: Arc<std::sync::Mutex<QuotaReportMap>>,
+    pub(super) reports: Arc<std::sync::Mutex<QuotaReportMap>>,
     rejected: Arc<std::sync::Mutex<mj_core::credentials::RejectedLogins>>,
     quotas_tx: watch::Sender<QuotaReportMap>,
     profiles_tx: watch::Sender<QuotaRefreshBatch>,

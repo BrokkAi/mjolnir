@@ -37,5 +37,6 @@ pub mod power_ranking;
 pub mod profile_scheduler;
 pub mod quota;
 mod quota_harness;
+pub mod quota_telemetry;
 pub mod review_selection;
 pub mod zai_usage;

@@ -43,6 +43,26 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    /// Current trailing-60-minute velocity and durable placement reservations.
+    fn quota_telemetry(
+        &self,
+    ) -> BoxFuture<'_, AnyResult<mj_controller::quota_telemetry::QuotaTelemetrySnapshot>> {
+        Box::pin(async { Ok(Default::default()) })
+    }
+
+    /// Current power-ranking snapshot (compiled baseline or cached fetch).
+    fn power_ranking(
+        &self,
+    ) -> BoxFuture<'_, AnyResult<mj_controller::power_ranking::PowerRankingSnapshot>> {
+        Box::pin(async {
+            Ok(mj_controller::power_ranking::PowerRankingSnapshot::baseline().clone())
+        })
+    }
+
+    /// Record an accepted placement in the daemon's in-memory telemetry so
+    /// burst spawns before the next 10-minute poll see its reservation.
+    fn record_placement(&self, _profile_id: &str, _category: &str) {}
+
     /// Cheap token for this session's durable wait inputs. Backends without
     /// a committed publication leave filtering to the detailed observation.
     fn wait_revision(&self, _session_id: &str) -> AnyResult<Option<u64>> {
