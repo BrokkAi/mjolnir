@@ -162,7 +162,7 @@ class SealedRunner:
                 or s.get("base") != snapshot["orphan"]):
             raise RuntimeError("engine session does not use the frozen cutoff and base")
         place = self.driver.container(sid)
-        cwd = f"/workspace/{sid}/{self.config['destination']}"
+        cwd = self.checkout_root(sid)
         proc = subprocess.run(
             ["podman", "exec", "--workdir", cwd, place["container"], "python3", "-c", PROBE,
              snapshot["orphan"], snapshot["tree"], json.dumps(PRIVATE_PATHS), str(self.config["git_port"])],
@@ -232,10 +232,14 @@ class SealedRunner:
             raise RuntimeError("engine request did not receive an accepted turn id")
         return turn
 
+    def checkout_root(self, sid):
+        """The session's checkout inside its container, which is also its starting directory."""
+        return f"/workspace/{sid}/{self.config['destination']}"
+
     def clean_checkout(self, sid, orphan="", *, clear=True):
         scratch = f".rql-engine-{sid}"
         place = self.driver.container(sid)
-        cwd = f"/workspace/{sid}/{self.config['destination']}"
+        cwd = self.checkout_root(sid)
         proc = subprocess.run(
             ["podman", "exec", "--workdir", cwd, place["container"], "python3", "-c",
              CHECKOUT_CLEAN, scratch, orphan, "clear" if clear else "check"], capture_output=True, timeout=300,
@@ -399,7 +403,10 @@ class SealedRunner:
         menu_path = f"{directory}/menu.md"
         output_path = f"{directory}/answer.json"
         menu_doc = semantics_only(menu, self.served_steps)
-        prompt = turn_prompt(query, output_path, catalogue_path, menu_path, errors)
+        # The prompt names absolute paths, so no command depends on the shell's directory.
+        root = self.checkout_root(sid)
+        prompt = turn_prompt(query, f"{root}/{output_path}", f"{root}/{catalogue_path}",
+                             f"{root}/{menu_path}", errors)
         assert_blind((prompt, catalogue, menu_doc), self.manifest)
         for path, contents in ((catalogue_path, catalogue), (menu_path, menu_doc)):
             self.command("put-file", "--session", sid, "--path", path, "-",

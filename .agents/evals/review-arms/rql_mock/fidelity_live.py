@@ -143,7 +143,8 @@ class LiveModels:
                            "-", data=data.encode("utf-8"))
         before = driver.mj("usage", "--session", sid)
         command = f"fidelity-{uuid4().hex}"
-        turn = runner.message(sid, prompt(scratch), command)
+        # The prompt names absolute paths, so no command depends on the shell's directory.
+        turn = runner.message(sid, prompt(f"{runner.checkout_root(sid)}/{scratch}"), command)
         waited = driver.mj("wait", "--session", sid, "--turn", turn,
                            "--return-on-input", "--timeout", 1800, timeout=1830)
         if waited.get("turn_id") != turn or waited["outcome"] != "finished":

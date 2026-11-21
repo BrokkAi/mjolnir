@@ -12,10 +12,14 @@ query under the specified semantics, with no implicit result cap. Use read-only
 commands for source inspection. Do not inspect harness transcripts, agent state
 or other turn artifacts. Do not run repository code, access Git, or seek any
 information about changes, bugs, study labels, or subsequent revisions.
-Keep temporary files beside the output file in the provided scratch directory.
-Never edit a file in place (no `sed -i`, `perl -i` or similar). An in-place edit makes your
-answer unusable. Rewrite a scratch script in full with `cat > /abs/path/build.py <<'EOF' … EOF`
-in one command, then run it in the next with the same path.
+Keep temporary files in the output file's directory. That directory is emptied
+before every turn, so files from an earlier attempt are gone. Use the absolute paths
+given below, and absolute paths in every command and script; never run `cd`.
+Run only scripts whose full text you wrote yourself: write each one whole with
+`cat > /abs/path/build.py <<'EOF' … EOF` in one command, then run it in the next
+command with the same absolute path. Never edit a file in place (no `sed -i`,
+`perl -i` or similar), and never create or change a script with another command
+or program. Either makes your answer unusable.
 
 Write a single JSON object to the specified output path. Use this schema:
 {"rows": [{"kind": "row_kind", "sites": [{"path": "repo/relative", "start_line": 1,
@@ -103,7 +107,8 @@ classification, candidate tags and gold adjudication concern the full study desi
 
 
 REPAIR = """A previous attempt at this query failed mechanical verification.
-Evaluate the full query from source. Before writing the new answer, check every
+Its scratch files, including any scripts, have been removed; write any script
+you need again in full. Evaluate the full query from source. Before writing the new answer, check every
 row against the applicable rules above:
 - For primary-anchor errors, set the required field (site, sink.site or
   event.site), then copy it to sites[0]. An operand's nested site is separate.
