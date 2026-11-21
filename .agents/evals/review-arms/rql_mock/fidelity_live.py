@@ -200,7 +200,7 @@ class LiveModels:
             return decisions
 
         decisions, _ = self.sealed_task(
-            query.commit, directory, SONNET, self.config["profile"], files, prompt, check_output)
+            query.commit, directory, SONNET, "claude5", files, prompt, check_output)
         return decisions
 
 

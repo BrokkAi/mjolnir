@@ -125,7 +125,7 @@ class PilotTest(unittest.TestCase):
         runner.args = SimpleNamespace(run_root=root)
         runner.engine_identity = engine.identity
         self.addCleanup(setattr, endpoint, "load_engine", endpoint.load_engine)
-        endpoint.load_engine = lambda: SimpleNamespace(identity=engine.identity, config={"profile": "claude-test"})
+        endpoint.load_engine = lambda: engine
         runner.diffs = {"mjolnir/first": {}}
         runner.writer_model = ("gpt-6.1-sol", "high")
         runner.gate, runner.attested = None, set()
@@ -827,7 +827,8 @@ if not (attempt / "recover").exists():
         path = self.root / "manifest.json"
         pilot.driver.save(path, manifest)
         config = self.root / "engine.json"
-        pilot.driver.save(config, {"manifest": str(path), "verifier": "/bin/true"})
+        pilot.driver.save(config, {"manifest": str(path), "verifier": "/bin/true",
+                                   "logins": [{"profile": "claude5", "engine_profile": "claude5-engine"}]})
         self.addCleanup(setattr, engine, "CONFIG", engine.CONFIG)
         engine.CONFIG = config
         return path, engine.load_engine()

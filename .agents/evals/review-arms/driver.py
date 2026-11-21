@@ -346,44 +346,55 @@ def quota_hold(scope=None, *, floor=None, weekly=False, strict=False, short_floo
         return None
     for spec in floor.split(","):
         profile, _, percent = spec.partition("=")
-        try:
-            rows = mj("quota", "--profile", profile).get("profiles") or []
-            report = (rows[0].get("report") or {}) if rows else {}
-            windows = report.get("windows") or []
-            pools = [(window, (window.get("model_scope") or "").split(","))
-                     for window in windows]
-        except (AttributeError, IndexError, KeyError, TypeError, ValueError,
-                RuntimeError, OSError, subprocess.SubprocessError) as error:
-            return f"{profile}: no usable quota report ({error})"
-        # Antigravity reports separate Gemini and Claude/GPT pools. Unscoped
-        # windows apply to every model; an absent matching pool stays unknown.
-        if unscoped:
-            windows = [w for w, models in pools if models == [""]]
-        elif scope:
-            windows = [w for w, models in pools if models == [""] or scope in models]
-        short = [w for w in windows if w.get("duration_seconds") == 18_000] if short_floor is not None else None
-        if weekly:
-            windows = [w for w in windows if w.get("duration_seconds") == 7 * 24 * 60 * 60]
-        left = [w.get("remaining_percent") for w in windows]
-        if (not left or any(type(value) not in {int, float} or not 0 <= value <= 100 for value in left)
-                or report.get("error")):
-            return f"{profile}: no usable quota report ({json.dumps(report)[:300]})"
-        least = min(windows, key=lambda w: w["remaining_percent"])
-        remaining = least["remaining_percent"]
-        if remaining < float(percent) or (strict and remaining == float(percent)):
-            if weekly:
-                threshold = "above" if strict else "at least"
-                return (f"{profile}: {remaining}% weekly remaining, requires {threshold} {percent}% "
-                        f"(resets {least.get('resets', 'unknown')}, "
-                        f"epoch {least.get('resets_at_epoch_seconds')})")
-            return f"{profile}: {remaining}% left, below the floor of {percent}%"
-        if short is not None:
-            left = [w.get("remaining_percent") for w in short]
-            if not left or any(type(value) not in {int, float} or not 0 <= value <= 100 for value in left):
-                return f"{profile}: no usable 5-hour quota report ({json.dumps(report)[:300]})"
-            if min(left) <= short_floor:
-                return f"{profile}: {min(left)}% 5-hour remaining, requires above {short_floor}%"
+        _, hold = _quota_status(profile, percent, scope=scope, weekly=weekly, strict=strict,
+                                short_floor=short_floor, unscoped=unscoped)
+        if hold:
+            return hold
     return None
+
+
+def _quota_status(profile, percent, *, scope=None, weekly=False, strict=False, short_floor=None, unscoped=False):
+    """Return the qualifying remaining percentages or a hold reason from one report."""
+    try:
+        rows = mj("quota", "--profile", profile).get("profiles") or []
+        report = (rows[0].get("report") or {}) if rows else {}
+        windows = report.get("windows") or []
+        pools = [(window, (window.get("model_scope") or "").split(","))
+                 for window in windows]
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+            RuntimeError, OSError, subprocess.SubprocessError) as error:
+        return None, f"{profile}: no usable quota report ({error})"
+    # Antigravity reports separate Gemini and Claude/GPT pools. Unscoped
+    # windows apply to every model; an absent matching pool stays unknown.
+    if unscoped:
+        windows = [w for w, models in pools if models == [""]]
+    elif scope:
+        windows = [w for w, models in pools if models == [""] or scope in models]
+    short = [w for w in windows if w.get("duration_seconds") == 18_000] if short_floor is not None else None
+    if weekly:
+        windows = [w for w in windows if w.get("duration_seconds") == 7 * 24 * 60 * 60]
+    left = [w.get("remaining_percent") for w in windows]
+    if (not left or any(type(value) not in {int, float} or not 0 <= value <= 100 for value in left)
+            or report.get("error")):
+        return None, f"{profile}: no usable quota report ({json.dumps(report)[:300]})"
+    least = min(windows, key=lambda w: w["remaining_percent"])
+    remaining = least["remaining_percent"]
+    if remaining < float(percent) or (strict and remaining == float(percent)):
+        if weekly:
+            threshold = "above" if strict else "at least"
+            return None, (f"{profile}: {remaining}% weekly remaining, requires {threshold} {percent}% "
+                          f"(resets {least.get('resets', 'unknown')}, "
+                          f"epoch {least.get('resets_at_epoch_seconds')})")
+        return None, f"{profile}: {remaining}% left, below the floor of {percent}%"
+    short_remaining = None
+    if short is not None:
+        left = [w.get("remaining_percent") for w in short]
+        if not left or any(type(value) not in {int, float} or not 0 <= value <= 100 for value in left):
+            return None, f"{profile}: no usable 5-hour quota report ({json.dumps(report)[:300]})"
+        short_remaining = min(left)
+        if short_remaining <= short_floor:
+            return None, f"{profile}: {short_remaining}% 5-hour remaining, requires above {short_floor}%"
+    return (remaining, short_remaining), None
 
 
 PILOT_TERRA_QUOTA_COST = 20
@@ -407,9 +418,13 @@ PILOT_CLAUDE_EFFORT = "high"
 PILOT_CLAUDE_AUXILIARY_PROVIDER_ID = "claude-haiku-5-5"
 
 
+def pilot_claude_quota(profile):
+    """Return the study's usable overall weekly and five-hour balances or why they are held."""
+    return _quota_status(profile, 25, weekly=True, strict=True, short_floor=20, unscoped=True)
+
+
 def pilot_claude_hold(profile):
-    """Apply the study's overall weekly and five-hour floors from one report."""
-    return quota_hold(floor=f"{profile}=25", weekly=True, strict=True, short_floor=20, unscoped=True)
+    return pilot_claude_quota(profile)[1]
 
 
 def repair_progress(previous, current):

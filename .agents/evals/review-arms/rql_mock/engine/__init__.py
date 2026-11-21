@@ -175,8 +175,9 @@ class Engine:
         if record_path.exists():
             # An interrupted query or a session left by the old protocol is never reused.
             finish_session(record_path.parent.parent, runner)
+        runner = runner.for_launch()
         record_path.parent.mkdir(parents=True, exist_ok=True)
-        identity = {"commit": commit, **snapshot}
+        identity = {"commit": commit, **snapshot, **runner.login._asdict()}
         # An interrupted launch may leave an engine without a recorded ID.
         # Keep the intent until it can be reconciled.
         save_json(record_path, identity)
@@ -237,7 +238,7 @@ class Engine:
                 active = directory / "active"
 
                 def add_turn(record):
-                    provenance["turns"].append(record)
+                    provenance["turns"].append({**record, **login})
                     provenance["turn"] = record["turn"]
                     provenance["context_id"] = record["context_id"]
                     for counter, tokens in (record["tokens"] or {}).items():
@@ -247,7 +248,8 @@ class Engine:
                 provenance["retired_sessions"] = []
                 for attempt in range(2):
                     runner, sid = self.session(commit, snapshot, active / "session.json")
-                    provenance["session"] = sid
+                    login = runner.login._asdict()
+                    provenance.update(session=sid, **login)
                     valid = False
                     try:
                         runner.prepare(sid, snapshot, active)
@@ -303,7 +305,7 @@ class Engine:
                     except IsolationFailure as error:
                         add_turn(error.record)
                         save_json(active / "void.json", {"session_id": sid, "reason": str(error)})
-                        provenance["retired_sessions"].append({"session": sid, "reason": str(error)})
+                        provenance["retired_sessions"].append({"session": sid, **login, "reason": str(error)})
                         if attempt:
                             raise
                     except RepairStalled as error:
@@ -311,7 +313,7 @@ class Engine:
                         # session as a voided one: its context may hold the model
                         # to its earlier mistakes.
                         provenance["retired_sessions"].append(
-                            {"session": sid, "reason": f"repair stalled: {error}"})
+                            {"session": sid, **login, "reason": f"repair stalled: {error}"})
                         if attempt:
                             return response("engine_error", message=str(error))
                     except TurnFailure as error:
@@ -334,6 +336,7 @@ class Engine:
 def load_engine(config_path=None, *, manifest_path=None):
     config_path = CONFIG if config_path is None else config_path
     config = load(config_path)
+    EngineRunner.configured_logins(config)
     manifest_path = Path(config["manifest"]) if manifest_path is None else manifest_path
     raw = manifest_path.read_bytes()
     manifest, documents, version = read_frozen_inputs(manifest_path, raw)

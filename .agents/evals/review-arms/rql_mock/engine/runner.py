@@ -1,4 +1,5 @@
 """Host adapter for the writer's sealed Podman launcher and distinct engine turns."""
+from copy import copy
 import fcntl
 import json
 import os
@@ -8,6 +9,7 @@ import subprocess
 from tempfile import NamedTemporaryFile
 import time
 import tomllib
+from typing import NamedTuple
 from uuid import uuid4
 from driver import PILOT_CLAUDE_EFFORT as EFFORT, PILOT_CLAUDE_MODEL as MODEL
 from driver import provider_model, verify_session_selection
@@ -493,22 +495,65 @@ class SealedRunner:
         return result["passed"]
 
 
+class EngineLogin(NamedTuple):
+    login_profile: str
+    engine_profile: str
+
+
 class EngineRunner(SealedRunner):
     engine_only = True
 
     def __init__(self, config, manifest=None):
-        self.login_profile = config.get("profile")
-        super().__init__({**config, "profile": config.get("engine_profile")}, manifest)
+        super().__init__(config, manifest)
+        self.logins = self.configured_logins(config)
+
+    @staticmethod
+    def configured_logins(config):
+        rows = config.get("logins")
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("engine configuration requires a nonempty logins list")
+        logins = []
+        profiles = set()
+        for row in rows:
+            if not isinstance(row, dict) or row.keys() != {"profile", "engine_profile"}:
+                raise ValueError("each engine login requires profile and engine_profile")
+            owner, alias = row["profile"], row["engine_profile"]
+            if (not isinstance(owner, str) or not owner or not isinstance(alias, str) or not alias
+                    or owner == alias or owner in profiles or alias in profiles):
+                raise ValueError("each engine login and alias must use a distinct profile")
+            profiles.update((owner, alias))
+            logins.append(EngineLogin(owner, alias))
+        return tuple(logins)
+
+    def select_login(self):
+        eligible, holds = [], []
+        for login in self.logins:
+            balances, hold = self.driver.pilot_claude_quota(login.login_profile)
+            if hold:
+                holds.append(hold)
+            else:
+                eligible.append((balances, login))
+        if not eligible:
+            raise LaunchHeld("; ".join(holds))
+        # max keeps the first candidate when both balances tie.
+        return max(eligible, key=lambda candidate: candidate[0])[1]
+
+    def for_launch(self):
+        login = self.select_login()
+        bound = copy(self)
+        bound.login = login
+        bound.config = {**self.config, "profile": bound.login.engine_profile}
+        return bound
 
     def check_quota(self):
-        if hold := self.driver.pilot_claude_hold(self.login_profile):
+        if hold := self.driver.pilot_claude_hold(self.login.login_profile):
             raise LaunchHeld(hold)
 
     def check_login_expiry(self, expires_at):
         # Leave enough time for Claude to finish one turn at the runner's timeout.
         if type(expires_at) is not int or expires_at <= (time.time() + TURN_TIMEOUT) * 1000:
             raise RuntimeError(
-                f"{self.login_profile} access credentials must stay valid for the next {TURN_TIMEOUT // 60} minutes"
+                f"{self.login.login_profile} access credentials must stay valid for the next {TURN_TIMEOUT // 60} minutes"
             )
 
     def seed_login(self):
@@ -516,18 +561,21 @@ class EngineRunner(SealedRunner):
 
     def sync_login(self, sid=None):
         """Publish the owner's access-only snapshot and return the token staged for this turn."""
-        alias = self.config["profile"]
-        if not alias or alias == self.login_profile:
-            raise ValueError("the engine requires its own engine_profile and the original claude5 profile")
+        profile, alias = self.login
         with (self.instance_dir / "config.toml").open("rb") as source:
             profiles = tomllib.load(source)["profiles"]
-        owner, engine = profiles[self.login_profile], profiles[alias]
+        owner, engine = profiles[profile], profiles[alias]
         login_home = Path(owner["home"]).expanduser().resolve(strict=True)
         home = Path(engine["home"]).expanduser().resolve(strict=True)
-        if (owner["kind"] != "claude" or login_home != (Path.home() / ".claude5").resolve(strict=True)
+        if (owner["kind"] != "claude" or login_home != (Path.home() / f".{profile}").resolve(strict=True)
                 or engine["kind"] != "claude" or engine.get("environment") or engine.get("aws")
                 or home.parent != self.instance_dir.resolve() or home == login_home):
-            raise ValueError("use the claude5 login and an auth-override-free engine home in the private instance")
+            raise ValueError(f"use the {profile} login and an auth-override-free engine home in the private instance")
+        for other in self.logins:
+            if other != self.login and other.engine_profile in profiles:
+                other_home = Path(profiles[other.engine_profile]["home"]).expanduser().resolve()
+                if home == other_home:
+                    raise ValueError(f"{alias} and {other.engine_profile} must have separate engine homes")
         if json.loads((home / "settings.json").read_bytes()) != ENGINE_SETTINGS:
             raise ValueError(f"engine settings do not match the tool policy at {home / 'settings.json'}")
 
@@ -537,12 +585,12 @@ class EngineRunner(SealedRunner):
             fcntl.flock(lock, fcntl.LOCK_EX)
             credential_file = login_home / ".credentials.json"
             if credential_file.is_symlink():
-                raise RuntimeError("claude5 credentials must be stored in its own login file")
+                raise RuntimeError(f"{profile} credentials must be stored in its own login file")
             credentials = json.loads(credential_file.read_bytes())
             oauth = credentials.get("claudeAiOauth") if isinstance(credentials, dict) else None
             token = oauth.get("accessToken") if isinstance(oauth, dict) else None
             if not isinstance(token, str) or not token:
-                raise RuntimeError(f"{self.login_profile} has no access credentials")
+                raise RuntimeError(f"{self.login.login_profile} has no access credentials")
             self.check_login_expiry(oauth.get("expiresAt"))
             oauth.pop("refreshToken", None)
             access_only = json.dumps({"claudeAiOauth": oauth}).encode("utf-8")
@@ -571,7 +619,7 @@ class EngineRunner(SealedRunner):
             input=access_only, capture_output=True, timeout=300,
         )
         if proc.returncode:
-            raise RuntimeError(f"could not synchronize {self.login_profile} credentials in engine session {sid}")
+            raise RuntimeError(f"could not synchronize {self.login.login_profile} credentials in engine session {sid}")
 
     def prompt(self, sid, text, context_id=None, *, before_send=None):
         token = self.sync_login(sid)
@@ -585,9 +633,9 @@ class EngineRunner(SealedRunner):
             try:
                 current_token = self.sync_login(sid)
             except RUN_ERRORS as sync_error:
-                raise TurnFailure(f"{self.login_profile} login was refused: {sync_error}", error.record) from sync_error
+                raise TurnFailure(f"{self.login.login_profile} login was refused: {sync_error}", error.record) from sync_error
             if current_token == token:
-                raise TurnFailure(f"{self.login_profile} login was refused and its access token is unchanged",
+                raise TurnFailure(f"{self.login.login_profile} login was refused and its access token is unchanged",
                                   error.record) from error
 
         # The failed provider request accepted no work. The retry gets its own
@@ -598,7 +646,7 @@ class EngineRunner(SealedRunner):
             raise
         except TurnFailure as error:
             if self._is_auth_refusal(error.record):
-                raise TurnFailure(f"{self.login_profile} login was refused after token rotation", error.record) from error
+                raise TurnFailure(f"{self.login.login_profile} login was refused after token rotation", error.record) from error
             raise
 
     @staticmethod
@@ -610,12 +658,7 @@ class EngineRunner(SealedRunner):
 
     def start(self, snapshot, record_id):
         try:
-            if self.login_profile != "claude5":
-                raise ValueError("the engine quota profile must be claude5")
-            self.check_quota()
             self.seed_login()
-        except LaunchHeld:
-            raise
         except RUN_ERRORS as error:
             raise LaunchPreflightFailure(str(error)) from error
         return self.launch_session(snapshot, record_id)
