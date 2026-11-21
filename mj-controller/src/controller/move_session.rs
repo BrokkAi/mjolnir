@@ -2307,6 +2307,19 @@ impl Controller {
                     if operation.in_place && operation.is_active() && !operation.cancellation_requested {
                         return self.retry_interrupted_in_place_move(admission, &mut operation, &previous, executor, manager).await;
                     }
+                    if !operation.in_place
+                        && matches!(
+                            self.restart_retained_move_source(
+                                admission, &id, &previous, executor, manager,
+                            )
+                            .await,
+                            Ok(true)
+                        )
+                    {
+                        operation.recovery_session = None;
+                        operation.source_snapshot = None;
+                        bail!("Move source capture was interrupted; source agent restarted in place. Retry Move when ready");
+                    }
                     let cause = anyhow::anyhow!("Move source sealed; environment retained for explicit retry");
                     return Err(self.retain_failed_in_place_move(&id, &previous, cause)?);
                 }
@@ -2433,18 +2446,25 @@ impl Controller {
                                     && record.target.as_deref() == previous.target.as_deref()
                             });
                         if destination_teardown_confirmed {
-                            if let Err(restart_err) = self
+                            match self
                                 .restart_retained_move_source(
                                     admission, &id, &previous, executor, manager,
                                 )
                                 .await
                             {
-                                tracing::warn!(
-                                    session_id = %id,
-                                    operation_id = %operation.operation_id,
-                                    error = %restart_err,
-                                    "could not restart retained Move source after destination rollback"
-                                );
+                                Ok(true) => {
+                                    operation.recovery_session = None;
+                                    operation.source_snapshot = None;
+                                }
+                                Ok(false) => {}
+                                Err(restart_err) => {
+                                    tracing::warn!(
+                                        session_id = %id,
+                                        operation_id = %operation.operation_id,
+                                        error = %restart_err,
+                                        "could not restart retained Move source after destination rollback"
+                                    );
+                                }
                             }
                         } else {
                             tracing::warn!(
@@ -3231,18 +3251,25 @@ impl Controller {
                                 && record.target.as_deref() == previous.target.as_deref()
                         });
                     if destination_teardown_confirmed {
-                        if let Err(restart_err) = self
+                        match self
                             .restart_retained_move_source(
                                 admission, &id, &previous, executor, manager,
                             )
                             .await
                         {
-                            tracing::warn!(
-                                session_id = %id,
-                                operation_id = %operation.operation_id,
-                                error = %restart_err,
-                                "could not restart source agent in place after failed cross-target Move"
-                            );
+                            Ok(true) => {
+                                operation.recovery_session = None;
+                                operation.source_snapshot = None;
+                            }
+                            Ok(false) => {}
+                            Err(restart_err) => {
+                                tracing::warn!(
+                                    session_id = %id,
+                                    operation_id = %operation.operation_id,
+                                    error = %restart_err,
+                                    "could not restart source agent in place after failed cross-target Move"
+                                );
+                            }
                         }
                     } else {
                         tracing::warn!(

@@ -194,13 +194,16 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
         error: None,
     };
 
-    // Crash right before DestinationOwns: source owns, destination torn down.
+    // Crash right before DestinationOwns: source owns and retains its environment.
     assert_eq!(classify_move_ownership(&op), MoveOwnership::Source);
+    assert!(op.retains_source_environment());
     // Crash right after DestinationOwns: destination owns, finish forward.
     op.phase = MovePhase::DestinationOwns;
     assert_eq!(classify_move_ownership(&op), MoveOwnership::Destination);
+    assert!(!op.retains_source_environment());
     op.phase = MovePhase::SourceRetired;
     assert_eq!(classify_move_ownership(&op), MoveOwnership::Destination);
+    assert!(!op.retains_source_environment());
 }
 
 #[test]

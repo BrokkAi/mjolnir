@@ -798,8 +798,13 @@ impl MoveOperation {
                 && self.queue_admission_finished)
     }
 
+    /// Whether this Move retains its source environment before destination
+    /// ownership commits. Both in-place Moves (which never recreate the target)
+    /// and cross-target Moves before `DestinationOwns` keep the source intact so
+    /// any pre-commit interruption or failure rolls back to the source instead
+    /// of tearing it down before a destination exists.
     pub fn retains_source_environment(&self) -> bool {
-        self.in_place
+        self.in_place || (!self.phase.destination_owns() && !self.queue_admission_started)
     }
 
     pub fn restore_artifact(&self) -> Option<&CheckpointMetadata> {
