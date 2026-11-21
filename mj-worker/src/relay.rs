@@ -1828,6 +1828,21 @@ impl DurableRelay {
             .values()
             .any(RelayDispatchRecord::prompt_may_have_reached_agent);
         if let Some(evidence) = &self.snapshot.native_use_evidence {
+            // Before the restored worker opens its first harness session,
+            // `native_session_id` is still `None` while the seed's archived
+            // evidence is already present. Honor `restored_native_session_unused`
+            // so an unused restored session can still take `LoadBeforeReplace`.
+            if self.snapshot.native_session_id.is_none() {
+                return if evidence.version == 1
+                    && evidence.usage == NativeSessionUse::Unused
+                    && self.snapshot.restored_native_session_unused
+                    && !dispatched
+                {
+                    NativeSessionHistory::LoadBeforeReplace
+                } else {
+                    NativeSessionHistory::MayHaveHistory
+                };
+            }
             if evidence.version != 1
                 || Some(&evidence.native_session_id) != self.snapshot.native_session_id.as_ref()
                 || evidence.usage != NativeSessionUse::Unused

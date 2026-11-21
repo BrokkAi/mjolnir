@@ -11130,3 +11130,102 @@ fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
     ));
     assert!(matches!(refused.body, RelayResponseBody::Error { .. }));
 }
+
+#[test]
+fn restored_schema_15_seed_preserves_load_before_replace_and_used_or_unknown_evidence() {
+    // 1. Unused evidence restored into a fresh relay (native_session_id == None)
+    //    must return LoadBeforeReplace, and opening a replacement fresh ID must
+    //    record replaced_unused_native_session_id and reset evidence to the fresh ID.
+    let temp = tempfile::tempdir().unwrap();
+    let unused_seed = mj_core::relay::RestoredRelaySeed {
+        command_ledger: None,
+        assessment_state: None,
+        notification_stack: None,
+        event_frontier: 4,
+        event_frontier_digest: "a".repeat(64),
+        queued_prompts: Vec::new(),
+        accepted_config: Default::default(),
+        native_session_unused: true,
+        mailbox: None,
+        native_use_evidence: Some(mj_core::relay::NativeSessionUseEvidence {
+            version: 1,
+            native_session_id: "archived-unused".into(),
+            opened_ordinal: Some(2),
+            usage: NativeSessionUse::Unused,
+        }),
+    };
+    std::fs::write(
+        mj_core::relay::restored_relay_seed_path(temp.path()),
+        serde_json::to_vec(&unused_seed).unwrap(),
+    )
+    .unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "restore-unused-evidence").unwrap();
+    assert_eq!(relay.operational_state().native_session_id, None);
+    assert_eq!(
+        relay.native_session_history(),
+        NativeSessionHistory::LoadBeforeReplace
+    );
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "fresh-replacement".into(),
+            native_continuity_lost: false,
+            resumed: false,
+            replaced_unused_native_session_id: Some("archived-unused".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        relay.operational_state().replaced_unused_native_session_id.as_deref(),
+        Some("archived-unused")
+    );
+    let fresh_evidence = relay.snapshot.native_use_evidence.as_ref().unwrap();
+    assert_eq!(fresh_evidence.native_session_id, "fresh-replacement");
+    assert_eq!(fresh_evidence.usage, NativeSessionUse::Unused);
+
+    // 2. Unknown or Used evidence restored into a fresh relay must return
+    //    MayHaveHistory and preserve Unknown / Used when the archived ID opens.
+    for usage in [NativeSessionUse::Unknown, NativeSessionUse::Used] {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = mj_core::relay::RestoredRelaySeed {
+            command_ledger: None,
+            assessment_state: None,
+            notification_stack: None,
+            event_frontier: 4,
+            event_frontier_digest: "a".repeat(64),
+            queued_prompts: Vec::new(),
+            accepted_config: Default::default(),
+            native_session_unused: false,
+            mailbox: None,
+            native_use_evidence: Some(mj_core::relay::NativeSessionUseEvidence {
+                version: 1,
+                native_session_id: "archived-id".into(),
+                opened_ordinal: Some(2),
+                usage,
+            }),
+        };
+        std::fs::write(
+            mj_core::relay::restored_relay_seed_path(dir.path()),
+            serde_json::to_vec(&seed).unwrap(),
+        )
+        .unwrap();
+        let mut relay = DurableRelay::open(dir.path(), SESSION, "restore-used-evidence").unwrap();
+        assert_eq!(
+            relay.native_session_history(),
+            NativeSessionHistory::MayHaveHistory
+        );
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "archived-id".into(),
+                native_continuity_lost: false,
+                resumed: false,
+                replaced_unused_native_session_id: None,
+            })
+            .unwrap();
+        let opened_evidence = relay.snapshot.native_use_evidence.as_ref().unwrap();
+        assert_eq!(opened_evidence.native_session_id, "archived-id");
+        assert_eq!(opened_evidence.usage, usage);
+        assert_eq!(
+            relay.native_session_history(),
+            NativeSessionHistory::MayHaveHistory
+        );
+    }
+}
