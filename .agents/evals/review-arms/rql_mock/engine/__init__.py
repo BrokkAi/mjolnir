@@ -33,8 +33,11 @@ def read_frozen_inputs(manifest_path, raw):
     for key in DOCUMENT_KEYS:
         path = manifest_path.parent / paths[key]
         content = path.read_bytes()
-        if hashlib.sha256(content).hexdigest() != hashes[f"{key}_sha256"]:
-            raise ValueError(f"frozen engine input digest does not match: {key}")
+        expected = hashes[f"{key}_sha256"]
+        actual = hashlib.sha256(content).hexdigest()
+        if actual != expected:
+            raise ValueError(f"frozen engine input digest does not match for {key} at {path}. "
+                             f"Expected {expected}, got {actual}.")
         data[key] = content
     provider_version = manifest["model_versions"]["fable_provider_id"]
     if not re.fullmatch(r"claude-fable-[0-9]+(?:-[0-9]+)+", provider_version):
@@ -277,3 +280,8 @@ def load_engine(config_path=None, *, manifest_path=None):
     engine.manifest = manifest
     engine.config = config
     return engine
+
+
+def answer(commit, query, *, fresh=False):
+    """Answer on the host, optionally making a fresh stability re-ask."""
+    return load_engine().answer(commit, query, fresh=fresh)

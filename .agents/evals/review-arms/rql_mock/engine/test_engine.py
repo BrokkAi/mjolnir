@@ -235,6 +235,46 @@ class FrozenInputTests(unittest.TestCase):
                     else:
                         self.assertEqual(body["rows"], ROWS)
 
+    def test_engine_load_failure_stores_details_on_the_host(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self.fixture(root)
+            raw = json.loads(manifest.read_text())
+            raw["page_rows"] = 50
+            manifest.write_text(json.dumps(raw))
+            config = root / "engine.json"
+            descriptor, log = root / "transport.json", root / "queries.jsonl"
+            descriptor.write_text(json.dumps({
+                "manifest": str(manifest), "engine": "rql_mock.engine:load_engine",
+                "sessions": {SESSION: {"diff": raw["diffs"][0]["key"], "intro": COMMIT, "arm": "R",
+                                       "log": str(log), "manifest_sha256": "0" * 64,
+                                       "engine_inputs_sha256": "1" * 64}},
+            }))
+            wrapper = Path(__file__).resolve().parents[1] / "serve-rql.sh"
+            env = {**os.environ, "SSH_ORIGINAL_COMMAND": SESSION, "REVIEW_ARMS_ENGINE_ROOT": str(root)}
+            catalogue = root / raw["input_paths"]["catalogue"]
+            diagnostic = log.with_name("engine-load-error.jsonl")
+            for failure in ("missing_config", "unreadable_input", "wrong_digest"):
+                with self.subTest(failure=failure):
+                    if failure != "missing_config":
+                        config.write_text(json.dumps({"manifest": str(manifest)}))
+                    if failure == "unreadable_input":
+                        catalogue.unlink()
+                    elif failure == "wrong_digest":
+                        catalogue.write_bytes(b"tampered")
+                    result = subprocess.run([wrapper, descriptor, SESSION], env=env, input="",
+                                            capture_output=True, text=True, timeout=15)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr.strip(), "serve-rql: invalid host transport configuration")
+                    record = json.loads(diagnostic.read_text().splitlines()[-1])
+                    self.assertEqual(record["session"], SESSION)
+                    self.assertIn("Traceback", record["traceback"])
+                    self.assertIn(str(config if failure == "missing_config" else catalogue), record["error"])
+                    if failure == "wrong_digest":
+                        self.assertIn(raw["inputs"]["catalogue_sha256"], record["error"])
+                        self.assertIn(hashlib.sha256(b"tampered").hexdigest(), record["error"])
+            self.assertEqual(diagnostic.stat().st_mode & 0o777, 0o600)
+
     # Hard-won: 49e16b8: a prompt change reused prior raw answers and fidelity measurements.
     def test_fidelity_checkpoints_follow_the_answer_cache_input_hash(self):
         with TemporaryDirectory() as directory:
@@ -444,7 +484,9 @@ class EngineTests(unittest.TestCase):
         runner = FakeRunner([payload(), payload([]), payload([])])
         engine = self.engine(runner)
         cached = engine.answer(COMMIT, QUERY)
-        fresh = [engine.answer(COMMIT, QUERY, fresh=True) for _ in range(2)]
+        self.addCleanup(setattr, live_engine, "load_engine", live_engine.load_engine)
+        live_engine.load_engine = lambda: engine
+        fresh = [live_engine.answer(COMMIT, QUERY, fresh=True) for _ in range(2)]
         self.assertTrue(all(answer["status"] == "ok" for answer in [cached, *fresh]))
         self.assertFalse(cached["provenance"]["fresh"])
         self.assertTrue(all(answer["provenance"]["fresh"] for answer in fresh))

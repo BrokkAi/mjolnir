@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import sys
 import time
+import traceback
 
 from protocol import encode, serve
 
@@ -55,6 +56,22 @@ def error(status, message, **fields):
     return {"status": status, "message": message, **fields}
 
 
+def append_record(log, record):
+    # Connections can overlap during reconnects.
+    fcntl.flock(log, fcntl.LOCK_EX)
+    try:
+        log.write(encode(record) + "\n")
+        log.flush()
+    finally:
+        fcntl.flock(log, fcntl.LOCK_UN)
+
+
+def record_host_error(log_path, name, session, message, **details):
+    with Path(log_path).with_name(name).open("a", encoding="utf-8") as log:
+        append_record(log, {"time": datetime.now(timezone.utc).isoformat(),
+                            "session": session, "error": message, **details})
+
+
 class Server:
     def __init__(self, session, assignment, page_rows, engine, log):
         self.session = session
@@ -62,6 +79,22 @@ class Server:
         self.page_rows = page_rows
         self.engine = engine
         self.log = log
+
+    def require_identity(self):
+        expected = {key: self.assignment.get(key) for key in IDENTITY_FIELDS}
+        actual = self.engine.identity
+        if (not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+                    for value in expected.values()) or expected != actual):
+            raise ValueError(f"RQL engine inputs differ from the frozen writer assignment. "
+                             f"Expected {expected!r}, loaded {actual!r}")
+
+    def tools(self):
+        try:
+            self.require_identity()
+        except ValueError as exc:
+            record_host_error(self.log.name, "engine-identity-error.jsonl", self.session, str(exc))
+            return []
+        return [TOOL]
 
     def page_answer(self, result, page):
         status = result["status"]
@@ -117,10 +150,7 @@ class Server:
             payload = error("invalid_arguments", "rql_query takes a string query and a positive integer page.")
         else:
             try:
-                expected_inputs = {key: self.assignment[key] for key in IDENTITY_FIELDS}
-                if (not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in expected_inputs.values())
-                        or expected_inputs != self.engine.identity):
-                    raise ValueError("RQL engine inputs differ from the frozen writer assignment.")
+                self.require_identity()
                 result = self.engine.answer(self.assignment["intro"], query)
                 payload = self.page_answer(result, page)
                 provenance = result.get("provenance")
@@ -156,13 +186,7 @@ class Server:
             record["engine_diagnostic"] = diagnostic
         def log_delivery(delivered):
             record["delivered"] = delivered
-            # Reconnects can run in parallel. Keep a large audit record together.
-            fcntl.flock(self.log, fcntl.LOCK_EX)
-            try:
-                self.log.write(encode(record) + "\n")
-                self.log.flush()
-            finally:
-                fcntl.flock(self.log, fcntl.LOCK_UN)
+            append_record(self.log, record)
         return {
             "content": [{"type": "text", "text": delivered}],
             "isError": payload["status"] != "ok",
@@ -183,6 +207,14 @@ def main():
         if assignment["arm"] == "none":
             serve([])
             return
+        log_path = Path(assignment["log"])
+        if not log_path.is_absolute():
+            raise ValueError("invalid session assignment log")
+    except (OSError, ValueError, KeyError, TypeError):
+        sys.exit("serve-rql: invalid host transport configuration")
+
+    os.umask(0o077)
+    try:
         manifest = json.loads(Path(config["manifest"]).read_text(encoding="utf-8"))
         page_rows = manifest["page_rows"]
         if type(page_rows) is not int or page_rows < 1:
@@ -192,7 +224,6 @@ def main():
             assignment["arm"] not in {"R", "R-loc"}
             or not re.fullmatch(r"[0-9a-f]{40}", assignment["intro"])
             or intros.get(assignment["diff"]) != assignment["intro"]
-            or not Path(assignment["log"]).is_absolute()
         ):
             raise ValueError("invalid session assignment")
         # The forced command executes this file by path, so add the package
@@ -201,15 +232,21 @@ def main():
         entry = config["engine"]
         module, _, function = ENGINE_LOADERS.get(entry, entry).partition(":")
         engine = getattr(import_module(module), function)()
-        if not callable(engine.answer):
-            raise ValueError("engine answer is not callable")
-    except (OSError, ValueError, KeyError, TypeError, ImportError, AttributeError):
+        if not callable(engine.answer) or not isinstance(engine.identity, dict):
+            raise ValueError("engine must provide an identity and a callable answer")
+    except Exception as exc:
+        try:
+            record_host_error(log_path, "engine-load-error.jsonl", args.session, str(exc),
+                              engine=config.get("engine"), transport=str(args.config),
+                              expected_inputs={key: assignment.get(key) for key in IDENTITY_FIELDS},
+                              traceback=traceback.format_exc())
+        except (OSError, TypeError, ValueError):
+            sys.exit("serve-rql: could not record host transport diagnostic")
         sys.exit("serve-rql: invalid host transport configuration")
-    os.umask(0o077)
     try:
-        with open(assignment["log"], "a", encoding="utf-8") as log:
+        with log_path.open("a", encoding="utf-8") as log:
             server = Server(args.session, assignment, page_rows, engine, log)
-            serve([TOOL], server.call)
+            serve(server.tools, server.call)
     except OSError:
         sys.exit("serve-rql: transport I/O failed")
 
