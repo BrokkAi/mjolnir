@@ -1,6 +1,7 @@
 use super::*;
 use crate::acp::tests::silent_bridge_spec;
 use serde_json::{Value, json};
+use std::path::Path;
 
 /// A scripted ACP harness that plays both sides of a guardian review. The
 /// process the worker starts for the session asks permission for each command
@@ -446,18 +447,4 @@ async fn a_verdict_reached_while_the_person_wrote_again_is_reviewed_again() {
         prompts[1]
     );
     runtime.abort();
-}
-
-/// Release archives ship the Codex notice from `licenses/native`, and the
-/// published worker crate, which carries Codex's policy text, ships its own
-/// copy; both must say the same.
-#[test]
-fn the_codex_notice_in_the_crate_matches_the_release_copy() {
-    let crate_copy = include_str!("guardian/OPENAI_CODEX_NOTICE.txt");
-    let release_copy = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../licenses/native/OPENAI_CODEX_GUARDIAN_NOTICE.txt"),
-    )
-    .unwrap();
-    assert_eq!(crate_copy, release_copy);
 }

@@ -19,11 +19,6 @@ use super::*;
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
-/// Codex's `REVIEW_TIMEOUT`: one deadline for a whole review, including
-/// starting the reviewer and every attempt. Waiting while another review
-/// starts the shared reviewer is a queue for it, not this review's own work,
-/// so the deadline starts after that.
-const REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
 /// Codex's `MAX_REVIEW_ATTEMPTS`: reviewer prompts per review, counting a
 /// retry on a fresh reviewer and a reminder for a reply without a verdict.
 const MAX_REVIEW_ATTEMPTS: usize = 3;
@@ -47,18 +42,19 @@ pub(in crate::acp) struct Guardian {
 }
 
 impl Guardian {
-    /// The guardian for `spec`, when its harness relies on Mjolnir's, its
-    /// target keeps configured approvals, and its profile has not turned the
-    /// guardian off.
+    /// Until daemon review is wired, offer the existing ACP reviewer only
+    /// for the harnesses whose reviewer launches already support it.
     pub(in crate::acp) fn for_launch(spec: &LaunchSpec) -> Option<Arc<Self>> {
-        spec.harness
-            .mjolnir_guardian_reviews(spec.execution_policy, spec.approval_choices)
-            .then(|| {
-                Arc::new(Self {
-                    spec: spec.clone(),
-                    host: tokio::sync::Mutex::new(None),
-                })
+        (spec.harness.guardian() == mj_core::config::GuardianReviewer::Mjolnir
+            && spec
+                .harness
+                .mjolnir_guardian_reviews(spec.execution_policy, spec.approval_choices))
+        .then(|| {
+            Arc::new(Self {
+                spec: spec.clone(),
+                host: tokio::sync::Mutex::new(None),
             })
+        })
     }
 
     /// Review one permission request.
@@ -85,39 +81,45 @@ impl Guardian {
             &self.spec.cwd,
             native_child,
         );
+        let tool_call_id = request.tool_call.tool_call_id.to_string();
         let slot = self.host.lock().await;
+        // Time spent waiting for the shared reviewer is outside the review deadline.
         let started = std::time::Instant::now();
-        let assessment =
-            match tokio::time::timeout(REVIEW_TIMEOUT, self.decide(slot, &action)).await {
-                Ok(Ok(assessment)) => assessment,
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        target: "mj_guardian",
-                        harness = %self.spec.harness.display_name(),
-                        tool_call_id = %request.tool_call.tool_call_id,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        error = %format!("{error:#}"),
-                        "guardian review failed; asking the person"
-                    );
-                    return GuardianDecision::AskPerson {
-                        reason: format!("its review failed: {error:#}"),
-                    };
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        target: "mj_guardian",
-                        harness = %self.spec.harness.display_name(),
-                        tool_call_id = %request.tool_call.tool_call_id,
-                        "guardian review timed out; asking the person"
-                    );
-                    return GuardianDecision::AskPerson {
-                        reason: format!(
-                            "its review did not finish within {} seconds",
-                            REVIEW_TIMEOUT.as_secs()
-                        ),
-                    };
-                }
-            };
+        let assessment = match tokio::time::timeout(
+            GUARDIAN_REVIEW_TIMEOUT,
+            self.decide(slot, &tool_call_id, &action),
+        )
+        .await
+        {
+            Ok(Ok(assessment)) => assessment,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    target: "mj_guardian",
+                    harness = %self.spec.harness.display_name(),
+                    tool_call_id = %request.tool_call.tool_call_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    error = %format!("{error:#}"),
+                    "guardian review failed; asking the person"
+                );
+                return GuardianDecision::AskPerson {
+                    reason: format!("its review failed: {error:#}"),
+                };
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "mj_guardian",
+                    harness = %self.spec.harness.display_name(),
+                    tool_call_id = %request.tool_call.tool_call_id,
+                    "guardian review timed out; asking the person"
+                );
+                return GuardianDecision::AskPerson {
+                    reason: format!(
+                        "its review did not finish within {} seconds",
+                        GUARDIAN_REVIEW_TIMEOUT.as_secs()
+                    ),
+                };
+            }
+        };
         let outcome = assessment.enforced_outcome();
         // Never the rationale or the reviewer's text: both can quote
         // workspace content. The transcript carries a denial's rationale.
@@ -151,19 +153,32 @@ impl Guardian {
     /// it is reviewed again on what they now say, as Codex discards a stale
     /// verdict (`review_request.rs`). Each repeat follows a new message; the
     /// review deadline bounds them.
-    async fn decide(&self, first: HostSlot<'_>, action: &serde_json::Value) -> Result<Assessment> {
+    async fn decide(
+        &self,
+        first: HostSlot<'_>,
+        tool_call_id: &str,
+        action: &serde_json::Value,
+    ) -> Result<Assessment> {
         let mut slot = Some(first);
         let mut attempts = 0;
         loop {
-            let evidence =
-                ReviewEvidence::collect(self.spec.harness, &self.spec.turn_context, action);
+            let evidence = ReviewEvidence::collect(
+                self.spec.harness,
+                &self.spec.turn_context,
+                tool_call_id,
+                action,
+            );
             let prompt = vec![
-                ContentBlock::Text(TextContent::new(reviewer_instructions())),
-                ContentBlock::Text(TextContent::new(evidence.request_text())),
+                ContentBlock::Text(TextContent::new(reviewer_instructions_acp())),
+                ContentBlock::Text(TextContent::new(evidence.request.request_text())),
             ];
             let assessment = self.assess(&mut slot, &prompt, &mut attempts).await?;
-            let current =
-                ReviewEvidence::collect(self.spec.harness, &self.spec.turn_context, action);
+            let current = ReviewEvidence::collect(
+                self.spec.harness,
+                &self.spec.turn_context,
+                tool_call_id,
+                action,
+            );
             if !current.person_wrote_since(&evidence) {
                 return Ok(assessment);
             }

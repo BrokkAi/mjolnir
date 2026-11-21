@@ -505,6 +505,10 @@ pub enum RelayRequest {
     CompleteHistoryRequest {
         result: crate::history::HistoryResult,
     },
+    GuardianRequests,
+    CompleteGuardianRequest {
+        result: crate::guardian::GuardianReviewResult,
+    },
     /// Acknowledge a completed MCP request and cache its bounded answer for
     /// subsequent tool calls and restart recovery.
     CompleteSubagentRequest {
@@ -701,6 +705,8 @@ impl RelayRequest {
             Self::HistoryQuery { .. } => "history_query",
             Self::HistoryRequests => "history_requests",
             Self::CompleteHistoryRequest { .. } => "complete_history_request",
+            Self::GuardianRequests => "guardian_requests",
+            Self::CompleteGuardianRequest { .. } => "complete_guardian_request",
             Self::CompleteSubagentRequest { .. } => "complete_subagent_request",
             Self::Reviewer { request, .. } => request.action_name(),
         }
@@ -728,6 +734,9 @@ impl RelayRequest {
             Self::HistoryQuery { .. }
             | Self::HistoryRequests
             | Self::CompleteHistoryRequest { .. } => 16,
+            Self::GuardianRequests | Self::CompleteGuardianRequest { .. } => {
+                super::RELAY_GUARDIAN_REVIEW_PROTOCOL
+            }
             Self::AttachmentPresent { .. }
             | Self::InstallAttachment { .. }
             | Self::ReadAttachment { .. } => 8,
@@ -1172,6 +1181,9 @@ pub enum RelayResponsePayload {
     },
     HistoryRequests {
         requests: Vec<crate::history::HistoryRequest>,
+    },
+    GuardianRequests {
+        requests: Vec<crate::guardian::GuardianReviewRequest>,
     },
     HistoryResult {
         result: crate::history::HistoryResult,
