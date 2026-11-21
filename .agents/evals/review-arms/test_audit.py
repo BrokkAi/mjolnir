@@ -961,7 +961,7 @@ def test_file_tools_and_root_globs_reject_escaping_symlink_targets(tmp_path, tar
     symlink_inventory(tmp_path, {"alias": target})
     for name, kind, raw in (
         ("Read", "read", {"file_path": "alias/input"}),
-        ("Glob", "search", {"pattern": ".rql-engine-*/answer.json"}),
+        ("Glob", "search", {"pattern": "**/*.rs"}),
     ):
         report = audit_call(tmp_path, {"name": name, "kind": kind, "rawInput": raw}, engine=True)
         assert not report["passed"]
@@ -983,6 +983,45 @@ def test_glob_finds_an_escaping_link_under_an_internal_directory_alias(tmp_path)
     report = audit_call(tmp_path, call, engine=True)
     assert not report["passed"]
     assert any("tracked symlink" in hit["snippet"] for hit in report["hits"])
+    call["rawInput"]["pattern"] = "alias/safe/*"
+    assert audit_call(tmp_path, call, engine=True)["passed"]
+
+
+# Hard-won: 1d9846951: a scratch-only Glob voided a live turn because of unrelated cache links
+@pytest.mark.parametrize(("pattern", "passed"), [
+    (".rql-engine-*/*", True),
+    ("**/*.rs", False),
+    (".agents/records/**", False),
+    ("*/records/**", False),
+    (".agents/records/tract-warm-latency/codeql-h2h/*/target/*", False),
+    (".agents/records/tract-warm-latency/codeql-h2h/*/notes/*", True),
+    (".agents/records/tract-warm-latency/codeql-h2h/*", True),
+    (".rql-engine-[a-z]/*", False),
+    ("answers.json", False),
+])
+def test_engine_glob_checks_only_reachable_links(tmp_path, pattern, passed):
+    prefix = ".agents/records/tract-warm-latency"
+    links = {f"{prefix}/{name}/target": "/mnt/optane/mbx-targets/v1/scrubbed" for name in (
+        "codeql-h2h/fixture",
+        "rust-sql-taint-gap/fixtures/api-wrapper-sink",
+        "rust-sql-taint-gap/fixtures/direct-postgres",
+        "rust-sql-taint-gap/fixtures/minimal-postgres",
+    )}
+    symlink_inventory(tmp_path, {**links, "CLAUDE.md": "AGENTS.md"})
+    call = {"name": "Glob", "kind": "search", "rawInput": {"pattern": pattern, "path": ENGINE_CWD},
+            "locations": [{"path": ENGINE_CWD}]}
+    report = audit_call(tmp_path, call, engine=True)
+    assert report["passed"] is passed, report["hits"]
+    if not passed:
+        assert any(hit["kind"] == "needs-inspection" for hit in report["hits"])
+
+
+def test_engine_glob_checks_claudes_rewritten_root_prefix(tmp_path):
+    symlink_inventory(tmp_path, {"src/cache": "/mnt/optane/mbx-targets"})
+    call = {"name": "Glob", "kind": "search", "rawInput": {"path": f"{ENGINE_CWD}/src", "pattern": "src/*"}}
+    report = audit_call(tmp_path, call, engine=True)
+    assert not report["passed"]
+    assert any("tracked symlink" in hit["snippet"] for hit in report["hits"])
 
 
 def test_cyclic_and_overlong_link_chains_need_inspection(tmp_path):
@@ -1000,7 +1039,7 @@ def test_old_inventory_without_targets_keeps_the_strict_glob_check(tmp_path):
     (tmp_path / "pre-inventory.json").write_text(json.dumps({
         "cwd": ENGINE_CWD, "tracked_symlinks": ["CLAUDE.md"],
     }))
-    call = {"name": "Glob", "kind": "search", "rawInput": {"pattern": ".rql-engine-*/answer.json"}}
+    call = {"name": "Glob", "kind": "search", "rawInput": {"pattern": "**/*.rs"}}
     report = audit_call(tmp_path, call, engine=True)
     assert not report["passed"]
     assert any("tracked symlink" in hit["snippet"] for hit in report["hits"])

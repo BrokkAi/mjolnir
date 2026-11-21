@@ -6,6 +6,7 @@ verdict: every hit is read by hand before a run is accepted or excluded.
 """
 import ast
 from collections import Counter
+from fnmatch import fnmatchcase
 import json
 import os
 import pathlib
@@ -1126,21 +1127,27 @@ class FilePathEvidence:
             stack.append((candidate, iter(pathlib.PurePosixPath(target).parts)))
         return tuple(resolved)
 
-    def glob_link_targets(self, root):
-        pending = [root]
-        seen = {root}
+    def glob_link_targets(self, root, pattern):
+        start = (root, frozenset({0}))
+        pending = [start]
+        seen = {start}
+        links = sorted(self.links or ())
         while pending:
-            directory = pending.pop()
-            for link in sorted(self.links or ()):
+            directory, states = pending.pop()
+            for link in links:
                 if link[:len(directory)] != directory:
                     continue
+                remaining = glob_after(pattern, states, link[len(directory):])
+                if not remaining:
+                    continue
                 target = self.resolve(link)
-                if target not in seen:
-                    seen.add(target)
-                    pending.append(target)
-                    yield target
+                next_step = (target, remaining)
+                if next_step not in seen:
+                    seen.add(next_step)
+                    pending.append(next_step)
+                yield target
 
-    def check(self, path, cwd, *, glob=False):
+    def check(self, path, cwd, *, glob_patterns=()):
         if self.blocked:
             raise InspectionRequired("path follows link handling or an unresolved command")
         # Inspect raw prefixes too. A traversal can follow a symlink before
@@ -1165,8 +1172,8 @@ class FilePathEvidence:
         if self.scratch in prefixes and target != self.scratch and not target.startswith(self.scratch + "/"):
             raise InspectionRequired("path leaves the verified scratch directory")
         targets = {target}
-        if glob:
-            targets.update(posixpath.join(self.root, *link) for link in self.glob_link_targets(resolved))
+        for pattern in glob_patterns:
+            targets.update(posixpath.join(self.root, *link) for link in self.glob_link_targets(resolved, pattern))
         return targets - {prefixes[-1]}
 
     def check_in_place(self, path, cwd, own_workspace):
@@ -2181,15 +2188,52 @@ def path_operands(call):
                         yield key, path
 
 
-def symlink_hits(path, cwd, evidence, *, glob=False):
+def symlink_hits(path, cwd, evidence, *, glob_patterns=()):
     try:
-        for target in sorted(evidence.check(path, cwd, glob=glob)):
+        for target in sorted(evidence.check(path, cwd, glob_patterns=glob_patterns)):
             yield from path_hits(target, evidence.workspace)
     except InspectionRequired as error:
         yield "needs-inspection", f"{error}: {path}"
 
 
-def search_pattern_symlink_hits(call, cwd, evidence):
+def engine_glob_patterns(pattern, root):
+    parts = pattern.split("/")
+    if (re.search(r"[\[\]{}!\x00]", pattern)
+            or any(part in {"", "."} or "**" in part and part != "**" for part in parts)):
+        raise InspectionRequired("unsupported Glob pattern")
+    encoded = tuple(os.fsencode(part) for part in parts)
+    # Claude Code 2.1.326 uses ripgrep --glob --hidden by default.
+    # A basename-only glob can match at any depth and '*' can match a dot.
+    yield (b"**", *encoded) if len(parts) == 1 else encoded
+    # Claude can strip a repeated literal prefix from a pattern supplied
+    # with a path. Check both spellings because the rewrite probes the FS.
+    root_parts = pathlib.PurePosixPath(root).parts
+    literal_count = next((i for i, part in enumerate(parts[:-1]) if "*" in part or "?" in part), len(parts) - 1)
+    for size in range(literal_count, 0, -1):
+        if tuple(parts[:size]) == root_parts[-size:]:
+            remaining = encoded[size:]
+            # The spawn path can drop the leading slash of the rewrite.
+            yield (b"**", *remaining) if len(remaining) == 1 else remaining
+            break
+
+
+def glob_after(pattern, states, components):
+    for component in components:
+        name = os.fsencode(component)
+        advancing = set()
+        for index in states:
+            while index < len(pattern) and pattern[index] == b"**":
+                advancing.add(index)  # Consume this component and keep '**' active.
+                index += 1  # Or let '**' match zero components.
+            if index < len(pattern) and fnmatchcase(name, pattern[index]):
+                advancing.add(index + 1)
+        if not advancing:
+            return frozenset()
+        states = advancing
+    return frozenset(states)
+
+
+def search_pattern_symlink_hits(call, cwd, evidence, *, engine=False):
     raw = call.get("rawInput")
     if not isinstance(raw, dict):
         return
@@ -2205,10 +2249,19 @@ def search_pattern_symlink_hits(call, cwd, evidence):
                 or "\\" in pattern or ".." in pattern or pattern.startswith("~")):
             yield "needs-inspection", f"unverified {name} {key}: {pattern!r}"
         elif name == "Glob" and isinstance(root, str) and root:
-            literal = re.split(r"[*?\[{]", pattern, maxsplit=1)[0]
-            if literal != pattern:
-                literal = posixpath.dirname(literal)
-            yield from symlink_hits(posixpath.join(root, literal), cwd, evidence, glob=True)
+            if engine:
+                try:
+                    search_root = recorded_path(root, cwd) or root
+                    patterns = tuple(engine_glob_patterns(pattern, search_root))
+                except InspectionRequired:
+                    yield "needs-inspection", f"unverified {name} {key}: {pattern!r}"
+                else:
+                    yield from symlink_hits(root, cwd, evidence, glob_patterns=patterns)
+            else:
+                literal = re.split(r"[*?\[{]", pattern, maxsplit=1)[0]
+                if literal != pattern:
+                    literal = posixpath.dirname(literal)
+                yield from symlink_hits(posixpath.join(root, literal), cwd, evidence, glob_patterns=((b"**",),))
 
 
 def structured_symlink_hits(call, cwd, evidence):
@@ -2391,7 +2444,7 @@ def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq):
             yield "outside-workspace", path
         else:
             yield from symlink_hits(path, cwd, evidence)
-    yield from search_pattern_symlink_hits(call, cwd, evidence)
+    yield from search_pattern_symlink_hits(call, cwd, evidence, engine=True)
 
 
 def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written, cwd, home,
