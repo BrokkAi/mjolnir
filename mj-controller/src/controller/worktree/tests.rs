@@ -3851,3 +3851,95 @@ fn legacy_clone_restore_repairs_nested_linked_worktree_after_publish_and_preserv
         "precious\n"
     );
 }
+
+#[test]
+fn legacy_raw_conversion_packs_against_selected_non_origin_remote() {
+    let temp = tempfile::tempdir().unwrap();
+    let origin = temp.path().join("origin.git");
+    let upstream = temp.path().join("upstream.git");
+    let checkout = temp.path().join("checkout");
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", "-b", "main", &origin.to_string_lossy()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", "-b", "main", &upstream.to_string_lossy()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["clone", &origin.to_string_lossy(), &checkout.to_string_lossy()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    test_git(&checkout, &["config", "user.name", "Test"]);
+    test_git(&checkout, &["config", "user.email", "test@example.com"]);
+    std::fs::write(checkout.join("base.txt"), "base\n").unwrap();
+    test_git(&checkout, &["add", "base.txt"]);
+    test_git(&checkout, &["commit", "-m", "base"]);
+    test_git(&checkout, &["push", "-u", "origin", "HEAD:main"]);
+    test_git(
+        &checkout,
+        &["remote", "add", "upstream", &upstream.to_string_lossy()],
+    );
+    test_git(&checkout, &["push", "upstream", "HEAD:main"]);
+
+    // Advance HEAD and push ONLY to `origin`, NOT to `upstream`.
+    std::fs::write(checkout.join("origin-only.txt"), "only on origin\n").unwrap();
+    test_git(&checkout, &["add", "origin-only.txt"]);
+    test_git(&checkout, &["commit", "-m", "origin-only commit"]);
+    let head = test_git(&checkout, &["rev-parse", "HEAD"]);
+    test_git(&checkout, &["push", "origin", "HEAD:main"]);
+
+    let source = mj_core::remote_git::NetworkGitSource {
+        fetch_url: upstream.to_string_lossy().into_owned(),
+        push_urls: vec![upstream.to_string_lossy().into_owned()],
+    };
+    let captured = capture_legacy_raw_checkout_snapshot(
+        &checkout,
+        "workspace",
+        &source,
+        Path::new("workspace"),
+        &mj_checkpoint::archive::SystemGit,
+    )
+    .unwrap();
+
+    // Restore into a fresh clone of `upstream` (which does NOT have `origin-only commit`).
+    let restored = temp.path().join("restored");
+    assert!(
+        Command::new("git")
+            .args(["clone", &upstream.to_string_lossy(), &restored.to_string_lossy()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let snapshot = mj_checkpoint::snapshot::WorkspaceSnapshot {
+        metadata: *captured
+            .repository
+            .metadata
+            .origin_delta
+            .clone()
+            .expect("origin_delta metadata"),
+        pack: captured.repository.origin_delta_pack.clone(),
+    };
+    mj_checkpoint::snapshot::restore_workspace_snapshot(
+        &mj_checkpoint::archive::SystemGit,
+        &snapshot,
+        &restored,
+    )
+    .unwrap();
+
+    assert_eq!(test_git(&restored, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        std::fs::read_to_string(restored.join("origin-only.txt")).unwrap(),
+        "only on origin\n"
+    );
+}

@@ -2429,6 +2429,13 @@ impl Controller {
                     None
                 }
             };
+            if ephemeral_conversion_archive.is_some() {
+                // Provisioning has read the ephemeral conversion metadata;
+                // restore the durable checkpoint on the in-memory record
+                // before restore_into_target or any later persistence runs.
+                self.state.sessions.get_mut(session_id).unwrap().checkpoint =
+                    previous.checkpoint.clone();
+            }
             if transferring_workspace {
                 self.restore_move_workspace(session_id, executor)?;
             }
@@ -2482,6 +2489,14 @@ impl Controller {
             .await
         }
         .await;
+        if ephemeral_conversion_archive.is_some()
+            && let Some(record) = self.state.sessions.get_mut(session_id)
+        {
+            // Restore the durable checkpoint on every exit path (including a
+            // provisioning error before the post-provision restore above) so
+            // failure handlers never persist the deleted temp archive path.
+            record.checkpoint = previous.checkpoint.clone();
+        }
         drop(ephemeral_conversion_archive);
         match result {
             Ok(materialized) => {

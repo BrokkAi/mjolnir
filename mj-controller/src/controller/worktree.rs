@@ -1279,22 +1279,24 @@ pub(super) fn capture_legacy_raw_checkout_snapshot(
     git: &dyn mj_checkpoint::archive::GitCommandRunner,
 ) -> Result<LegacyRawConversionSnapshot> {
     use mj_checkpoint::snapshot::{
-        CaptureConsent, CheckoutOwnership, OperationConsent, SnapshotHead, UntrackedConsent,
-        capture_workspace_snapshot, session_inventory,
+        CaptureConsent, CheckoutOwnership, ExclusionSource, OperationConsent, RepositoryInput,
+        SessionCaptureConsent, SnapshotHead, UntrackedConsent, capture_session_snapshot,
+        session_inventory,
     };
 
     let pack_dir = tempfile::tempdir().context("create temporary directory for raw snapshot")?;
     let pack_path = pack_dir.path().join(format!("{repository_id}.pack"));
-    let origin_override = Some(source.fetch_url.clone());
+    let repo_input = RepositoryInput {
+        id: repository_id.to_owned(),
+        checkout: checkout.to_path_buf(),
+        ownership: CheckoutOwnership::Raw { launch: None },
+        origin_override: Some(source.fetch_url.clone()),
+        pack_path,
+        exclusions: ExclusionSource::Remote(source.fetch_url.clone()),
+        keep_dir: None,
+    };
 
-    let inventory_input = mj_checkpoint::checkpoint::raw_snapshot_input(
-        repository_id,
-        checkout,
-        None,
-        origin_override.clone(),
-        pack_path.clone(),
-    );
-    let inventory = session_inventory(git, &[inventory_input])
+    let inventory = session_inventory(git, std::slice::from_ref(&repo_input))
         .with_context(|| format!("inspect untracked files in {}", checkout.display()))?;
     let mut untracked_paths = inventory
         .get(repository_id)
@@ -1307,18 +1309,19 @@ pub(super) fn capture_legacy_raw_checkout_snapshot(
         .unwrap_or_default();
     untracked_paths.sort();
 
-    let snapshot = capture_workspace_snapshot(
-        git,
-        checkout,
-        &CheckoutOwnership::Raw { launch: None },
-        &pack_path,
-        &CaptureConsent {
+    let mut consent = SessionCaptureConsent::default();
+    consent.repositories.insert(
+        repository_id.to_owned(),
+        CaptureConsent {
             untracked: UntrackedConsent::Any,
             operations: OperationConsent::None,
         },
-        origin_override,
-    )
-    .with_context(|| format!("capture raw checkout snapshot at {}", checkout.display()))?;
+    );
+    let snapshot = capture_session_snapshot(git, std::slice::from_ref(&repo_input), &consent)
+        .with_context(|| format!("capture raw checkout snapshot at {}", checkout.display()))?
+        .repositories
+        .remove(repository_id)
+        .context("raw checkout snapshot missing captured repository")?;
 
     let origin = mj_checkpoint::archive::redact_origin_credentials(&source.fetch_url)?;
     let branch = match &snapshot.metadata.head {
