@@ -340,6 +340,59 @@ Sol/xhigh + 2× Terra/xhigh (212 s, 120) join the frontier.
   catches 12, Terra/xhigh 9, 2× Terra/xhigh 10, and adding Gemini, Sol/high,
   Sol/xhigh or Greptile Base to 2× Terra/xhigh gives 11.
 
+### Stage 4 follow-up: Gemini 4 Hydrogen/medium (arm N, verified by Neon/medium)
+
+Jonathan asked whether `gemini-4-hydrogen:medium` cuts `Gemini/high`'s 200 s
+latency enough to make it a useful fast non-GPT reviewer without rerunning
+`Gemini/high` (reusing arm `L`).
+
+Method:
+
+- Arm `N`: 1 `gemini-4-hydrogen:medium` session on all 70 diffs, on the default
+  instance across `gemini` (31) and `gemini2` (39), single container image
+  (`9a1d16144cc1…`). 70/70 handed back; 0 checkout inventory problems. Because
+  `mj` now destroys reviewer sessions at role end, reviewer transcripts are not
+  retained (no tool-call transcript audit); `driver.py` captures
+  `prompt-time.json` while live and `score.py` pairs it with `usage.json`'s
+  `completed_at_ms` so turn latency uses the same definition as Stages 1–4.
+- `verify6` pooled arm `N` with Stages 1–4 (`A,B,D,D2,E,G-base,G-plus,H,J,K,L,I,N`;
+  1,306 sessions, 1,960 findings, 34 blind batches) and ran on
+  `gemini-4-neon/medium` (`gemini,gemini2`) at Jonathan's instruction (Claude
+  subscription profiles were exhausted). Across the 1,928 findings shared with
+  `verify5` (Opus/high), verdict agreement is 88.5%: Neon/medium is more
+  lenient (104 plausible → confirmed, 108 rejected → confirmed, 10 confirmed →
+  rejected) and shifts severities upward (394 low → medium, 240 medium → high),
+  so absolute totals are higher in `verify6` while within-`verify6` comparisons
+  are apples-to-apples (`results/stage4-hydrogen-medium/consistency-vs-verify5.json`).
+
+Results (`results/stage4-hydrogen-medium/`):
+
+- **Speed vs. recall:** `Gemini/medium` cuts median turn latency from **200 s**
+  to **75.0 s** (p90 118.5 s, range 21.4–163.0 s; wall from review start
+  84.5 s), with 0% rejected (32/32 raw findings confirmed across 25/70 diffs).
+  However, it drops to **0.46 confirmed/diff** (32 total; 0.39 medium+high,
+  0.16 high), versus **1.14/diff** (80 total) for `Gemini/high` (−48.0, 95%
+  −65.0 to −32.0; −45.0 medium+high), **1.46/diff** for `Terra/high` (−68.2),
+  **2.62/diff** for `Terra/xhigh` (−151.5), and **0.71/diff** for `Sol/medium`
+  (−18.0). 29 of its 32 confirmed findings are a subset of `Gemini/high`'s 80.
+- **As a 3rd reviewer on `2× Terra/xhigh` (`third-reviewer.txt`):** adds
+  **+7.0** confirmed (+3.0 to +12.0; +4.0 medium+high) at 97.2 s median latency,
+  versus `Gemini/high` **+22.0** (+17.0 medium+high) at 199.5 s, `Sol/high`
+  **+10.0** (+9.3 medium+high) at 102.6 s, and `Terra/high` **+7.25** (+4.58
+  medium+high) at 93.6 s. `Gemini/medium + 2× Terra/xhigh` (97.2 s, 232.0) is
+  dominated by `Terra/high + 2× Terra/xhigh` (93.6 s, 232.25) on both latency
+  and findings (all severities and medium+high).
+- **Pareto frontier (`pareto.md`, `pareto-sev-high-medium.md`):**
+  `Gemini/medium` alone (75.0 s, 32.0) is far off the frontier (dominated by
+  `Terra/high` at 43.1 s, 100.2). Only `Gemini/medium + Terra/high + Terra/xhigh`
+  barely touches the all-severity frontier (92.6 s, 204.62 vs
+  `2× Terra/high + Terra/xhigh` 85.9 s, 204.08; bootstrap share 0.343), and no
+  `Gemini/medium` combination is on the medium+high frontier.
+- **Known bugs (`knownbug.txt`):** **4.00/30** alone (vs `Gemini/high` 8.00,
+  `Terra/high` 7.33, `Terra/xhigh` 9.50, `Sol/medium` 7.00), and adds **+0.00**
+  to `2× Terra/xhigh` (stays 10.00/30, vs 11.00/30 with `Gemini/high`,
+  `Sol/high`, `Sol/medium`, `Sol/xhigh`, or `Greptile/base`).
+
 ## Missing-fact labels (for a static-analysis hypothesis)
 
 Jonathan asked, on 2026-11-14, for the one fact each defect's reviewer needed
