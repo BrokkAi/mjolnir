@@ -285,7 +285,8 @@ CREATE TABLE sessions (
     create_managed_worktree INTEGER
         CHECK(create_managed_worktree IN (0, 1)),
     mjolnir_subagents INTEGER
-        CHECK(mjolnir_subagents IN (0, 1))
+        CHECK(mjolnir_subagents IN (0, 1)),
+    closing_consent TEXT CHECK(closing_consent IS NULL OR json_valid(closing_consent))
 ) STRICT;
 
 CREATE TABLE "hidden_native_sessions" (

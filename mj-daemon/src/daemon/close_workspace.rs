@@ -57,7 +57,9 @@ impl RuntimeState {
     }
 
     pub async fn close_workspace(self: &Arc<Self>, workspace_id: String) -> Result<()> {
-        let _upgrade_work = mj_controller::upgrade::activity("workspace close")?;
+        // Hold handoff admission only while recording intent and dispatching
+        // suspends, not while waiting for them to finish.
+        let upgrade_work = mj_controller::upgrade::activity("workspace close")?;
         let cancelled = Arc::new(AtomicBool::new(false));
         {
             let mut closes = self
@@ -110,6 +112,9 @@ impl RuntimeState {
                     .with_context(|| format!("stop session {session_id}"))
             });
         }
+        // Release handoff admission before waiting on session suspends so a
+        // stuck session cannot block a daemon upgrade.
+        drop(upgrade_work);
         let mut failures = Vec::new();
         let mut cancellation_poll = tokio::time::interval(Duration::from_millis(100));
         while !jobs.is_empty() {

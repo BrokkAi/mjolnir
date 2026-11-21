@@ -14,6 +14,19 @@ pub fn export_stdin_command(locator: &TargetLocator, session_id: &str) -> Result
     export_command(locator, session_id, EXPORT_SPEC_STDIN)
 }
 
+pub fn suspend_preflight_stdin_command(
+    locator: &TargetLocator,
+    session_id: &str,
+) -> Result<CommandSpec> {
+    let mut command = export_command(locator, session_id, EXPORT_SPEC_STDIN)?;
+    for arg in &mut command.args {
+        if arg == "export-checkpoint" {
+            *arg = "suspend-preflight".to_owned();
+        }
+    }
+    Ok(command)
+}
+
 pub fn capture_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {
     checkpoint_stdin_command(
         locator,

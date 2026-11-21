@@ -1147,18 +1147,32 @@ pub(super) async fn handle_action(
             }
         }
         DaemonAction::WaitSessionLifecycle(receipt) => state.wait_session_lifecycle(receipt).await,
+        DaemonAction::SuspendPreflight {
+            session_id,
+            dry_run,
+            without_checkpoint,
+        } => Ok(DaemonReply::SuspendPreflight(Box::new(
+            state
+                .suspend_preflight(session_id, dry_run, without_checkpoint)
+                .await?,
+        ))),
         DaemonAction::SuspendSession {
             session_id,
-            acknowledge_unpublished_work,
+            discard_untracked,
+            abort_operations,
+            without_checkpoint,
+            confirm_no_checkpoint,
         } => {
             state
-                .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
-                .await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::IgnoreNestedRepositoriesAndSuspend { session_id } => {
-            state
-                .ignore_nested_repositories_and_suspend(session_id)
+                .suspend_session_with_consent(
+                    session_id,
+                    mj_core::suspend_consent::SuspendConsent {
+                        discard_untracked,
+                        abort_operations,
+                        without_checkpoint,
+                        confirm_no_checkpoint,
+                    },
+                )
                 .await?;
             Ok(DaemonReply::Done)
         }
@@ -1248,30 +1262,15 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::MoveSources(sources))
         }
-        DaemonAction::DiscardSinceCheckpoint {
-            session_id,
-            checkpoint,
-        } => {
+        DaemonAction::DestroyStoppedSession { session_id } => {
             state
-                .discard_since_checkpoint(session_id, checkpoint)
+                .destroy_stopped_session(session_id, BranchDisposition::Keep)
                 .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::DestroyStoppedSession {
-            session_id,
-            delete_branch,
-        } => {
+        DaemonAction::ForceDestroySession { session_id } => {
             state
-                .destroy_stopped_session(session_id, branch_disposition(delete_branch))
-                .await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::ForceDestroySession {
-            session_id,
-            delete_branch,
-        } => {
-            state
-                .force_destroy_session(session_id, branch_disposition(delete_branch))
+                .force_destroy_session(session_id, BranchDisposition::Keep)
                 .await?;
             Ok(DaemonReply::Done)
         }
@@ -1392,16 +1391,6 @@ pub(super) fn upgrade_request_activity(
 fn repository_preflight_executor() -> CancellableProcessExecutor {
     CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
         .with_deadline(Duration::from_secs(30))
-}
-
-/// Destroy requests carry a flag, not a controller enum, so the wire protocol
-/// stays independent of the controller's types.
-fn branch_disposition(delete_branch: bool) -> BranchDisposition {
-    if delete_branch {
-        BranchDisposition::Delete
-    } else {
-        BranchDisposition::Keep
-    }
 }
 
 #[cfg(all(test, unix))]

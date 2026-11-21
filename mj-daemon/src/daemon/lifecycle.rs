@@ -672,7 +672,7 @@ impl RuntimeState {
                     },
                 );
                 if mode == AdmissionMode::FreshRequest
-                    && matches!(kind, LifecycleKind::Suspend | LifecycleKind::ForceStop)
+                    && matches!(kind, LifecycleKind::Suspend)
                 {
                     lifecycle_owner.close_requested.insert(session_id.clone());
                 }
@@ -933,12 +933,11 @@ impl RuntimeState {
                         && matches!(
                             kind,
                             LifecycleKind::Suspend
-                                | LifecycleKind::ForceStop
                                 | LifecycleKind::Restart
                                 | LifecycleKind::UpgradeContainer
                         )
                     {
-                        if matches!(kind, LifecycleKind::Suspend | LifecycleKind::ForceStop) {
+                        if matches!(kind, LifecycleKind::Suspend) {
                             state
                                 .record_failed_close(
                                     &operation_session_id,

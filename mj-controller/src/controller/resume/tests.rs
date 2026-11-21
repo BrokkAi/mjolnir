@@ -3429,6 +3429,7 @@ fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() 
     let input = mj_checkpoint::checkpoint::cutoff_snapshot_input(
         "repo",
         &checkout_dir,
+        None,
         vec![cutoff_sha.clone()],
         temp.path().join("cutoff.pack"),
     );

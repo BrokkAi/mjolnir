@@ -624,9 +624,13 @@ async fn suspend_session(client: &ApiClient, session_id: &str, timing: ExitTimin
     if session.lifecycle == ViewerLifecycleCategory::Suspended {
         return Ok(());
     }
-    // Unpublished Git work is never acknowledged on a person's behalf: the
-    // daemon refuses, and the session stays live for a person to publish it.
-    let accepted = client.suspend(session_id, false).await.with_context(|| {
+    // Untracked files and in-progress operations are never discarded on a
+    // person's behalf: the daemon refuses, and the session stays live for a
+    // person to handle.
+    let accepted = client
+        .suspend(session_id, &mj_core::suspend_consent::SuspendConsent::default())
+        .await
+        .with_context(|| {
         format!(
             "suspend session {session_id}; it was left {}, and `mj suspend --session {session_id}` retries",
             session.state
@@ -704,7 +708,7 @@ async fn destroy_session(client: &ApiClient, session_id: &str, timing: ExitTimin
     let Some(before) = look(client, session_id).await? else {
         return Ok(());
     };
-    client.destroy(session_id, false).await.with_context(|| {
+    client.destroy(session_id).await.with_context(|| {
         format!(
             "destroy session {session_id}; it was left as it was, and `mj destroy --session {session_id}` retries"
         )
@@ -1975,7 +1979,7 @@ mod tests {
             [
                 "interrupt session-1",
                 "look session-1",
-                r#"suspend session-1 {"acknowledge_active_subagents":true,"acknowledge_unpublished_work":false}"#,
+                r#"suspend session-1 {"discard_untracked":"None","abort_operations":"None","without_checkpoint":false}"#,
                 "look session-1",
                 "look session-1",
                 "look session-1",
@@ -2004,7 +2008,7 @@ mod tests {
                 "look session-1",
                 // The look that confirms the session still exists.
                 "look session-1",
-                r#"destroy session-1 {"delete_branch":false}"#,
+                r#"destroy session-1 {}"#,
                 "look session-1",
                 "look session-1",
             ],
@@ -2127,8 +2131,8 @@ mod tests {
         assert_eq!(
             destroyed,
             [
-                r#"destroy session-1 {"delete_branch":false}"#,
-                r#"destroy session-2 {"delete_branch":false}"#,
+                r#"destroy session-1 {}"#,
+                r#"destroy session-2 {}"#,
             ]
         );
     }
@@ -2163,7 +2167,7 @@ mod tests {
 
         assert_eq!(
             daemon.lifecycle_calls(),
-            [r#"destroy session-1 {"delete_branch":false}"#]
+            [r#"destroy session-1 {}"#]
         );
     }
 
@@ -2192,7 +2196,7 @@ mod tests {
 
         assert_eq!(
             daemon.lifecycle_calls(),
-            [r#"destroy session-1 {"delete_branch":false}"#]
+            [r#"destroy session-1 {}"#]
         );
     }
 

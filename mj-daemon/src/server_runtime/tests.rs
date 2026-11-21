@@ -34,7 +34,10 @@ fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() 
     for action in [
         ControllerAction::Suspend {
             session_id: "suspend-web-session".into(),
-            acknowledge_unpublished_work: true,
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
+            abort_operations: mj_core::suspend_consent::OperationConsent::None,
+            without_checkpoint: false,
+            confirm_no_checkpoint: false,
         },
         ControllerAction::Restart {
             session_id: "restart-web-session".into(),
@@ -2270,7 +2273,6 @@ fn force_close_is_admitted_like_close() {
     let mut active = std::collections::BTreeSet::from(["session-1".to_owned()]);
     let force_close = ControllerAction::Destroy {
         session_id: "session-1".into(),
-        delete_branch: false,
     };
     // A session already busy with a stuck close is exactly when a force
     // close has to get through.
@@ -2314,7 +2316,10 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
     );
     let close = ControllerAction::Suspend {
         session_id: "session-1".into(),
-        acknowledge_unpublished_work: false,
+        discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
+        abort_operations: mj_core::suspend_consent::OperationConsent::None,
+        without_checkpoint: false,
+        confirm_no_checkpoint: false,
     };
     assert_eq!(
         admit_phone_action(&close, &mut active, &sessions, &cancellations),

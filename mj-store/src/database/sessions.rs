@@ -1099,9 +1099,11 @@ pub fn fail_unready_session(
 pub fn save_suspension_intent(
     session: &SessionRecord,
     ready_move: Option<&mj_core::state::MoveOperation>,
+    consent: Option<&mj_core::suspend_consent::SuspendConsent>,
 ) -> Result<()> {
     let mut session = session.clone();
     let ready_move = ready_move.cloned();
+    let consent_json = consent.map(serde_json::to_string).transpose()?;
     submit_database_write("save suspension intent", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut operation = super::session_move::load_move_operation_with(&tx, &session.id)?;
@@ -1129,9 +1131,31 @@ pub fn save_suspension_intent(
         }
         validate_session_record(&session)?;
         update_lifecycle_fields(&tx, &session)?;
+        tx.execute(
+            "UPDATE sessions SET closing_consent = ?2 WHERE session_id = ?1",
+            params![session.id, consent_json],
+        )?;
         tx.commit()?;
         Ok(())
     })
+}
+
+/// Read the persisted suspend consent for a session currently in `Closing`.
+pub fn load_closing_consent(
+    session_id: &str,
+) -> Result<Option<mj_core::suspend_consent::SuspendConsent>> {
+    let connection = open_reader(&database_path())?;
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT closing_consent FROM sessions WHERE session_id = ?1",
+            [session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    raw.as_deref()
+        .map(|json| serde_json::from_str(json).context("decode sessions.closing_consent"))
+        .transpose()
 }
 
 pub fn save_failed_close(session: &SessionRecord) -> Result<SessionRecord> {
