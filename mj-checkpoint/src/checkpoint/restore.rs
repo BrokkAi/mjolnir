@@ -689,7 +689,7 @@ pub(super) fn restore_repositories_from_archive(
             &repository.metadata,
         )
         .with_context(|| format!("restore repository {id:?}"))?;
-        crate::archive::restore_git_snapshot_for_session(
+        let notices = crate::archive::restore_git_snapshot_for_session(
             git,
             &path,
             &snapshot,
@@ -697,6 +697,10 @@ pub(super) fn restore_repositories_from_archive(
             restore_contents,
         )
         .with_context(|| format!("restore repository {id:?}"))?;
+        for notice in &notices {
+            tracing::info!(repository_id = %id, "{notice}");
+        }
+        all_notices.extend(notices);
     }
     Ok(all_notices)
 }
@@ -839,7 +843,7 @@ pub fn restore_single_repository_onto_branch(
     repository_path: &Path,
     branch: &str,
     git: &dyn GitCommandRunner,
-) -> Result<Option<String>> {
+) -> Result<Vec<String>> {
     ensure!(repository_path.is_dir(), "restore checkout is missing");
     let archive = crate::archive::read_archive_repositories(archive_path)?;
     let [repository] = archive.manifest.repositories.as_slice() else {
@@ -853,7 +857,7 @@ pub fn restore_single_repository_onto_branch(
         "this session's project is a directory without a committed Git checkout, so it cannot be restored into one"
     );
     let mut snapshot = archived_repository_snapshot(&archive, repository)?;
-    let archived_branch = snapshot.metadata.branch.replace(branch.to_owned());
+    snapshot.metadata.branch = Some(branch.to_owned());
     // This explicit host restore uses a linked worktree whose local Git
     // configuration is shared with the user's main checkout; keep managed
     // network configuration out of that shared config.
@@ -865,8 +869,7 @@ pub fn restore_single_repository_onto_branch(
         Some(&archive.manifest.session.id),
         true,
     )
-    .with_context(|| format!("restore repository {:?}", repository.metadata.id))?;
-    Ok(archived_branch)
+    .with_context(|| format!("restore repository {:?}", repository.metadata.id))
 }
 
 /// Restore a retired independent clone on the branch saved in its archive.
@@ -874,7 +877,7 @@ pub fn restore_single_repository_into_checkout(
     archive_path: &Path,
     repository_path: &Path,
     git: &dyn GitCommandRunner,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     ensure!(repository_path.is_dir(), "restore checkout is missing");
     let archive = crate::archive::read_archive_repositories(archive_path)?;
     let [repository] = archive.manifest.repositories.as_slice() else {
@@ -894,6 +897,39 @@ pub fn restore_single_repository_into_checkout(
         true,
     )
     .context("restore independent checkout before moving it into a target")
+}
+
+/// Restore a legacy single-repository archive into a fresh managed clone.
+/// Checks out the saved commit on the saved branch name, or as a detached HEAD
+/// (with a resume notice) if that branch name already exists pointing at a
+/// different commit.
+pub fn restore_single_repository_into_clone(
+    archive_path: &Path,
+    repository_path: &Path,
+    git: &dyn GitCommandRunner,
+) -> Result<Vec<String>> {
+    ensure!(repository_path.is_dir(), "restore checkout is missing");
+    let archive = crate::archive::read_archive_repositories(archive_path)?;
+    let [repository] = archive.manifest.repositories.as_slice() else {
+        bail!("an isolated clone requires exactly one archived repository");
+    };
+    ensure!(
+        !repository.metadata.plain_directory,
+        "this session's project is a directory without a committed Git checkout, so it cannot be restored into one"
+    );
+    let mut snapshot = archived_repository_snapshot(&archive, repository)?;
+    snapshot.metadata.remote_workspace = false;
+    crate::archive::restore_git_snapshot_for_session_with_options(
+        git,
+        repository_path,
+        &snapshot,
+        Some(&archive.manifest.session.id),
+        true,
+        crate::archive::LegacyRestoreOptions {
+            detach_on_branch_collision: true,
+        },
+    )
+    .context("restore legacy archive into fresh managed clone")
 }
 
 /// Native session files use harness-specific working-directory keys. Rewrite

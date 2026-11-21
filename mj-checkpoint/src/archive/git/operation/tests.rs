@@ -198,25 +198,6 @@ fn unrelated_work(repository: &Path) {
     fs::write(repository.join("notes/untracked.txt"), "untracked\n").unwrap();
 }
 
-/// Settles every path `partly_resolve` left unmerged.
-const FINISH_RESOLVING: &[&[&str]] = &[&["add", "a.txt", "link"], &["rm", "-q", "m.txt"]];
-
-fn finish_resolving(repository: &Path) {
-    fs::write(
-        repository.join("a.txt"),
-        "1\nresolved 2\n3\n4\n5\n6\n7\nresolved 8\n9\n",
-    )
-    .unwrap();
-    for arguments in FINISH_RESOLVING {
-        let arguments = arguments
-            .iter()
-            .copied()
-            .filter(|argument| cfg!(unix) || *argument != "link")
-            .collect::<Vec<_>>();
-        step_ok(repository, &arguments);
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 enum WorktreeEntry {
     Missing,
@@ -332,24 +313,6 @@ fn collect_git_directory(root: &Path, directory: &Path, found: &mut BTreeMap<Str
     }
 }
 
-/// An exact copy of a checkout, Git directory included.
-fn copy_tree(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let kind = entry.file_type().unwrap();
-        let target = to.join(entry.file_name());
-        if kind.is_dir() {
-            copy_tree(&entry.path(), &target);
-        } else if kind.is_symlink() {
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(fs::read_link(entry.path()).unwrap(), &target).unwrap();
-        } else {
-            fs::copy(entry.path(), &target).unwrap();
-        }
-    }
-}
-
 fn capture(source: &Path, base: &str) -> RepositorySnapshot {
     let snapshot = collect_git_snapshot(
         &crate::test_support::Git231,
@@ -371,34 +334,28 @@ fn capture(source: &Path, base: &str) -> RepositorySnapshot {
 }
 
 /// Restores the archive the way resume does: into a fresh clone of origin,
-/// from the verified archive file.
-fn restore(lab: &Lab, archive: &Path, name: &str) -> PathBuf {
+/// from the verified archive file, returning the checkout path and notices.
+fn restore(lab: &Lab, archive: &Path, name: &str) -> (PathBuf, Vec<String>) {
     let workspace = lab.directory.path().join(name);
     fs::create_dir_all(&workspace).unwrap();
     let destination = clone_repository(&workspace, &lab.origin, "repo");
-    crate::checkpoint::restore_repositories(archive, &workspace, &crate::test_support::Git231)
-        .unwrap();
-    destination
+    let notices = crate::checkpoint::restore_single_repository_into_checkout(
+        archive,
+        &destination,
+        &crate::test_support::Git231,
+    )
+    .unwrap();
+    (destination, notices)
 }
 
-struct RoundTrip {
-    finished_source: PathBuf,
-    finished_restored: PathBuf,
-    abandoned_copy: PathBuf,
-    abandoned_restored: PathBuf,
-}
-
-/// Checkpoints the source through a real archive, restores it twice, and
-/// checks that each restored copy is the source: first as it stands, then
-/// after Git's own step that finishes the operation (taken in the source and
-/// one copy) and after the step that abandons it (taken in an exact copy of
-/// the source and the other).
-fn round_trip(lab: &Lab, finish: &dyn Fn(&Path), abandon: &dyn Fn(&Path)) -> RoundTrip {
-    let abandoned_copy = lab.directory.path().join("abandoned-copy");
-    copy_tree(&lab.source, &abandoned_copy);
-    // The copy's index records the source's file times; Git's own abort
-    // steps do not refresh it before they compare.
-    step(&abandoned_copy, &["update-index", "-q", "--refresh"]);
+/// Checkpoints the source through a real legacy archive, restores it, and
+/// checks that the in-progress Git operation state is dropped with a notice
+/// while conflicted working files survive as ordinary unstaged edits.
+fn round_trip_dropped_operation(
+    lab: &Lab,
+    expected_kind: &str,
+    expected_conflicted_paths: &[&str],
+) -> (PathBuf, Vec<String>) {
     let snapshot = capture(&lab.source, &lab.base);
     let archive = lab.directory.path().join("checkpoint.hel.zip");
     let mut archive_input = input();
@@ -406,77 +363,72 @@ fn round_trip(lab: &Lab, finish: &dyn Fn(&Path), abandon: &dyn Fn(&Path)) -> Rou
     archive_input.repositories = vec![snapshot];
     write_archive_atomic(&archive, &archive_input).unwrap();
 
-    let finished_restored = restore(lab, &archive, "finished");
-    let abandoned_restored = restore(lab, &archive, "abandoned");
+    let (restored, notices) = restore(lab, &archive, "restored");
     let before = observe(&lab.source);
-    assert_eq!(observe(&finished_restored), before);
-    assert_eq!(observe(&abandoned_restored), before);
+    let after = observe(&restored);
 
-    finish(&lab.source);
-    finish(&finished_restored);
-    assert_eq!(observe(&finished_restored), observe(&lab.source));
-    abandon(&abandoned_copy);
-    abandon(&abandoned_restored);
-    assert_eq!(observe(&abandoned_restored), observe(&abandoned_copy));
-    RoundTrip {
-        finished_source: lab.source.clone(),
-        finished_restored,
-        abandoned_copy,
-        abandoned_restored,
+    // Working-tree files (including conflicted files, missing_worktree_paths,
+    // staged/unstaged edits, and untracked files) survive as ordinary files.
+    // A path that was both unmerged and missing from the working tree may no
+    // longer appear in `ls-files` once unmerged index stages are dropped.
+    let mut expected_worktree = before.worktree;
+    expected_worktree.retain(|path, entry| {
+        !(*entry == WorktreeEntry::Missing && !after.worktree.contains_key(path))
+    });
+    assert_eq!(after.worktree, expected_worktree);
+    // No active Git operation state or unmerged index stages remain.
+    assert!(
+        after.git_directory.is_empty(),
+        "expected no active Git operation state, found: {:?}",
+        after.git_directory.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        git_line(&restored, &["ls-files", "--unmerged"]),
+        "",
+        "expected no unmerged index entries after dropping legacy operation state"
+    );
+    assert_eq!(
+        notices.len(),
+        1,
+        "expected one resume notice, got: {notices:?}"
+    );
+    assert!(
+        notices[0].contains(expected_kind),
+        "expected notice to name '{expected_kind}': {}",
+        notices[0]
+    );
+    for path in expected_conflicted_paths {
+        assert!(
+            notices[0].contains(path),
+            "expected notice to name preserved conflicted path '{path}': {}",
+            notices[0]
+        );
     }
-}
-
-fn parents(repository: &Path) -> Vec<String> {
-    git_line(repository, &["rev-list", "--parents", "-n", "1", "HEAD"])
-        .split(' ')
-        .skip(1)
-        .map(str::to_owned)
-        .collect()
+    (restored, notices)
 }
 
 // Hard-won: #1319: a clone mid-merge could not be checkpointed, so suspend failed forever
 // Hard-won: 5a3457a30: Git 2.25 echoed --path-format=absolute, so every clone checkpoint failed to locate its operation state.
 #[test]
-fn a_clone_stopped_in_a_conflicted_merge_resumes_mid_merge() {
+fn a_clone_stopped_in_a_conflicted_merge_drops_operation_and_preserves_conflicted_files() {
     let lab = lab();
     let diverged = diverge(&lab);
     step_ok(&lab.source, &["switch", "-q", "main"]);
-    // An rr-cache directory turns rerere on, so the merge records its
-    // conflicts there and in MERGE_RR.
     fs::create_dir(lab.source.join(".git/rr-cache")).unwrap();
     dirty_before_starting(&lab.source);
     step_stops(&lab.source, &["merge", "--autostash", "side"]);
     partly_resolve(&lab.source);
 
-    let checked = round_trip(
-        &lab,
-        &|repository| {
-            finish_resolving(repository);
-            step_ok(repository, &["commit", "--no-edit"]);
-        },
-        &|repository| step_ok(repository, &["merge", "--abort"]),
-    );
-    assert_eq!(
-        parents(&checked.finished_restored),
-        [diverged.main.clone(), diverged.side_tip]
-    );
-    assert_eq!(
-        git_line(&checked.abandoned_restored, &["rev-parse", "HEAD"]),
-        diverged.main
-    );
-    assert_eq!(
-        fs::read_to_string(checked.abandoned_restored.join("e.txt")).unwrap(),
-        "autostashed e\n"
-    );
+    let (restored, _) =
+        round_trip_dropped_operation(&lab, "merge", &["a.txt", "link", "m.txt"]);
+    assert_eq!(git_line(&restored, &["rev-parse", "HEAD"]), diverged.main);
 }
 
 #[test]
-fn a_clone_stopped_in_a_cherry_pick_sequence_resumes_it() {
+fn a_clone_stopped_in_a_cherry_pick_sequence_drops_operation_and_preserves_conflicted_files() {
     let lab = lab();
     let diverged = diverge(&lab);
     step_ok(&lab.source, &["switch", "-q", "main"]);
-    // The picked commits are then named only by the operation: the second
-    // one only by the sequencer's todo list, with an abbreviated id.
     step_ok(&lab.source, &["branch", "-q", "-D", "side"]);
     step_stops(
         &lab.source,
@@ -484,97 +436,40 @@ fn a_clone_stopped_in_a_cherry_pick_sequence_resumes_it() {
     );
     partly_resolve(&lab.source);
 
-    let checked = round_trip(
-        &lab,
-        &|repository| {
-            finish_resolving(repository);
-            step_ok(repository, &["cherry-pick", "--continue"]);
-        },
-        &|repository| step_ok(repository, &["cherry-pick", "--abort"]),
-    );
-    assert_eq!(
-        fs::read_to_string(checked.finished_restored.join("s.txt")).unwrap(),
-        "side s\n"
-    );
-    assert_eq!(
-        git_line(&checked.finished_restored, &["rev-parse", "HEAD~2"]),
-        diverged.main
-    );
-    assert_eq!(
-        git_line(&checked.abandoned_restored, &["rev-parse", "HEAD"]),
-        diverged.main
-    );
+    let (restored, _) =
+        round_trip_dropped_operation(&lab, "cherry-pick", &["a.txt", "link", "m.txt"]);
+    assert_eq!(git_line(&restored, &["rev-parse", "HEAD"]), diverged.main);
 }
 
 #[test]
-fn a_clone_stopped_in_a_conflicted_revert_resumes_it() {
+fn a_clone_stopped_in_a_conflicted_revert_drops_operation_and_preserves_conflicted_files() {
     let lab = lab();
     let reverted = commit_changes(&lab.source, "main work", &main_changes());
     let later = commit_changes(&lab.source, "later work", &side_changes());
     step_stops(&lab.source, &["revert", &reverted]);
     partly_resolve(&lab.source);
 
-    let checked = round_trip(
-        &lab,
-        &|repository| {
-            finish_resolving(repository);
-            step_ok(repository, &["revert", "--continue"]);
-        },
-        &|repository| step_ok(repository, &["revert", "--abort"]),
-    );
-    assert_eq!(
-        parents(&checked.finished_restored),
-        std::slice::from_ref(&later)
-    );
-    assert_eq!(
-        git_line(&checked.abandoned_restored, &["rev-parse", "HEAD"]),
-        later
-    );
+    let (restored, _) =
+        round_trip_dropped_operation(&lab, "revert", &["a.txt", "link", "m.txt"]);
+    assert_eq!(git_line(&restored, &["rev-parse", "HEAD"]), later);
 }
 
 #[test]
-fn a_clone_stopped_in_a_rebase_resumes_it_with_either_backend() {
+fn a_clone_stopped_in_a_rebase_drops_operation_and_preserves_conflicted_files() {
     for backend in ["--merge", "--apply"] {
         let lab = lab();
-        let diverged = diverge(&lab);
+        let _diverged = diverge(&lab);
         dirty_before_starting(&lab.source);
         step_stops(&lab.source, &["rebase", backend, "--autostash", "main"]);
         partly_resolve(&lab.source);
 
-        let checked = round_trip(
-            &lab,
-            &|repository| {
-                finish_resolving(repository);
-                // A rebase continues only once nothing is left unstaged.
-                step_ok(repository, &["add", "d.txt"]);
-                step_ok(repository, &["rebase", "--continue"]);
-            },
-            &|repository| step_ok(repository, &["rebase", "--abort"]),
-        );
-        for repository in [&checked.finished_source, &checked.finished_restored] {
-            assert_eq!(
-                git_line(repository, &["symbolic-ref", "HEAD"]),
-                "refs/heads/side",
-                "{backend}"
-            );
-            assert_eq!(
-                git_line(repository, &["rev-parse", "HEAD~2"]),
-                diverged.main,
-                "{backend}"
-            );
-        }
-        for repository in [&checked.abandoned_copy, &checked.abandoned_restored] {
-            assert_eq!(
-                git_line(repository, &["rev-parse", "HEAD"]),
-                diverged.side_tip,
-                "{backend}"
-            );
-        }
+        let (_restored, _) =
+            round_trip_dropped_operation(&lab, "rebase", &["a.txt", "link", "m.txt"]);
     }
 }
 
 #[test]
-fn a_clone_in_the_middle_of_a_bisect_resumes_it() {
+fn a_clone_in_the_middle_of_a_bisect_drops_operation_with_notice() {
     let lab = lab();
     for number in 1..=6 {
         commit_changes(
@@ -583,30 +478,14 @@ fn a_clone_in_the_middle_of_a_bisect_resumes_it() {
             &[("h.txt", Some(&format!("{number}\n")))],
         );
     }
-    let tip = git_line(&lab.source, &["rev-parse", "HEAD"]);
     step_ok(&lab.source, &["bisect", "start"]);
     step_ok(&lab.source, &["bisect", "bad"]);
     step_ok(&lab.source, &["bisect", "good", &lab.base]);
     step_ok(&lab.source, &["bisect", "bad"]);
     unrelated_work(&lab.source);
-    let log = git(&lab.source, &["bisect", "log"]);
 
-    let checked = round_trip(
-        &lab,
-        &|repository| {
-            assert_eq!(git(repository, &["bisect", "log"]), log);
-            step_ok(repository, &["bisect", "good"]);
-        },
-        &|repository| step_ok(repository, &["bisect", "reset"]),
-    );
-    assert_ne!(
-        git_line(&checked.finished_restored, &["rev-parse", "HEAD"]),
-        tip
-    );
-    assert_eq!(
-        git_line(&checked.abandoned_restored, &["rev-parse", "HEAD"]),
-        tip
-    );
+    let (restored, _) = round_trip_dropped_operation(&lab, "bisect", &[]);
+    assert_eq!(git_line(&restored, &["for-each-ref", "refs/bisect"]), "");
 }
 
 #[test]

@@ -2846,7 +2846,10 @@ pub use git::{
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};
-pub(crate) use git::{ensure_no_symlink_ancestors, restore_git_snapshot_for_session};
+pub(crate) use git::{
+    LegacyRestoreOptions, ensure_no_symlink_ancestors, restore_git_snapshot_for_session,
+    restore_git_snapshot_for_session_with_options,
+};
 use git::{
     validate_conflicted_worktree_tar, validate_conflicted_worktree_tar_reader,
     validate_operation_state_tar, validate_operation_state_tar_reader, validate_untracked_tar,
