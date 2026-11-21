@@ -2849,6 +2849,33 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;"
         ))?;
     }
+    // Compatible: adds the `host_snapshot_cache` table to track host-side
+    // snapshot archive copies for resume reuse, Destroy cleanup, and 48-hour
+    // expiry. Older revision-147 daemons ignore the new table and no existing
+    // schema or data changes.
+    if version < 148 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS host_snapshot_cache (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 session_id TEXT NOT NULL,
+                 host TEXT NOT NULL,
+                 sha256 TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 written_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS host_snapshot_cache_host_sha256
+             ON host_snapshot_cache(host, sha256);
+             CREATE INDEX IF NOT EXISTS host_snapshot_cache_session
+             ON host_snapshot_cache(session_id);
+             CREATE INDEX IF NOT EXISTS host_snapshot_cache_written_at
+             ON host_snapshot_cache(written_at);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (148, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 148;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -7137,6 +7164,42 @@ mod reader_tests {
             StoreSchemaMismatchReason::Incompatible {
                 minimum_compatible: MINIMUM_COMPATIBLE_VERSION
             }
+        );
+    }
+
+    #[test]
+    fn host_snapshot_cache_migration_148_stays_compatible_with_revision_147() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        {
+            let connection = open_writer(&path).unwrap();
+            connection
+                .execute_batch(
+                    "DROP TABLE host_snapshot_cache;
+                     DELETE FROM schema_migrations WHERE version >= 148;
+                     PRAGMA user_version = 147;",
+                )
+                .unwrap();
+        }
+        forget_verified_schema(&path);
+        let connection = open_writer(&path).unwrap();
+        let table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'host_snapshot_cache')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            table_exists,
+            "migration 148 must create host_snapshot_cache"
+        );
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(147));
+        assert!(
+            state.ensure_supported_by(147).is_ok(),
+            "revision 148 must remain compatible with revision 147 readers and writers"
         );
     }
 }

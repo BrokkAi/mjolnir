@@ -356,6 +356,73 @@ pub(super) async fn run_daemon_runtime(
             );
         })
     };
+    // Host snapshot cache 48-hour expiry sweep and timer. Holds no daemon
+    // handoff admission; stops on cancellation and rebuilds from SQLite rows
+    // at the next daemon startup.
+    let host_snapshot_cache_expiry = {
+        let cancellation = cancellation.clone();
+        mj_core::runtime::spawn(async move {
+            let wakeup = mj_controller::controller::host_snapshot_cache_wakeup();
+            let ttl = chrono::Duration::seconds(
+                mj_controller::controller::HOST_SNAPSHOT_CACHE_TTL.as_secs() as i64,
+            );
+            loop {
+                if cancellation.is_cancelled() {
+                    return;
+                }
+                let sweep_cancel = cancellation.clone();
+                let _ = mj_core::runtime::spawn_blocking(move || {
+                    mj_controller::controller::sweep_expired_host_snapshot_cache(
+                        &mj_controller::targets::BoundedProcessExecutor::new(Duration::from_secs(
+                            15,
+                        )),
+                        chrono::Utc::now(),
+                        &|| sweep_cancel.is_cancelled(),
+                    );
+                })
+                .await;
+                if cancellation.is_cancelled() {
+                    return;
+                }
+                let earliest = mj_core::runtime::spawn_blocking(
+                    mj_controller::database::earliest_host_snapshot_cache_written_at,
+                )
+                .await
+                .ok()
+                .and_then(|res| res.ok())
+                .flatten();
+                let sleep_for = earliest
+                    .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
+                    .map(|dt| {
+                        let due = dt.with_timezone(&chrono::Utc) + ttl;
+                        let remaining = due - chrono::Utc::now();
+                        if remaining <= chrono::Duration::zero() {
+                            // Overdue row remained (e.g. unreachable host); retry after backoff.
+                            Duration::from_secs(900)
+                        } else {
+                            remaining
+                                .to_std()
+                                .unwrap_or_else(|_| Duration::from_secs(900))
+                        }
+                    });
+                match sleep_for {
+                    Some(delay) => {
+                        tokio::select! {
+                            _ = cancellation.cancelled() => return,
+                            _ = wakeup.notified() => {}
+                            _ = tokio::time::sleep(delay) => {}
+                        }
+                    }
+                    None => {
+                        tokio::select! {
+                            _ = cancellation.cancelled() => return,
+                            _ = wakeup.notified() => {}
+                        }
+                    }
+                }
+            }
+        })
+    };
     let activity_cleanup = {
         let cancellation = cancellation.clone();
         mj_core::runtime::spawn(async move {
@@ -1071,6 +1138,11 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join checkpoint leftover sweep",
         checkpoint_sweep.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join host snapshot cache expiry",
+        host_snapshot_cache_expiry.await.map_err(anyhow::Error::new),
     );
     for interrupted_close_task in interrupted_close_tasks {
         epilogue.record(

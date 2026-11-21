@@ -336,6 +336,24 @@ ON subagent_sessions(parent_session_id, child_session_id);
 
 CREATE INDEX api_events_session ON api_events(session_id, seq);
 
+CREATE TABLE host_snapshot_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    host TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    path TEXT NOT NULL,
+    written_at TEXT NOT NULL
+);
+
+CREATE INDEX host_snapshot_cache_host_sha256
+ON host_snapshot_cache(host, sha256);
+
+CREATE INDEX host_snapshot_cache_session
+ON host_snapshot_cache(session_id);
+
+CREATE INDEX host_snapshot_cache_written_at
+ON host_snapshot_cache(written_at);
+
 CREATE TRIGGER session_contexts_workspace_insert
 BEFORE INSERT ON session_contexts
 WHEN NOT EXISTS(

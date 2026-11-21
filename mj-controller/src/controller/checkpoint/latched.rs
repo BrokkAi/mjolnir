@@ -925,6 +925,17 @@ impl Controller {
                 // Packing removed the stage and the cleanup just removed the
                 // archive, so nothing is left for the exit to remove.
                 target_files.handed_off();
+                // Best-effort atomic publish into host-owned snapshot cache
+                // before the session's environment (e.g. container) is retired.
+                if exclusivity == LatchExclusivity::HoldThroughClose {
+                    super::publish_host_snapshot_cache_best_effort(
+                        session_id,
+                        &backend,
+                        verified.archive_path(),
+                        verified.sha256(),
+                        executor,
+                    );
+                }
                 CheckpointMetadata {
                     archive_path: verified.archive_path().to_path_buf(),
                     sha256: verified.sha256().to_string(),

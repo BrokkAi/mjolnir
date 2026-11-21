@@ -2726,6 +2726,16 @@ impl Controller {
                     session_id,
                     session.checkpoint.as_deref(),
                 )?;
+                match super::checkpoint::cleanup_session_host_snapshot_cache(session_id, executor) {
+                    Ok(warnings) => outcome.warnings.extend(warnings),
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id,
+                            error = %format!("{error:#}"),
+                            "could not list host snapshot cache entries during Destroy"
+                        );
+                    }
+                }
                 mj_core::attachment::AttachmentStore::controller(session_id)?
                     .remove_session_data()
                     .context("remove session image attachments")?;
