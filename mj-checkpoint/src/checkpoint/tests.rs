@@ -5013,3 +5013,76 @@ fn missing_sqlite_recovery_publishes_a_complete_wal_snapshot_before_other_artifa
         "newer conversation"
     );
 }
+
+#[test]
+fn origin_delta_raw_export_captures_post_launch_work_without_quiescence_receipt() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let checkout = spec
+        .workspace_root
+        .join(&spec.repositories[0].relative_destination);
+    git(&checkout, &["branch", "pre-launch-branch"]);
+    fs::write(checkout.join("README.md"), "pre-launch stash\n").unwrap();
+    git(&checkout, &["stash", "push", "-m", "pre-launch stash"]);
+
+    crate::snapshot::record_launch_if_absent(&SystemGit, &checkout, &spec.session.id).unwrap();
+
+    git(&checkout, &["checkout", "-b", "post-launch-branch"]);
+    fs::write(checkout.join("post.txt"), "post-launch commit\n").unwrap();
+    git(&checkout, &["add", "post.txt"]);
+    git(&checkout, &["commit", "-m", "post-launch commit"]);
+    fs::write(checkout.join("post.txt"), "post-launch stash\n").unwrap();
+    git(&checkout, &["stash", "push", "-m", "post-launch stash"]);
+    fs::write(checkout.join("post.txt"), "unstaged edit\n").unwrap();
+    fs::write(checkout.join("untracked.txt"), "untracked file\n").unwrap();
+
+    spec.repositories[0].capture = CheckpointRepositoryCapture::OriginDeltaRaw;
+    spec.protocol_version = CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+    assert_eq!(
+        spec.protocol_version,
+        CHECKPOINT_ORIGIN_DELTA_EXPORT_PROTOCOL_VERSION
+    );
+
+    export_checkpoint(&spec).unwrap();
+    let archive = read_archive_verified(&spec.output_path).unwrap();
+    let repository = &archive.manifest.repositories[0];
+    assert!(repository.origin_delta_pack_path.is_some());
+    let delta = repository
+        .metadata
+        .origin_delta
+        .as_ref()
+        .expect("origin_delta metadata");
+    assert!(delta.origin_url.is_some());
+    assert!(delta.refs.contains_key("refs/heads/post-launch-branch"));
+    assert!(!delta.refs.contains_key("refs/heads/pre-launch-branch"));
+    assert_eq!(delta.stash.len(), 1);
+    assert_eq!(
+        fs::read_to_string(checkout.join("untracked.txt")).unwrap(),
+        "untracked file\n"
+    );
+}
+
+#[test]
+fn origin_delta_raw_export_handles_originless_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let checkout = spec
+        .workspace_root
+        .join(&spec.repositories[0].relative_destination);
+    git(&checkout, &["remote", "remove", "origin"]);
+
+    spec.repositories[0].capture = CheckpointRepositoryCapture::OriginDeltaRaw;
+    spec.protocol_version = CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+
+    export_checkpoint(&spec).unwrap();
+    let archive = read_archive_verified(&spec.output_path).unwrap();
+    let repository = &archive.manifest.repositories[0];
+    assert!(repository.origin_delta_pack_path.is_none());
+    assert!(repository.metadata.origin.is_empty());
+    let delta = repository
+        .metadata
+        .origin_delta
+        .as_ref()
+        .expect("origin_delta metadata");
+    assert!(delta.origin_url.is_none());
+}

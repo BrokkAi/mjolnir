@@ -605,6 +605,17 @@ impl Controller {
         // barrier to cancel.
         let mut completion = CheckpointCompletion::HeldBarrier;
 
+        let mut repositories = repositories;
+        if export_policy == CheckpointExportPolicy::OriginDeltaRaw
+            && relay_protocol >= mj_core::relay::RELAY_RAW_ORIGIN_DELTA_PROTOCOL
+        {
+            for repository in &mut repositories {
+                if repository.capture == CheckpointRepositoryCapture::MetadataOnly {
+                    repository.capture = CheckpointRepositoryCapture::OriginDeltaRaw;
+                }
+            }
+        }
+
         let exported: Result<CheckpointArtifact> = async {
             let target_files = target_files.get_or_insert_with(own_target_files);
             let spec = CheckpointExportSpec {

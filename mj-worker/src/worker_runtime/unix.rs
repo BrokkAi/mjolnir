@@ -112,6 +112,7 @@ struct HarnessPreparationSetup {
     root: PathBuf,
     config: WorkerLaunchConfig,
     relay: Arc<RelayCell>,
+    restarting: bool,
     session_git_config_include: Option<PathBuf>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
@@ -1300,6 +1301,7 @@ pub async fn run_daemon_owned(
         root: root.clone(),
         config,
         relay: relay.clone(),
+        restarting,
         session_git_config_include,
         credentials,
         kimi_task_home,
@@ -1890,6 +1892,7 @@ async fn prepare_and_start_harness(
         root: root_path,
         mut config,
         relay,
+        restarting,
         session_git_config_include,
         credentials,
         kimi_task_home,
@@ -1932,10 +1935,15 @@ async fn prepare_and_start_harness(
             .harness
             .configure_staged_home_environment(&home, &mut config.environment);
     }
+    let record_raw_launch = config
+        .environment
+        .get(mj_core::worker_launch::SESSION_RAW_LAUNCH_RECORD_ENV)
+        .is_some_and(|value| value == "1");
     let mut session_environment = base_environment.clone();
     session_environment.extend(config.environment.clone());
     session_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     session_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
+    session_environment.remove(mj_core::worker_launch::SESSION_RAW_LAUNCH_RECORD_ENV);
     session_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
     session_environment.remove(mj_core::worker_launch::SESSION_PROJECT_TOOLS_ROOTS);
     let github_root = root.to_owned();
@@ -1944,6 +1952,7 @@ async fn prepare_and_start_harness(
     let git_config_include = session_git_config_include.clone();
     let mut explicit_environment = config.environment.clone();
     explicit_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
+    explicit_environment.remove(mj_core::worker_launch::SESSION_RAW_LAUNCH_RECORD_ENV);
     explicit_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
     let base_environment_for_filter = base_environment.clone();
     // Credential sync installs the session's slopcop login in its harness home.
@@ -1976,6 +1985,31 @@ async fn prepare_and_start_harness(
         .await?;
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
     config.environment = session_environment.clone();
+
+    if record_raw_launch && !restarting {
+        let budget = preparation_step(
+            root,
+            status,
+            "raw-launch-record",
+            LOCAL_PREPARATION_STEP_TIMEOUT,
+            cancel,
+        )
+        .await?;
+        let cwd = config.cwd.clone();
+        let session_id = config.session_id.clone();
+        bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+            if step_cancel.is_cancelled() {
+                bail!("preparation cancelled before recording raw launch baseline");
+            }
+            mj_checkpoint::snapshot::record_launch_if_absent(
+                &mj_checkpoint::archive::SystemGit,
+                &cwd,
+                &session_id,
+            )
+            .with_context(|| format!("record raw launch baseline in {}", cwd.display()))
+        })
+        .await?;
+    }
 
     // Every launch records its `gh` approval where the selected harness reads
     // it, and OpenCode's denials apply in every execution policy.

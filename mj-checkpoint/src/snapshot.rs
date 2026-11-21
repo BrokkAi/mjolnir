@@ -474,30 +474,88 @@ impl LaunchRecord {
         Ok(Some(record))
     }
 }
+fn build_launch_record(runner: &dyn GitCommandRunner, top_level: &Path) -> Result<LaunchRecord> {
+    Ok(LaunchRecord {
+        version: 1,
+        refs: read_refs(runner, top_level)?,
+        stash: read_stash(runner, top_level)?,
+        worktrees: discover_linked_worktrees(runner, top_level)?
+            .into_iter()
+            .map(|w| w.relative)
+            .collect(),
+    })
+}
+
+fn write_launch_record_temp(
+    parent: &Path,
+    record: &LaunchRecord,
+) -> Result<tempfile::NamedTempFile> {
+    fs::create_dir_all(parent)?;
+    let mut bytes = serde_json::to_vec(record)?;
+    bytes.push(b'\n');
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::Write::write_all(&mut file, &bytes)?;
+    file.as_file().sync_all()?;
+    Ok(file)
+}
+
 pub fn record_launch(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
     session_id: &str,
 ) -> Result<()> {
-    let record = LaunchRecord {
-        version: 1,
-        refs: read_refs(runner, checkout)?,
-        stash: read_stash(runner, checkout)?,
-        worktrees: discover_linked_worktrees(runner, checkout)?
-            .into_iter()
-            .map(|w| w.relative)
-            .collect(),
-    };
-    let path = launch_path(runner, checkout, session_id)?;
+    let top_level = crate::archive::git::locate_checkout(runner, checkout)?.top_level;
+    let record = build_launch_record(runner, &top_level)?;
+    let path = launch_path(runner, &top_level, session_id)?;
     let parent = path.parent().context("launch path has no parent")?;
-    fs::create_dir_all(parent)?;
-    let mut bytes = serde_json::to_vec(&record)?;
-    bytes.push(b'\n');
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    std::io::Write::write_all(&mut file, &bytes)?;
-    file.as_file().sync_all()?;
+    let file = write_launch_record_temp(parent, &record)?;
     file.persist(&path)
         .with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+pub fn record_launch_if_absent(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    session_id: &str,
+) -> Result<()> {
+    let top_level = crate::archive::git::locate_checkout(runner, checkout)?.top_level;
+    let path = launch_path(runner, &top_level, session_id)?;
+    if path.exists() {
+        return Ok(());
+    }
+    let record = build_launch_record(runner, &top_level)?;
+    let parent = path.parent().context("launch path has no parent")?;
+    let file = write_launch_record_temp(parent, &record)?;
+    match file.persist_noclobber(&path) {
+        Ok(_) => Ok(()),
+        Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(err) => Err(err.error).with_context(|| format!("write {}", path.display())),
+    }
+}
+
+pub fn remove_launch_record(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    session_id: &str,
+) -> Result<()> {
+    let path = launch_path(runner, checkout, session_id)?;
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("remove {}", path.display())),
+    }
+    if let Some(parent) = path.parent() {
+        match fs::remove_dir(parent) {
+            Ok(()) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(_) => {}
+        }
+    }
     Ok(())
 }
 fn local_snapshot_ref(name: &str) -> bool {
@@ -1734,7 +1792,7 @@ fn selected_refs(
                         CheckoutOwnership::Raw {
                             launch: Some(launch),
                         } => launch.refs.get(*name) != Some(*oid),
-                        CheckoutOwnership::Raw { launch: None } => false,
+                        CheckoutOwnership::Raw { launch: None } => true,
                     })
         })
         .map(|(name, oid)| (name.clone(), oid.clone()))
@@ -6707,5 +6765,57 @@ mod tests {
             historical.trim_end_matches('\n')
         );
         git(&restored, &["fsck", "--full"]);
+    }
+
+    #[test]
+    fn raw_capture_without_launch_record_keeps_all_local_refs_and_stashes() {
+        let r = Repo::new();
+        git(&r.checkout, &["branch", "extra-branch"]);
+        git(&r.checkout, &["tag", "v-local"]);
+        git(&r.checkout, &["notes", "add", "-m", "local note"]);
+        let head = git(&r.checkout, &["rev-parse", "HEAD"]);
+        git(&r.checkout, &["update-ref", "refs/mj/durable-keep", &head]);
+        r.commit("base tracked\n");
+        fs::write(r.checkout.join("a.txt"), "stashed change\n").unwrap();
+        git(&r.checkout, &["add", "a.txt"]);
+        git(&r.checkout, &["stash", "push", "-m", "raw stash"]);
+
+        let snapshot = r.capture(&CheckoutOwnership::Raw { launch: None });
+        assert!(snapshot.metadata.refs.contains_key("refs/heads/main"));
+        assert!(snapshot.metadata.refs.contains_key("refs/heads/extra-branch"));
+        assert!(snapshot.metadata.refs.contains_key("refs/tags/v-local"));
+        assert!(snapshot.metadata.refs.contains_key("refs/notes/commits"));
+        assert!(snapshot.metadata.refs.contains_key("refs/mj/durable-keep"));
+        assert!(!snapshot.metadata.refs.contains_key("refs/stash"));
+        assert_eq!(snapshot.metadata.stash.len(), 1);
+    }
+
+    #[test]
+    fn record_launch_if_absent_from_subdirectory_is_idempotent_and_removable() {
+        let r = Repo::new();
+        let sub = r.checkout.join("nested/sub");
+        fs::create_dir_all(&sub).unwrap();
+        record_launch_if_absent(&SystemGit, &sub, "session-a").unwrap();
+        record_launch_if_absent(&SystemGit, &sub, "session-b").unwrap();
+
+        git(&r.checkout, &["branch", "post-launch"]);
+        record_launch_if_absent(&SystemGit, &sub, "session-a").unwrap();
+
+        let a = LaunchRecord::read(&SystemGit, &r.checkout, "session-a")
+            .unwrap()
+            .expect("session-a launch record");
+        assert!(!a.refs.contains_key("refs/heads/post-launch"));
+
+        remove_launch_record(&SystemGit, &sub, "session-a").unwrap();
+        assert!(
+            LaunchRecord::read(&SystemGit, &r.checkout, "session-a")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            LaunchRecord::read(&SystemGit, &r.checkout, "session-b")
+                .unwrap()
+                .is_some()
+        );
     }
 }

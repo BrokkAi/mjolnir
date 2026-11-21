@@ -2227,9 +2227,12 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
             );
         }
         if let Some(snapshot) = &metadata.origin_delta {
+            let origin_matches = match snapshot.origin_url.as_deref() {
+                Some(url) => !url.is_empty() && metadata.origin == url,
+                None => metadata.origin.is_empty() && repository.origin_delta_pack_path.is_none(),
+            };
             ensure!(
-                snapshot.origin_url.as_deref() == Some(metadata.origin.as_str())
-                    && !metadata.origin.is_empty()
+                origin_matches
                     && snapshot.head.commit() == metadata.head_commit
                     && !metadata.remote_workspace
                     && !metadata.plain_directory
