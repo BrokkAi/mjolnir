@@ -14,6 +14,7 @@ import subprocess
 import sys
 from tempfile import NamedTemporaryFile
 
+from audit import PASSING_HIT_KINDS
 from pilot_lock import pilot_lock
 
 HERE = Path(__file__).resolve().parent
@@ -226,12 +227,15 @@ def isolation_evidence(root, runs):
 def isolation_report(egress=(), evidence=()):
     kinds = ("writer", "reviewer", "engine", "judge")
     void = defaultdict(lambda: defaultdict(dict))
-    screened, attempts = defaultdict(set), []
+    screened, edits, attempts = defaultdict(set), defaultdict(set), []
+
+    def blocking(reason):
+        return not isinstance(reason, dict) or reason.get("kind") not in PASSING_HIT_KINDS
 
     def record_void(kind, sid, reasons):
-        recorded = void[kind][sid]
         for reason in reasons:
-            recorded[json.dumps(reason, sort_keys=True)] = reason
+            if blocking(reason):
+                void[kind][sid][json.dumps(reason, sort_keys=True)] = reason
 
     for kind, directory, launch_name, relative in evidence:
         launch = directory / launch_name
@@ -248,18 +252,21 @@ def isolation_report(egress=(), evidence=()):
             report = load(path)
             hits = report.get("hits", ())
             if report["passed"] is False:
-                reasons = [hit for hit in hits if hit["kind"] != "interpreter-screened"]
+                reasons = [hit for hit in hits if blocking(hit)]
                 record_void(kind, sid, reasons or ["transcript audit failed"])
             for hit in hits:
                 if hit["kind"] == "interpreter-screened":
                     # Turn and retirement audits may cover the same transcript.
                     screened[kind].add((sid, hit["seq"]))
+                elif hit["kind"] == "in-place-edit":
+                    edits[kind].add((sid, hit["seq"], hit.get("edit_index", 0)))
     return {
         **({"egress_source": "missing"} if egress is None else {"egress_measurements": list(egress)}),
         "void_sessions": {kind: len(void[kind]) for kind in kinds},
         "void_reasons": {kind: {sid: [reasons[key] for key in sorted(reasons)]
                                for sid, reasons in sorted(void[kind].items())} for kind in kinds},
         "interpreter_screened": {kind: len(screened[kind]) for kind in kinds},
+        "in_place_edits": {kind: len(edits[kind]) for kind in kinds},
         "attempts": sorted(attempts, key=lambda attempt: (attempt["kind"], attempt["path"], attempt["session_id"])),
         "enforcement_gap": "Podman does not restrict pilot egress to providers. The engine's probes "
                            "measure reachability of selected non-provider hosts. Stored transcript audits "
