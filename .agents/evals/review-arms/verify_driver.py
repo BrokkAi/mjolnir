@@ -52,8 +52,9 @@ p.add_argument("--seal-probe", type=pathlib.Path, help="trusted isolation probe 
 p.add_argument("--provider-model", help="concrete provider-reported Claude model ID")
 p.add_argument("--model-version", help="frozen Claude model display version")
 p.add_argument("--output", help="task: the file each unit's session writes, fetched into the unit directory")
-# Model and profiles of the sessions; rounds A to F used Opus on the Claude profiles.
+# Model, effort, and profiles of the sessions; rounds A to F used Opus/high on the Claude profiles.
 p.add_argument("--model", default="opus")
+p.add_argument("--effort", default="high")
 p.add_argument("--profiles", default=",".join(PROFILES), help="comma-separated mj profiles, used in turn")
 # Judge rounds normally run both judges with one model; --judges A (or B) runs one side, so the
 # two judges of a batch can use different models in two invocations (brief/PLAN-bifrost-oracle-strict.md).
@@ -528,22 +529,25 @@ def run_unit(batch_path, judge=None):
         cached = json.loads(out_path.read_text())
         producer = cached.get("producer") or {}
         made_by = (producer.get("config") or {}).get("model")
+        made_effort = (producer.get("config") or {}).get("effort")
         made_on = producer.get("profile")
         # A split-judge invocation pins one side's model, so an output that predates producer records
         # cannot show it matches. Unknown and mismatched producers are both ineligible.
         unknown = not producer and a.kind == "judge" and len(JUDGES) == 1
-        if unknown or (made_by is not None and made_by != a.model) or (made_on is not None and made_on not in PROFILES):
+        if (unknown or (made_by is not None and made_by != a.model)
+                or (made_effort is not None and made_effort != a.effort)
+                or (made_on is not None and made_on not in PROFILES)):
             # Mark the unit ineligible and retire any aggregate in one serialized step, so no collector
             # reads verdicts this check rejects.
             import fcntl
             with open(V / "workflow-out.lock", "w") as held:
                 fcntl.flock(held, fcntl.LOCK_EX)
-                save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by] if producer else None,
-                                                                      "requested": [PROFILES, a.model]}})
+                save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by, made_effort] if producer else None,
+                                                                      "requested": [PROFILES, a.model, a.effort]}})
                 (V / "workflow-out.json").unlink(missing_ok=True)
             raise RuntimeError(f"unit {tag} already has output from "
-                               f"{f'{made_on}/{made_by}' if producer else 'an unrecorded producer'}, not "
-                               f"{','.join(PROFILES)}/{a.model}; move {out_path.name} and "
+                               f"{f'{made_on}/{made_by}/{made_effort}' if producer else 'an unrecorded producer'}, not "
+                               f"{','.join(PROFILES)}/{a.model}/{a.effort}; move {out_path.name} and "
                                f"sessions/batch-{tag}.json aside to rerun it")
         # The cached output matches this invocation, so any earlier invalid marker for it is stale.
         (V / "out" / f"invalid-{tag}.json").unlink(missing_ok=True)
@@ -551,11 +555,14 @@ def run_unit(batch_path, judge=None):
     if rec_path.exists():
         rec = json.loads(rec_path.read_text())
         sid = rec["session_id"]
-        # A session set up for another model or profile is not this invocation's unit to resume.
+        # A session set up for another model, effort, or profile is not this invocation's unit to resume.
         recorded_model = (rec.get("config") or {}).get("model")
-        if (recorded_model is not None and recorded_model != a.model) or rec.get("profile") not in PROFILES:
-            raise RuntimeError(f"unit {tag} has a session for {rec.get('profile')}/{recorded_model}, not "
-                               f"{','.join(PROFILES)}/{a.model}; move sessions/batch-{tag}.json aside to rerun it")
+        recorded_effort = (rec.get("config") or {}).get("effort")
+        if ((recorded_model is not None and recorded_model != a.model)
+                or (recorded_effort is not None and recorded_effort != a.effort)
+                or rec.get("profile") not in PROFILES):
+            raise RuntimeError(f"unit {tag} has a session for {rec.get('profile')}/{recorded_model}/{recorded_effort}, not "
+                               f"{','.join(PROFILES)}/{a.model}/{a.effort}; move sessions/batch-{tag}.json aside to rerun it")
     else:
         profile = pick_profile()
         if os.environ.get("REVIEW_ARMS_QUOTA_FLOOR"):
@@ -567,7 +574,7 @@ def run_unit(batch_path, judge=None):
                 raise RuntimeError("held before verifier session start: " + hold)
         source = ["--bundle", a.bundle] if a.bundle else ["--project-directory", REPO]
         sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", a.target,
-                 *source, "--effort", "high", "--review", "off", "--no-project-memory",
+                 *source, "--effort", a.effort, "--review", "off", "--no-project-memory",
                  "--no-github-events", "--no-github-credentials", "--subagents", "none",
                  "--title", f"review-arms {V.name} {tag}",
                  timeout=900)["session_id"]
@@ -579,7 +586,7 @@ def run_unit(batch_path, judge=None):
         prompt.write_text(prompt_text(batch_path, judge))
         while not (session(sid).get("is_idle") and session(sid).get("lifecycle") == "live"):
             time.sleep(5)
-        for k, v in [("model", a.model), ("effort", "high")]:
+        for k, v in [("model", a.model), ("effort", a.effort)]:
             # An idle, live session can still be initializing; mj then refuses with 409 until
             # initialization ends, so retry exactly that refusal.
             while True:
@@ -591,7 +598,7 @@ def run_unit(batch_path, judge=None):
                         raise
                     time.sleep(10)
         cfg = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
-        assert cfg.get("model") == a.model and cfg.get("effort") == "high", cfg
+        assert cfg.get("model") == a.model and cfg.get("effort") == a.effort, cfg
         # Record the model before sending the prompt: a turn accepted before an interruption keeps
         # its true model, and the resume guard above then compares against it.
         rec = {**rec, "config": cfg}
@@ -635,16 +642,16 @@ def run_unit(batch_path, judge=None):
     # session was on when its turn completed (quota recovery can move it) and the recorded model.
     producer = {"session_id": sid, "profile": s.get("profile_id") or rec.get("profile"),
                 "launch_profile": rec.get("profile"), "config": rec.get("config")}
-    made_on, made_by = producer["profile"], (rec.get("config") or {}).get("model")
-    if made_on not in PROFILES or made_by != a.model:
+    made_on, made_by, made_effort = producer["profile"], (rec.get("config") or {}).get("model"), (rec.get("config") or {}).get("effort")
+    if made_on not in PROFILES or made_by != a.model or (made_effort is not None and made_effort != a.effort):
         import fcntl
         with open(V / "workflow-out.lock", "w") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
-            save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by],
-                                                                  "requested": [PROFILES, a.model]},
+            save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by, made_effort],
+                                                                  "requested": [PROFILES, a.model, a.effort]},
                                                      "session_id": sid})
             (V / "workflow-out.json").unlink(missing_ok=True)
-        raise RuntimeError(f"unit {tag} finished on {made_on}/{made_by}, not {','.join(PROFILES)}/{a.model}")
+        raise RuntimeError(f"unit {tag} finished on {made_on}/{made_by}/{made_effort}, not {','.join(PROFILES)}/{a.model}/{a.effort}")
     if a.kind == "task":
         (batch_path / a.output).write_text(out["text"])
         out = {"output": str(batch_path / a.output), "session_id": sid}

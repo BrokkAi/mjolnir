@@ -156,6 +156,11 @@ impl KimiAuth {
         })
     }
 
+    /// Whether the profile has a key or a local OAuth credential to try.
+    pub fn has_credentials(&self) -> Result<bool> {
+        Ok(self.api_key.is_some() || self.runtime.credentials_path.try_exists()?)
+    }
+
     async fn token(&self, force: bool, rejected: Option<String>) -> Result<Option<String>> {
         if let Some(api_key) = &self.api_key {
             return Ok(if force { None } else { Some(api_key.clone()) });

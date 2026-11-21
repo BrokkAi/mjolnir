@@ -1581,6 +1581,73 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn guardian_actor_delivers_fallback_for_a_request_added_after_attachment() {
+    use mj_core::guardian::{GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult};
+    const CHILD: &str = "MJ_TEST_GUARDIAN_POLL_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "guardian_actor_delivers_fallback_for_a_request_added_after_attachment",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    mj_core::config::Config::default().save().unwrap();
+    register_leased_relay_session();
+    let relay_root = tempfile::tempdir().unwrap();
+    let SessionManagerChannels {
+        targets,
+        control,
+        shutdown,
+        ..
+    } = spawn_session_manager().expect("spawn the session manager");
+    targets.send_replace(vec![leased_relay_target(relay_root.path())]);
+    let session = control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(2))
+        .await
+        .unwrap();
+    session.sync_now().await.unwrap();
+    assert!(session.view().connected);
+
+    mj_core::config::atomic_write(
+        &relay_root.path().join("guardian-request.json"),
+        &serde_json::to_vec(&GuardianReviewRequest {
+            request_id: "permission-1".into(),
+            harness: mj_core::config::HarnessKind::Codex,
+            session_id: LEASED_RELAY_SESSION.into(),
+            tool_call_id: "call".into(),
+            action: serde_json::json!({"input": {"command": "cargo test"}}),
+            user_instructions: vec!["Run the tests.".into()],
+            user_instructions_omitted: false,
+            transcript: String::new(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let response = relay_root.path().join("guardian-result.json");
+    let result: GuardianReviewResult = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match std::fs::read(&response) {
+                Ok(bytes) => break serde_json::from_slice(&bytes).unwrap(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(result.request_id, "permission-1");
+    assert_eq!(
+        result.decision,
+        GuardianReviewOutcome::UseAcpFallback { stage1_score: None }
+    );
+    shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
 fn exact_test_name(test: &str) -> String {
     test_name(module_path!(), test)
 }

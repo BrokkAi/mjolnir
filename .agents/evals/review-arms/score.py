@@ -63,13 +63,18 @@ def latency(session_dir):
     """Seconds from the reviewer's prompt to the end of its turn, or None."""
     # Completed review roles are normally destroyed (#1554/#1559). Missing
     # capture is unavailable timing, never a zero-duration observation.
-    if not all((session_dir / name).exists() for name in ("session.json", "transcript.json")):
-        return None
-    row = json.loads((session_dir / "session.json").read_text())
-    done = (row.get("last_turn_outcome") or {}).get("completed_at_ms")
-    items = [i for p in json.loads((session_dir / "transcript.json").read_text()) for i in p["items"]]
-    prompt = next((i["created_at_ms"] for i in items if i["role"] == "user"), None)
-    return round((done - prompt) / 1000, 1) if done and prompt else None
+    if all((session_dir / name).exists() for name in ("session.json", "transcript.json")):
+        row = json.loads((session_dir / "session.json").read_text())
+        done = (row.get("last_turn_outcome") or {}).get("completed_at_ms")
+        items = [i for p in json.loads((session_dir / "transcript.json").read_text()) for i in p["items"]]
+        prompt = next((i["created_at_ms"] for i in items if i["role"] == "user"), None)
+        return round((done - prompt) / 1000, 1) if done and prompt else None
+    if all((session_dir / name).exists() for name in ("usage.json", "prompt-time.json")):
+        turns = json.loads((session_dir / "usage.json").read_text()).get("turns") or []
+        done = turns[-1].get("completed_at_ms") if turns else None
+        prompt = json.loads((session_dir / "prompt-time.json").read_text()).get("prompt_created_at_ms")
+        return round((done - prompt) / 1000, 1) if done and prompt else None
+    return None
 
 
 sessions = {}

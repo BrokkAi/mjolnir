@@ -1,3 +1,4 @@
+use super::standalone::ConnectionActivity;
 use super::*;
 
 const DEFERRED_SUBMIT_CAPACITY: usize = 32;
@@ -134,7 +135,7 @@ pub async fn run_session_actor(
         Returned(Option<Box<ReturnedConnection>>),
         Reviewer(Option<std::result::Result<(), tokio::task::JoinError>>),
         Tick,
-        RelayChanged,
+        ConnectionActivity(ConnectionActivity),
         Policy,
         OwnerChanged(bool),
         Command(Option<Box<ActorCommand>>),
@@ -177,12 +178,12 @@ pub async fn run_session_actor(
                         // A sealed relay has nothing left to follow. Its lifecycle
                         // owner may stop the target after returning the connection.
                         && connection.as_ref().is_none_or(|connection| connection.operational().execution != mj_core::relay::RelayExecutionState::Closed) => Event::Tick,
-                    () = async {
+                    completed = async {
                         match connection.as_mut() {
-                            Some(connection) => connection.relay_changed().await,
+                            Some(connection) => connection.wait_for_activity().await,
                             None => std::future::pending().await,
                         }
-                    } => Event::RelayChanged,
+                    } => Event::ConnectionActivity(completed),
                     _ = policies.changed() => Event::Policy,
                     ready = async {
                         match recovery_waiting.expect("guarded recovery wait") {
@@ -198,14 +199,28 @@ pub async fn run_session_actor(
             } => event,
         };
         match event {
-            // A busy session is followed on the fast cadence already; a quiet
-            // one syncs now instead of waiting for its slow timer.
-            Event::RelayChanged => {
-                if connection
-                    .as_ref()
-                    .is_some_and(|connection| !connection.follows_closely())
+            Event::ConnectionActivity(ConnectionActivity::RelayChanged { guardian }) => {
+                if guardian
+                    || connection
+                        .as_ref()
+                        .is_some_and(|connection| !connection.follows_closely())
                 {
                     schedule.no_later_than(Duration::ZERO);
+                }
+            }
+            Event::ConnectionActivity(ConnectionActivity::GuardianCompleted(result)) => {
+                let deliver = connection
+                    .as_mut()
+                    .expect("guardian connection")
+                    .deliver_guardian_review(result);
+                tokio::select! {
+                    biased;
+                    _ = retirement.wait_for(|retired| *retired) => break,
+                    result = deliver => if let Err(error) = result {
+                        tracing::debug!(session_id = %target.session_id, %error, "guardian response delivery lost its relay");
+                        connection = None;
+                        schedule.no_later_than(Duration::ZERO);
+                    }
                 }
             }
             Event::OwnerChanged(ready) => {
@@ -1300,6 +1315,9 @@ pub async fn run_session_actor(
             }
         }
     }
+    if let Some(connection) = connection.as_mut() {
+        connection.cancel_guardian_jobs();
+    }
     reviewer_cancellation.cancel();
     reviewer_connections.clear();
     reviewer_tails.clear();
@@ -1842,6 +1860,7 @@ pub async fn sync_actor_connection(
                 tracing::warn!(session_id = %target.session_id, %error, "could not prune read notifications on relay attachment");
             }
         }
+        fresh.sync_guardian().await?;
         fresh.start_observing(target).await;
         let snapshot = fresh.snapshot();
         observe_worker_readiness(target, &snapshot, observation).await?;
@@ -1850,6 +1869,7 @@ pub async fn sync_actor_connection(
     }
     let connection = connection.as_mut().expect("connection was initialized");
     let changed = connection.sync_in_place().await?;
+    connection.sync_guardian().await?;
     connection.start_observing(target).await;
     if changed || observation.is_some() {
         // Readiness can already have been published while the swap owner was

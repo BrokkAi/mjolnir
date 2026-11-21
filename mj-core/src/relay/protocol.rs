@@ -505,6 +505,10 @@ pub enum RelayRequest {
     CompleteHistoryRequest {
         result: crate::history::HistoryResult,
     },
+    GuardianRequests,
+    CompleteGuardianRequest {
+        result: crate::guardian::GuardianReviewResult,
+    },
     /// Acknowledge a completed MCP request and cache its bounded answer for
     /// subsequent tool calls and restart recovery.
     CompleteSubagentRequest {
@@ -701,6 +705,8 @@ impl RelayRequest {
             Self::HistoryQuery { .. } => "history_query",
             Self::HistoryRequests => "history_requests",
             Self::CompleteHistoryRequest { .. } => "complete_history_request",
+            Self::GuardianRequests => "guardian_requests",
+            Self::CompleteGuardianRequest { .. } => "complete_guardian_request",
             Self::CompleteSubagentRequest { .. } => "complete_subagent_request",
             Self::Reviewer { request, .. } => request.action_name(),
         }
@@ -728,6 +734,9 @@ impl RelayRequest {
             Self::HistoryQuery { .. }
             | Self::HistoryRequests
             | Self::CompleteHistoryRequest { .. } => 16,
+            Self::GuardianRequests | Self::CompleteGuardianRequest { .. } => {
+                super::RELAY_GUARDIAN_REVIEW_PROTOCOL
+            }
             Self::AttachmentPresent { .. }
             | Self::InstallAttachment { .. }
             | Self::ReadAttachment { .. } => 8,
@@ -1028,12 +1037,15 @@ pub enum RelayResponsePayload {
         state_digest: Option<String>,
     },
     /// The answer to [`RelayRequest::WaitForChange`]: the worker's latest event
-    /// ordinal and state digest now, and whether this connection's sub-agent
-    /// queue has changes to poll. Equal values mean the wait ran out.
+    /// ordinal and state digest now, and whether the sub-agent or guardian
+    /// queue has changes to poll. An unchanged frontier with no queue changes
+    /// means the wait ran out.
     ChangeObserved {
         latest_ordinal: u64,
         state_digest: String,
         subagent_queue_changed: bool,
+        #[serde(default, skip_serializing_if = "crate::transcript::is_false")]
+        guardian_queue_changed: bool,
     },
     /// An attach whose `known_state_digest` still matches: the state is the
     /// one the controller holds, so only the events are sent. Protocol 57.
@@ -1173,10 +1185,14 @@ pub enum RelayResponsePayload {
     HistoryRequests {
         requests: Vec<crate::history::HistoryRequest>,
     },
+    GuardianRequests {
+        requests: Vec<crate::guardian::GuardianReviewRequest>,
+    },
     HistoryResult {
         result: crate::history::HistoryResult,
     },
     HistoryRequestCompleted,
+    GuardianRequestCompleted,
     /// What every workspace repository changed since the stored baselines.
     ReviewDelta {
         repositories: Vec<RepoDelta>,

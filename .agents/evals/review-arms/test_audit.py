@@ -1326,6 +1326,16 @@ def test_engine_saved_result_requires_prior_audit_in_the_same_session(tmp_path, 
     assert any(hit["seq"] == read_seq for hit in report["hits"])
 
 
+# Hard-won: eefcdaa95: a Grep confined to the engine's own saved Grep output voided a live turn
+def test_engine_can_grep_exactly_its_own_saved_tool_result(tmp_path, saved_engine_result):
+    read = saved_engine_result[1]
+    saved = read["rawInput"]["file_path"]
+    read.update(name="Grep", kind="search",
+                rawInput={"pattern": "fn \\w+", "path": saved, "output_mode": "content", "glob": "*", "-n": True})
+    report = audit_engine_result(tmp_path, saved_engine_result)
+    assert report["passed"], report["hits"]
+
+
 @pytest.mark.parametrize("name", ["Grep", "Glob", "Write", "Edit"])
 def test_engine_saved_results_are_read_only_and_disallow_search(tmp_path, saved_engine_result, name):
     read = saved_engine_result[1]

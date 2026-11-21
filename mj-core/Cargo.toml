@@ -19,6 +19,9 @@ include = [
     "src/activity/eot_glide_fresh_sample.json",
     "src/github_item/questions_v2.json",
     "src/github_item/ettin-tokenizer.json",
+    # OpenAI Codex guardian policy embedded by the guardian reviewers.
+    "src/guardian/*.md",
+    "src/guardian/OPENAI_CODEX_NOTICE.txt",
     # Recorded ACP bridge traffic the step-clock tests replay.
     "src/**/testdata/**/*.jsonl",
     # Mjolnir-authored skills embedded with `include_str!`.

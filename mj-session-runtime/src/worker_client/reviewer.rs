@@ -194,10 +194,12 @@ impl RelayClient {
                 latest_ordinal,
                 state_digest,
                 subagent_queue_changed,
+                guardian_queue_changed,
             } => Ok(ObservedChange {
                 latest_ordinal,
                 state_digest,
                 subagent_queue_changed,
+                guardian_queue_changed,
             }),
             _ => bail!("relay returned an unexpected change-wait response"),
         }
@@ -506,4 +508,5 @@ pub struct ObservedChange {
     pub latest_ordinal: u64,
     pub state_digest: String,
     pub subagent_queue_changed: bool,
+    pub guardian_queue_changed: bool,
 }

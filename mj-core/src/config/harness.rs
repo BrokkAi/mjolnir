@@ -1338,15 +1338,8 @@ impl HarnessKind {
         Ok(())
     }
 
-    /// Who reviews this harness's tool approvals under configured approvals
-    /// (a raw target), so the person is not asked about every action.
-    ///
-    /// Codex, Claude Code, Grok Build, Muse Code and Antigravity ship their
-    /// own reviewer, selected through [`Self::execution_enforcement`]. Kimi
-    /// Code, OpenCode and DSH ship none: they only ask, and a permission
-    /// prompt alone is not a guardian. The Mjolnir worker answers their
-    /// permission requests with Codex's guardian policy instead, on a
-    /// read-only session of the same harness and model.
+    /// Whether the harness ships a native reviewer under configured
+    /// approvals. Kimi Code, OpenCode and DSH rely on Mjolnir's reviewer.
     pub const fn guardian(self) -> GuardianReviewer {
         match self {
             Self::Codex | Self::Claude | Self::Grok | Self::Muse | Self::Antigravity => {
@@ -1356,18 +1349,13 @@ impl HarnessKind {
         }
     }
 
-    /// Whether the Mjolnir worker reviews this harness's tool approvals: the
-    /// target keeps configured approvals, the harness ships no reviewer of its
-    /// own, and the profile has not turned the Mjolnir guardian off. When it
-    /// does not, each approval the harness asks for goes to the person.
+    /// Whether requests that reach Mjolnir are eligible for its guardian.
     pub fn mjolnir_guardian_reviews(
         self,
         policy: ExecutionPolicy,
         choices: ApprovalChoices,
     ) -> bool {
-        policy == ExecutionPolicy::ConfiguredApprovals
-            && self.guardian() == GuardianReviewer::Mjolnir
-            && choices.mjolnir_guardian
+        policy == ExecutionPolicy::ConfiguredApprovals && choices.mjolnir_guardian
     }
 
     /// The launch flag the bridge command line carries, if any.
@@ -1723,9 +1711,8 @@ pub struct HarnessProfile {
     pub claude_permission_mode: Option<ClaudePermissionMode>,
     /// Whether the Mjolnir guardian answers this profile's tool approvals
     /// where the target keeps configured approvals (localhost, guardian SSH).
-    /// On by default; false sends every approval the harness asks for to the
-    /// person. Only valid on a profile whose harness has no reviewer of its
-    /// own (Kimi Code, OpenCode, DSH; see [`HarnessKind::guardian`]).
+    /// On by default. Turn it off to send pending harness approval requests
+    /// directly to the person.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub mjolnir_guardian: bool,
     /// The IAM role Mjolnir assumes for each session of a profile that
@@ -2219,12 +2206,6 @@ impl HarnessProfile {
         }
         if self.claude_permission_mode.is_some() && self.kind != HarnessKind::Claude {
             bail!("profile {id:?}: `claude_permission_mode` applies only to a Claude profile");
-        }
-        if !self.mjolnir_guardian && self.kind.guardian() != GuardianReviewer::Mjolnir {
-            bail!(
-                "profile {id:?}: `mjolnir_guardian` applies only to a Kimi Code, OpenCode, or DSH profile; {} reviews approvals with its own guardian",
-                self.kind.display_name()
-            );
         }
         if !self.third_party_models && self.kind != HarnessKind::Antigravity {
             bail!("profile {id:?}: `third_party_models` applies only to an Antigravity profile");

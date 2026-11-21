@@ -383,7 +383,17 @@ pub async fn run_with_shutdown(
     events: mpsc::Sender<RuntimeEvent>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let result = run_inner(spec, requests, events.clone(), shutdown).await;
+    run_with_guardian(spec, requests, events, shutdown, None).await
+}
+
+pub(crate) async fn run_with_guardian(
+    spec: LaunchSpec,
+    requests: mpsc::Receiver<CommandRequest>,
+    events: mpsc::Sender<RuntimeEvent>,
+    shutdown: tokio_util::sync::CancellationToken,
+    guardian_endpoint: Option<Arc<crate::worker_runtime::guardian_endpoint::GuardianEndpoint>>,
+) -> Result<()> {
+    let result = run_inner(spec, requests, events.clone(), shutdown, guardian_endpoint).await;
     if let Err(error) = &result {
         emit_runtime_event(
             &events,
@@ -500,6 +510,7 @@ async fn run_inner(
     mut requests: mpsc::Receiver<CommandRequest>,
     events: mpsc::Sender<RuntimeEvent>,
     shutdown: tokio_util::sync::CancellationToken,
+    guardian_endpoint: Option<Arc<crate::worker_runtime::guardian_endpoint::GuardianEndpoint>>,
 ) -> Result<()> {
     spec.environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
     let mut rapid_deaths = 0_u32;
@@ -551,6 +562,7 @@ async fn run_inner(
                 pending_reload_ack: &mut pending_reload_ack,
             },
             &shutdown,
+            guardian_endpoint.clone(),
         )
         .await;
         let opened_as_resume = opened
@@ -706,6 +718,7 @@ async fn run_bridge(
     opened: Arc<Mutex<Option<OpenedSession>>>,
     session_open: BridgeSessionOpen<'_>,
     shutdown: &tokio_util::sync::CancellationToken,
+    guardian_endpoint: Option<Arc<crate::worker_runtime::guardian_endpoint::GuardianEndpoint>>,
 ) -> Result<Option<BridgeRestart>> {
     // Before the process starts, not after: a selector the harness reads only
     // at startup cannot be corrected once it has opened the session.
@@ -785,7 +798,7 @@ async fn run_bridge(
     // Like the terminals, the guardian's reviewer outlives the protocol
     // driver: it is stopped below, after this bridge's own teardown, on every
     // exit path, so the next bridge never starts beside a live reviewer.
-    let guardian = guardian::Guardian::for_launch(spec);
+    let guardian = guardian::Guardian::for_launch(spec, guardian_endpoint);
     let (mut result, child_reaped) = {
         let drive = drive_with_terminals(
             transport,
