@@ -839,11 +839,14 @@ class PilotFixture(unittest.TestCase):
         self.assertEqual((error["code"], error["site"]), ("unmatched-quote", "matched_defect:d0"))
         verdicts = j.records(self.root, key, "judge")
         self.assertEqual(set(verdicts), set(key["outputs"]) - {error["row"]})
-        # Pass the judge's exact pair of normalized findings through the engine.
+        # Pass the judge's exact pair of normalized findings through the engine. The
+        # shared rule stalls each engine session; the engine's one fresh session
+        # meets the same pair and stalls too.
         rounds = [j.load(report_path.parent / "rounds" / str(i) / "result.json")["errors"] for i in range(2)]
-        answer, runner = EngineTests.verified_query(self.root / "engine-fixture", rounds)
+        answer, runner = EngineTests.verified_query(self.root / "engine-fixture", rounds * 2)
         self.assertEqual(answer["status"], "engine_error")
-        self.assertEqual(len(runner.turns), 2)
+        self.assertEqual(len(runner.turns), 4)
+        self.assertEqual(len(runner.launches), 2)
 
     def test_provider_mismatch_keeps_sealed_session_and_usage(self):
         key = setup(self.root, *fixture())
