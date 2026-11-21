@@ -13,11 +13,80 @@ pub enum ResumeQueueDisposition {
     Discard,
 }
 
+/// Route taken to move an archive (and optional `.mj/keep/` stream) between targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferRoute {
+    SameHost,
+    DirectPush,
+    DirectPull,
+    DaemonStream,
+}
+
+impl TransferRoute {
+    pub const fn is_direct(self) -> bool {
+        matches!(self, Self::DirectPush | Self::DirectPull)
+    }
+
+    pub const fn is_pulled(self) -> bool {
+        matches!(self, Self::DirectPull)
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SameHost => "same-host pipe",
+            Self::DirectPush => "direct push",
+            Self::DirectPull => "direct pull",
+            Self::DaemonStream => "daemon stream",
+        }
+    }
+}
+
+/// Read-only route preview for `--dry-run`. Never installs keys or AWS SG rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutePreview {
+    SameHost,
+    DirectOrDaemonStream,
+}
+
+impl RoutePreview {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SameHost => "same-host pipe",
+            Self::DirectOrDaemonStream => "direct host-to-host (or daemon stream fallback)",
+        }
+    }
+}
+
+/// Durable ownership record for an ephemeral Move SSH key / known_hosts stage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantedMoveKey {
+    pub host: String,
+    pub comment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_hosts_path: Option<PathBuf>,
+}
+
+/// Durable ownership record for a shared EC2 security-group ingress grant used by a Move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantedEc2Rule {
+    pub security_group_id: String,
+    pub cidr_ip: String,
+    pub port: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MoveSelection {
     #[serde(default)]
-    pub workspace: crate::move_workspace::WorkspaceSelection,
+    pub consent: crate::suspend_consent::SuspendConsent,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_keep_paths: Vec<PathBuf>,
     #[serde(default)]
     pub clear_resource_allocation: bool,
     pub session_id: String,
@@ -219,7 +288,12 @@ pub struct MovePreparation {
     #[serde(default)]
     pub destination_checks: DestinationChecks,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<crate::move_workspace::WorkspaceAssessment>,
+    pub route_preview: Option<RoutePreview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend_preflight: Option<Box<crate::suspend_consent::SuspendPreflight>>,
+    /// Skipped `.mj/keep/` paths and their sizes in bytes, for `--dry-run` and dialogs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_keep_sizes: Vec<(PathBuf, u64)>,
     #[serde(default)]
     pub source_unavailable: bool,
     /// The destination is the source target: only the harness is replaced;
@@ -280,6 +354,35 @@ pub struct MoveOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MovePhase {
+    Capturing,
+    Transferring,
+    Restoring,
+    DestinationStarting,
+    DestinationOwns,
+    SourceRetired,
+    QueueAdmitted,
+    DispatchReleased,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl MovePhase {
+    /// True once the cross-target Move has crossed its commit point and the
+    /// destination durably owns the session.
+    pub const fn destination_owns(self) -> bool {
+        matches!(
+            self,
+            Self::DestinationOwns | Self::SourceRetired | Self::QueueAdmitted
+        )
+    }
+}
+
+/// Pre-148 `MovePhase` variants kept solely for startup recovery of in-flight
+/// legacy `MoveOperation` records across an upgrade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyMovePhase {
     Preparing,
     ClosingSource,
     ResumingDestination,
@@ -289,12 +392,130 @@ pub enum MovePhase {
     Cancelled,
 }
 
+impl LegacyMovePhase {
+    pub const fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Preparing | Self::ClosingSource | Self::ResumingDestination | Self::StartingQueue
+        )
+    }
+}
+
+/// Pre-148 `MoveOperation` shape decoded only during startup recovery so an
+/// upgraded daemon can roll back source-owned legacy moves or finish forward
+/// destination-owned legacy moves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyMoveOperation {
+    #[serde(default)]
+    pub quota_stop_reason: Option<String>,
+    #[serde(default)]
+    pub quota_continuation: Option<QuotaMoveContinuation>,
+    #[serde(default)]
+    pub prepared_destination: Option<PreparedMoveDestination>,
+    #[serde(default)]
+    pub acknowledge_interruption: bool,
+    #[serde(default)]
+    pub handoff: Option<CheckpointMetadata>,
+    #[serde(default)]
+    pub source_checkpoint_only: bool,
+    #[serde(default)]
+    pub in_place: bool,
+    pub operation_id: String,
+    pub source_profile_id: String,
+    pub source_target_template_id: String,
+    pub source_target: Option<TargetLocator>,
+    pub source_native_session_id: Option<String>,
+    #[serde(default)]
+    pub inherited_resource_allocation: Option<SessionResourceAllocation>,
+    #[serde(default)]
+    pub inherited_additional_mounts: Vec<AdditionalMount>,
+    #[serde(default)]
+    pub source_additional_mounts: Vec<AdditionalMount>,
+    #[serde(default)]
+    pub source_resource_allocation: Option<SessionResourceAllocation>,
+    pub destination_target: Option<TargetLocator>,
+    pub destination_native_session_id: Option<String>,
+    pub destination_store_id: Option<String>,
+    #[serde(default)]
+    pub configuration_fingerprint: String,
+    #[serde(default)]
+    pub checkpoint: Option<CheckpointMetadata>,
+    #[serde(default)]
+    pub recovery_session: Option<SessionRecord>,
+    pub queue: ResumeQueueDisposition,
+    pub phase: LegacyMovePhase,
+    #[serde(default)]
+    pub queue_admission_started: bool,
+    #[serde(default)]
+    pub queue_admission_finished: bool,
+    #[serde(default)]
+    pub cancellation_requested: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Result of decoding a stored `MoveOperation` JSON row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredMoveOperation {
+    Current(Box<MoveOperation>),
+    Legacy(Box<LegacyMoveOperation>),
+}
+
+impl StoredMoveOperation {
+    pub fn decode_json(json: &str) -> anyhow::Result<Self> {
+        match serde_json::from_str::<MoveOperation>(json) {
+            Ok(op) => Ok(Self::Current(Box::new(op))),
+            Err(current_err) => match serde_json::from_str::<LegacyMoveOperation>(json) {
+                Ok(legacy) => Ok(Self::Legacy(Box::new(legacy))),
+                Err(_) => Err(current_err.into()),
+            },
+        }
+    }
+
+    pub fn operation_id(&self) -> &str {
+        match self {
+            Self::Current(op) => &op.operation_id,
+            Self::Legacy(op) => &op.operation_id,
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        match self {
+            Self::Current(op) => op.is_active(),
+            Self::Legacy(op) => op.phase.is_active(),
+        }
+    }
+}
+
 /// The continuation chosen once on the destination before queue admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuotaMoveContinuation {
     Prompt,
     ResumeGoal,
+}
+
+/// Durable metadata for a cross-target Move archive that remains on the source
+/// target and streams directly to the destination (never installed on the
+/// daemon as `session.checkpoint`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveSourceSnapshot {
+    /// Archive path on the source target.
+    pub archive_path: PathBuf,
+    /// Verified SHA-256 digest of the source-target archive.
+    pub sha256: String,
+    /// Archive manifest returned by the source worker at export time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<crate::archive::ArchiveManifest>,
+    /// Queued prompts captured at the source barrier for post-commit admission.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_prompts: Vec<crate::archive::CanonicalQueuedPrompt>,
+    /// Pending worker mail captured at the source barrier for post-commit admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox: Option<crate::archive::CanonicalMailbox>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,11 +532,40 @@ pub struct MoveOperation {
     pub accepted_preparation: Option<Box<MovePreparation>>,
     #[serde(default)]
     pub acknowledge_interruption: bool,
+    /// Route chosen for cross-target archive + `.mj/keep/` transfer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_transfer: Option<crate::move_workspace::WorkspaceTransfer>,
-    /// Move-owned session state, never a portable workspace checkpoint.
+    pub transfer_route: Option<TransferRoute>,
+    /// Typed suspend consent captured for this Move.
+    #[serde(default)]
+    pub consent: crate::suspend_consent::SuspendConsent,
+    /// Relative `.mj/keep/` paths excluded from transfer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_keep_paths: Vec<PathBuf>,
+    /// Ephemeral SSH keys / known_hosts files owned by this Move (persisted before install).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub granted_keys: Vec<GrantedMoveKey>,
+    /// Shared EC2 security-group ingress rules used by this Move (persisted before install).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub granted_ec2_rules: Vec<GrantedEc2Rule>,
+    /// In-place Move: relay `store_id` captured before holding dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handoff: Option<CheckpointMetadata>,
+    pub in_place_expected_store_id: Option<String>,
+    /// In-place Move: operation-derived command ID for `SubmitFront` continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_place_continuation_command_id: Option<String>,
+    /// In-place Move: pending command IDs recorded when `HoldInPlaceMoveDispatch` ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub in_place_held_command_ids: Vec<String>,
+    /// In-place Move: whether `RestartHarnessInPlace` has completed.
+    #[serde(default)]
+    pub in_place_harness_restarted: bool,
+    /// Environment changes deferred until the session's environment is next recreated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_environment_changes: Vec<String>,
+    /// Source-target Move snapshot streamed directly to the destination without
+    /// staging on daemon disk or overwriting `session.checkpoint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_snapshot: Option<Box<MoveSourceSnapshot>>,
     /// Keep the source harness stopped across recovery until destination restoration.
     #[serde(default)]
     pub source_checkpoint_only: bool,
@@ -329,7 +579,6 @@ pub struct MoveOperation {
     pub source_target_template_id: String,
     pub source_target: Option<TargetLocator>,
     pub source_native_session_id: Option<String>,
-    // Additive shape within unshipped breaking store revision 132; no new migration.
     /// Frozen request inherited by the destination when selection says keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_resource_allocation: Option<SessionResourceAllocation>,
@@ -362,8 +611,14 @@ impl MoveOperation {
         &self,
         canonical: &crate::archive::CanonicalSessionSnapshot,
     ) -> std::collections::BTreeSet<String> {
-        let mut ids = canonical
-            .queued_prompts
+        self.queue_command_ids_from_prompts(&canonical.queued_prompts)
+    }
+
+    pub fn queue_command_ids_from_prompts(
+        &self,
+        queued_prompts: &[crate::archive::CanonicalQueuedPrompt],
+    ) -> std::collections::BTreeSet<String> {
+        let mut ids = queued_prompts
             .iter()
             .map(|queued| queued.command_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
@@ -405,26 +660,25 @@ impl MoveOperation {
     }
 
     pub fn retains_source_environment(&self) -> bool {
-        self.in_place || self.workspace_transfer.is_some()
+        self.in_place
     }
+
     pub fn restore_artifact(&self) -> Option<&CheckpointMetadata> {
-        self.handoff.as_ref().or(self.checkpoint.as_ref())
+        self.checkpoint.as_ref()
     }
 
     pub fn retains_checkpoint(&self) -> bool {
-        (!self.is_resolved() && (self.handoff.is_some() || self.phase != MovePhase::Cancelled))
+        (!self.is_resolved() && self.phase != MovePhase::Cancelled)
             || (self.queue_admission_started && !self.queue_admission_finished)
     }
 
-    /// Every checkpoint archive this Move keeps on disk: its handoff and the
-    /// source's last full checkpoint. The startup archive sweep and the
-    /// superseded-checkpoint prune both ask this one question, so neither can
-    /// delete an archive the Move still restores from.
+    /// Every checkpoint archive this Move keeps on disk. The startup archive
+    /// sweep and the superseded-checkpoint prune both ask this one question, so
+    /// neither can delete an archive the Move still restores from.
     pub fn retained_archives(&self) -> impl Iterator<Item = &CheckpointMetadata> {
         self.retains_checkpoint()
-            .then_some([self.handoff.as_ref(), self.checkpoint.as_ref()])
+            .then_some(self.checkpoint.as_ref())
             .into_iter()
-            .flatten()
             .flatten()
     }
 
@@ -434,7 +688,7 @@ impl MoveOperation {
     /// reference is removed from the record, so the recovery guidance, the API
     /// and the retry admission all read the loss from here.
     pub fn checkpoint_retained(&self) -> bool {
-        !self.is_resolved() && self.restore_artifact().is_some()
+        !self.is_resolved() && (self.restore_artifact().is_some() || self.source_snapshot.is_some())
     }
 
     /// Whether a surface should offer to retry this failed or cancelled Move:
@@ -457,10 +711,14 @@ impl MoveOperation {
     pub fn is_active(&self) -> bool {
         matches!(
             self.phase,
-            MovePhase::Preparing
-                | MovePhase::ClosingSource
-                | MovePhase::ResumingDestination
-                | MovePhase::StartingQueue
+            MovePhase::Capturing
+                | MovePhase::Transferring
+                | MovePhase::Restoring
+                | MovePhase::DestinationStarting
+                | MovePhase::DestinationOwns
+                | MovePhase::SourceRetired
+                | MovePhase::QueueAdmitted
+                | MovePhase::DispatchReleased
         )
     }
 }

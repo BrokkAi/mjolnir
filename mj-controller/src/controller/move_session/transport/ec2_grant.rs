@@ -159,6 +159,121 @@ impl Ec2GrantStore for InMemoryGrantStore {
     }
 }
 
+/// SQLite-backed [`Ec2GrantStore`] persisted in the daemon's `ec2_move_grants` table.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SqliteEc2GrantStore;
+
+impl SqliteEc2GrantStore {
+    fn state_to_str(state: Ec2GrantState) -> &'static str {
+        match state {
+            Ec2GrantState::Installing => "installing",
+            Ec2GrantState::Installed => "installed",
+            Ec2GrantState::Removing => "removing",
+            Ec2GrantState::External => "external",
+        }
+    }
+
+    fn str_to_state(state: &str) -> Result<Ec2GrantState> {
+        match state {
+            "installing" => Ok(Ec2GrantState::Installing),
+            "installed" => Ok(Ec2GrantState::Installed),
+            "removing" => Ok(Ec2GrantState::Removing),
+            "external" => Ok(Ec2GrantState::External),
+            other => bail!("unknown ec2_move_grants state `{other}`"),
+        }
+    }
+}
+
+impl Ec2GrantStore for SqliteEc2GrantStore {
+    fn with_transaction<R, F>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut BTreeMap<Ec2GrantKey, Ec2GrantRecord>) -> Result<R>,
+    {
+        let (to_caller_tx, to_caller_rx) =
+            std::sync::mpsc::sync_channel::<BTreeMap<Ec2GrantKey, Ec2GrantRecord>>(1);
+        let (to_writer_tx, to_writer_rx) =
+            std::sync::mpsc::sync_channel::<BTreeMap<Ec2GrantKey, Ec2GrantRecord>>(1);
+
+        std::thread::scope(|scope| {
+            let tx_handle = scope.spawn(move || {
+                crate::database::with_ec2_move_grants_transaction(move |rows| {
+                    let mut map = BTreeMap::new();
+                    for (k, v) in rows.iter() {
+                        let key = Ec2GrantKey {
+                            security_group_id: k.security_group_id.clone(),
+                            cidr_ip: k.cidr_ip.clone(),
+                            port: k.port,
+                        };
+                        map.insert(
+                            key.clone(),
+                            Ec2GrantRecord {
+                                key,
+                                state: Self::str_to_state(&v.state)?,
+                                users: v.users.clone(),
+                                absent_checks: v.absent_checks,
+                                attempt_id: v.attempt_id,
+                            },
+                        );
+                    }
+                    to_caller_tx
+                        .send(map)
+                        .map_err(|_| anyhow::anyhow!("ec2 grant transaction caller dropped"))?;
+                    let updated = to_writer_rx
+                        .recv()
+                        .map_err(|_| anyhow::anyhow!("ec2 grant transaction aborted"))?;
+                    rows.clear();
+                    for (k, v) in updated {
+                        let key_row = crate::database::Ec2MoveGrantKeyRow {
+                            security_group_id: k.security_group_id,
+                            cidr_ip: k.cidr_ip,
+                            port: k.port,
+                        };
+                        rows.insert(
+                            key_row.clone(),
+                            crate::database::Ec2MoveGrantRow {
+                                key: key_row,
+                                state: Self::state_to_str(v.state).to_owned(),
+                                users: v.users,
+                                absent_checks: v.absent_checks,
+                                attempt_id: v.attempt_id,
+                            },
+                        );
+                    }
+                    Ok(())
+                })
+            });
+
+            let mut map = match to_caller_rx.recv() {
+                Ok(map) => map,
+                Err(_) => {
+                    drop(to_writer_tx);
+                    match tx_handle.join() {
+                        Ok(Err(err)) => return Err(err),
+                        Ok(Ok(())) => bail!("ec2 grant transaction closed without yielding state"),
+                        Err(_) => bail!("ec2 grant transaction thread panicked"),
+                    }
+                }
+            };
+            match f(&mut map) {
+                Ok(value) => {
+                    let _ = to_writer_tx.send(map);
+                    match tx_handle.join() {
+                        Ok(Ok(())) => Ok(value),
+                        Ok(Err(err)) => Err(err),
+                        Err(_) => bail!("ec2 grant transaction thread panicked"),
+                    }
+                }
+                Err(err) => {
+                    // Dropping `to_writer_tx` aborts and rolls back the SQLite transaction.
+                    drop(to_writer_tx);
+                    let _ = tx_handle.join();
+                    Err(err)
+                }
+            }
+        })
+    }
+}
+
 /// Abstraction over AWS EC2 security-group ingress API calls.
 pub trait Ec2SecurityGroupClient: Send + Sync {
     fn authorize_ingress(
@@ -1572,5 +1687,57 @@ mod tests {
         assert_eq!(startup_report.revoked_rules, 1);
         assert!(client.rules_for("sg-live").is_empty());
         assert!(mgr.store().snapshot().is_empty());
+    }
+
+    #[test]
+    fn sqlite_ec2_grant_store_commits_and_rolls_back_atomically() {
+        let name = crate::controller::test_support::test_name(
+            module_path!(),
+            "sqlite_ec2_grant_store_commits_and_rolls_back_atomically",
+        );
+        if !crate::controller::move_session::test_fixtures::isolated_test_child(
+            &name,
+            "MJ_SQLITE_EC2_GRANT_CHILD",
+        ) {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let store = SqliteEc2GrantStore;
+        let key = Ec2GrantKey::ssh("sg-sqlite", "10.0.1.5/32");
+
+        // Commit a grant row atomically.
+        store
+            .with_transaction(|map| {
+                map.insert(
+                    key.clone(),
+                    Ec2GrantRecord {
+                        key: key.clone(),
+                        state: Ec2GrantState::Installed,
+                        users: BTreeSet::from(["op-commit".to_owned()]),
+                        absent_checks: 0,
+                        attempt_id: 1,
+                    },
+                );
+                Ok(())
+            })
+            .expect("commit grant");
+
+        // Return Err after mutating: SQLite must roll back and retain the committed row.
+        let err = store
+            .with_transaction(|map| -> Result<()> {
+                map.get_mut(&key)
+                    .unwrap()
+                    .users
+                    .insert("op-rolled-back".into());
+                bail!("simulated rollback")
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("simulated rollback"));
+
+        // Verify only the committed user persisted.
+        let users = store
+            .with_transaction(|map| Ok(map.get(&key).map(|rec| rec.users.clone())))
+            .expect("read grant");
+        assert_eq!(users, Some(BTreeSet::from(["op-commit".to_owned()])));
     }
 }

@@ -13,7 +13,7 @@ use mj_core::relay::{RelayCommand, RelayExecutionState};
 
 use super::backend::backend_locator;
 use super::checkpoint::{
-    CheckpointExportPolicy, ControllerRelayLease, LatchExclusivity,
+    CheckpointDelivery, CheckpointExportPolicy, ControllerRelayLease, LatchExclusivity,
     adopt_restarted_checkpoint_relay, prune_replaced_checkpoint,
     release_projection_behind_checkpoint, verify_installed_checkpoint_gate, wait_for_relay_closed,
 };
@@ -809,10 +809,15 @@ impl Controller {
                     &mut source_relay,
                 )
                 .await?;
-                let export_policy = if disposition == SourceTargetDisposition::RetainForInPlaceSwap
-                    || operation.workspace_transfer.is_some()
+                let export_policy = if operation.in_place
+                    && disposition == SourceTargetDisposition::RetainForInPlaceSwap
                 {
                     CheckpointExportPolicy::SessionHandoff
+                } else if !operation.in_place {
+                    // Cross-target Move captures with the same OriginDelta
+                    // quiescence and policy as suspend, keeping the archive on
+                    // the source target for direct streaming to destination.
+                    self.explicit_suspend_export_policy_with_executor(session_id, executor)?
                 } else {
                     CheckpointExportPolicy::ReuseUnchangedArchive
                 };
@@ -821,6 +826,7 @@ impl Controller {
                 } else {
                     LatchExclusivity::HoldThroughClose
                 };
+                let consent = operation.selection.consent.clone();
                 self.suspend_session_controlled_with_manager(
                     admission,
                     session_id,
@@ -829,7 +835,7 @@ impl Controller {
                     Some((operation, preparation)),
                     disposition,
                     export_policy,
-                    &mj_core::suspend_consent::SuspendConsent::default(),
+                    &consent,
                     None,
                     source_relay.take(),
                     exclusivity,
@@ -1121,14 +1127,20 @@ impl Controller {
         // Close seals the relay at the exact latched cursor, so this checkpoint
         // keeps its exclusive connection until the relay reports Closed.
         let capture_consent = consent.capture_consent();
+        let delivery = if move_intent.as_ref().is_some_and(|(op, _)| !op.in_place) {
+            CheckpointDelivery::KeepOnSourceTarget
+        } else {
+            CheckpointDelivery::DownloadToDaemon
+        };
         let checkpoint = self
-            .checkpoint_session_latched_for_operation_with_consent(
+            .checkpoint_session_latched_for_operation_with_delivery(
                 admission,
                 session_id,
                 executor,
                 manager,
                 exclusivity,
                 checkpoint_export_policy,
+                delivery,
                 move_intent.as_ref().map(|(operation, _)| operation.operation_id.as_str()),
                 held_relay,
                 &capture_consent,
@@ -1179,9 +1191,12 @@ impl Controller {
 
         let artifact = latched.artifact.clone();
         // Retained environments are not being published or retired. A profile
-        // switch must not wait on the repository's network remote.
+        // switch must not wait on the repository's network remote. Move
+        // captures never overwrite `session.checkpoint` on the daemon: the
+        // daemon copy remains whatever the last suspend produced.
         let session_handoff = checkpoint_export_policy == CheckpointExportPolicy::SessionHandoff;
-        let publication = if session_handoff
+        let preserves_session_checkpoint = session_handoff || move_intent.is_some();
+        let publication = if preserves_session_checkpoint
             || matches!(
                 checkpoint_export_policy,
                 CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
@@ -1224,17 +1239,29 @@ impl Controller {
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.state = SessionState::Closing;
         record.native_session_id = Some(artifact.native_session_id.clone());
-        if !session_handoff {
+        if !preserves_session_checkpoint {
             record.checkpoint = Some(Box::new(artifact.metadata.clone()));
             record.publication = publication.map(Box::new);
         }
         record.updated_at = now();
         record.last_error = None;
         record.last_checkpoint_error = None;
-        if session_handoff {
+        if preserves_session_checkpoint {
             if let Some((operation, _)) = move_intent.as_mut() {
-                operation.handoff = Some(artifact.metadata.clone());
-                operation.checkpoint = previous.checkpoint.clone().map(|v| *v);
+                if artifact.on_source_target {
+                    let (queued_prompts, mailbox) =
+                        artifact.captured_queue.clone().unwrap_or_default();
+                    operation.source_snapshot = Some(Box::new(mj_core::state::MoveSourceSnapshot {
+                        archive_path: artifact.metadata.archive_path.clone(),
+                        sha256: artifact.metadata.sha256.clone(),
+                        manifest: artifact.manifest.clone(),
+                        queued_prompts,
+                        mailbox,
+                    }));
+                    operation.checkpoint = None;
+                } else {
+                    operation.checkpoint = Some(artifact.metadata.clone());
+                }
                 operation.updated_at = now();
                 crate::database::save_move_operation(operation)?;
             } else {
@@ -1274,6 +1301,21 @@ impl Controller {
                 Err(error) => Err(error),
             };
             if let Err(error) = validation {
+                if let Err(cancel) = latched.relay.cancel_abandoned_barrier(admission).await {
+                    tracing::warn!(
+                        session_id,
+                        error = format!("{cancel:#}"),
+                        "could not release the checkpoint barrier after move preflight failure"
+                    );
+                }
+                if let Some(attempt) = origin_delta.as_ref() {
+                    latched.relay.release();
+                    return Err(self
+                        .restart_after_refused_origin_delta(
+                            admission, session_id, executor, manager, attempt, &previous, error,
+                        )
+                        .await);
+                }
                 let record = self.state.sessions.get_mut(session_id).unwrap();
                 record.state = previous.state;
                 record.last_error = Some(format!("{error:#}"));
@@ -1283,11 +1325,6 @@ impl Controller {
                     "restore source after move preflight failure",
                 )?;
                 return Err(error);
-            }
-            if !session_handoff {
-                operation.checkpoint = Some(artifact.metadata.clone());
-                operation.updated_at = now();
-                crate::database::save_move_operation(operation)?;
             }
         }
         if let Some(before_close) = before_close
@@ -1324,11 +1361,50 @@ impl Controller {
             )?;
             return Err(error);
         }
-        if !session_handoff {
+        if !preserves_session_checkpoint {
             prune_replaced_checkpoint(previous.checkpoint.as_deref(), &artifact.metadata);
             // A stopping session will not checkpoint again, so this is its last
             // chance to release what its checkpoint now covers.
             release_projection_behind_checkpoint(session_id, &artifact.metadata);
+        }
+
+        // Cross-target OriginDelta Move keeps the source relay UNSEALED and
+        // stops only the temporary `CheckpointOnly` worker: all session
+        // processes are already stopped by `OriginDeltaSuspend` quiescence, so
+        // nothing writes during transfer, and a failure before DestinationOwns
+        // can tear down the destination and restart the source agent in place.
+        if origin_delta.is_some()
+            && let Some((operation, _)) = move_intent.as_mut()
+            && !operation.in_place
+        {
+            if let Err(cancel) = latched.relay.cancel_abandoned_barrier(admission).await {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{cancel:#}"),
+                    "could not cancel checkpoint barrier on cross-target Move source"
+                );
+            }
+            latched.relay.release();
+            if let Ok((backend, _)) = self.worker_placement(session_id)
+                && let Ok(stop_plan) = targets::stop_worker_plan(
+                    &backend,
+                    session_id,
+                    "stop CheckpointOnly worker after cross-target Move capture",
+                )
+                && let Err(stop_err) =
+                    mj_core::runtime::off_async_worker(|| stop_plan.execute(executor, &super::ControlWorker))
+            {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{stop_err:#}"),
+                    "could not stop CheckpointOnly worker after cross-target Move capture"
+                );
+            }
+            let mut sealed = previous;
+            sealed.state = SessionState::Closing;
+            operation.recovery_session = Some(sealed);
+            crate::database::save_move_operation(operation)?;
+            return Ok(false);
         }
 
         let close_command_id = new_command_id("close")?;
@@ -1402,9 +1478,7 @@ impl Controller {
         }
         latched.relay.release();
 
-        if session_handoff
-            && let Some((operation, _)) = move_intent
-        {
+        if let Some((operation, _)) = move_intent {
             let mut sealed = previous;
             sealed.state = SessionState::Closing;
             operation.recovery_session = Some(sealed);
@@ -1501,6 +1575,57 @@ impl Controller {
             Ok(()) => error,
             Err(restart) => error.context(format!("restart the retained session: {restart:#}")),
         }
+    }
+
+    /// Restart a retained cross-target Move source in place after tearing down
+    /// a failed or interrupted destination (before `DestinationOwns`).
+    ///
+    /// Returns `Ok(true)` when the source worker and agent were restarted and
+    /// `SessionState::Running` was restored; `Ok(false)` when this session did
+    /// not use `OriginDeltaSuspend` quiescence (e.g. a legacy sealed source).
+    pub(super) async fn restart_retained_move_source(
+        &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+        previous: &SessionRecord,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+    ) -> Result<bool> {
+        let Some(record) = self.state.sessions.get(session_id) else {
+            return Ok(false);
+        };
+        if record.target.is_none() || !OriginDeltaSuspend::applies(self, session_id, executor)? {
+            return Ok(false);
+        }
+        let attempt = OriginDeltaSuspend::load(self, session_id, executor)?;
+        executor.notify_notice("Restarting the source agent in place after failed Move");
+        attempt
+            .start_worker(
+                self,
+                admission,
+                session_id,
+                executor,
+                Some(manager),
+                mj_core::worker_launch::WorkerRunMode::Harness,
+            )
+            .await?
+            .release();
+        let record = self
+            .state
+            .sessions
+            .get_mut(session_id)
+            .context("session disappeared while restarting Move source")?;
+        record.state = state_after_unsealed_close(previous);
+        record.updated_at = now();
+        self.persist_session_state(session_id)?;
+        if let Err(cleanup) = attempt.clear_after_restart(executor) {
+            tracing::warn!(
+                session_id,
+                %cleanup,
+                "could not clear worker suspend records after restarting Move source"
+            );
+        }
+        Ok(true)
     }
 
     /// Resume the durable closing state after a controller restart. If the
@@ -2526,7 +2651,7 @@ impl Controller {
         }
         if let Some(mut operation) = crate::database::load_move_operation(session_id)? {
             self.cleanup_prepared_move_destination(&mut operation, executor)?;
-            self.remove_abandoned_move_stage(&operation, executor);
+            super::move_session::recovery::cleanup_local_move_key_files(&operation.granted_keys);
         }
         let retained_checkout = if self.state.subagents.contains_key(session_id) {
             super::environment::stop_borrower(session_id, &self.config, executor)?;
@@ -2695,7 +2820,7 @@ impl Controller {
                         cleanup,
                         executor,
                     )?;
-                    self.remove_abandoned_move_stage(&operation, executor);
+                    super::move_session::recovery::cleanup_local_move_key_files(&operation.granted_keys);
                 }
                 outcome.cleanup(
                     if self.state.subagents.contains_key(session_id) {

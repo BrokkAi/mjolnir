@@ -25,47 +25,11 @@ use mj_core::targets::{
     self, CommandExecutor, CommandSpec, ProcessExecutor, SshTarget, SshTrafficClass, SshWalk,
     TargetLocator,
 };
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use self::ec2_grant::{AcquireOutcome, Ec2GrantKey, Ec2GrantManager, Ec2GrantStore, Ec2SecurityGroupClient};
 
-/// Route taken to move an archive (and optional `.mj/keep/` stream) between targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TransferRoute {
-    SameHost,
-    DirectPush,
-    DirectPull,
-    DaemonStream,
-}
-
-impl TransferRoute {
-    pub const fn is_direct(self) -> bool {
-        matches!(self, Self::DirectPush | Self::DirectPull)
-    }
-
-    pub const fn is_pulled(self) -> bool {
-        matches!(self, Self::DirectPull)
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::SameHost => "same-host pipe",
-            Self::DirectPush => "direct push",
-            Self::DirectPull => "direct pull",
-            Self::DaemonStream => "daemon stream",
-        }
-    }
-}
-
-/// Read-only route preview for `--dry-run`. Never installs keys or AWS SG rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RoutePreview {
-    SameHost,
-    DirectOrDaemonStream,
-}
+pub use mj_core::state::{RoutePreview, TransferRoute};
 
 /// Preview the transfer route without mutating any host, key, or AWS resource.
 pub fn preview_transfer_route(
@@ -116,6 +80,33 @@ pub struct KeepTransferOptions {
     pub keep_dest: Option<PathBuf>,
     /// Relative paths under `keep_dir` to exclude from the keep tar stream.
     pub skip: Vec<PathBuf>,
+}
+
+/// Worker binaries and `.mj/keep/` options for framed Move streams
+/// (`export-move-stream | receive-move-stream`). Used on `SameHost` and
+/// `DaemonStream` routes even when direct host-to-host SSH is unavailable.
+#[derive(Debug, Clone)]
+pub struct WorkerStreamConfig {
+    pub source_worker_bin: String,
+    pub destination_worker_bin: String,
+    pub keep: KeepTransferOptions,
+}
+
+/// Verified outcome of a Move archive (+ optional `.mj/keep/`) transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferReceipt {
+    pub route: TransferRoute,
+    /// `.mj/keep/` tar payload size in bytes reported by `receive-move-stream`
+    /// (0 when no keep directory was streamed or a raw transfer ran).
+    pub keep_bytes: u64,
+}
+
+fn parse_keep_tar_bytes(stdout: &[u8]) -> u64 {
+    let trimmed = String::from_utf8_lossy(stdout);
+    let last_line = trimmed.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+    serde_json::from_str::<mj_checkpoint::move_stream::MoveStreamReceipt>(last_line.trim())
+        .map(|receipt| receipt.keep_tar_bytes)
+        .unwrap_or(0)
 }
 
 /// Optional parameters for direct host-to-host SSH push/pull transfers.
@@ -210,17 +201,62 @@ where
     S: Ec2GrantStore,
     C: Ec2SecurityGroupClient,
 {
+    let stream = direct.map(|peer| WorkerStreamConfig {
+        source_worker_bin: peer.source_worker_bin.clone(),
+        destination_worker_bin: peer.destination_worker_bin.clone(),
+        keep: peer.keep.clone(),
+    });
+    Ok(transfer_move_stream_with_direct(
+        source,
+        source_path,
+        destination,
+        destination_path,
+        sha256,
+        executor,
+        stream.as_ref(),
+        direct,
+        ec2_grants,
+    )?
+    .route)
+}
+
+/// Full route-ordered Move transfer carrying both archive and `.mj/keep/`
+/// (honoring `--skip`) across `SameHost` -> `DirectPush` -> `DirectPull` ->
+/// `DaemonStream`, returning both the chosen route and verified keep size.
+#[allow(clippy::too_many_arguments)]
+pub fn transfer_move_stream_with_direct<S, C>(
+    source: &TargetLocator,
+    source_path: &Path,
+    destination: &TargetLocator,
+    destination_path: &Path,
+    sha256: &str,
+    executor: &(impl CommandExecutor + Sync),
+    stream: Option<&WorkerStreamConfig>,
+    direct: Option<&DirectPeerConfig>,
+    ec2_grants: Option<&Ec2GrantManager<S, C>>,
+) -> Result<TransferReceipt>
+where
+    S: Ec2GrantStore,
+    C: Ec2SecurityGroupClient,
+{
+    let fallback_stream = direct.map(|peer| WorkerStreamConfig {
+        source_worker_bin: peer.source_worker_bin.clone(),
+        destination_worker_bin: peer.destination_worker_bin.clone(),
+        keep: peer.keep.clone(),
+    });
+    let effective_stream = stream.or(fallback_stream.as_ref());
+
     if targets_share_host(source, destination) {
-        if let Some(peer) = direct {
-            transfer_same_host_stream(
+        let keep_bytes = if let Some(cfg) = effective_stream {
+            transfer_same_host_stream_config(
                 source,
                 source_path,
                 destination,
                 destination_path,
                 sha256,
                 executor,
-                peer,
-            )?;
+                cfg,
+            )?
         } else {
             transfer_same_host(
                 source,
@@ -230,8 +266,12 @@ where
                 sha256,
                 executor,
             )?;
-        }
-        return Ok(TransferRoute::SameHost);
+            0
+        };
+        return Ok(TransferReceipt {
+            route: TransferRoute::SameHost,
+            keep_bytes,
+        });
     }
 
     if let Some(peer) = direct {
@@ -245,8 +285,13 @@ where
             peer,
             ec2_grants,
         ) {
-            Ok(true) => return Ok(TransferRoute::DirectPush),
-            Ok(false) => {}
+            Ok(Some(keep_bytes)) => {
+                return Ok(TransferReceipt {
+                    route: TransferRoute::DirectPush,
+                    keep_bytes,
+                });
+            }
+            Ok(None) => {}
             Err(err) => {
                 tracing::warn!(
                     operation_id = %peer.operation_id,
@@ -266,8 +311,13 @@ where
             peer,
             ec2_grants,
         ) {
-            Ok(true) => return Ok(TransferRoute::DirectPull),
-            Ok(false) => {}
+            Ok(Some(keep_bytes)) => {
+                return Ok(TransferReceipt {
+                    route: TransferRoute::DirectPull,
+                    keep_bytes,
+                });
+            }
+            Ok(None) => {}
             Err(err) => {
                 tracing::warn!(
                     operation_id = %peer.operation_id,
@@ -278,16 +328,16 @@ where
         }
     }
 
-    if let Some(peer) = direct {
-        transfer_daemon_stream_with_worker(
+    let keep_bytes = if let Some(cfg) = effective_stream {
+        transfer_daemon_stream_with_config(
             source,
             source_path,
             destination,
             destination_path,
             sha256,
-            peer,
+            cfg,
             &ProcessStreamPipe,
-        )?;
+        )?
     } else {
         transfer_daemon_stream(
             source,
@@ -297,8 +347,12 @@ where
             sha256,
             executor,
         )?;
-    }
-    Ok(TransferRoute::DaemonStream)
+        0
+    };
+    Ok(TransferReceipt {
+        route: TransferRoute::DaemonStream,
+        keep_bytes,
+    })
 }
 
 /// Run one host-local pipeline piping source archive bytes directly into
@@ -339,6 +393,7 @@ fn transfer_same_host(
 
 /// Same-host framed `export-move-stream | receive-move-stream` pipeline so
 /// `.mj/keep/` (with `--skip`) travels identically on the `SameHost` route.
+#[cfg(test)]
 fn transfer_same_host_stream(
     source: &TargetLocator,
     source_path: &Path,
@@ -348,19 +403,47 @@ fn transfer_same_host_stream(
     executor: &(impl CommandExecutor + Sync),
     peer: &DirectPeerConfig,
 ) -> Result<()> {
+    let cfg = WorkerStreamConfig {
+        source_worker_bin: peer.source_worker_bin.clone(),
+        destination_worker_bin: peer.destination_worker_bin.clone(),
+        keep: peer.keep.clone(),
+    };
+    let _ = transfer_same_host_stream_config(
+        source,
+        source_path,
+        destination,
+        destination_path,
+        expected_sha256,
+        executor,
+        &cfg,
+    )?;
+    Ok(())
+}
+
+/// Same-host framed `export-move-stream | receive-move-stream` pipeline so
+/// `.mj/keep/` (with `--skip`) travels identically on the `SameHost` route.
+fn transfer_same_host_stream_config(
+    source: &TargetLocator,
+    source_path: &Path,
+    destination: &TargetLocator,
+    destination_path: &Path,
+    expected_sha256: &str,
+    executor: &(impl CommandExecutor + Sync),
+    cfg: &WorkerStreamConfig,
+) -> Result<u64> {
     let export_cmd = format_shell_export_command(
         source,
-        &peer.source_worker_bin,
+        &cfg.source_worker_bin,
         source_path,
-        peer.keep.keep_dir.as_deref(),
-        &peer.keep.skip,
+        cfg.keep.keep_dir.as_deref(),
+        &cfg.keep.skip,
     )?;
     let receive_cmd = format_shell_receive_command(
         destination,
-        &peer.destination_worker_bin,
+        &cfg.destination_worker_bin,
         destination_path,
         expected_sha256,
-        peer.keep.keep_dest.as_deref(),
+        cfg.keep.keep_dest.as_deref(),
     )?;
     let script = format!("set -euo pipefail\n{export_cmd} | {receive_cmd}\n");
     let host_locator = host_shell_locator(source);
@@ -382,7 +465,7 @@ fn transfer_same_host_stream(
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
-    Ok(())
+    Ok(parse_keep_tar_bytes(&output.stdout))
 }
 
 /// Bounded-memory concurrent pipe between a source export command and a
@@ -399,6 +482,16 @@ pub trait StreamPipe: Send + Sync {
         destination: &CommandSpec,
         expected_sha256: Option<&str>,
     ) -> Result<()>;
+
+    fn pipe_capture_stdout(
+        &self,
+        source: &CommandSpec,
+        destination: &CommandSpec,
+        expected_sha256: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        self.pipe(source, destination, expected_sha256)?;
+        Ok(Vec::new())
+    }
 }
 
 /// Real bounded-memory (64 KiB buffer) concurrent subprocess pipe.
@@ -433,6 +526,16 @@ impl StreamPipe for ProcessStreamPipe {
         destination: &CommandSpec,
         expected_sha256: Option<&str>,
     ) -> Result<()> {
+        let _ = self.pipe_capture_stdout(source, destination, expected_sha256)?;
+        Ok(())
+    }
+
+    fn pipe_capture_stdout(
+        &self,
+        source: &CommandSpec,
+        destination: &CommandSpec,
+        expected_sha256: Option<&str>,
+    ) -> Result<Vec<u8>> {
         const BUF_SIZE: usize = 64 * 1024;
 
         // Lease any managed SSH sessions without stdout markers (stdout carries
@@ -529,7 +632,7 @@ impl StreamPipe for ProcessStreamPipe {
             .join()
             .unwrap_or_else(|_| Ok(Vec::new()))
             .unwrap_or_default();
-        let _dst_stdout_bytes = dst_out_thread
+        let dst_stdout_bytes = dst_out_thread
             .join()
             .unwrap_or_else(|_| Ok(Vec::new()))
             .unwrap_or_default();
@@ -558,7 +661,7 @@ impl StreamPipe for ProcessStreamPipe {
             "daemon-stream destination write failed ({dst_status}): {}",
             String::from_utf8_lossy(&dst_stderr_bytes).trim()
         );
-        Ok(())
+        Ok(dst_stdout_bytes)
     }
 }
 
@@ -647,19 +750,45 @@ pub fn transfer_daemon_stream_with_worker(
     peer: &DirectPeerConfig,
     pipe: &dyn StreamPipe,
 ) -> Result<()> {
+    let cfg = WorkerStreamConfig {
+        source_worker_bin: peer.source_worker_bin.clone(),
+        destination_worker_bin: peer.destination_worker_bin.clone(),
+        keep: peer.keep.clone(),
+    };
+    let _ = transfer_daemon_stream_with_config(
+        source,
+        source_path,
+        destination,
+        destination_path,
+        expected_sha256,
+        &cfg,
+        pipe,
+    )?;
+    Ok(())
+}
+
+fn transfer_daemon_stream_with_config(
+    source: &TargetLocator,
+    source_path: &Path,
+    destination: &TargetLocator,
+    destination_path: &Path,
+    expected_sha256: &str,
+    cfg: &WorkerStreamConfig,
+    pipe: &dyn StreamPipe,
+) -> Result<u64> {
     let export_cmd = format_shell_export_command(
         source,
-        &peer.source_worker_bin,
+        &cfg.source_worker_bin,
         source_path,
-        peer.keep.keep_dir.as_deref(),
-        &peer.keep.skip,
+        cfg.keep.keep_dir.as_deref(),
+        &cfg.keep.skip,
     )?;
     let receive_cmd = format_shell_receive_command(
         destination,
-        &peer.destination_worker_bin,
+        &cfg.destination_worker_bin,
         destination_path,
         expected_sha256,
-        peer.keep.keep_dest.as_deref(),
+        cfg.keep.keep_dest.as_deref(),
     )?;
     let source_host = host_shell_locator(source);
     let dest_host = host_shell_locator(destination);
@@ -685,7 +814,8 @@ pub fn transfer_daemon_stream_with_worker(
         ],
     )
     .purpose("daemon-stream framed receive");
-    pipe.pipe(&export_spec, &import_spec, None)
+    let stdout = pipe.pipe_capture_stdout(&export_spec, &import_spec, None)?;
+    Ok(parse_keep_tar_bytes(&stdout))
 }
 
 struct EphemeralKeypair {
@@ -829,7 +959,7 @@ fn try_direct_push<S, C>(
     executor: &(impl CommandExecutor + Sync),
     peer: &DirectPeerConfig,
     ec2_grants: Option<&Ec2GrantManager<S, C>>,
-) -> Result<bool>
+) -> Result<Option<u64>>
 where
     S: Ec2GrantStore,
     C: Ec2SecurityGroupClient,
@@ -909,7 +1039,7 @@ where
                 cleanup.ec2_key = Some(key.clone());
             }
             AcquireOutcome::FallbackToDaemonStream => {
-                return Ok(false);
+                return Ok(None);
             }
         }
     }
@@ -948,7 +1078,7 @@ where
         push_out.status,
         String::from_utf8_lossy(&push_out.stderr).trim()
     );
-    Ok(true)
+    Ok(Some(parse_keep_tar_bytes(&push_out.stdout)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -961,7 +1091,7 @@ fn try_direct_pull<S, C>(
     executor: &(impl CommandExecutor + Sync),
     peer: &DirectPeerConfig,
     ec2_grants: Option<&Ec2GrantManager<S, C>>,
-) -> Result<bool>
+) -> Result<Option<u64>>
 where
     S: Ec2GrantStore,
     C: Ec2SecurityGroupClient,
@@ -1038,7 +1168,7 @@ where
                 cleanup.ec2_key = Some(key.clone());
             }
             AcquireOutcome::FallbackToDaemonStream => {
-                return Ok(false);
+                return Ok(None);
             }
         }
     }
@@ -1075,7 +1205,7 @@ where
         pull_out.status,
         String::from_utf8_lossy(&pull_out.stderr).trim()
     );
-    Ok(true)
+    Ok(Some(parse_keep_tar_bytes(&pull_out.stdout)))
 }
 
 fn stage_mode_0600_file(

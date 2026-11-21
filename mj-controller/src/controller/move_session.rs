@@ -8,7 +8,8 @@ mod tests;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_fixtures;
-mod transfer;
+pub mod in_place;
+pub mod recovery;
 pub mod transport;
 mod viewer_recovery;
 pub use viewer_recovery::ViewerMoveRecovery;
@@ -18,7 +19,7 @@ use mj_core::hex::lower_hex;
 use sha2::{Digest, Sha256};
 
 use super::lifecycle::SourceTargetDisposition;
-use super::{Controller, SessionResumeOptions, now};
+use super::{Controller, now};
 use crate::session_manager::move_ownership::set_move_queue_hold;
 pub use crate::session_manager::move_ownership::{
     MoveMutationGuard, move_has_pending_queue, move_owns_session, move_refuses_command,
@@ -235,14 +236,12 @@ pub(crate) fn forget_missing_move_archives(operation: &mut MoveOperation) -> boo
             )
         })
     };
-    let lost = if missing(&operation.handoff) {
-        [operation.handoff.take(), operation.checkpoint.take()]
-    } else if operation.handoff.is_none() && missing(&operation.checkpoint) {
-        [None, operation.checkpoint.take()]
+    let lost = if missing(&operation.checkpoint) {
+        operation.checkpoint.take()
     } else {
         return false;
     };
-    for checkpoint in lost.iter().flatten() {
+    if let Some(checkpoint) = lost {
         tracing::warn!(
             session_id = %operation.selection.session_id,
             reference = %operation.operation_id,
@@ -276,7 +275,7 @@ pub(crate) fn forget_unsealed_move_archives(
         || operation.is_resolved()
         || operation.queue_admission_started
         || operation.recovery_session.is_some()
-        || (operation.handoff.is_none() && operation.checkpoint.is_none())
+        || (operation.checkpoint.is_none() && operation.source_snapshot.is_none())
     {
         return None;
     }
@@ -286,14 +285,8 @@ pub(crate) fn forget_unsealed_move_archives(
         "a Move ended before sealing its source, which is running again; releasing its stale restore archive"
     );
     operation.checkpoint = None;
-    Some(
-        operation
-            .handoff
-            .take()
-            .map(|handoff| handoff.archive_path)
-            .into_iter()
-            .collect(),
-    )
+    operation.source_snapshot = None;
+    Some(Vec::new())
 }
 
 /// Record, at daemon startup, every Move whose archive is missing. An active
@@ -370,28 +363,18 @@ fn sealed_selection_difference(retained: &MoveSelection, requested: &MoveSelecti
             ));
         }
     }
-    if retained.workspace.acknowledge_large_transfer
-        != requested.workspace.acknowledge_large_transfer
-    {
-        parts.push(if retained.workspace.acknowledge_large_transfer {
-            "large-transfer acknowledgement (the Move was sealed with it; pass --allow-large-transfer)".to_owned()
-        } else {
-            "large-transfer acknowledgement (the Move was sealed without it; omit --allow-large-transfer)".to_owned()
-        });
-    }
-    if retained.workspace.exclusions != requested.workspace.exclusions {
-        let excluded = retained
-            .workspace
-            .exclusions
+    if retained.skip_keep_paths != requested.skip_keep_paths {
+        let skipped = retained
+            .skip_keep_paths
             .iter()
-            .map(|path| format!("{}:{}", path.repository, path.path.display()))
+            .map(|path| path.display().to_string())
             .collect::<Vec<_>>();
-        parts.push(if excluded.is_empty() {
-            "excluded files (the Move was sealed excluding none)".to_owned()
+        parts.push(if skipped.is_empty() {
+            "skipped .mj/keep/ paths (the Move was sealed skipping none)".to_owned()
         } else {
             format!(
-                "excluded files (the Move was sealed excluding exactly {})",
-                excluded.join(", ")
+                "skipped .mj/keep/ paths (the Move was sealed skipping exactly {})",
+                skipped.join(", ")
             )
         });
     }
@@ -841,6 +824,61 @@ fn replace_queued_images_with_placeholders(
 impl Controller {
     /// Close takes over only after the Move owner has actually stopped. A
     /// placement published during cloning is not a destination worker.
+    pub fn cleanup_retained_move_source(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        crate::worker_lifecycle::run_blocking(
+            session_id,
+            "cleanup retained move source",
+            executor,
+            || {
+                let retained = crate::database::retained_move_sources(session_id)?
+                    .into_iter()
+                    .find(|source| source.operation_id == operation_id)
+                    .context("retained Move source is missing")?;
+                let source = &retained.source;
+                ensure!(
+                    !self
+                        .state
+                        .sessions
+                        .values()
+                        .any(|session| session.target.is_some() && session.target == source.target),
+                    "retained source is still referenced by an active session"
+                );
+                if let mj_core::state::Checkout::ManagedWorktree {
+                    worktree: checkout, ..
+                } = source.checkout()
+                {
+                    ensure!(
+                        !self.state.sessions.keys().any(|session_id| {
+                            matches!(
+                                self.state.checkout(session_id),
+                                Ok(mj_core::state::Checkout::ManagedWorktree {
+                                    worktree: other,
+                                    ..
+                                }) if other == checkout
+                            )
+                        }),
+                        "retained checkout is still referenced by a session"
+                    );
+                }
+                let environment = crate::database::retained_move_environment(operation_id)?
+                    .context("retained Move source has no recorded environment owner")?;
+                super::environment::retire_owned_environment(
+                    environment,
+                    &self.config,
+                    executor,
+                    super::BranchDisposition::Keep,
+                    super::CheckoutDisposition::Remove,
+                )?;
+                crate::database::forget_retained_move_source(operation_id)
+            },
+        )
+    }
+
     pub async fn settle_superseded_move_for_close(
         &mut self,
         session_id: &str,
@@ -904,17 +942,12 @@ impl Controller {
                     &operation.operation_id,
                 )
             };
-            if operation.workspace_transfer.is_some() {
-                self.rollback_move_destination_with_persist(&operation, reason, executor, persist)
-                    .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
-            } else {
-                self.retain_failed_in_place_move_with_persist(
-                    session_id,
-                    &source,
-                    reason,
-                    |record| persist(record, None),
-                )?;
-            }
+            self.retain_failed_in_place_move_with_persist(
+                session_id,
+                &source,
+                reason,
+                |record| persist(record, None),
+            )?;
         } else {
             // The environment ledger owns both identities, even when the
             // failed provisioning left only a partial destination checkout.
@@ -1024,18 +1057,21 @@ impl Controller {
                 operation.selection == *selection,
                 "queue admission is incomplete on the live destination; retry that move before selecting another destination"
             );
-            let checkpoint = operation
-                .restore_artifact()
-                .context("retained queue checkpoint is missing")?;
-            let verified = verify_archive_streaming(&checkpoint.archive_path)?;
-            ensure!(
-                verified.archive_sha256 == checkpoint.sha256
-                    && verified.manifest.session.id == source.id,
-                "retained move checkpoint verification failed"
-            );
-            queued = verified
-                .canonical_session
-                .queued_prompts
+            let captured_prompts = if let Some(snapshot) = operation.source_snapshot.as_deref() {
+                snapshot.queued_prompts.clone()
+            } else {
+                let checkpoint = operation
+                    .restore_artifact()
+                    .context("retained queue checkpoint is missing")?;
+                let verified = verify_archive_streaming(&checkpoint.archive_path)?;
+                ensure!(
+                    verified.archive_sha256 == checkpoint.sha256
+                        && verified.manifest.session.id == source.id,
+                    "retained move checkpoint verification failed"
+                );
+                verified.canonical_session.queued_prompts
+            };
+            queued = captured_prompts
                 .into_iter()
                 .map(|entry| mj_core::state::MaterializedQueuedPrompt {
                     accepted_ordinal: None,
@@ -1268,7 +1304,7 @@ impl Controller {
             // not part of what a retry has to repeat. Every surface (the web
             // retry has no large-transfer flag at all) retries it the same way.
             if retained.in_place {
-                selection.workspace = retained.selection.workspace.clone();
+                selection.skip_keep_paths = retained.selection.skip_keep_paths.clone();
             }
             // A field the request omits means the one the Move was sealed
             // with, so a surface that cannot express it (the CLI has no flag
@@ -1505,7 +1541,7 @@ impl Controller {
             .filter(|operation| {
                 operation.selection == selection
                     && !operation.is_resolved()
-                    && operation.restore_artifact().is_some()
+                    && operation.checkpoint_retained()
             })
             .map(|operation| operation.operation_id.clone())
             .unwrap_or(new_command_id("move")?);
@@ -1518,15 +1554,72 @@ impl Controller {
         {
             bail!("{error}; close or finish those children before moving to this harness");
         }
-        let workspace = if keeps_workspace {
+        let route_preview = if in_place {
             None
         } else {
-            Some(self.assess_move_workspace(&selection, executor)?)
+            source.target.as_deref().and_then(|src| {
+                let target_id = selection.target_template_id.as_deref()?;
+                self.config.targets.get(target_id).map(|dest| {
+                    if matches!(src, mj_core::state::TargetLocator::LocalBare { .. } | mj_core::state::TargetLocator::LocalPodman { .. } | mj_core::state::TargetLocator::LocalDocker { .. } | mj_core::state::TargetLocator::AppleContainer { .. })
+                        && matches!(
+                            dest,
+                            mj_core::config::TargetTemplate::LocalBare
+                                | mj_core::config::TargetTemplate::LocalPodman { .. }
+                                | mj_core::config::TargetTemplate::LocalDocker { .. }
+                                | mj_core::config::TargetTemplate::AppleContainer { .. }
+                        )
+                    {
+                        mj_core::state::RoutePreview::SameHost
+                    } else {
+                        mj_core::state::RoutePreview::DirectOrDaemonStream
+                    }
+                })
+            })
+        };
+        let (suspend_preflight, skip_keep_sizes) = if !in_place
+            && matches!(
+                source.state,
+                SessionState::Running | SessionState::Disconnected
+            )
+            && source.target.is_some()
+        {
+            match self.suspend_preflight(&source.id, true, false, executor) {
+                Ok(preflight) => {
+                    let skip_keep_sizes = selection
+                        .skip_keep_paths
+                        .iter()
+                        .map(|skip| {
+                            let bytes = preflight
+                                .keep_dir_entries
+                                .iter()
+                                .filter(|entry| {
+                                    entry.path == *skip || entry.path.starts_with(skip)
+                                })
+                                .map(|entry| entry.bytes)
+                                .sum();
+                            (skip.clone(), bytes)
+                        })
+                        .collect();
+                    (Some(Box::new(preflight)), skip_keep_sizes)
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        session_id = %source.id,
+                        error = %err,
+                        "Move prepare could not collect suspend preflight; continuing without it"
+                    );
+                    (None, Vec::new())
+                }
+            }
+        } else {
+            (None, Vec::new())
         };
         Ok(MovePreparation {
             container_upgrade,
             destination_checks: DestinationChecks::Checked,
-            workspace,
+            route_preview,
+            suspend_preflight,
+            skip_keep_sizes,
             source_unavailable: false,
             in_place,
             // Recreating the environment can stop native children too; retain
@@ -1654,20 +1747,11 @@ impl Controller {
         checked.stops_subagents = prepared.stops_subagents;
         let queue = request.queue.unwrap_or(ResumeQueueDisposition::Discard);
         let source = self.state.sessions[&id].clone();
-        if let Some(assessment) = &checked.workspace {
-            checked.selection.workspace.validate(assessment)?;
-        }
         let old_operation = crate::database::load_move_operation(&id)?;
         let retry = old_operation.clone().filter(|op| {
             op.selection == prepared.selection && op.checkpoint_retained()
         });
-        // A different Move replaces the old one, which can no longer resume
-        // its copy: its staging on the destination host is abandoned.
-        let abandoned = old_operation.filter(|_| retry.is_none());
         if retry.is_none() && move_changes_nothing(&source, &checked.selection) {
-            if let Some(abandoned) = &abandoned {
-                self.remove_abandoned_move_stage(abandoned, executor);
-            }
             crate::database::accept_unchanged_move(&checked.selection)?;
             let latest = crate::database::load_session_record(&id)?.context("Move session disappeared")?;
             let record = self.state.sessions.get_mut(&id).unwrap();
@@ -1717,22 +1801,17 @@ impl Controller {
                 prepared_destination: None,
                 accepted_preparation: None,
                 acknowledge_interruption: false,
-                workspace_transfer: if checked.in_place {
-                    None
-                } else {
-                    Some(
-                        self.new_workspace_transfer(
-                            &id,
-                            &prepared.operation_id,
-                            checked
-                                .workspace
-                                .clone()
-                                .context("Move workspace assessment missing")?,
-                            executor,
-                        )?,
-                    )
-                },
-                handoff: None,
+                transfer_route: None,
+                consent: checked.selection.consent.clone(),
+                skip_keep_paths: checked.selection.skip_keep_paths.clone(),
+                granted_keys: Vec::new(),
+                granted_ec2_rules: Vec::new(),
+                in_place_expected_store_id: None,
+                in_place_continuation_command_id: None,
+                in_place_held_command_ids: Vec::new(),
+                in_place_harness_restarted: false,
+                deferred_environment_changes: Vec::new(),
+                source_snapshot: None,
                 source_checkpoint_only: false,
                 in_place: checked.in_place,
                 operation_id: prepared.operation_id.clone(),
@@ -1753,7 +1832,7 @@ impl Controller {
                 checkpoint: None,
                 recovery_session: None,
                 queue,
-                phase: MovePhase::Preparing,
+                phase: MovePhase::Capturing,
                 queue_admission_started: false,
                 queue_admission_finished: false,
                 cancellation_requested: false,
@@ -1765,9 +1844,6 @@ impl Controller {
         if let Some((reason, continuation)) = quota_move {
             operation.quota_stop_reason = Some(reason);
             operation.quota_continuation = Some(continuation);
-        }
-        if let Some(abandoned) = &abandoned {
-            self.remove_abandoned_move_stage(abandoned, executor);
         }
         operation.capture_container_settings(&source);
         operation.accepted_preparation = Some(Box::new(checked.clone()));
@@ -1829,9 +1905,9 @@ impl Controller {
         record.resource_allocation = latest.resource_allocation;
         record.additional_mounts = latest.additional_mounts;
         if result.is_err()
-            && ((operation.workspace_transfer.is_some() && !crate::upgrade::gate().is_open())
+            && ((!operation.in_place && !crate::upgrade::gate().is_open())
                 || (operation.in_place
-                    && operation.phase == MovePhase::ClosingSource
+                    && operation.phase == MovePhase::Capturing
                     && (executor.shutdown_interrupted() || !crate::upgrade::gate().is_open())))
         {
             // Handoff cancellation is not user cancellation. Leave the durable
@@ -1890,10 +1966,14 @@ impl Controller {
             }
             Err(error) => {
                 let phase = match operation.phase {
-                    MovePhase::Preparing => "preparing the destination",
-                    MovePhase::ClosingSource => "checkpointing and suspending the source",
-                    MovePhase::ResumingDestination => "resuming the destination",
-                    MovePhase::StartingQueue => "starting the destination queue",
+                    MovePhase::Capturing => "capturing the source snapshot",
+                    MovePhase::Transferring => "transferring the snapshot",
+                    MovePhase::Restoring => "restoring the destination",
+                    MovePhase::DestinationStarting => "starting the destination worker",
+                    MovePhase::DestinationOwns => "retiring the source",
+                    MovePhase::SourceRetired => "admitting the destination queue",
+                    MovePhase::QueueAdmitted => "settling the move",
+                    MovePhase::DispatchReleased => "releasing in-place dispatch",
                     MovePhase::Completed | MovePhase::Failed | MovePhase::Cancelled => {
                         "recovering the move"
                     }
@@ -2067,35 +2147,58 @@ impl Controller {
         let id = operation.selection.session_id.clone();
         let result = async {
             let mut session = self.state.sessions.get(&id).context("move session is missing")?.clone();
-            if operation.queue_admission_started {
-                ensure!(!operation.cancellation_requested, "Move was cancelled; destination retained without further queue admission");
-                self.finish_workspace_transfer(&mut operation, executor)?;
-                return self.admit_move_queue(&mut operation, executor).await;
-            }
-            if operation.phase == MovePhase::Cancelled
-                && !operation.is_resolved()
-                && operation.workspace_transfer.is_some()
-                && operation.recovery_session.is_some()
-                && session.state == SessionState::Closing
-                && operation.destination_target.is_none()
-                && !crate::database::load_worker_restart(&id)?
-                    .is_some_and(|intent| session.target.as_deref() == Some(&intent.target))
-            {
-                // Cancellation retains Move's source for retry; it does not
-                // authorize suspension. Its durable seal already proves the
-                // source cut, so never lease an uninstalled destination here.
-                return Err(self.rollback_move_destination(
-                    &operation,
-                    anyhow::anyhow!("Move cancelled after sealing its source; source environment retained for explicit retry"),
-                    executor,
-                )?);
-            }
-            if operation.workspace_transfer.is_some() && operation.recovery_session.is_some() && !operation.cancellation_requested
-                && !(operation.phase == MovePhase::ResumingDestination && session.state == SessionState::Running) {
-                if session.state == SessionState::Provisioning || session.target.as_deref() != operation.source_target.as_ref() {
-                    self.rollback_move_destination(&operation, anyhow::anyhow!("resume interrupted Move transfer"), executor)?;
+            // Check in-place moves FIRST so `MovePhase::DispatchReleased`
+            // (which also sets `queue_admission_started`) routes to the
+            // idempotent release handler rather than cross-target
+            // `admit_move_queue`.
+            if operation.in_place {
+                if operation.phase == MovePhase::DispatchReleased {
+                    if let Ok(mut relay) = MoveSourceRelay::lease(admission, manager, &id).await
+                        && let Some(conn) = relay.0.as_mut().map(|r| r.connection_mut())
+                        && let Some(expected_store_id) = operation.in_place_expected_store_id.clone()
+                        && conn.snapshot().operational.store_id.as_deref() == Some(expected_store_id.as_str())
+                    {
+                        conn.client
+                            .release_in_place_move_dispatch(&operation.operation_id, &expected_store_id)
+                            .await?;
+                        if self.source_has_request_queue(&id) {
+                            let _ = conn.set_subagent_admission(true).await;
+                        }
+                    }
+                    operation.phase = MovePhase::Completed;
+                    operation.queue_admission_finished = true;
+                    operation.updated_at = now();
+                    crate::database::save_move_operation(&operation)?;
+                    return Ok(());
                 }
-                return Box::pin(self.execute_move(admission, &mut operation, None, executor, manager, MoveSourceRelay::default())).await;
+                if operation.cancellation_requested {
+                    if let Ok(mut relay) = MoveSourceRelay::lease(admission, manager, &id).await
+                        && let Some(conn) = relay.0.as_mut().map(|r| r.connection_mut())
+                        && let Some(expected_store_id) = operation.in_place_expected_store_id.clone()
+                        && conn.snapshot().operational.store_id.as_deref() == Some(expected_store_id.as_str())
+                    {
+                        let _ = conn
+                            .client
+                            .release_in_place_move_dispatch(&operation.operation_id, &expected_store_id)
+                            .await;
+                    }
+                    bail!("in-place Move was cancelled; dispatch hold released");
+                }
+                let relay = MoveSourceRelay::lease(admission, manager, &id).await?;
+                return Box::pin(self.execute_move(
+                    admission,
+                    &mut operation,
+                    None,
+                    executor,
+                    manager,
+                    relay,
+                ))
+                .await;
+            }
+            if operation.queue_admission_started || operation.phase.destination_owns() {
+                ensure!(!operation.cancellation_requested, "Move was cancelled; destination retained without further queue admission");
+                self.retire_move_source_if_needed(&mut operation, executor)?;
+                return self.admit_move_queue(&mut operation, executor).await;
             }
             if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
                 let cleanup = crate::targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(15));
@@ -2133,7 +2236,7 @@ impl Controller {
                     self.state.sessions[&id].state,
                     SessionState::Running | SessionState::Disconnected
                 );
-                if !(reopened && operation.in_place && operation.phase == MovePhase::ClosingSource && !operation.cancellation_requested) {
+                if !(reopened && operation.in_place && operation.phase == MovePhase::Capturing && !operation.cancellation_requested) {
                     bail!("{}", interrupted_source_stop_message(
                         "Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings",
                         operation.in_place,
@@ -2145,7 +2248,7 @@ impl Controller {
                 session = self.state.sessions[&id].clone();
             }
             match operation.phase {
-                MovePhase::ClosingSource
+                MovePhase::Capturing
                     if operation.in_place
                         && matches!(
                             session.state,
@@ -2153,9 +2256,6 @@ impl Controller {
                         )
                         && !operation.cancellation_requested =>
                 {
-                    // The phase is durable before the worker admission gate
-                    // closes. If the daemon died before the session reached
-                    // Closing, resume the gate/drain/stop sequence on startup.
                     let relay = MoveSourceRelay::lease(admission, manager, &id).await?;
                     return Box::pin(self.execute_move(admission,
                         &mut operation,
@@ -2166,7 +2266,7 @@ impl Controller {
                     ))
                     .await;
                 }
-                MovePhase::ClosingSource
+                MovePhase::Capturing
                     if operation.in_place
                         && matches!(
                             session.state,
@@ -2183,43 +2283,75 @@ impl Controller {
                     }
                     bail!("Move was cancelled before source interruption; source retained and sub-agent requests reopened")
                 }
-                MovePhase::Preparing => bail!("Move preparation was interrupted; source retained. Prepare Move again."),
-                MovePhase::ResumingDestination if session.state == SessionState::Running => {
-                    // Running is installed only after native readiness and the
-                    // handoff. A crash before the next intent write is safe to
-                    // advance, since restore started with an empty queue.
+                MovePhase::DestinationOwns
+                | MovePhase::SourceRetired
+                | MovePhase::QueueAdmitted => {
+                    ensure!(!operation.cancellation_requested, "Move was cancelled; ready destination retained");
+                    self.retire_move_source_if_needed(&mut operation, executor)?;
+                    restore_move_queue_hold(&operation);
+                    self.admit_move_queue(&mut operation, executor).await
+                }
+                MovePhase::Restoring | MovePhase::DestinationStarting
+                    if session.state == SessionState::Running =>
+                {
                     ensure!(Some(&session.last_profile) == operation.selection.profile_id.as_ref()
                         && Some(&session.target_template_id) == operation.selection.target_template_id.as_ref(),
                         "ready destination does not match the move intent");
                     operation.destination_target = session.target.clone().map(|v| *v);
                     operation.destination_native_session_id = session.native_session_id.clone();
                     operation.queue_admission_started = true;
-                    operation.phase = MovePhase::StartingQueue;
-                    crate::database::save_move_operation(&operation)?;
+                    operation.phase = MovePhase::DestinationOwns;
+                    crate::database::commit_move_destination_owns(&operation, &session)?;
+                    self.retire_move_source_if_needed(&mut operation, executor)?;
                     restore_move_queue_hold(&operation);
                     ensure!(!operation.cancellation_requested, "Move was cancelled; ready destination retained");
-                    self.finish_workspace_transfer(&mut operation, executor)?;
                     self.admit_move_queue(&mut operation, executor).await
                 }
-                MovePhase::ResumingDestination => {
-                    let previous = operation.recovery_session.as_ref().context("move lacks its stopped recovery identity; retain resources for inspection")?;
+                MovePhase::Transferring | MovePhase::Restoring | MovePhase::DestinationStarting => {
+                    recovery::cleanup_local_move_key_files(&operation.granted_keys);
+                    let previous = operation.recovery_session.clone().context("move lacks its stopped recovery identity; retain resources for inspection")?;
                     if operation.in_place && !operation.cancellation_requested {
-                        let previous = previous.clone();
                         return self.retry_interrupted_in_place_move(admission, &mut operation, &previous, executor, manager).await;
                     }
-                    // The retained environment belongs to this Move, even
-                    // when only part of its worker installation completed.
-                    let cause = anyhow::anyhow!("destination restoration was interrupted; checkpoint retained for an explicit retry");
+                    let cause = anyhow::anyhow!("destination restoration was interrupted before DestinationOwns; source retained for retry");
                     let error = if operation.in_place {
-                        self.retain_failed_in_place_move(&id, previous, cause)?
-                    } else if operation.workspace_transfer.is_some() {
-                        self.rollback_move_destination(&operation, cause, executor)?
+                        self.retain_failed_in_place_move(&id, &previous, cause)?
                     } else {
-                        self.rollback_failed_resume(&id, previous, crate::database::move_source_environment(&operation.operation_id)?.as_ref(), false, cause, executor)?
+                        // Before DestinationOwns, source owns the session:
+                        // tear down any destination environment FIRST, and
+                        // only then restart the source agent in place.
+                        if let Err(cleanup_err) = self.cleanup_prepared_move_destination(&mut operation, executor) {
+                            tracing::warn!(
+                                session_id = %id,
+                                operation_id = %operation.operation_id,
+                                error = %cleanup_err,
+                                "prepared destination cleanup during Move recovery deferred"
+                            );
+                        }
+                        let rollback_err = self.rollback_failed_resume(
+                            &id,
+                            &previous,
+                            crate::database::move_source_environment(&operation.operation_id)?.as_ref(),
+                            false,
+                            cause,
+                            executor,
+                        )?;
+                        if let Err(restart_err) = self
+                            .restart_retained_move_source(admission, &id, &previous, executor, manager)
+                            .await
+                        {
+                            tracing::warn!(
+                                session_id = %id,
+                                operation_id = %operation.operation_id,
+                                error = %restart_err,
+                                "could not restart retained Move source after destination rollback"
+                            );
+                        }
+                        rollback_err
                     };
                     Err(error)
                 }
-                MovePhase::ClosingSource => {
+                MovePhase::Capturing => {
                     if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
                         Box::pin(self.recover_move_source_stop(admission, &mut operation, executor, manager)).await?;
                     }
@@ -2231,6 +2363,25 @@ impl Controller {
                         "source stop was recovered; verified checkpoint retained. Retry move or Resume with previous settings",
                         operation.in_place,
                     ))
+                }
+                MovePhase::DispatchReleased => {
+                    if let Ok(mut relay) = MoveSourceRelay::lease(admission, manager, &id).await
+                        && let Some(conn) = relay.0.as_mut().map(|r| r.connection_mut())
+                        && let Some(expected_store_id) = operation.in_place_expected_store_id.clone()
+                        && conn.snapshot().operational.store_id.as_deref() == Some(expected_store_id.as_str())
+                    {
+                        conn.client
+                            .release_in_place_move_dispatch(
+                                &operation.operation_id,
+                                &expected_store_id,
+                            )
+                            .await?;
+                    }
+                    operation.phase = MovePhase::Completed;
+                    operation.queue_admission_finished = true;
+                    operation.updated_at = now();
+                    crate::database::save_move_operation(&operation)?;
+                    Ok(())
                 }
                 _ => bail!("Move requires an explicit retry after the daemon restarted"),
             }
@@ -2266,7 +2417,7 @@ impl Controller {
         // Record the destination phase before the record leaves `Closing`, so
         // a daemon that stops during this retry leaves a state that startup
         // retries again: `ClosingSource` with an `Error` record does not.
-        operation.phase = MovePhase::ResumingDestination;
+        operation.phase = MovePhase::Restoring;
         operation.recovery_session = Some(previous.clone());
         operation.updated_at = now();
         crate::database::save_move_operation(operation)?;
@@ -2428,11 +2579,6 @@ impl Controller {
                     // another retry. Marking it `Closing` here left a failed
                     // retry suspending with nothing to finish it.
                     self.retain_failed_in_place_move(&id, previous, cause)?;
-                } else if operation.workspace_transfer.is_some() {
-                    self.rollback_move_destination(operation, cause, executor)?;
-                    let record = self.state.sessions.get_mut(&id).unwrap();
-                    record.state = SessionState::Closing;
-                    crate::database::save_resumed_session(record, None)?;
                 } else {
                     let failure =
                         self.rollback_failed_resume(&id, previous, crate::database::move_source_environment(&operation.operation_id)?.as_ref(), false, cause, executor)?;
@@ -2449,125 +2595,419 @@ impl Controller {
                 Box::pin(self.recover_move_source_stop(admission, operation, executor, manager)).await?;
                 operation.checkpoint = self.state.sessions[&id].checkpoint.clone().map(|v| *v);
             }
+            if operation.in_place {
+                // Same-target Move ALWAYS runs in place via Slice 5A (Relay
+                // Protocol 81): never seal the relay, never take a handoff
+                // archive, and never stop the worker process tree.
+                if !source_relay.is_held() {
+                    source_relay = MoveSourceRelay::lease(admission, manager, &id).await?;
+                }
+                let protocol_version = source_relay
+                    .0
+                    .as_mut()
+                    .context("in-place Move requires a live worker connection")?
+                    .connection_mut()
+                    .protocol_version();
+                in_place::ensure_worker_supports_in_place_move(
+                    &id,
+                    protocol_version,
+                    operation.quota_stop_reason.is_some(),
+                )?;
+                let dest_profile_id = operation
+                    .selection
+                    .profile_id
+                    .clone()
+                    .unwrap_or_else(|| operation.source_profile_id.clone());
+                let dest_target_template_id = operation
+                    .selection
+                    .target_template_id
+                    .clone()
+                    .unwrap_or_else(|| operation.source_target_template_id.clone());
+                let dest_profile = self.config.named_profile(&dest_profile_id)?.clone();
+                let source_has_request_queue = self.source_has_request_queue(&id);
+                let destination_subagents = operation
+                    .selection
+                    .subagents
+                    .clone()
+                    .or_else(|| self.state.sessions.get(&id).and_then(|s| s.subagents.clone()))
+                    .unwrap_or_default();
+                let is_subagent = self.state.subagents.contains_key(&id);
+                let destination_has_parent_role = destination_subagents
+                    .for_launch(dest_profile.kind, is_subagent)
+                    .parent_role()
+                    .is_some();
+
+                let mut closed_subagent_admission = false;
+                if !operation.in_place_harness_restarted {
+                    operation.phase = MovePhase::Capturing;
+                    operation.updated_at = now();
+                    crate::database::save_move_operation(operation)?;
+                    if source_has_request_queue {
+                        // Capturing is durable: handoff cancels this wait and
+                        // the next daemon resumes it before holding dispatch.
+                        executor.begin_resumable_work()?;
+                        let drained = source_relay.drain_subagent_mutations(&id, executor).await;
+                        executor.end_resumable_work("Move control transition")?;
+                        match drained? {
+                            SubagentMutationDrain::Drained => {
+                                closed_subagent_admission = true;
+                            }
+                            SubagentMutationDrain::UnsupportedWorkerProtocol(version) => {
+                                bail!(
+                                    "in-place Move requires a worker that can drain sub-agent requests; source relay protocol is {version}"
+                                );
+                            }
+                        }
+                    }
+                    if should_stop_move_subagents(true, destination_has_parent_role) {
+                        let current = crate::database::load_state()?;
+                        let stopping_children = !current.active_child_session_ids(&id).is_empty();
+                        let error = if stopping_children && operation.quota_stop_reason.is_some() {
+                            Some("automatic quota Move would stop existing sub-agents".into())
+                        } else if stopping_children
+                            && operation
+                                .accepted_preparation
+                                .as_ref()
+                                .is_some_and(|accepted| !accepted.stops_subagents)
+                        {
+                            Some(
+                                "sub-agents appeared after preparation; prepare and confirm Move again before stopping them"
+                                    .into(),
+                            )
+                        } else {
+                            roleless_move_children_error(&live_move_children(&current, &id))
+                        };
+                        if let Some(error) = error {
+                            if closed_subagent_admission {
+                                source_relay
+                                    .reopen_subagent_mutations(&id)
+                                    .await
+                                    .context(
+                                        "could not reopen sub-agent requests after refusing Move",
+                                    )?;
+                            }
+                            bail!(
+                                "{error}; close or finish those children before moving to this harness"
+                            );
+                        }
+                        let stop_confirmed = operation.quota_stop_reason.is_none()
+                            && operation
+                                .accepted_preparation
+                                .as_ref()
+                                .is_none_or(|accepted| accepted.stops_subagents);
+                        if stop_confirmed
+                            && let Err(error) = executor.before_move_source_stop().await
+                        {
+                            if closed_subagent_admission {
+                                source_relay
+                                    .reopen_subagent_mutations(&id)
+                                    .await
+                                    .context(
+                                        "could not reopen sub-agent requests after stopping children failed",
+                                    )?;
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+
+                let conn = source_relay
+                    .0
+                    .as_mut()
+                    .context("in-place Move requires a live worker connection")?
+                    .connection_mut();
+                let live_store_id = conn
+                    .snapshot()
+                    .operational
+                    .store_id
+                    .clone()
+                    .context("in-place Move worker does not expose a durable store_id")?;
+                let expected_store_id = match operation.in_place_expected_store_id.clone() {
+                    Some(recorded) => {
+                        if live_store_id != recorded {
+                            let unapplied = match operation.queue {
+                                ResumeQueueDisposition::Discard => {
+                                    "discarding held pending commands"
+                                }
+                                ResumeQueueDisposition::Start => {
+                                    "submitting continuation and resuming queue"
+                                }
+                            };
+                            if closed_subagent_admission {
+                                let _ = conn.set_subagent_admission(true).await;
+                            }
+                            bail!(
+                                "in-place Move could not safely apply its queue decision ({unapplied}): \
+                                 relay store changed from {recorded} to {live_store_id}"
+                            );
+                        }
+                        recorded
+                    }
+                    None => {
+                        operation.in_place_expected_store_id = Some(live_store_id.clone());
+                        operation.updated_at = now();
+                        crate::database::save_move_operation(operation)?;
+                        live_store_id
+                    }
+                };
+                let held_ids = match conn
+                    .client
+                    .hold_in_place_move_dispatch(&operation.operation_id, &expected_store_id)
+                    .await
+                {
+                    Ok(ids) => ids,
+                    Err(err) => {
+                        if closed_subagent_admission {
+                            let _ = conn.set_subagent_admission(true).await;
+                        }
+                        return Err(err);
+                    }
+                };
+                if operation.in_place_held_command_ids.is_empty() && !held_ids.is_empty() {
+                    operation.in_place_held_command_ids = held_ids;
+                    operation.updated_at = now();
+                    crate::database::save_move_operation(operation)?;
+                }
+                // Any failure or cancellation after the dispatch hold is taken
+                // MUST best-effort release the hold so the worker is never
+                // stranded.
+                let post_hold: Result<()> = async {
+                    ensure!(
+                        !executor.cancellation_requested(),
+                        "in-place Move cancelled after holding dispatch"
+                    );
+                    if operation.quota_stop_reason.is_some() && !operation.in_place_harness_restarted
+                    {
+                        let operational = conn.client.status().await?;
+                        let source_harness = self
+                            .state
+                            .sessions
+                            .get(&id)
+                            .map(|session| session.harness_kind)
+                            .unwrap_or(dest_profile.kind);
+                        ensure!(
+                            operational.safe_to_move(
+                                source_harness,
+                                mj_core::activity::MovePurpose::QuotaRetry,
+                            ),
+                            "automatic quota Move aborted because the session is working"
+                        );
+                    }
+                    if !operation.in_place_harness_restarted {
+                        let previous_session = self
+                            .state
+                            .sessions
+                            .get(&id)
+                            .context("move session missing")?
+                            .clone();
+                        let native_continuity = self.config.native_continuity(
+                            previous_session.harness_kind,
+                            &operation.source_profile_id,
+                            &dest_profile_id,
+                        )?;
+                        let utility_handoff = if !native_continuity {
+                            let materialized = crate::database::load_materialized_session(&id)?
+                                .context(
+                                    "cross-harness in-place Move session projection is missing",
+                                )?;
+                            let canonical = mj_transcript::projection::canonical_session_from_materialized_owned(
+                                materialized,
+                            )?;
+                            let context_bytes =
+                                crate::handoff::profile_handoff_bytes(Some(&dest_profile));
+                            Some(
+                                super::resume::utility_handoff_while_cancellable(
+                                    &id,
+                                    &self.config,
+                                    &canonical,
+                                    None,
+                                    context_bytes,
+                                    executor,
+                                    tokio_util::sync::CancellationToken::new(),
+                                )
+                                .await
+                                .context("prepare cross-harness in-place handoff")?,
+                            )
+                        } else {
+                            None
+                        };
+                        {
+                            let session = self
+                                .state
+                                .sessions
+                                .get_mut(&id)
+                                .context("move session missing")?;
+                            session.last_profile = dest_profile_id.clone();
+                            session.harness_kind = dest_profile.kind;
+                            session.target_template_id = dest_target_template_id.clone();
+                            if let Some(policy) = &operation.selection.subagents {
+                                session.subagents = Some(policy.clone());
+                            }
+                            if let Some(oracle) = operation.selection.oracle {
+                                session.oracle = oracle;
+                            }
+                            if let Some(choice) = &operation.selection.oracle_choice {
+                                session.oracle_choice = Some(Box::new(choice.clone()));
+                            }
+                            if !native_continuity {
+                                session.native_session_id = None;
+                            }
+                            session.updated_at = now();
+                        }
+                        let restart_result: Result<()> = async {
+                            let session = self
+                                .state
+                                .sessions
+                                .get(&id)
+                                .context("move session missing")?;
+                            let locator = session
+                                .target
+                                .as_deref()
+                                .context("in-place Move session has no target locator")?;
+                            let backend = super::backend_locator(locator, session, &self.config)?;
+                            let worker_root = crate::targets::worker_root(&backend, &id)?;
+                            self.prepare_worker_files_for(
+                                &id,
+                                &backend,
+                                &worker_root,
+                                executor,
+                                super::worker_binary::launch::WorkerFilePreparation::RefreshProfileOnly,
+                                super::worker_binary::launch::LaunchHistory::Stored,
+                            )?;
+                            let launch_config = self.current_worker_launch_config(&id, &backend)?;
+                            conn.client
+                                .restart_harness_in_place(
+                                    &operation.operation_id,
+                                    &expected_store_id,
+                                    Box::new(launch_config),
+                                )
+                                .await?;
+                            Ok(())
+                        }
+                        .await;
+                        if let Err(err) = restart_result {
+                            self.state.sessions.insert(id.clone(), previous_session);
+                            return Err(err);
+                        }
+                        crate::database::save_resumed_session(&self.state.sessions[&id], None)?;
+                        operation.in_place_harness_restarted = true;
+                        operation.updated_at = now();
+                        crate::database::save_move_operation(operation)?;
+                        if let Some(handoff) = utility_handoff {
+                            conn.client.install_prompt_context(handoff).await?;
+                        }
+                    }
+                    match operation.queue {
+                        ResumeQueueDisposition::Discard => {
+                            if !operation.in_place_held_command_ids.is_empty() {
+                                conn.client
+                                    .discard_held_move_commands(
+                                        &operation.operation_id,
+                                        &expected_store_id,
+                                        operation.in_place_held_command_ids.clone(),
+                                    )
+                                    .await?;
+                            }
+                        }
+                        ResumeQueueDisposition::Start => {
+                            if operation.quota_stop_reason.is_some() {
+                                use mj_core::state::QuotaMoveContinuation;
+                                let continuation = operation
+                                    .quota_continuation
+                                    .context("quota Move has no saved continuation action")?;
+                                let cmd_id = operation
+                                    .in_place_continuation_command_id
+                                    .clone()
+                                    .unwrap_or_else(|| {
+                                        mj_core::continuation::GeneratedPrompt::QuotaRetry
+                                            .command_id(&operation.operation_id)
+                                    });
+                                let cmd = match continuation {
+                                    QuotaMoveContinuation::ResumeGoal => {
+                                        mj_core::relay::RelayCommand::GoalControl {
+                                            action: mj_core::goal::GoalControlAction::Resume,
+                                        }
+                                    }
+                                    QuotaMoveContinuation::Prompt => {
+                                        mj_core::relay::RelayCommand::Prompt {
+                                            prompt: mj_core::continuation::prompt_blocks(),
+                                        }
+                                    }
+                                };
+                                conn.client
+                                    .submit_front(
+                                        &operation.operation_id,
+                                        &expected_store_id,
+                                        cmd_id,
+                                        cmd,
+                                    )
+                                    .await?;
+                            }
+                        }
+                    }
+                    operation.phase = MovePhase::DispatchReleased;
+                    operation.queue_admission_started = true;
+                    operation.updated_at = now();
+                    crate::database::commit_in_place_dispatch_released(operation)?;
+                    conn.client
+                        .release_in_place_move_dispatch(&operation.operation_id, &expected_store_id)
+                        .await?;
+                    if closed_subagent_admission {
+                        conn.set_subagent_admission(true).await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(err) = post_hold {
+                    if let Err(release_err) = conn
+                        .client
+                        .release_in_place_move_dispatch(&operation.operation_id, &expected_store_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %id,
+                            operation_id = %operation.operation_id,
+                            error = %release_err,
+                            "failed to release in-place Move dispatch hold after error"
+                        );
+                    }
+                    if closed_subagent_admission {
+                        let _ = conn.set_subagent_admission(true).await;
+                    }
+                    return Err(err);
+                }
+                operation.phase = MovePhase::Completed;
+                operation.queue_admission_finished = true;
+                operation.updated_at = now();
+                crate::database::save_move_operation(operation)?;
+                for change in &operation.deferred_environment_changes {
+                    executor.notify_notice(&in_place::deferred_environment_change_notice(change));
+                }
+                return Ok(());
+            }
             if matches!(
                 self.state.sessions[&id].state,
                 SessionState::Running | SessionState::Disconnected
             ) && operation.destination_target.is_none()
             {
-                let source = self.state.sessions[&id].clone();
-                // Any worker with an `mj-agents` request queue can register or
-                // message a child (`ask_oracle`, `request_review`), so the gate
-                // covers every such source, not only those with the parent role.
-                let source_has_request_queue = self.source_has_request_queue(&id);
-                let destination_has_parent_role = parent_tools_enabled(
-                    &move_subagent_policy(&source, &operation.selection),
-                    operation
-                        .selection
-                        .profile_id
-                        .as_deref()
-                        .and_then(|profile| self.config.profiles.get(profile))
-                        .context("destination profile is missing")?
-                        .kind,
+                // Cross-target Move stops child sessions before source capture.
+                executor.before_move_source_stop().await?;
+                ensure!(
+                    !executor.cancellation_requested(),
+                    "Move cancelled before source interruption"
                 );
-                if operation.in_place {
-                    // Persist the phase before closing worker admission. A daemon
-                    // crash from this point can reopen the relay, finish the
-                    // drain, or observe that source sealing already began.
-                    operation.phase = MovePhase::ClosingSource;
-                    operation.updated_at = now();
-                    crate::database::save_move_operation(operation)?;
-                    let mut stopped_subagents_for_legacy_worker = false;
-                    if source_has_request_queue {
-                        if !source_relay.is_held() {
-                            source_relay = MoveSourceRelay::lease(admission, manager, &id).await?;
-                        }
-                        // ClosingSource is durable: handoff cancels this wait and
-                        // the next daemon resumes it before sealing the source.
-                        executor.begin_resumable_work()?;
-                        let drained = source_relay.drain_subagent_mutations(&id, executor).await;
-                        executor.end_resumable_work("Move control transition")?;
-                        match drained? {
-                            SubagentMutationDrain::Drained => {}
-                            SubagentMutationDrain::UnsupportedWorkerProtocol(version) => {
-                                ensure!(operation.quota_stop_reason.is_none(),
-                                    "automatic quota Move requires a worker that can drain sub-agent requests; source relay protocol is {version}");
-                                executor.notify_notice(&format!(
-                                    "The source worker uses relay protocol {version}; protocol 32 is required to safely drain sub-agent requests, so stopping sub-agents before this in-place Move"
-                                ));
-                                executor.before_move_source_stop().await?;
-                                stopped_subagents_for_legacy_worker = true;
-                            }
-                        }
-                    }
-                    if should_stop_move_subagents(true, destination_has_parent_role)
-                        && !stopped_subagents_for_legacy_worker
-                    {
-                        let current = crate::database::load_state()?;
-                        // The drained request queue owns the child set now. A child
-                        // admitted after preparation must never be stopped by an
-                        // automatic quota Move.
-                        let stopping_children = !current.active_child_session_ids(&id).is_empty();
-                        let error = if stopping_children && operation.quota_stop_reason.is_some() {
-                            Some("automatic quota Move would stop existing sub-agents".into())
-                        } else if stopping_children && operation.accepted_preparation.as_ref()
-                            .is_some_and(|accepted| !accepted.stops_subagents)
-                        {
-                            Some("sub-agents appeared after preparation; prepare and confirm Move again before stopping them".into())
-                        } else {
-                            roleless_move_children_error(&live_move_children(&current, &id))
-                        };
-                        if let Some(error) = error {
-                            if source_has_request_queue {
-                                source_relay
-                                    .reopen_subagent_mutations(&id)
-                                    .await
-                                    .context("could not reopen sub-agent requests after refusing Move")?;
-                            }
-                            bail!("{error}; close or finish those children before moving to this harness");
-                        }
-                        // An automatic Move owns no child stop. In particular,
-                        // daemon-side children registered after the empty check
-                        // must survive; never re-read and stop them in the hook.
-                        let stop_confirmed = operation.quota_stop_reason.is_none()
-                            && operation.accepted_preparation.as_ref()
-                                .is_none_or(|accepted| accepted.stops_subagents);
-                        if stop_confirmed && let Err(error) = executor.before_move_source_stop().await {
-                            if source_has_request_queue {
-                                source_relay
-                                    .reopen_subagent_mutations(&id)
-                                    .await
-                                    .context("could not reopen sub-agent requests after stopping children failed")?;
-                            }
-                            return Err(error);
-                        }
-                    }
-                } else {
-                    // Non-in-place Moves retain their existing child-stop
-                    // behavior before the source checkpoint begins.
-                    executor.before_move_source_stop().await?;
-                }
-                if executor.cancellation_requested() {
-                    if operation.in_place && source_has_request_queue {
-                        source_relay.reopen_subagent_mutations(&id).await?;
-                    }
-                    bail!("Move cancelled before source interruption");
-                }
                 executor.notify_notice("Stopping source");
                 let _timing = MovePhaseTimer::new(&id, "checkpoint and source stop");
-                if !operation.in_place {
-                    operation.phase = MovePhase::ClosingSource;
-                    operation.updated_at = now();
-                    crate::database::save_move_operation(operation)?;
-                }
-                // An eligible move keeps its environment: the close stops at
-                // the sealed relay and the record keeps its target for
-                // `restore_session_in_place`.
-                let disposition = if operation.in_place {
-                    SourceTargetDisposition::RetainForInPlaceSwap
-                } else {
-                    SourceTargetDisposition::Destroy
-                };
-                let suspended = Box::pin(self.suspend_session_for_move(admission,
+                operation.phase = MovePhase::Capturing;
+                operation.updated_at = now();
+                crate::database::save_move_operation(operation)?;
+                // Cross-target Move keeps the source environment intact until
+                // AFTER `DestinationOwns` commits, so any failure before
+                // destination readiness can tear down the destination and
+                // restart the source agent in place.
+                let disposition = SourceTargetDisposition::RetainForInPlaceSwap;
+                let suspended = Box::pin(self.suspend_session_for_move(
+                    admission,
                     &id,
                     executor,
                     manager,
@@ -2577,54 +3017,28 @@ impl Controller {
                     std::mem::take(&mut source_relay),
                 ))
                 .await;
-                if let Err(error) = suspended {
-                    if operation.in_place
-                        && source_has_request_queue
-                        && matches!(
-                            self.state.sessions[&id].state,
-                            SessionState::Running | SessionState::Disconnected
-                        )
-                        && let Err(reopen) = MoveSourceRelay::set_subagent_admission_via_manager(admission,
-                            manager,
-                            &id,
-                            true,
-                        )
-                        .await
-                    {
-                        return Err(error.context(format!(
-                            "could not reopen sub-agent requests after source checkpoint failed: {reopen:#}"
-                        )));
-                    }
-                    return Err(error);
-                }
+                suspended?;
             }
             // Past the source stop, nothing else needs the source's connection.
             drop(source_relay);
-            // An in-place move never reaches `Stopped` with a target: its
-            // source stays `Closing` in the environment the destination reuses.
-            if !operation.in_place
-                && operation.workspace_transfer.is_none()
-                && self.state.sessions[&id].state == SessionState::Stopped
-                && self.state.sessions[&id].target.is_some()
-            {
-                executor.notify_notice("Cleaning up source");
-                let _timing = MovePhaseTimer::new(&id, "source storage cleanup");
-                self.cleanup_stopped_target(&id, executor)?;
+            if operation.source_snapshot.is_none() {
+                operation.checkpoint = operation
+                    .checkpoint
+                    .clone()
+                    .or_else(|| self.state.sessions[&id].checkpoint.clone().map(|v| *v));
             }
-            operation.checkpoint = operation
-                .checkpoint
-                .clone()
-                .or_else(|| self.state.sessions[&id].checkpoint.clone().map(|v| *v));
             ensure!(
-                operation.restore_artifact().is_some(),
-                "move has no verified checkpoint"
+                operation.checkpoint_retained(),
+                "move has no verified snapshot"
             );
             ensure!(
                 !executor.cancellation_requested(),
-                "move cancelled after source sealing; checkpoint and remaining environment retained"
+                "move cancelled after source capture; snapshot and source environment retained"
             );
-            operation.phase = MovePhase::ResumingDestination;
-            operation.recovery_session = Some(self.state.sessions[&id].clone());
+            if operation.recovery_session.is_none() {
+                operation.recovery_session = Some(self.state.sessions[&id].clone());
+            }
+            operation.phase = MovePhase::Transferring;
             operation.updated_at = now();
             crate::database::save_move_operation(operation)?;
             executor.reserve_move_destination();
@@ -2635,10 +3049,16 @@ impl Controller {
             session.resource_allocation = if operation.selection.clear_resource_allocation {
                 None
             } else {
-                operation.selection.resource_allocation.clone()
+                operation
+                    .selection
+                    .resource_allocation
+                    .clone()
                     .or_else(|| operation.inherited_resource_allocation.clone())
             };
-            session.additional_mounts = operation.selection.additional_mounts.clone()
+            session.additional_mounts = operation
+                .selection
+                .additional_mounts
+                .clone()
                 .unwrap_or_else(|| operation.inherited_additional_mounts.clone());
             // The destination worker reads its delegation policy from the
             // record at launch. `recovery_session` above keeps the old one
@@ -2659,54 +3079,190 @@ impl Controller {
                 }
                 crate::database::save_resumed_session(session, None)?;
             }
-            if operation.in_place {
-                // The environment is kept, so there is nothing to provision and
-                // no allocation to clear: eligibility already required the
-                // allocation to be unchanged.
-                Box::pin(self.restore_session_in_place(
-                    &id,
-                    operation.selection.profile_id.as_deref().unwrap(),
-                    operation.selection.target_template_id.as_deref().unwrap(),
-                    executor,
-                ))
-                .await?;
-            } else {
-                if operation.workspace_transfer.is_some() {
-                    self.capture_move_workspace(operation, executor)?;
-                    Box::pin(self.resume_session_for_move(operation, executor)).await?;
-                    let saved = crate::database::load_move_operation(&id)?
-                        .context("Move intent disappeared during restore")?;
-                    operation.workspace_transfer = saved.workspace_transfer;
-                    operation.prepared_destination = saved.prepared_destination;
-                } else {
-                    Box::pin(self.resume_session_controlled(
-                        &id,
-                        operation.selection.profile_id.as_deref().unwrap(),
-                        operation.selection.target_template_id.as_deref().unwrap(),
-                        SessionResumeOptions {
-                            additional_mounts: None,
-                            resource_allocation: None,
-                            discard_queue: true,
-                        },
-                        executor,
-                    ))
-                    .await?;
+            let restore_result =
+                Box::pin(self.resume_session_for_cross_target_move(operation, executor)).await;
+            if let Err(err) = restore_result {
+                // Before DestinationOwns, the source still owns the session.
+                // `resume_session_for_cross_target_move` has already torn down
+                // any partial destination runtime/checkout; clean up any
+                // prepared EC2 destination too, and ONLY THEN restart the
+                // source agent in place.
+                if let Err(cleanup_err) = self.cleanup_prepared_move_destination(operation, executor)
+                {
+                    tracing::warn!(
+                        session_id = %id,
+                        operation_id = %operation.operation_id,
+                        error = %cleanup_err,
+                        "prepared destination cleanup failed after cross-target Move error"
+                    );
                 }
+                if let Some(previous) = operation.recovery_session.clone()
+                    && let Err(restart_err) = self
+                        .restart_retained_move_source(admission, &id, &previous, executor, manager)
+                        .await
+                {
+                    tracing::warn!(
+                        session_id = %id,
+                        operation_id = %operation.operation_id,
+                        error = %restart_err,
+                        "could not restart source agent in place after failed cross-target Move"
+                    );
+                }
+                return Err(err);
             }
-            let destination = &self.state.sessions[&id];
+            let destination = self.state.sessions[&id].clone();
             operation.destination_target = destination.target.clone().map(|v| *v);
             operation.destination_native_session_id = destination.native_session_id.clone();
-            // Persist readiness before submitting even the first queued command.
-            operation.phase = MovePhase::StartingQueue;
+            // Single-transaction commit point: DestinationOwns + session placement.
+            operation.phase = MovePhase::DestinationOwns;
             operation.queue_admission_started = true;
             operation.updated_at = now();
-            crate::database::save_move_operation(operation)?;
+            crate::database::commit_move_destination_owns(operation, &destination)?;
+
+            // Retire the source environment ONLY AFTER DestinationOwns has committed.
+            self.retire_move_source_if_needed(operation, executor)?;
         }
         restore_move_queue_hold(operation);
-        self.finish_workspace_transfer(operation, executor)?;
-        self.admit_move_queue(operation, executor).await
+        self.admit_move_queue(operation, executor).await?;
+        operation.phase = MovePhase::QueueAdmitted;
+        operation.updated_at = now();
+        crate::database::save_move_operation(operation)?;
+        Ok(())
 
         }).await
+    }
+
+    /// Retire the source environment for a Move that has crossed `DestinationOwns`,
+    /// persisting `MovePhase::SourceRetired` once done. Idempotent across recovery.
+    pub(crate) fn retire_move_source_if_needed(
+        &self,
+        operation: &mut MoveOperation,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        if matches!(
+            operation.phase,
+            MovePhase::SourceRetired | MovePhase::QueueAdmitted | MovePhase::Completed
+        ) {
+            return Ok(());
+        }
+        let id = &operation.selection.session_id;
+        if let Some(source_env) = crate::database::move_source_environment(&operation.operation_id)? {
+            executor.notify_notice("Retiring source environment");
+            let _timing = MovePhaseTimer::new(id, "source environment retirement");
+            super::environment::retire_owned_environment(
+                source_env,
+                &self.config,
+                executor,
+                super::BranchDisposition::Keep,
+                super::CheckoutDisposition::Remove,
+            )?;
+        }
+        operation.phase = MovePhase::SourceRetired;
+        operation.updated_at = now();
+        crate::database::save_move_operation(operation)?;
+        Ok(())
+    }
+
+    /// Recover a pre-149 `LegacyMoveOperation` BEFORE deleting its durable row:
+    /// - `MoveOwnership::Source`: tear down any prepared destination environment,
+    ///   recover any `Closing`/`Destroying` source session (reopening only when
+    ///   the worker is live, otherwise marking `Error`/`Stopped`), and return a
+    ///   rerun notice.
+    /// - `MoveOwnership::Destination`: retire any remaining source environment,
+    ///   complete pending queue admission when `!queue_admission_finished`, and
+    ///   return a finish-forward notice.
+    pub async fn recover_legacy_move_operation(
+        &mut self,
+        session_id: &str,
+        legacy: &mj_core::state::LegacyMoveOperation,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<String> {
+        let session = self.state.sessions.get(session_id).cloned();
+        match recovery::classify_legacy_move_ownership(legacy, session.as_ref()) {
+            recovery::MoveOwnership::Source => {
+                if let Some(prepared) = &legacy.prepared_destination
+                    && prepared.owns_resource()
+                {
+                    let mut shim = legacy_shim_move_operation(session_id, legacy, session.as_ref());
+                    self.cleanup_prepared_move_destination(&mut shim, executor)?;
+                }
+                if let Some(record) = self.state.sessions.get(session_id).cloned()
+                    && matches!(record.state, SessionState::Closing | SessionState::Destroying)
+                {
+                    let worker_alive = record.target.as_deref().is_some_and(|locator| {
+                        super::backend_locator(locator, &record, &self.config)
+                            .and_then(|backend| {
+                                let root = crate::targets::worker_root(&backend, session_id)?;
+                                super::worker_binary::probe_worker_liveness(
+                                    executor, &backend, session_id, &root,
+                                )
+                            })
+                            .is_ok_and(|out| {
+                                out.status == 0
+                                    && matches!(out.stdout.as_slice(), b"alive\n" | b"starting\n")
+                            })
+                    });
+                    let notice = recovery::legacy_source_rollback_notice(&legacy.operation_id);
+                    let mut updated = record;
+                    if worker_alive {
+                        updated.state = SessionState::Running;
+                        updated.last_error = None;
+                    } else if updated.target.is_some() {
+                        updated.state = SessionState::Error;
+                        updated.last_error = Some(notice.clone());
+                    } else if updated.checkpoint.is_some() {
+                        updated.state = SessionState::Stopped;
+                        updated.last_error = Some(notice.clone());
+                    } else {
+                        updated.state = SessionState::Lost;
+                        updated.last_error = Some(notice.clone());
+                    }
+                    updated.updated_at = now();
+                    crate::database::save_resumed_session(&updated, None)?;
+                    self.state.sessions.insert(session_id.to_owned(), updated);
+                }
+                Ok(recovery::legacy_source_rollback_notice(&legacy.operation_id))
+            }
+            recovery::MoveOwnership::Destination => {
+                if let Some(source_env) =
+                    crate::database::move_source_environment(&legacy.operation_id)?
+                {
+                    super::environment::retire_owned_environment(
+                        source_env,
+                        &self.config,
+                        executor,
+                        super::BranchDisposition::Keep,
+                        super::CheckoutDisposition::Remove,
+                    )?;
+                }
+                if !legacy.queue_admission_finished
+                    && let Some(record) = self.state.sessions.get(session_id)
+                    && record.state == SessionState::Running
+                {
+                    let mut forward = legacy_shim_move_operation(session_id, legacy, Some(record));
+                    forward.phase = MovePhase::SourceRetired;
+                    forward.queue_admission_started = true;
+                    forward.queue_admission_finished = false;
+                    forward.destination_target = legacy
+                        .destination_target
+                        .clone()
+                        .or_else(|| record.target.clone().map(|t| *t));
+                    forward.destination_native_session_id = legacy
+                        .destination_native_session_id
+                        .clone()
+                        .or_else(|| record.native_session_id.clone());
+                    if forward.checkpoint.is_some()
+                        || forward.queue == ResumeQueueDisposition::Discard
+                    {
+                        self.admit_move_queue(&mut forward, executor).await?;
+                    }
+                }
+                Ok(format!(
+                    "Finished forward recovery for upgraded Move {} on destination.",
+                    legacy.operation_id
+                ))
+            }
+        }
     }
 
     async fn admit_move_queue(
@@ -2763,20 +3319,26 @@ impl Controller {
         // The destination's restore left the archived source's pending mail
         // for this point, after the ownership commit: until then a failed Move
         // hands the session back to a source that still holds it.
-        let verified = if operation.queue_admission_finished {
+        let captured = if operation.queue_admission_finished {
             None
-        } else {
-            let checkpoint = operation
-                .restore_artifact()
-                .context("move queue archive is missing")?;
+        } else if let Some(snapshot) = operation.source_snapshot.as_deref() {
+            Some((snapshot.queued_prompts.clone(), snapshot.mailbox.clone()))
+        } else if let Some(checkpoint) = operation.restore_artifact() {
             let verified = verify_archive_streaming(&checkpoint.archive_path)?;
             ensure!(
                 verified.archive_sha256 == checkpoint.sha256 && verified.manifest.session.id == *id,
                 "move queue checkpoint verification failed"
             );
-            Some(verified)
+            Some((
+                verified.canonical_session.queued_prompts,
+                verified.canonical_session.mailbox,
+            ))
+        } else if operation.queue == ResumeQueueDisposition::Discard {
+            Some((Vec::new(), None))
+        } else {
+            bail!("move queue snapshot is missing");
         };
-        if let Some(verified) = verified.as_ref()
+        if let Some((queued_prompts, _)) = captured.as_ref()
             && operation.queue == ResumeQueueDisposition::Start
         {
             let _starting_queue = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
@@ -2784,7 +3346,7 @@ impl Controller {
             relay
                 .update_command_retention(
                     Some(operation.operation_id.clone()),
-                    operation.queue_command_ids(&verified.canonical_session),
+                    operation.queue_command_ids_from_prompts(queued_prompts),
                     false,
                 )
                 .await?;
@@ -2817,7 +3379,7 @@ impl Controller {
                     )
                     .await?;
             }
-            for queued in &verified.canonical_session.queued_prompts {
+            for queued in queued_prompts {
                 ensure!(
                     !executor.cancellation_requested(),
                     "move cancelled during queue admission; destination retained"
@@ -2845,9 +3407,9 @@ impl Controller {
         }
         // Mail joins behind the admitted queue, whichever way the queue went:
         // discarding queued prompts never discards messages sent to the session.
-        if let Some(verified) = &verified {
+        if let Some((_, mailbox)) = &captured {
             for (command_id, command) in
-                super::resume::deferred_mail_commands(&verified.canonical_session)
+                super::resume::deferred_mail_commands_from_mailbox(mailbox.as_ref())
             {
                 ensure!(
                     !executor.cancellation_requested(),
@@ -2977,32 +3539,62 @@ impl Controller {
             "destination configuration changed during move"
         );
         let id = &operation.selection.session_id;
-        let bundle_move = !operation.in_place && operation.workspace_transfer.is_some();
+        let bundle_move = !operation.in_place;
+        let mut skip_daemon_checkpoint_preflight = false;
         if bundle_move || preparation.is_some() {
-            let checkpoint = operation
-                .restore_artifact()
-                .or(self.state.sessions[id].checkpoint.as_deref())
-                .context("no move checkpoint")?;
-            let verified = verify_archive_streaming(&checkpoint.archive_path)?;
-            if bundle_move {
-                current.validate_move_bundle_sources(operation, &verified.manifest, executor)?;
-            }
-            if let Some(prepared) = preparation {
-                let actual: Vec<_> = verified
-                    .canonical_session
-                    .queued_prompts
-                    .iter()
-                    .map(|p| p.command_id.as_str())
-                    .collect();
-                let expected: Vec<_> = prepared
-                    .queued_commands
-                    .iter()
-                    .map(|p| p.command_id.as_str())
-                    .collect();
-                ensure!(
-                    actual == expected,
-                    "pending queue changed before checkpoint capture; source retained, confirm Move again"
-                );
+            if let Some(snapshot) = operation.source_snapshot.as_deref() {
+                if bundle_move
+                    && let Some(manifest) = snapshot.manifest.as_ref()
+                {
+                    current.validate_move_bundle_sources(operation, manifest, executor)?;
+                    skip_daemon_checkpoint_preflight = manifest.repositories.iter().all(|repo| {
+                        repo.metadata.origin_delta.is_some() || repo.metadata.remote_workspace
+                    });
+                } else {
+                    skip_daemon_checkpoint_preflight = true;
+                }
+                if let Some(prepared) = preparation {
+                    let actual: Vec<_> = snapshot
+                        .queued_prompts
+                        .iter()
+                        .map(|p| p.command_id.as_str())
+                        .collect();
+                    let expected: Vec<_> = prepared
+                        .queued_commands
+                        .iter()
+                        .map(|p| p.command_id.as_str())
+                        .collect();
+                    ensure!(
+                        actual == expected,
+                        "pending queue changed before checkpoint capture; source retained, confirm Move again"
+                    );
+                }
+            } else {
+                let checkpoint = operation
+                    .restore_artifact()
+                    .or(self.state.sessions[id].checkpoint.as_deref())
+                    .context("no move checkpoint")?;
+                let verified = verify_archive_streaming(&checkpoint.archive_path)?;
+                if bundle_move {
+                    current.validate_move_bundle_sources(operation, &verified.manifest, executor)?;
+                }
+                if let Some(prepared) = preparation {
+                    let actual: Vec<_> = verified
+                        .canonical_session
+                        .queued_prompts
+                        .iter()
+                        .map(|p| p.command_id.as_str())
+                        .collect();
+                    let expected: Vec<_> = prepared
+                        .queued_commands
+                        .iter()
+                        .map(|p| p.command_id.as_str())
+                        .collect();
+                    ensure!(
+                        actual == expected,
+                        "pending queue changed before checkpoint capture; source retained, confirm Move again"
+                    );
+                }
             }
         }
         current.validate_move_destination_paths(
@@ -3011,7 +3603,8 @@ impl Controller {
             executor,
         )?;
         if !operation.in_place
-            && operation.workspace_transfer.is_none()
+            && !skip_daemon_checkpoint_preflight
+            && self.state.sessions[id].checkpoint.is_some()
             && let super::ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) = self
                 .preflight_resume_repository_sources_with_token(
                     id,
@@ -3026,6 +3619,306 @@ impl Controller {
             );
         }
         Ok(())
+    }
+}
+
+/// Stream a cross-target Move archive and optional `.mj/keep/<session-id>/`
+/// directory (excluding `operation.selection.skip_keep_paths`) straight from
+/// `source` to `destination` via `transport::transfer_move_stream_with_direct`
+/// (`SameHost` -> `DirectPush` -> `DirectPull` -> `DaemonStream`), persisting
+/// `operation.transfer_route`, reporting the chosen route (plus keep bytes on
+/// `DaemonStream`), and cleaning up ephemeral key files on every exit path.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn transfer_move_snapshot_to_destination(
+    operation: &mut MoveOperation,
+    source: &mj_core::targets::TargetLocator,
+    source_worker_root: &str,
+    destination: &mj_core::targets::TargetLocator,
+    destination_worker_root: &str,
+    destination_archive: &std::path::Path,
+    source_keep_dir: Option<&std::path::Path>,
+    destination_keep_dir: Option<&std::path::Path>,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<transport::TransferReceipt> {
+    let snapshot = operation
+        .source_snapshot
+        .as_deref()
+        .context("cross-target Move has no source snapshot to transfer")?;
+    let source_archive = snapshot.archive_path.clone();
+    let sha256 = snapshot.sha256.clone();
+
+    let keep = transport::KeepTransferOptions {
+        keep_dir: source_keep_dir.map(std::path::Path::to_path_buf),
+        keep_dest: destination_keep_dir.map(std::path::Path::to_path_buf),
+        skip: operation.selection.skip_keep_paths.clone(),
+    };
+    let stream_cfg = transport::WorkerStreamConfig {
+        source_worker_bin: format!("{source_worker_root}/hel"),
+        destination_worker_bin: format!("{destination_worker_root}/hel"),
+        keep: keep.clone(),
+    };
+
+    let direct_peer = if transport::targets_share_host(source, destination) {
+        None
+    } else {
+        try_build_direct_peer_config(
+            operation,
+            source,
+            source_worker_root,
+            destination,
+            destination_worker_root,
+            keep,
+            executor,
+        )
+    };
+    if let Some(peer) = direct_peer.as_ref() {
+        // Persist ephemeral key ownership BEFORE installing keys on either host.
+        let comment = format!("mj-move-{}", peer.operation_id);
+        operation.granted_keys = vec![
+            mj_core::state::GrantedMoveKey {
+                host: peer.source_address.clone(),
+                comment: comment.clone(),
+                private_key_path: Some(
+                    peer.source_stage_dir
+                        .join(format!("mj-move-{}.key", peer.operation_id)),
+                ),
+                known_hosts_path: Some(
+                    peer.source_stage_dir
+                        .join(format!("mj-move-{}.known_hosts", peer.operation_id)),
+                ),
+            },
+            mj_core::state::GrantedMoveKey {
+                host: peer.destination_address.clone(),
+                comment,
+                private_key_path: Some(
+                    peer.destination_stage_dir
+                        .join(format!("mj-move-{}.pull.key", peer.operation_id)),
+                ),
+                known_hosts_path: Some(
+                    peer.destination_stage_dir
+                        .join(format!("mj-move-{}.pull.known_hosts", peer.operation_id)),
+                ),
+            },
+        ];
+        operation.updated_at = now();
+        crate::database::save_move_operation(operation)?;
+    }
+
+    let ec2_manager = direct_peer
+        .as_ref()
+        .filter(|peer| peer.destination_ec2_grant.is_some() || peer.source_ec2_grant.is_some())
+        .and_then(|_| crate::database::daemon_instance_id().ok())
+        .map(|instance_id| {
+            transport::ec2_grant::Ec2GrantManager::new(
+                transport::ec2_grant::SqliteEc2GrantStore,
+                transport::ec2_grant::AwsCliEc2Client::default(),
+                instance_id,
+                transport::ec2_grant::Ec2GrantConfig::default(),
+            )
+        });
+
+    let result = transport::transfer_move_stream_with_direct(
+        source,
+        &source_archive,
+        destination,
+        destination_archive,
+        &sha256,
+        executor,
+        Some(&stream_cfg),
+        direct_peer.as_ref(),
+        ec2_manager.as_ref(),
+    );
+    recovery::cleanup_local_move_key_files(&operation.granted_keys);
+    let receipt = result?;
+    operation.transfer_route = Some(receipt.route);
+    operation.updated_at = now();
+    crate::database::save_move_operation(operation)?;
+    let notice = if receipt.route == mj_core::state::TransferRoute::DaemonStream {
+        format!(
+            "Transferred snapshot via {} (.mj/keep/: {})",
+            receipt.route.label(),
+            format_transfer_bytes(receipt.keep_bytes),
+        )
+    } else {
+        format!("Transferred snapshot via {}", receipt.route.label())
+    };
+    executor.notify_notice(&notice);
+    Ok(receipt)
+}
+
+fn format_transfer_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if (bytes as f64) < MIB {
+        format!("{:.1} KiB", bytes as f64 / KIB)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    }
+}
+
+/// Probe verified peer SSH host keys and paths over the daemon's already-trusted
+/// SSH connections to build a `DirectPeerConfig` for `DirectPush` / `DirectPull`.
+/// Returns `None` when either endpoint is local or lacks a host-side worker
+/// binary for `authorized-keys`, falling back cleanly to framed `DaemonStream`.
+fn try_build_direct_peer_config(
+    operation: &MoveOperation,
+    source: &mj_core::targets::TargetLocator,
+    source_worker_root: &str,
+    destination: &mj_core::targets::TargetLocator,
+    destination_worker_root: &str,
+    keep: transport::KeepTransferOptions,
+    executor: &(impl CommandExecutor + Sync),
+) -> Option<transport::DirectPeerConfig> {
+    let (src_ssh, src_host_worker_bin) = direct_ssh_endpoint(source, source_worker_root)?;
+    let (dst_ssh, dst_host_worker_bin) = direct_ssh_endpoint(destination, destination_worker_root)?;
+    let src_host_locator = mj_core::targets::TargetLocator::SshBare {
+        ssh: src_ssh.clone(),
+        workspace: String::new(),
+        worker_id: None,
+    };
+    let dst_host_locator = mj_core::targets::TargetLocator::SshBare {
+        ssh: dst_ssh.clone(),
+        workspace: String::new(),
+        worker_id: None,
+    };
+    let (src_home, src_host_key) = probe_ssh_host_identity(&src_host_locator, executor)?;
+    let (dst_home, dst_host_key) = probe_ssh_host_identity(&dst_host_locator, executor)?;
+    let ssh_host = |ssh: &mj_core::targets::SshTarget| {
+        ssh.destination
+            .rsplit_once('@')
+            .map_or(ssh.destination.as_str(), |(_, host)| host)
+            .to_owned()
+    };
+    Some(transport::DirectPeerConfig {
+        operation_id: operation.operation_id.clone(),
+        source_address: ssh_host(src_ssh),
+        destination_address: ssh_host(dst_ssh),
+        destination_ssh_destination: dst_ssh.destination.clone(),
+        source_ssh_destination: src_ssh.destination.clone(),
+        destination_host_key: dst_host_key,
+        source_host_key: src_host_key,
+        source_stage_dir: std::path::PathBuf::from(&src_home)
+            .join(".cache/mjolnir/move-stage"),
+        destination_stage_dir: std::path::PathBuf::from(&dst_home)
+            .join(".cache/mjolnir/move-stage"),
+        destination_authorized_keys: std::path::PathBuf::from(&dst_home)
+            .join(".ssh/authorized_keys"),
+        source_authorized_keys: std::path::PathBuf::from(&src_home)
+            .join(".ssh/authorized_keys"),
+        source_worker_bin: src_host_worker_bin,
+        destination_worker_bin: dst_host_worker_bin,
+        destination_ec2_grant: None,
+        source_ec2_grant: None,
+        keep,
+    })
+}
+
+fn direct_ssh_endpoint<'a>(
+    locator: &'a mj_core::targets::TargetLocator,
+    worker_root: &str,
+) -> Option<(&'a mj_core::targets::SshTarget, String)> {
+    match locator {
+        mj_core::targets::TargetLocator::SshBare { ssh, .. }
+        | mj_core::targets::TargetLocator::AwsEc2 { ssh, .. } => {
+            Some((ssh, format!("{worker_root}/hel")))
+        }
+        _ => None,
+    }
+}
+
+fn probe_ssh_host_identity(
+    host_locator: &mj_core::targets::TargetLocator,
+    executor: &(impl CommandExecutor + Sync),
+) -> Option<(String, String)> {
+    let spec = mj_core::targets::locator_command(
+        mj_core::targets::SshTrafficClass::Control,
+        host_locator,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "printf '%s\\n' \"$HOME\" && (cat /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || cat /etc/ssh/ssh_host_rsa_key.pub 2>/dev/null) | head -n 1".into(),
+        ],
+    )
+    .purpose("probe trusted SSH host identity for direct Move");
+    let out = executor.execute(&spec).ok()?;
+    if out.status != 0 {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let mut lines = text.lines();
+    let home = lines.next()?.trim().to_owned();
+    let key_line = lines.next()?.trim();
+    let mut parts = key_line.split_whitespace();
+    let key_type = parts.next()?;
+    let key_b64 = parts.next()?;
+    if home.is_empty() || key_type.is_empty() || key_b64.is_empty() {
+        return None;
+    }
+    Some((home, format!("{key_type} {key_b64}")))
+}
+
+fn legacy_shim_move_operation(
+    session_id: &str,
+    legacy: &mj_core::state::LegacyMoveOperation,
+    session: Option<&mj_core::state::SessionRecord>,
+) -> MoveOperation {
+    MoveOperation {
+        quota_stop_reason: legacy.quota_stop_reason.clone(),
+        quota_continuation: legacy.quota_continuation,
+        prepared_destination: legacy.prepared_destination.clone(),
+        accepted_preparation: None,
+        acknowledge_interruption: legacy.acknowledge_interruption,
+        transfer_route: None,
+        consent: Default::default(),
+        skip_keep_paths: Vec::new(),
+        granted_keys: Vec::new(),
+        granted_ec2_rules: Vec::new(),
+        in_place_expected_store_id: None,
+        in_place_continuation_command_id: None,
+        in_place_held_command_ids: Vec::new(),
+        in_place_harness_restarted: false,
+        deferred_environment_changes: Vec::new(),
+        source_snapshot: None,
+        source_checkpoint_only: legacy.source_checkpoint_only,
+        in_place: legacy.in_place,
+        operation_id: legacy.operation_id.clone(),
+        selection: MoveSelection {
+            consent: Default::default(),
+            skip_keep_paths: Vec::new(),
+            clear_resource_allocation: false,
+            session_id: session_id.to_owned(),
+            profile_id: session.map(|s| s.last_profile.clone()),
+            target_template_id: session.map(|s| s.target_template_id.clone()),
+            additional_mounts: None,
+            resource_allocation: None,
+            subagents: None,
+            oracle: None,
+            oracle_choice: None,
+        },
+        source_profile_id: legacy.source_profile_id.clone(),
+        source_target_template_id: legacy.source_target_template_id.clone(),
+        source_target: legacy.source_target.clone(),
+        source_native_session_id: legacy.source_native_session_id.clone(),
+        inherited_resource_allocation: legacy.inherited_resource_allocation.clone(),
+        inherited_additional_mounts: legacy.inherited_additional_mounts.clone(),
+        source_additional_mounts: legacy.source_additional_mounts.clone(),
+        source_resource_allocation: legacy.source_resource_allocation.clone(),
+        destination_target: legacy.destination_target.clone(),
+        destination_native_session_id: legacy.destination_native_session_id.clone(),
+        destination_store_id: legacy.destination_store_id.clone(),
+        configuration_fingerprint: legacy.configuration_fingerprint.clone(),
+        checkpoint: legacy.handoff.clone().or_else(|| legacy.checkpoint.clone()),
+        recovery_session: legacy.recovery_session.clone(),
+        queue: legacy.queue,
+        phase: MovePhase::Capturing,
+        queue_admission_started: legacy.queue_admission_started,
+        queue_admission_finished: legacy.queue_admission_finished,
+        cancellation_requested: legacy.cancellation_requested,
+        created_at: legacy.created_at.clone(),
+        updated_at: legacy.updated_at.clone(),
+        error: legacy.error.clone(),
     }
 }
 

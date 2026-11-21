@@ -31,10 +31,13 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 148;
+const SCHEMA_VERSION: i64 = 149;
 
 pub mod web_push;
 pub use web_push::*;
+
+mod ec2_grants;
+pub use ec2_grants::*;
 
 mod environments;
 pub use environments::*;

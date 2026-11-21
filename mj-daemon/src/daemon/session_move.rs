@@ -254,7 +254,8 @@ impl RuntimeState {
                     session_id: session_id.to_owned(),
                     profile_id: Some(profile_id.to_owned()),
                     target_template_id: None,
-                    workspace: Default::default(),
+                    consent: Default::default(),
+                    skip_keep_paths: Vec::new(),
                     clear_resource_allocation: false,
                     additional_mounts: None,
                     resource_allocation: None,
@@ -460,6 +461,58 @@ impl RuntimeState {
     ) -> Result<MoveRecoveryOwners> {
         let mut owned = BTreeSet::new();
         let mut closes = BTreeSet::new();
+        let active_op_ids: BTreeSet<String> = operations
+            .iter()
+            .filter(|op| op.is_active())
+            .map(|op| op.operation_id.clone())
+            .collect();
+        // Reconcile any persisted EC2 Move security-group grants in the
+        // background without holding daemon handoff admission.
+        mj_controller::controller::move_session::recovery::spawn_ec2_grant_reconcile_background(
+            active_op_ids,
+        );
+        // Clean up local ephemeral Move key files for any already-resolved moves.
+        for operation in &operations {
+            if operation.is_resolved() && !operation.granted_keys.is_empty() {
+                mj_controller::controller::move_session::recovery::cleanup_local_move_key_files(
+                    &operation.granted_keys,
+                );
+            }
+        }
+        // Recover any pre-148 LegacyMoveOperation rows across an upgrade,
+        // running rollback or finish-forward BEFORE deleting the legacy row.
+        if let Ok(legacy_ops) = mj_controller::database::load_legacy_move_operations() {
+            let executor = mj_core::targets::ProcessExecutor;
+            for (session_id, legacy_op) in legacy_ops {
+                if !legacy_op.phase.is_active() {
+                    let _ = mj_controller::database::delete_move_operation(&session_id);
+                    continue;
+                }
+                let recovered = match mj_controller::controller::Controller::load() {
+                    Ok(mut controller) => {
+                        controller
+                            .recover_legacy_move_operation(&session_id, &legacy_op, &executor)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                match recovered {
+                    Ok(notice) => {
+                        let _ = mj_controller::database::delete_move_operation(&session_id);
+                        self.push_notice(&session_id, notice);
+                    }
+                    Err(error) => {
+                        self.push_notice(
+                            &session_id,
+                            format!(
+                                "Legacy Move {} recovery failed: {error:#}",
+                                legacy_op.operation_id
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         for operation in &operations {
             mj_controller::controller::move_session::restore_move_queue_hold(operation);
         }

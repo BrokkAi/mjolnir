@@ -304,6 +304,13 @@ pub fn write_archive_hashed(path: &Path, input: &ArchiveInput) -> Result<String>
     write_archive_hashed_view(path, input.into())
 }
 
+pub fn write_archive_hashed_with_manifest(
+    path: &Path,
+    input: &ArchiveInput,
+) -> Result<(String, ArchiveManifest)> {
+    write_archive_hashed_view_with_manifest(path, input.into())
+}
+
 pub fn write_archive_hashed_borrowed(
     path: &Path,
     session: &SessionManifest,
@@ -313,7 +320,28 @@ pub fn write_archive_hashed_borrowed(
     native_artifacts: &[NativeArtifact],
     repositories: &[RepositorySnapshot],
 ) -> Result<String> {
-    write_archive_hashed_view(
+    Ok(write_archive_hashed_borrowed_with_manifest(
+        path,
+        session,
+        target,
+        bundle,
+        canonical_session,
+        native_artifacts,
+        repositories,
+    )?
+    .0)
+}
+
+pub fn write_archive_hashed_borrowed_with_manifest(
+    path: &Path,
+    session: &SessionManifest,
+    target: &TargetManifest,
+    bundle: &BundleManifest,
+    canonical_session: &CanonicalSessionSnapshot,
+    native_artifacts: &[NativeArtifact],
+    repositories: &[RepositorySnapshot],
+) -> Result<(String, ArchiveManifest)> {
+    write_archive_hashed_view_with_manifest(
         path,
         ArchiveInputView {
             session,
@@ -327,10 +355,18 @@ pub fn write_archive_hashed_borrowed(
 }
 
 fn write_archive_hashed_view(path: &Path, input: ArchiveInputView<'_>) -> Result<String> {
-    write_archive_installed_view(path, input, PAYLOAD_PART_BYTES)?;
+    Ok(write_archive_hashed_view_with_manifest(path, input)?.0)
+}
+
+fn write_archive_hashed_view_with_manifest(
+    path: &Path,
+    input: ArchiveInputView<'_>,
+) -> Result<(String, ArchiveManifest)> {
+    let manifest = write_archive_installed_view(path, input, PAYLOAD_PART_BYTES)?;
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    digest_reader(&mut file)
-        .with_context(|| format!("hash newly written archive {}", path.display()))
+    let sha256 = digest_reader(&mut file)
+        .with_context(|| format!("hash newly written archive {}", path.display()))?;
+    Ok((sha256, manifest))
 }
 
 fn write_archive_installed(path: &Path, input: &ArchiveInput) -> Result<()> {
@@ -342,14 +378,15 @@ fn write_archive_installed_with_part_size(
     input: &ArchiveInput,
     part_bytes: usize,
 ) -> Result<()> {
-    write_archive_installed_view(path, input.into(), part_bytes)
+    write_archive_installed_view(path, input.into(), part_bytes)?;
+    Ok(())
 }
 
 fn write_archive_installed_view(
     path: &Path,
     input: ArchiveInputView<'_>,
     part_bytes: usize,
-) -> Result<()> {
+) -> Result<ArchiveManifest> {
     let (manifest, payloads) = prepare_archive_view_with_part_size(input, part_bytes)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)
@@ -370,8 +407,7 @@ fn write_archive_installed_view(
     restrict_archive_permissions(path)?;
     mj_core::config::sync_directory(parent)?;
     drop(payloads);
-    drop(manifest);
-    Ok(())
+    Ok(manifest)
 }
 
 pub fn checkpoint_for_close(path: &Path, input: &ArchiveInput) -> CloseVerification {

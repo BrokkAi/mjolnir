@@ -299,7 +299,7 @@ pub fn serve_latch_relay() {
                 mj_core::relay::RelayRequest::Submit {
                     command: RelayCommand::BeginCheckpoint { .. },
                     ..
-                }
+                } | mj_core::relay::RelayRequest::HoldInPlaceMoveDispatch { .. }
             ) {
                 relay
                     .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
@@ -425,6 +425,41 @@ pub fn serve_latch_relay() {
                         relay.operational_state(),
                     ),
                 },
+            }
+        } else if let mj_core::relay::RelayRequest::RestartHarnessInPlace {
+            operation_id,
+            expected_store_id,
+            launch_config,
+        } = &request.request
+        {
+            let body = match relay.admit_in_place_harness_restart(operation_id, expected_store_id) {
+                Err(error) => mj_core::relay::RelayResponseBody::Error { error: *error },
+                Ok(crate::relay::InPlaceHarnessRestartDecision::AlreadyRestarted) => {
+                    mj_core::relay::RelayResponseBody::Ok {
+                        payload: mj_core::relay::RelayResponsePayload::HarnessRestartedInPlace,
+                    }
+                }
+                Ok(crate::relay::InPlaceHarnessRestartDecision::Proceed) => {
+                    let _ = launch_config.write(&Path::new(&root).join("launch.json"));
+                    match relay.mark_in_place_harness_restarted(operation_id, expected_store_id) {
+                        Ok(()) => mj_core::relay::RelayResponseBody::Ok {
+                            payload: mj_core::relay::RelayResponsePayload::HarnessRestartedInPlace,
+                        },
+                        Err(error) => mj_core::relay::relay_error(
+                            mj_core::relay::RelayErrorCode::Internal,
+                            format!("complete in-place harness restart: {error:#}"),
+                            false,
+                            None,
+                        ),
+                    }
+                }
+            };
+            mj_core::relay::RelayResponseEnvelope {
+                request_id: request.request_id.clone(),
+                protocol_version: max_protocol
+                    .map(|limit| limit.min(mj_core::relay::RELAY_PROTOCOL_VERSION))
+                    .unwrap_or(request.protocol_version),
+                body,
             }
         } else if let Some(response) = subagent_connection_response(&request) {
             response

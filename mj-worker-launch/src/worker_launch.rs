@@ -922,8 +922,10 @@ pub fn worker_launch_config_for_move(
             && operation.destination_target.is_none()
             && matches!(
                 operation.phase,
-                mj_core::state::MovePhase::Preparing
-                    | mj_core::state::MovePhase::ClosingSource
+                mj_core::state::MovePhase::Capturing
+                    | mj_core::state::MovePhase::Transferring
+                    | mj_core::state::MovePhase::Restoring
+                    | mj_core::state::MovePhase::DestinationStarting
                     | mj_core::state::MovePhase::Failed
                     | mj_core::state::MovePhase::Cancelled
             )
