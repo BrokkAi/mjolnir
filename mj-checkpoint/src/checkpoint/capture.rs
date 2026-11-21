@@ -973,12 +973,12 @@ fn verify_origin_delta_quiescence(
     Ok(())
 }
 
-/// Canonical `.mj/keep` directory under a managed repository checkout, shared
-/// by preflight inventory and snapshot capture so `Shown` consent paths always
-/// match and protect every file under `.mj/keep/` (both direct files and
-/// per-session subdirectories) before checkout teardown.
-pub fn session_keep_dir(checkout: &Path, _session_id: &str) -> PathBuf {
-    checkout.join(".mj").join("keep")
+/// Canonical `.mj/keep/<session-id>` directory under a repository checkout,
+/// shared by worker launch (`MJ_KEEP_DIR`), suspend preflight, snapshot
+/// capture, and Move transfer so `Shown` consent paths and `--skip` paths
+/// always match.
+pub fn session_keep_dir(checkout: &Path, session_id: &str) -> Result<PathBuf> {
+    mj_core::session_keep::snapshot_keep_dir(checkout, Some(session_id))
 }
 
 pub fn managed_clone_snapshot_input(
@@ -987,18 +987,18 @@ pub fn managed_clone_snapshot_input(
     session_id: Option<&str>,
     pack_path: PathBuf,
     origin_override: Option<String>,
-) -> crate::snapshot::RepositoryInput {
+) -> Result<crate::snapshot::RepositoryInput> {
     use crate::snapshot::{CheckoutOwnership, ExclusionSource, RepositoryInput};
 
-    RepositoryInput {
+    Ok(RepositoryInput {
         id: id.to_owned(),
         checkout: path.to_path_buf(),
         ownership: CheckoutOwnership::Managed,
         origin_override,
         pack_path,
         exclusions: ExclusionSource::Origin,
-        keep_dir: session_id.map(|sid| session_keep_dir(path, sid)),
-    }
+        keep_dir: Some(mj_core::session_keep::snapshot_keep_dir(path, session_id)?),
+    })
 }
 
 fn collect_origin_delta(
@@ -1021,7 +1021,7 @@ fn collect_origin_delta(
         session_id,
         snapshot_directory.join(&repository.id),
         repository.origin_override.clone(),
-    );
+    )?;
     if let Some(keep_dir) = &input.keep_dir {
         let checkout = CheckoutKey {
             repository_id: repository.id.clone(),
@@ -1163,18 +1163,18 @@ pub fn cutoff_snapshot_input(
     session_id: Option<&str>,
     exclude_commits: Vec<String>,
     pack_path: PathBuf,
-) -> crate::snapshot::RepositoryInput {
+) -> Result<crate::snapshot::RepositoryInput> {
     use crate::snapshot::{CheckoutOwnership, ExclusionSource, RepositoryInput};
 
-    RepositoryInput {
+    Ok(RepositoryInput {
         id: id.to_owned(),
         checkout: path.to_path_buf(),
         ownership: CheckoutOwnership::Managed,
         origin_override: None,
         pack_path,
         exclusions: ExclusionSource::Commits(exclude_commits),
-        keep_dir: session_id.map(|sid| session_keep_dir(path, sid)),
-    }
+        keep_dir: Some(mj_core::session_keep::snapshot_keep_dir(path, session_id)?),
+    })
 }
 
 fn collect_origin_delta_cutoff(
@@ -1198,7 +1198,7 @@ fn collect_origin_delta_cutoff(
         session_id,
         exclude_commits,
         snapshot_directory.join(&repository.id),
-    );
+    )?;
     if let Some(keep_dir) = &input.keep_dir {
         let checkout = CheckoutKey {
             repository_id: repository.id.clone(),
@@ -1294,8 +1294,9 @@ fn collect_checkpoint_repositories_with_policy(
                         repository,
                         session_id,
                         exclude_commits.clone(),
-                        snapshot_directory
-                            .context("history-cutoff origin-delta export requires a single-shot export")?,
+                        snapshot_directory.context(
+                            "history-cutoff origin-delta export requires a single-shot export",
+                        )?,
                         consent,
                     );
                 }

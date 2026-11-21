@@ -2700,6 +2700,40 @@ async fn prepare_and_start_harness(
         None => (false, None),
     };
 
+    let keep_budget = preparation_step(
+        root,
+        status,
+        "session-keep",
+        LOCAL_PREPARATION_STEP_TIMEOUT,
+        cancel,
+    )
+    .await?;
+    let keep_cwd = config.cwd.clone();
+    let keep_session_id = config.session_id.clone();
+    let mut keep_environment = config.environment.clone();
+    config.environment =
+        bounded_blocking_preparation_step(&keep_budget, cancel, move |step_cancel| {
+            if step_cancel.is_cancelled() {
+                bail!("preparation cancelled before preparing the session keep directory");
+            }
+            if let Err(error) = mj_core::session_keep::install_session_keep_dir(
+                &keep_cwd,
+                &keep_session_id,
+                &mut keep_environment,
+            ) {
+                // A read-only checkout, or a symlinked `.mj` path, must not
+                // block the session. The harness then has no `MJ_KEEP_DIR`.
+                tracing::warn!(
+                    session_id = %keep_session_id,
+                    cwd = %keep_cwd.display(),
+                    error = format!("{error:#}"),
+                    "could not prepare the session keep directory; continuing without MJ_KEEP_DIR"
+                );
+            }
+            Ok(keep_environment)
+        })
+        .await?;
+
     let harness_budget = preparation_step(
         root,
         status,

@@ -291,6 +291,7 @@ pub fn stage_worker_files_for(
         storage.managed_temporary_volume,
         &storage.attachments,
     )?;
+    append_session_state_instructions(profile.kind, &profile_stage)?;
     append_subagent_policy(
         profile.kind,
         &profile_stage,

@@ -1010,20 +1010,23 @@ impl Controller {
                         transfer.operation.updated_at = now();
                         crate::database::save_move_operation(transfer.operation)?;
                         let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                        let computed_dest_keep = transfer.dest_keep_dir.clone().or_else(|| {
-                            let repo_root = resumed_project_directory.clone().unwrap_or_else(|| {
-                                self.state.sessions[session_id]
-                                    .project_bundle(&self.config)
-                                    .and_then(|bundle| bundle.primary())
-                                    .map(|primary| {
-                                        PathBuf::from(&workspace_root).join(&primary.destination)
-                                    })
-                                    .unwrap_or_else(|| PathBuf::from(&workspace_root))
-                            });
-                            Some(mj_checkpoint::checkpoint::session_keep_dir(
-                                &repo_root, session_id,
-                            ))
-                        });
+                        let computed_dest_keep = match transfer.dest_keep_dir.clone() {
+                            Some(path) => Some(path),
+                            None => {
+                                let repo_root = resumed_project_directory.clone().unwrap_or_else(|| {
+                                    self.state.sessions[session_id]
+                                        .project_bundle(&self.config)
+                                        .and_then(|bundle| bundle.primary())
+                                        .map(|primary| {
+                                            PathBuf::from(&workspace_root).join(&primary.destination)
+                                        })
+                                        .unwrap_or_else(|| PathBuf::from(&workspace_root))
+                                });
+                                Some(mj_checkpoint::checkpoint::session_keep_dir(
+                                    &repo_root, session_id,
+                                )?)
+                            }
+                        };
                         super::move_session::transfer_move_snapshot_to_destination(
                             transfer.operation,
                             &transfer.source_backend,
@@ -1963,9 +1966,9 @@ impl Controller {
                 Some(mj_checkpoint::checkpoint::session_keep_dir(
                     &worktree.worktree_root,
                     session_id,
-                ))
+                )?)
             } else if let Some(dir) = previous_project_directory.as_deref() {
-                Some(mj_checkpoint::checkpoint::session_keep_dir(dir, session_id))
+                Some(mj_checkpoint::checkpoint::session_keep_dir(dir, session_id)?)
             } else {
                 let source_ws = PathBuf::from(super::network_git::workspace_root(
                     &source_backend,
@@ -1978,7 +1981,7 @@ impl Controller {
                     .unwrap_or(source_ws);
                 Some(mj_checkpoint::checkpoint::session_keep_dir(
                     &repo_root, session_id,
-                ))
+                )?)
             };
             Some((source_backend, source_worker_root, source_keep_dir))
         } else {
@@ -2551,7 +2554,7 @@ impl Controller {
                         let dest_keep_dir = mj_checkpoint::checkpoint::session_keep_dir(
                             &conversion.worktree.worktree_root,
                             session_id,
-                        );
+                        )?;
                         operation.phase = mj_core::state::MovePhase::Transferring;
                         operation.updated_at = now();
                         crate::database::save_move_operation(operation)?;
@@ -2731,7 +2734,8 @@ impl Controller {
                             &conv.worktree.worktree_root,
                             session_id,
                         )
-                    });
+                    })
+                    .transpose()?;
                 Some(MoveDirectTransfer {
                     operation,
                     source_backend,

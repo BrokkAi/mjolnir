@@ -3269,7 +3269,8 @@ fn legacy_linked_worktree_origin_delta_capture_and_restore_as_clone() {
             None,
             pack_path,
             origin_override,
-        );
+        )
+        .unwrap();
         let mut snapshot =
             capture_session_snapshot(&SystemGit, &[input], &SessionCaptureConsent::default())
                 .unwrap()

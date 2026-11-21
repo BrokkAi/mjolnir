@@ -3240,7 +3240,7 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
     assert_eq!(preflight.keep_dir_entries.len(), 1);
     assert_eq!(
         preflight.keep_dir_entries[0].path,
-        std::path::PathBuf::from(format!("{session_id}/note.txt"))
+        std::path::PathBuf::from("note.txt")
     );
     assert!(preflight.keep_dir_bytes > 0);
     assert_eq!(preflight.operations.len(), 1);
@@ -3529,9 +3529,9 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
     .to_owned();
 
     std::fs::write(repo.join(".git/info/exclude"), "/.mj/keep/\n").unwrap();
-    let keep_dir = mj_checkpoint::checkpoint::session_keep_dir(&repo, session_id);
-    std::fs::create_dir_all(keep_dir.join(session_id)).unwrap();
-    std::fs::write(keep_dir.join(session_id).join("notes.txt"), "keep note\n").unwrap();
+    let keep_dir = mj_checkpoint::checkpoint::session_keep_dir(&repo, session_id).unwrap();
+    std::fs::create_dir_all(keep_dir.join("sub")).unwrap();
+    std::fs::write(keep_dir.join("sub").join("notes.txt"), "keep note\n").unwrap();
     std::fs::write(keep_dir.join("ignored.txt"), "direct keep file\n").unwrap();
 
     let mut session = checkpoint_test_session(session_id);
@@ -3571,9 +3571,9 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
         .iter()
         .map(|entry| entry.path.as_path())
         .collect();
-    assert_eq!(keep_paths.len(), 2, "expected both direct and per-session keep files: {keep_paths:?}");
+    assert_eq!(keep_paths.len(), 2, "expected both top-level and nested keep files: {keep_paths:?}");
     assert!(keep_paths.contains(&std::path::Path::new("ignored.txt")));
-    assert!(keep_paths.contains(&std::path::Path::new(&format!("{session_id}/notes.txt"))));
+    assert!(keep_paths.contains(&std::path::Path::new("sub/notes.txt")));
 
     let consent = preflight.shown_consent().capture_consent();
     let input = mj_checkpoint::checkpoint::cutoff_snapshot_input(
@@ -3582,7 +3582,8 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
         Some(session_id),
         vec![head],
         directory.path().join("workspace.pack"),
-    );
+    )
+    .unwrap();
     let checkout = mj_checkpoint::snapshot::CheckoutKey {
         repository_id: "workspace".into(),
         checkout_path: std::path::PathBuf::new(),

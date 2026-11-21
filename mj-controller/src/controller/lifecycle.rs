@@ -259,7 +259,7 @@ impl Controller {
                         keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
                             &worktree.worktree_root,
                             session_id,
-                        )),
+                        )?),
                         origin_override: origin_delta::managed_origin_override(worktree),
                     }]
                 }
@@ -275,21 +275,21 @@ impl Controller {
                     bundle
                         .repositories
                         .iter()
-                        .map(|repository| {
+                        .map(|repository| -> Result<_> {
                             let path = workspace_root.join(&repository.destination);
-                            mj_core::suspend_consent::WorkerPreflightRepo {
+                            Ok(mj_core::suspend_consent::WorkerPreflightRepo {
                                 id: repository.id.clone(),
                                 keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
                                     &path,
                                     session_id,
-                                )),
+                                )?),
                                 path,
                                 raw: false,
                                 exclude_commits: None,
                                 origin_override: None,
-                            }
+                            })
                         })
-                        .collect()
+                        .collect::<Result<Vec<_>>>()?
                 }
                 _ => Vec::new(),
             },
@@ -316,15 +316,19 @@ impl Controller {
                         })
                     });
                 root.into_iter()
-                    .map(|path| mj_core::suspend_consent::WorkerPreflightRepo {
-                        id: "workspace".to_owned(),
-                        keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(&path, session_id)),
-                        path,
-                        raw: false,
-                        exclude_commits: Some(exclude_commits.clone()),
-                        origin_override: None,
+                    .map(|path| -> Result<_> {
+                        Ok(mj_core::suspend_consent::WorkerPreflightRepo {
+                            id: "workspace".to_owned(),
+                            keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
+                                &path, session_id,
+                            )?),
+                            path,
+                            raw: false,
+                            exclude_commits: Some(exclude_commits.clone()),
+                            origin_override: None,
+                        })
                     })
-                    .collect()
+                    .collect::<Result<Vec<_>>>()?
             }
             CheckpointExportPolicy::OriginDeltaRaw => checkout
                 .project_directory()
@@ -438,7 +442,7 @@ impl Controller {
                                 Some(session_id),
                                 exclude_commits.clone(),
                                 PathBuf::new(),
-                            )
+                            )?
                         } else {
                             mj_checkpoint::checkpoint::managed_clone_snapshot_input(
                                 &repo.id,
@@ -446,7 +450,7 @@ impl Controller {
                                 Some(session_id),
                                 PathBuf::new(),
                                 repo.origin_override.clone(),
-                            )
+                            )?
                         };
                         input.keep_dir = repo.keep_dir.clone();
                         let inventories = mj_checkpoint::snapshot::session_inventory(
@@ -596,7 +600,7 @@ impl Controller {
                         path.display().to_string()
                     }
                     mj_core::suspend_consent::UntrackedItem::KeepDirFile { path, .. } => {
-                        format!(".mj/keep/{}", path.display())
+                        format!(".mj/keep/{session_id}/{}", path.display())
                     }
                     mj_core::suspend_consent::UntrackedItem::Stash { commit, message, .. } => {
                         format!("stash {} ({message})", &commit[..commit.len().min(8)])

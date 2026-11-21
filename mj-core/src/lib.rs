@@ -60,6 +60,7 @@ pub mod retry_after;
 pub mod review;
 pub mod runtime;
 pub mod session_instructions;
+pub mod session_keep;
 pub mod skills;
 pub mod slopcop;
 pub mod snapshot_map;
