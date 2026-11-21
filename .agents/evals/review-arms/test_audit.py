@@ -122,7 +122,7 @@ def test_structured_edit_text_does_not_trigger_protected_access(tmp_path):
         "file_path": "README.md",
         "old_string": "search_sessions",
         "new_string": "Use ssh host or curl https://example.invalid to find /run/hel/git-cache.",
-    }})
+    }}, cwd=writer_checkout(tmp_path))
     assert result["passed"], result["hits"]
 
 
@@ -162,7 +162,7 @@ def test_protected_command_access_voids(tmp_path, command, hit):
     ({"title": "Edit file", "kind": "edit", "rawInput": {"file_path": "memory/MEMORY.md"}}, "memory-or-sessions"),
 ])
 def test_protected_structured_access_voids(tmp_path, call, hit):
-    result = audit_call(tmp_path, call)
+    result = audit_call(tmp_path, call, cwd=writer_checkout(tmp_path))
     assert not result["passed"]
     assert {item["kind"] for item in result["hits"]} == {hit}
 
@@ -531,7 +531,7 @@ def test_script_changed_after_visible_write_is_opaque(tmp_path, mutation):
         successful_bash("cat > f.py <<'EOF'\nprint('safe')\nEOF"),
         mutation,
         shell("python3 f.py"),
-    ])
+    ], cwd=writer_checkout(tmp_path))
     assert not report["passed"]
     assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(3, "needs-inspection")]
 
@@ -708,7 +708,7 @@ def test_title_only_list_requires_target_evidence(tmp_path, raw):
 ])
 def test_list_with_recorded_target_or_visible_default_passes(tmp_path, evidence):
     report = audit_calls(tmp_path, [{"name": "exec_command", "kind": "read", "title": "List files", **evidence}],
-                         cwd=f"/workspace/{OWN}/repo")
+                         cwd=writer_checkout(tmp_path))
     assert report["passed"], report["hits"]
 
 
@@ -847,7 +847,7 @@ def test_in_place_edits_keep_the_workspace_and_read_subset_checks(tmp_path, comm
 def test_in_place_edits_count_separate_commands_in_one_call(tmp_path):
     command = "sed -i 's/a/b/' brief.md; perl -i -lpe 's/b/c/' brief.md"
     report = audit_calls(tmp_path, [
-        shell("""python3 -c 'from pathlib import Path; print(Path("brief.md").read_text().replace("a", "b"))'"""),
+        shell("head brief.md"),
         shell(command),
     ], cwd=writer_checkout(tmp_path), allow_in_place_edits=True)
     assert report["passed"], report["hits"]
@@ -941,6 +941,70 @@ def test_in_place_edit_requires_root_and_tracked_link_inventory(tmp_path, tracke
 ENGINE_CWD = f"/workspace/{OWN}/engine-trees"
 
 
+# Hard-won: dd934cd54: structured paths followed tracked links outside the checkout
+@pytest.mark.parametrize(("name", "kind", "key", "engine"), [
+    ("read_file", "read", "Path", False),
+    ("write_file", "edit", "Path", False),
+    ("Read", "read", "file_path", False),
+    ("Write", "edit", "file_path", False),
+    ("apply_patch", "edit", "patch", False),
+    ("Read", "read", "file_path", True),
+    ("Write", "edit", "file_path", True),
+    ("Edit", "edit", "file_path", True),
+    ("Grep", "search", "path", True),
+    ("Glob", "search", "path", True),
+])
+def test_structured_file_tools_require_link_free_paths(tmp_path, name, kind, key, engine):
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({
+        "cwd": ENGINE_CWD, "tracked_symlinks": ["src/outside"],
+    }))
+    for path, passes in [("src/outside/data", False), ("src/outside/../data", False),
+                         ("src/outside-sibling/data", True)]:
+        raw = {"patch": f"*** Begin Patch\n*** Add File: {path}\n+text\n*** End Patch"} if key == "patch" else {key: path}
+        if kind == "search":
+            raw["pattern"] = "*.rs"
+        report = audit_call(tmp_path, {"name": name, "kind": kind, "title": name, "rawInput": raw},
+                            engine=engine)
+        assert report["passed"] == passes, report["hits"]
+        if not passes:
+            assert any("tracked symlink" in finding["snippet"] for finding in report["hits"])
+
+
+def test_engine_glob_checks_path_patterns_and_grep_checks_its_search_root(tmp_path):
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({
+        "cwd": ENGINE_CWD, "tracked_symlinks": ["src/outside"],
+    }))
+    call = {"name": "Glob", "kind": "search", "rawInput": {"pattern": "src/*/data"}}
+    report = audit_call(tmp_path, call, engine=True)
+    assert not report["passed"]
+    assert any("tracked symlink" in finding["snippet"] for finding in report["hits"])
+    call = {"name": "Grep", "kind": "search", "rawInput": {"pattern": "value", "glob": "*.rs"}}
+    assert audit_call(tmp_path, call, engine=True)["passed"]
+    call["rawInput"]["path"] = "src/outside"
+    assert not audit_call(tmp_path, call, engine=True)["passed"]
+
+
+def test_missing_inventory_blocks_access_outside_verified_engine_scratch(tmp_path):
+    call = {"name": "Read", "kind": "read", "rawInput": {"file_path": "src/example.rs"}}
+    report = audit_call(tmp_path, call, cwd=ENGINE_CWD, engine=True)
+    assert not report["passed"]
+    assert [finding["snippet"] for finding in report["hits"]] == [
+        "path requires tracked symlink inventory: src/example.rs",
+    ]
+    call["rawInput"]["file_path"] = f".rql-engine-{OWN}/answer.json"
+    assert audit_call(tmp_path, call, cwd=ENGINE_CWD, engine=True)["passed"]
+    assert not audit_call(tmp_path, call, cwd=ENGINE_CWD)["passed"]
+
+
+@pytest.mark.parametrize("prior", ["ln -s /tmp alias", f"git checkout --detach {PIN}",
+                                    "python3 -c 'print(1)'"])
+def test_link_handling_invalidates_subsequent_structured_paths(tmp_path, prior):
+    call = {"name": "Read", "kind": "read", "rawInput": {"file_path": "alias/input"}}
+    report = audit_calls(tmp_path, [shell(prior), call], cwd=writer_checkout(tmp_path))
+    assert not report["passed"]
+    assert any(finding["seq"] == 2 and "link handling" in finding["snippet"] for finding in report["hits"])
+
+
 @pytest.mark.parametrize("name", [
     "Bash", "PowerShell", "Agent", "TaskStop", "mcp__rql__rql_query", "ListMcpResourcesTool",
     "NotebookEdit", "WebFetch", "read", "FutureTool", None,
@@ -951,6 +1015,7 @@ def test_engine_audit_requires_the_native_tool_name(tmp_path, name):
             "rawInput": {"file_path": "README.md"}}
     if name is not None:
         call["name"] = name
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({"tracked_symlinks": []}))
     assert audit_call(tmp_path, call, cwd=ENGINE_CWD)["passed"]
     report = audit_call(tmp_path, call, cwd=ENGINE_CWD, engine=True)
     assert not report["passed"]
@@ -965,7 +1030,7 @@ def test_engine_audit_requires_the_native_tool_name(tmp_path, name):
 ])
 def test_engine_audit_inspects_search_pattern_escapes(tmp_path, name, key, escape):
     call = {"name": name, "kind": "search", "rawInput": {"pattern": "*.rs", key: escape}}
-    assert audit_call(tmp_path, call, cwd=ENGINE_CWD)["passed"]
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({"tracked_symlinks": []}))
     report = audit_call(tmp_path, call, cwd=ENGINE_CWD, engine=True)
     assert not report["passed"]
     assert report["hits"] == [{"seq": 1, "kind": "needs-inspection", "where": "input",
@@ -975,7 +1040,7 @@ def test_engine_audit_inspects_search_pattern_escapes(tmp_path, name, key, escap
 # Hard-won: 3a68d9227: Grep's content regex was audited as a path, voiding searches for path-like text
 @pytest.mark.parametrize("pattern", ["/etc/passwd", "../", "include_str!\\(\"../"])
 def test_engine_audit_treats_grep_pattern_as_content(tmp_path, pattern):
-    (tmp_path / "pre-inventory.json").write_text(json.dumps({"cwd": ENGINE_CWD}))
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({"cwd": ENGINE_CWD, "tracked_symlinks": []}))
     call = {"name": "Grep", "kind": "search", "rawInput": {"pattern": pattern, "path": ENGINE_CWD}}
     assert audit_call(tmp_path, call, engine=True)["passed"]
 
@@ -984,7 +1049,7 @@ def test_engine_audit_treats_grep_pattern_as_content(tmp_path, pattern):
 def test_engine_audit_resolves_search_without_path_from_recorded_cwd(tmp_path, name):
     call = {"name": name, "kind": "search", "rawInput": {"pattern": "main"}}
     assert not audit_call(tmp_path, call, engine=True)["passed"]
-    (tmp_path / "pre-inventory.json").write_text(json.dumps({"cwd": ENGINE_CWD}))
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({"cwd": ENGINE_CWD, "tracked_symlinks": []}))
     assert audit_call(tmp_path, call, engine=True)["passed"]
     call["locations"] = [{"path": f"/workspace/{OWN}/another-checkout/README.md"}]
     assert not audit_call(tmp_path, call, engine=True)["passed"]
