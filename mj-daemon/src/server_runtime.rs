@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 pub(crate) mod api;
 mod api_activity;
 pub(crate) use mj_controller::profile_catalog;
-mod publication;
+pub(crate) mod publication;
 
 use mj_core::config::{Config, PhoneConfig, is_bare_project_target};
 use mj_core::refusal::Refusal;
@@ -62,6 +62,7 @@ const TAILSCALE_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const TAILSCALE_RENEW_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 mod projection;
+pub(crate) use projection::ConversationProjectionKey;
 use projection::*;
 mod args;
 use args::*;
@@ -76,6 +77,7 @@ use preflight::*;
 mod actions;
 use actions::*;
 mod project_sources;
+pub(crate) use project_sources::ProjectSourceKey;
 use project_sources::*;
 mod snapshot;
 pub(crate) use crate::server::phone_prompt_blocks;

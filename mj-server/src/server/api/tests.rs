@@ -2060,6 +2060,7 @@ fn api_app_with_worker_check(
     let (preflight_tx, _preflight_rx) = mpsc::channel(8);
     let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
     let (client_state_tx, _client_state_rx) = mpsc::channel(8);
+    let browser = super::super::tests::test_browser_source(snapshot_rx.clone());
     let mut options = ServerOptions::new(
         "127.0.0.1:0".parse().unwrap(),
         snapshot_rx,
@@ -2072,6 +2073,7 @@ fn api_app_with_worker_check(
             move_preparation_tx,
             client_state_tx,
         },
+        browser,
     )
     .unwrap()
     .with_test_credentials("123456", b"01234567890123456789012345678901");

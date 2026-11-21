@@ -13,7 +13,6 @@ use tokio::sync::{mpsc, watch};
 #[derive(Clone)]
 pub(crate) struct Services {
     pub backend: Arc<ApiBackend>,
-    pub quotas: watch::Receiver<QuotaReportMap>,
     refresh: mpsc::UnboundedSender<crate::daemon::QuotaRefreshIntent>,
 }
 impl Services {
@@ -219,11 +218,7 @@ impl Policy {
             rejected.clone(),
         );
         let mut policy = Self {
-            services: Services {
-                backend,
-                quotas,
-                refresh,
-            },
+            services: Services { backend, refresh },
             state,
             quota_source_reader,
             catalog,

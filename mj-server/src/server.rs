@@ -152,7 +152,7 @@ pub struct ServerOptions {
     login_token: String,
     cookie_key: Vec<u8>,
     viewer_revocations: Arc<ViewerRevocations>,
-    viewer_history: viewer_feed::ViewerHistoryHandle,
+    browser: BrowserSource,
     api_token: String,
     subagent: Option<Arc<dyn api::SubagentBackend>>,
     /// Where the remembered fast-start preferences live. Injected rather than
@@ -198,9 +198,9 @@ impl ServerOptions {
             mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>,
         >,
         requests: ServerRequests,
+        browser: BrowserSource,
     ) -> AnyResult<Self> {
         let cookie_key = generate_cookie_key()?.to_vec();
-        let viewer_history = viewer_feed::ViewerHistoryHandle::new()?;
         Ok(Self {
             bind,
             snapshot_rx,
@@ -221,7 +221,7 @@ impl ServerOptions {
             login_token: derive_login_token(&cookie_key),
             cookie_key,
             viewer_revocations: Arc::new(ViewerRevocations::default()),
-            viewer_history,
+            browser,
             // An empty token authenticates nothing: the daemon installs the
             // persisted one, and a server without it serves the viewer only.
             api_token: String::new(),
@@ -376,6 +376,7 @@ pub async fn run_server_on_listener(
 }
 
 mod viewer_feed;
+pub use viewer_feed::{BrowserSource, BrowserViews};
 mod viewer_types;
 pub mod viewer_wire;
 pub use viewer_types::*;

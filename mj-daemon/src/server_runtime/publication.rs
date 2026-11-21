@@ -1,13 +1,17 @@
 //! Incremental public rows; raw daemon configuration never crosses the web API.
 use super::*;
+use crate::daemon::browser::BrowserInputs;
 use mj_client::runtime_feed::RuntimeProjection;
 use mj_core::snapshot_map::SnapshotMap;
 use mj_core::targets::storage::{StorageCondition, TargetStorageView};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Default)]
-pub(super) struct ViewerPublication {
+#[derive(Clone, Default)]
+pub(crate) struct ViewerPublication {
     records: SnapshotMap<String, SessionRecord>,
+    browser: BrowserInputs,
+    native_agents: BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>,
+    move_recoveries: ViewerMoveRecoveries,
     subagents: SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
     children: crate::server::ViewerChildren,
     config: Option<Config>,
@@ -25,10 +29,76 @@ pub(super) struct ViewerPublication {
 }
 
 impl ViewerPublication {
-    pub(super) fn project_changed(&mut self, id: String) {
-        self.dirty.insert(id.clone());
-        self.project_dirty.insert(id);
+    pub(crate) fn project(
+        &mut self,
+        runtime: &RuntimeProjection,
+        browser: &BrowserInputs,
+        sequence: u64,
+        captured_at: u64,
+    ) -> ViewerSnapshot {
+        for (id, _) in self.browser.conversations.changes(&browser.conversations) {
+            self.dirty.insert(id.clone());
+        }
+        for (id, _) in self
+            .browser
+            .project_sources
+            .changes(&browser.project_sources)
+        {
+            self.dirty.insert(id.clone());
+            self.project_dirty.insert(id.clone());
+        }
+        self.browser = browser.clone();
+        let mut native_agents = std::mem::take(&mut self.native_agents);
+        let mut move_recoveries = std::mem::take(&mut self.move_recoveries);
+        self.observe_runtime(runtime, &mut native_agents, &mut move_recoveries);
+        let mut controller = Controller {
+            config: runtime.metadata.installed_config(),
+            state: State::default(),
+        };
+        install_captured_records(&mut controller, runtime);
+        for (id, error) in browser.action_errors.iter() {
+            if controller
+                .state
+                .sessions
+                .get(id)
+                .is_some_and(|record| record.last_error.is_none())
+            {
+                controller
+                    .state
+                    .sessions
+                    .get_mut(id)
+                    .expect("captured record")
+                    .last_error = Some(error.clone());
+            }
+        }
+        let mut snapshot = self.snapshot_at(
+            &controller,
+            &runtime.metadata.workspaces,
+            &runtime.metadata.quotas.reports,
+            &PhoneSessionViews {
+                native_agents: &native_agents,
+                conversations: &browser.conversations,
+                sessions: &runtime.sessions,
+                project_sources: &browser.project_sources,
+                operations: &runtime
+                    .metadata
+                    .lifecycles
+                    .iter()
+                    .map(|view| (view.session_id.clone(), viewer_operation(view)))
+                    .collect(),
+                move_recoveries: &move_recoveries,
+                capacity: &viewer_capacity(&runtime.metadata, captured_at),
+                launch_failures: &browser.launch_failures,
+                reviews: &viewer_reviews(&runtime.metadata.reviews),
+            },
+            (sequence, captured_at),
+        );
+        self.native_agents = native_agents;
+        self.move_recoveries = move_recoveries;
+        snapshot.notices.clone_from(&browser.notices);
+        snapshot
     }
+
     /// Update only metadata named by the daemon's persistent-map differences.
     pub(super) fn observe_runtime(
         &mut self,
@@ -166,6 +236,7 @@ impl ViewerPublication {
         self.runtime = next.clone();
     }
 
+    #[cfg(test)]
     pub(super) fn snapshot(
         &mut self,
         controller: &Controller,
@@ -173,6 +244,23 @@ impl ViewerPublication {
         quotas: &BTreeMap<String, ProfileQuota>,
         views: &PhoneSessionViews<'_>,
         revision: u64,
+    ) -> ViewerSnapshot {
+        self.snapshot_at(
+            controller,
+            workspaces,
+            quotas,
+            views,
+            (revision, now_seconds()),
+        )
+    }
+
+    fn snapshot_at(
+        &mut self,
+        controller: &Controller,
+        workspaces: &[WorkspaceRecord],
+        quotas: &BTreeMap<String, ProfileQuota>,
+        views: &PhoneSessionViews<'_>,
+        stamp: (u64, u64),
     ) -> ViewerSnapshot {
         if self.config.as_ref() != Some(&controller.config)
             || self.workspace_count != workspaces.len()
@@ -247,7 +335,7 @@ impl ViewerPublication {
             workspaces,
             quotas,
             views,
-            revision,
+            stamp,
             ViewerRecordSelection {
                 ids: &self.dirty,
                 children: &self.children,

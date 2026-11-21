@@ -38,11 +38,6 @@ pub(super) const METADATA_FIELDS: [&str; 20] = [
     "notices",
 ];
 
-/// Fixed-size digests avoid retaining serialized metadata for each history
-/// revision. `None` records fields omitted by their wire `skip_serializing_if`.
-#[derive(Clone, Copy)]
-pub(super) struct MetadataDigests(pub(super) [Option<[u8; 32]>; METADATA_FIELDS.len()]);
-
 /// Summary rows retain exactly these serialized session fields: `id`,
 /// `workspace_id`, `bundle_id`, `title`, `given_title`, `subagent_parent_id`,
 /// `subagent_session_ids`, `reviewer_session_ids`, `publication_state`,
@@ -194,20 +189,6 @@ pub(super) fn metadata(
         .as_object()
         .cloned()
         .context("viewer metadata must serialize as an object")
-}
-
-pub(super) fn metadata_digests(snapshot: &ViewerSnapshot) -> Result<MetadataDigests> {
-    let values = metadata(snapshot, snapshot.server_time_ms)?;
-    let mut digests = [None; METADATA_FIELDS.len()];
-    for (field, value) in &values {
-        let index = METADATA_FIELDS
-            .iter()
-            .position(|known| *known == field.as_str())
-            .context("viewer metadata field has no history digest slot")?;
-        let bytes = serde_json::to_vec(value).context("serialize viewer metadata field")?;
-        digests[index] = Some(Sha256::digest(bytes).into());
-    }
-    Ok(MetadataDigests(digests))
 }
 
 pub fn row(session: &ViewerSession) -> Result<WireRow> {

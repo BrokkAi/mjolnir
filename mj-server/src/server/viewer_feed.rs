@@ -1,111 +1,29 @@
-//! Browser publications resume from a process-wide bounded snapshot history.
-use super::{ViewerSessions, ViewerSnapshot, viewer_wire};
+//! Encode browser views from the daemon's retained runtime captures.
+use super::{ViewerSnapshot, viewer_wire};
 use anyhow::{Context, Result};
 use mj_client::runtime_feed::RuntimeCursor;
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use tokio::sync::watch;
 
-const HISTORY_REVISIONS: usize = 128;
 const MAX_DELTA_BYTES: usize = 16 * 1024 * 1024;
 const ALWAYS_METADATA: [&str; 3] = ["revision", "server_time_ms", "generated_at"];
 
+pub struct BrowserViews {
+    pub cursor: RuntimeCursor,
+    pub current: Arc<ViewerSnapshot>,
+    /// Present only when the requested cursor belongs to a retained capture.
+    pub base: Option<Arc<ViewerSnapshot>>,
+}
+
+pub type ReadBrowserViews = dyn Fn(Option<&RuntimeCursor>) -> Result<BrowserViews> + Send + Sync;
+
 #[derive(Clone)]
-pub(super) struct ViewerHistoryHandle(Arc<Mutex<ViewerHistory>>);
-
-impl ViewerHistoryHandle {
-    pub(super) fn new() -> Result<Self> {
-        Ok(Self(Arc::new(Mutex::new(ViewerHistory::new()?))))
-    }
-
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ViewerHistory>> {
-        self.0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("viewer history lock was poisoned"))
-    }
-
-    pub(super) fn record_snapshot(
-        &self,
-        read_current: impl FnOnce() -> ViewerSnapshot,
-    ) -> Result<(ViewerSnapshot, RuntimeCursor)> {
-        let mut history = self.lock()?;
-        let snapshot = read_current();
-        history.record(&snapshot)?;
-        let cursor = history.cursor(snapshot.revision);
-        Ok((snapshot, cursor))
-    }
-}
-
-pub(super) struct ViewerHistory {
-    incarnation: String,
-    entries: VecDeque<Arc<ViewerHistoryEntry>>,
-}
-
-struct ViewerHistoryEntry {
-    revision: u64,
-    sessions: ViewerSessions,
-    metadata_digests: viewer_wire::MetadataDigests,
-}
-
-impl ViewerHistoryEntry {
-    fn capture(snapshot: &ViewerSnapshot) -> Result<Self> {
-        Ok(Self {
-            revision: snapshot.revision,
-            sessions: snapshot.sessions.clone(),
-            metadata_digests: viewer_wire::metadata_digests(snapshot)?,
-        })
-    }
-}
-
-impl ViewerHistory {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            incarnation: mj_client::session::new_command_id("viewer")?,
-            entries: VecDeque::with_capacity(HISTORY_REVISIONS),
-        })
-    }
-
-    fn cursor(&self, revision: u64) -> RuntimeCursor {
-        RuntimeCursor {
-            alert_sequence: 0,
-            incarnation: self.incarnation.clone(),
-            sequence: revision,
-            subagent_parents: Default::default(),
-        }
-    }
-
-    fn record(&mut self, snapshot: &ViewerSnapshot) -> Result<Arc<ViewerHistoryEntry>> {
-        if let Some(existing) = self
-            .entries
-            .iter()
-            .find(|entry| entry.revision == snapshot.revision)
-        {
-            return Ok(Arc::clone(existing));
-        }
-        let entry = Arc::new(ViewerHistoryEntry::capture(snapshot)?);
-        let index = self
-            .entries
-            .iter()
-            .position(|existing| existing.revision > entry.revision)
-            .unwrap_or(self.entries.len());
-        self.entries.insert(index, Arc::clone(&entry));
-        while self.entries.len() > HISTORY_REVISIONS {
-            self.entries.pop_front();
-        }
-        Ok(entry)
-    }
-
-    fn find(&self, cursor: &RuntimeCursor) -> Option<Arc<ViewerHistoryEntry>> {
-        (cursor.incarnation == self.incarnation)
-            .then(|| {
-                self.entries
-                    .iter()
-                    .find(|entry| entry.revision == cursor.sequence)
-                    .cloned()
-            })
-            .flatten()
-    }
+pub struct BrowserSource {
+    pub revisions: watch::Receiver<u64>,
+    pub views: Arc<ReadBrowserViews>,
 }
 
 #[derive(Debug)]
@@ -132,49 +50,38 @@ enum ViewerFrame {
     ResetRequired,
 }
 
+#[derive(Default)]
 pub(super) struct ViewerFeed {
-    history: ViewerHistoryHandle,
-    previous: Option<Arc<ViewerHistoryEntry>>,
+    previous: Option<(RuntimeCursor, Arc<ViewerSnapshot>)>,
     known_interned: BTreeSet<String>,
 }
 
 impl ViewerFeed {
-    pub(super) fn new(history: ViewerHistoryHandle) -> Self {
-        Self {
-            history,
-            previous: None,
-            known_interned: BTreeSet::new(),
-        }
-    }
-
-    /// Establish a stream from a retained base or send the current snapshot.
-    /// Recording and selection share one lock with `/api/snapshot`, so a
-    /// cursor returned by that route cannot race ahead of its history entry.
-    pub(super) fn start(
+    pub(super) fn encode(
         &mut self,
-        current: ViewerSnapshot,
-        requested: Option<RuntimeCursor>,
+        views: BrowserViews,
+        reconnect: Option<RuntimeCursor>,
     ) -> Result<Vec<EncodedFrame>> {
-        let (current_entry, base, incarnation) = {
-            let mut history = self.history.lock()?;
-            let current_entry = history.record(&current)?;
-            let base = requested.as_ref().and_then(|cursor| history.find(cursor));
-            (current_entry, base, history.incarnation.clone())
-        };
-        let cursor = RuntimeCursor {
-            alert_sequence: 0,
-            incarnation,
-            sequence: current.revision,
-            subagent_parents: Default::default(),
-        };
-        if let (Some(requested), Some(base)) = (requested, base) {
-            self.known_interned = viewer_wire::interned_keys_from_sessions(&base.sessions)?;
-            self.previous = Some(Arc::clone(&base));
-            if requested.sequence == current.revision {
-                self.previous = Some(current_entry);
+        let BrowserViews {
+            cursor,
+            current,
+            base,
+        } = views;
+        let resumed = reconnect.zip(base);
+        let previous = self
+            .previous
+            .replace((cursor.clone(), current.clone()))
+            .or(resumed);
+        if let Some((from, base)) = previous
+            && from.incarnation == cursor.incarnation
+        {
+            if self.known_interned.is_empty() {
+                self.known_interned = viewer_wire::interned_keys_from_sessions(&base.sessions)?;
+            }
+            if from.sequence == cursor.sequence {
                 return Ok(Vec::new());
             }
-            return self.delta(&current, current_entry, cursor);
+            return self.delta(&base, &current, from, cursor);
         }
 
         let body = viewer_wire::snapshot(&current, &cursor, mj_core::clock::epoch_millis())?;
@@ -184,53 +91,18 @@ impl ViewerFeed {
             .keys()
             .cloned()
             .collect();
-        self.previous = Some(current_entry);
         Ok(vec![self.snapshot_frame(cursor, body)?])
-    }
-
-    /// Coalesce watch notifications to the newest history root and emit only
-    /// wire-visible row changes. SnapshotMap retains unchanged rows by Arc.
-    pub(super) fn update(&mut self, current: ViewerSnapshot) -> Result<Vec<EncodedFrame>> {
-        let current_entry = self.history.lock()?.record(&current)?;
-        let Some(previous_revision) = self.previous.as_ref().map(|previous| previous.revision)
-        else {
-            let incarnation = self.history.lock()?.incarnation.clone();
-            return self.start(
-                current,
-                Some(RuntimeCursor {
-                    alert_sequence: 0,
-                    incarnation,
-                    sequence: current_entry.revision,
-                    subagent_parents: Default::default(),
-                }),
-            );
-        };
-        if current_entry.revision <= previous_revision {
-            return Ok(Vec::new());
-        }
-        let incarnation = self.history.lock()?.incarnation.clone();
-        let cursor = RuntimeCursor {
-            alert_sequence: 0,
-            incarnation,
-            sequence: current_entry.revision,
-            subagent_parents: Default::default(),
-        };
-        self.delta(&current, current_entry, cursor)
     }
 
     fn delta(
         &mut self,
+        previous: &ViewerSnapshot,
         current: &ViewerSnapshot,
-        current_entry: Arc<ViewerHistoryEntry>,
+        from: RuntimeCursor,
         cursor: RuntimeCursor,
     ) -> Result<Vec<EncodedFrame>> {
-        let previous = self
-            .previous
-            .as_ref()
-            .context("viewer delta has no baseline")?;
-        let from = self.history.lock()?.cursor(previous.revision);
         let now = mj_core::clock::epoch_millis();
-        let metadata = changed_metadata(previous, &current_entry, current, now)?;
+        let metadata = changed_metadata(previous, current, now)?;
         let mut sessions = Vec::new();
         let mut detail_changed = Vec::new();
         let mut interned = BTreeMap::new();
@@ -273,7 +145,6 @@ impl ViewerFeed {
             interned,
         };
         let data = serde_json::to_string(&delta)?;
-        self.previous = Some(Arc::clone(&current_entry));
         if data.len() <= MAX_DELTA_BYTES {
             return Ok(vec![EncodedFrame {
                 id: cursor_text(&cursor),
@@ -328,36 +199,34 @@ pub(super) fn parse_cursor(text: &str) -> Option<RuntimeCursor> {
 }
 
 fn changed_metadata(
-    previous: &ViewerHistoryEntry,
-    current_entry: &ViewerHistoryEntry,
+    previous: &ViewerSnapshot,
     current: &ViewerSnapshot,
     server_time_ms: i64,
 ) -> Result<Map<String, Value>> {
+    let before = viewer_wire::metadata(previous, server_time_ms)?;
     let after = viewer_wire::metadata(current, server_time_ms)?;
     let mut changed = Map::new();
-    for (index, key) in viewer_wire::METADATA_FIELDS.iter().enumerate() {
-        if ALWAYS_METADATA.contains(key) {
-            if let Some(value) = after.get(*key) {
-                changed.insert((*key).to_owned(), value.clone());
+    for key in viewer_wire::METADATA_FIELDS {
+        if ALWAYS_METADATA.contains(&key) {
+            if let Some(value) = after.get(key) {
+                changed.insert(key.to_owned(), value.clone());
             }
             continue;
         }
-        let before = previous.metadata_digests.0[index];
-        let next = current_entry.metadata_digests.0[index];
-        if before == next {
+        if before.get(key) == after.get(key) {
             continue;
         }
-        if let Some(value) = after.get(*key) {
-            changed.insert((*key).to_owned(), value.clone());
-        } else if before.is_some() {
-            let empty = match *key {
+        if let Some(value) = after.get(key) {
+            changed.insert(key.to_owned(), value.clone());
+        } else if before.contains_key(key) {
+            let empty = match key {
                 "server_version" => Value::String(String::new()),
                 "workspaces" | "capacity" | "launch_failures" | "notices" => {
                     Value::Array(Vec::new())
                 }
                 _ => Value::Null,
             };
-            changed.insert((*key).to_owned(), empty);
+            changed.insert(key.to_owned(), empty);
         }
     }
     Ok(changed)
@@ -367,6 +236,38 @@ fn changed_metadata(
 mod tests {
     use super::*;
     use crate::server::{ViewerLifecycleCategory, ViewerSessionCapabilities};
+
+    #[derive(Default)]
+    struct TestFeed {
+        feed: ViewerFeed,
+    }
+
+    impl TestFeed {
+        fn start(
+            &mut self,
+            snapshot: ViewerSnapshot,
+            _: Option<RuntimeCursor>,
+        ) -> Result<Vec<EncodedFrame>> {
+            self.update(snapshot)
+        }
+
+        fn update(&mut self, snapshot: ViewerSnapshot) -> Result<Vec<EncodedFrame>> {
+            let current = Arc::new(snapshot);
+            self.feed.encode(
+                BrowserViews {
+                    cursor: RuntimeCursor {
+                        alert_sequence: 0,
+                        incarnation: "test".into(),
+                        sequence: current.revision,
+                        subagent_parents: Default::default(),
+                    },
+                    current,
+                    base: None,
+                },
+                None,
+            )
+        }
+    }
 
     fn row(id: &str, lifecycle: &str) -> crate::server::ViewerSession {
         serde_json::from_value(serde_json::json!({
@@ -401,9 +302,44 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_encodes_a_delta_only_with_a_retained_base() {
+        let from = RuntimeCursor {
+            incarnation: "runtime".into(),
+            sequence: 7,
+            alert_sequence: 0,
+            subagent_parents: Default::default(),
+        };
+        let cursor = RuntimeCursor {
+            sequence: 8,
+            ..from.clone()
+        };
+        let previous = Arc::new(snapshot(7, vec![row("a", "live")]));
+        let current = Arc::new(snapshot(8, vec![row("a", "live"), row("b", "live")]));
+        for (base, kind) in [(Some(previous), "delta"), (None, "snapshot")] {
+            let mut feed = ViewerFeed::default();
+            let encoded = feed
+                .encode(
+                    BrowserViews {
+                        cursor: cursor.clone(),
+                        current: current.clone(),
+                        base,
+                    },
+                    Some(from.clone()),
+                )
+                .unwrap();
+            assert_eq!(encoded[0].id, "runtime:8");
+            let frame = decode(&encoded[0]);
+            assert_eq!(frame["kind"], kind);
+            if kind == "delta" {
+                assert_eq!(frame["from"]["sequence"], 7);
+                assert_eq!(frame["sessions"][0][0], "b");
+            }
+        }
+    }
+
+    #[test]
     fn summary_to_detail_transition_sends_the_complete_detail_row() {
-        let history = ViewerHistoryHandle::new().unwrap();
-        let mut feed = ViewerFeed::new(history);
+        let mut feed = TestFeed::default();
         let mut stopped = row("a", "suspended");
         stopped.preview = vec!["conversation preview".into()];
         let initial = feed
@@ -427,43 +363,8 @@ mod tests {
     }
 
     #[test]
-    fn retained_cursors_resume_with_a_delta_and_missing_cursors_get_a_snapshot() {
-        let history = ViewerHistoryHandle::new().unwrap();
-        let mut publisher = ViewerFeed::new(history.clone());
-        let first = publisher
-            .start(snapshot(20, vec![row("a", "live")]), None)
-            .unwrap();
-        let base_cursor: RuntimeCursor =
-            serde_json::from_value(decode(&first[0])["cursor"].clone()).unwrap();
-        publisher
-            .update(snapshot(21, vec![row("a", "live")]))
-            .unwrap();
-
-        let mut resumed = ViewerFeed::new(history.clone());
-        let replay = resumed
-            .start(snapshot(21, vec![row("a", "live")]), Some(base_cursor))
-            .unwrap();
-        assert_eq!(decode(&replay[0])["kind"], "delta");
-
-        let mut missing = ViewerFeed::new(history);
-        let fallback = missing
-            .start(
-                snapshot(21, vec![row("a", "live")]),
-                Some(RuntimeCursor {
-                    alert_sequence: 0,
-                    incarnation: "old-daemon".into(),
-                    sequence: 20,
-                    subagent_parents: Default::default(),
-                }),
-            )
-            .unwrap();
-        assert_eq!(decode(&fallback[0])["kind"], "snapshot");
-    }
-
-    #[test]
     fn deltas_omit_unchanged_metadata_and_publish_only_new_interned_keys() {
-        let history = ViewerHistoryHandle::new().unwrap();
-        let mut feed = ViewerFeed::new(history);
+        let mut feed = TestFeed::default();
         let first = feed
             .start(snapshot(30, vec![row("a", "live")]), None)
             .unwrap();
@@ -506,8 +407,7 @@ mod tests {
 
     #[test]
     fn summary_equal_internal_change_marks_detail_as_changed() {
-        let history = ViewerHistoryHandle::new().unwrap();
-        let mut feed = ViewerFeed::new(history);
+        let mut feed = TestFeed::default();
         let initial = feed
             .start(snapshot(40, vec![row("a", "suspended")]), None)
             .unwrap();

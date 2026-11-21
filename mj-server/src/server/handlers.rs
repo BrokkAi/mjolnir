@@ -96,24 +96,24 @@ pub(super) async fn clear_session(
 }
 
 pub(super) async fn snapshot(State(state): State<ServerState>) -> Result<Response<Body>, ApiError> {
-    let (snapshot, cursor) = state
-        .viewer_history
-        .record_snapshot(|| state.snapshot_rx.borrow().clone())
-        .map_err(|error| {
-            tracing::error!(error = %format!("{error:#}"), "could not record browser snapshot");
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not create viewer snapshot",
-            )
-        })?;
-    let projection = viewer_wire::snapshot(&snapshot, &cursor, mj_core::clock::epoch_millis())
-        .map_err(|error| {
-            tracing::error!(error = %format!("{error:#}"), "could not project browser snapshot");
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not create viewer snapshot",
-            )
-        })?;
+    let projection = mj_core::runtime::spawn_blocking(move || {
+        let views = (state.browser.views)(None)?;
+        viewer_wire::snapshot(
+            &views.current,
+            &views.cursor,
+            mj_core::clock::epoch_millis(),
+        )
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|result| result)
+    .map_err(|error| {
+        tracing::error!(error = %format!("{error:#}"), "could not project browser snapshot");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not create viewer snapshot",
+        )
+    })?;
     let mut response = Json(projection).into_response();
     response
         .headers_mut()
@@ -126,16 +126,21 @@ pub(super) async fn session_row(
     Path(session_id): Path<String>,
 ) -> Result<Response<Body>, ApiError> {
     validate_public_id(&session_id)?;
-    let (snapshot, _) = state
-        .viewer_history
-        .record_snapshot(|| state.snapshot_rx.borrow().clone())
+    // The SSE stream may already have sent a newer view than the API
+    // waiter's watch has observed. Serve detail from the same history as SSE.
+    let read = state.browser.views;
+    let snapshot = mj_core::runtime::spawn_blocking(move || read(None))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|result| result)
         .map_err(|error| {
-            tracing::error!(error = %format!("{error:#}"), "could not record browser detail row");
+            tracing::error!(%error, "could not read browser view");
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "could not read viewer session",
             )
-        })?;
+        })?
+        .current;
     let Some(session) = snapshot.sessions.0.get(&session_id) else {
         return Err(ApiError::not_found("session not found"));
     };
@@ -1109,46 +1114,20 @@ pub(super) async fn events(
                     .and_then(|value| value.to_str().ok())
             })
             .and_then(viewer_feed::parse_cursor);
-        let history = state.viewer_history.clone();
+        let source = state.browser.clone();
         mj_core::runtime::spawn(async move {
             let publish = async {
-                let mut feed = viewer_feed::ViewerFeed::new(history);
-                let current = snapshots.borrow_and_update().clone();
-                let encoded = mj_core::runtime::spawn_blocking(move || {
-                    let result = feed.start(current, requested_cursor);
-                    (feed, result)
-                })
-                .await;
-                let (mut feed, initial_frames) = match encoded {
-                    Ok((feed, Ok(frames))) => (feed, frames),
-                    Ok((_, Err(error))) => {
-                        tracing::error!(%error, "could not start browser publication stream");
-                        return;
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "browser publication initializer failed");
-                        return;
-                    }
-                };
-                for frame in initial_frames {
-                    if tx
-                        .send(Ok(Event::default()
-                            .event("runtime")
-                            .id(frame.id)
-                            .data(frame.data)))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
+                let mut revisions = source.revisions;
+                let mut feed = viewer_feed::ViewerFeed::default();
+                let mut reconnect = requested_cursor;
                 loop {
-                    if snapshots.changed().await.is_err() {
-                        return;
-                    }
-                    let current = snapshots.borrow_and_update().clone();
+                    // Observe the wake before reading, so a runtime change
+                    // that races the capture remains pending.
+                    revisions.borrow_and_update();
+                    let read = source.views.clone();
                     let encoded = mj_core::runtime::spawn_blocking(move || {
-                        let result = feed.update(current);
+                        let result = read(reconnect.as_ref())
+                            .and_then(|views| feed.encode(views, reconnect.take()));
                         (feed, result)
                     })
                     .await;
@@ -1166,6 +1145,7 @@ pub(super) async fn events(
                             return;
                         }
                     };
+                    reconnect = None;
                     for frame in frames {
                         if tx
                             .send(Ok(Event::default()
@@ -1177,6 +1157,9 @@ pub(super) async fn events(
                         {
                             return;
                         }
+                    }
+                    if revisions.changed().await.is_err() {
+                        return;
                     }
                 }
             };

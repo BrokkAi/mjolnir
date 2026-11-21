@@ -39,6 +39,12 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-20) Milestone 4 third review: Move admission protects pending prose questions, lifecycle warnings include tool-only children, and Interrupt All refuses untargetable autonomous goal cancellation.
 - [x] (2026-11-20) Milestone 4 review follow-ups: fixed all five verdict and action issues listed under Outcomes. The focused Rust and Chromium regressions, 35 terminal goldens, the phone golden, 97 web unit tests and Clippy passed. The `feeds-m4f` live checks confirmed the standalone shell shortcut and Interrupt All for a managed child under a held Move. The completed import’s second daemon read stays deferred.
 - [ ] Milestone 5: one history for both feeds. The user chose to do it now (2026-11-20). The section below has been revised to move the browser-only inputs into the capture first.
+- [x] (2026-11-21) Milestone 5 scope confirmed: include resolved project identities as a fourth browser-only input.
+- [x] (2026-11-21 04:02Z) Milestone 5 prototype uses retained runtime captures for the browser, with its four inputs held in runtime state. The merged web suites passed (97 unit tests and 146 Chromium tests, with three lab cases skipped).
+- [x] (2026-11-21) Milestone 5 uses one latest view and rebuilds retained reconnect bases. The focused reconnect, preview and terminal-frame regressions passed.
+- [x] (2026-11-21) Repeated both heap runs with the latest-only cache. The retained heap at 4,096 captures fell from 56.19 MiB to 30.63 MiB.
+- [x] (2026-11-21) On the merged tree, daemon library tests passed (595 with two ignored), server library tests passed (275), and Clippy passed for both. The final web run passed 97 unit and 146 Chromium tests, with three provisioned-lab cases skipped.
+- [ ] Complete UTC TUI validation, the named-instance run and review.
 
 
 ## Surprises & Discoveries
@@ -78,6 +84,15 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 - Observation: the current terminal includes managed children with unfinished turns, including a waiting form or question. The runtime's `interrupted` child status describes a finished turn and includes ordinary user-requested cancellation. Including that status by itself would keep Interrupt All offered on an idle parent after cancelling its only working child. A parked child can retain the turn outcome after its worker has stopped.
   Evidence: `mj-tui/src/dashboard_sessions.rs` at the Milestone 3 revision, `mj-core/src/subagent.rs` (`failed_turn`), `mj-daemon/src/server_runtime/api.rs` (`subagent_status`), `mj-controller/src/controller/subagent_park.rs`, and the Milestone 3 live result above.
+
+- Observation: asynchronously resolved project identities are another browser-only input to the current view. A successful probe can change the public project label and key without changing any runtime record or transcript. A retained capture cannot reconstruct that view while resolution results live only in the phone loop.
+  Evidence: `mj-daemon/src/server_runtime/run.rs` lines 428–441 complete the probe, dirty its row and republish. `mj-daemon/src/server_runtime/snapshot.rs` lines 618–622 applies the resolved identity to the row. `mj-daemon/src/server_runtime/project_sources.rs` lines 241–255 reads it from the phone-local cache. The decision to unify project-source caches remains deferred.
+
+- Observation: caching each browser view through the lifetime of its runtime capture materially increases retained heap even with incremental row reuse and preview-only conversation retention.
+  Evidence: a reconstruction of the Milestone 3 fixture with 1,200 records (200 active views, 1,000 stopped sessions, two profiles and one configured target) measured glibc live heap after round-robin conversation updates. At 400 updates and 801 runtime captures, retained bytes rose from 7.04 MiB to 12.21 MiB. At 2,048 updates and 4,096 retained runtime captures, they rose from 22.96 MiB to 56.19 MiB, an increase of 33.24 MiB (145%). The baseline reproduced the old capture layout and the browser history's 128 row roots plus metadata digests. The prototype retained 4,096 full browser snapshots. Each comparison used fresh processes with the same fixture, and the samples excluded the common initial fixture allocations. Exact logs and the temporary probe are in the Milestone 5 report directory.
+
+- Observation: retaining only the latest browser view removes most of that increase.
+  Evidence: the repeated runs with the same fixture and conversation updates retained 7.64 MiB at 400 updates and 30.63 MiB at 2,048 updates. The increases relative to the legacy baseline were 0.59 MiB (8.4%) and 7.67 MiB (33.4%). The revised cache saved 25.56 MiB at 4,096 captures relative to the first prototype. Every retained capture remained eligible for reconnect.
 
 ## Decision Log
 
@@ -146,6 +161,14 @@ This plan does not add a new public API. A later plan will publish this projecti
 - Decision: do Milestone 5 now, not as part of the later versioned `/api/v1` stream plan. Before it merges the histories, it moves the three browser-only inputs (conversation projections, launch failures for requests that produced no session, per-action error notices) into daemon runtime state. A browser view is then a pure function of one retained capture. Those payloads stay off the terminal wire, and the history's memory cost is measured before any limit is considered.
   Rationale: the parent recommended deferring, because the two histories no longer disagree about any fact. The user chose to finish the unification now. One history can only serve per-client views if every input of a view is part of the capture.
   Date/Author: 2026-11-20, user decision; design by the parent session.
+
+- Decision revision: capture resolved project identities as a fourth browser-only input in Milestone 5. Keep the existing asynchronous probes, retry behavior and resolver. Install a keyed result only while its identity inputs match, invalidate it when they change, and publish a revision for each accepted change. The terminal resolver RPC and its cache stay independent until the deferred project-source follow-up.
+  Rationale: project labels and grouping keys must come from the same retained capture as the session rows.
+  Date/Author: 2026-11-21, parent session.
+
+- Decision revision: keep only the latest full browser view in `RuntimeHistory`. An open SSE stream retains the last view it sent. For reconnect, reconstruct the retained capture's browser view using the latest view's unchanged rows. The rebuilt rows must match the ones originally served at that cursor, so each row uses only captured facts. Current browser clocks use captured activity timestamps.
+  Rationale: retaining a full browser snapshot per capture more than doubled the measured history heap. Rebuilding the base preserves the runtime replay window without another retention limit.
+  Date/Author: 2026-11-21, parent session.
 
 ## Outcomes & Retrospective
 
@@ -227,15 +250,16 @@ Compute verdicts in the daemon from the capture, family by family so a parent's 
 
 At the end of this milestone the web viewer's cursor is a `RuntimeHistory` cursor, and `viewer_feed.rs`'s separate 128-snapshot history and incarnation are gone. The phone publication loop in `mj-daemon/src/server_runtime/run.rs` no longer publishes snapshots. It keeps its other job of executing phone actions.
 
-A browser view must be a pure function of one retained capture, so first move the inputs that only the web viewer uses into daemon-owned runtime state (`RuntimeState`, `mj-daemon/src/daemon/state.rs`). The capture then reads them like every other fact, and a change to any of them publishes a runtime revision. There are three such inputs today.
+A browser view must be a pure function of one retained capture, so first move the inputs that only the web viewer uses into daemon-owned runtime state (`RuntimeState`, `mj-daemon/src/daemon/state.rs`). The capture then reads them like every other fact, and a change to any of them publishes a runtime revision. The 2026-11-21 Decision Log revision identifies four inputs.
 
 - Conversation projections: the browser's conversation availability, preview and last-message time. The phone loop computes these asynchronously from transcript tails (its conversation projection jobs and conversation watch). Keep the asynchronous jobs, but install each finished projection into runtime state, together with the tail sequence it was projected from, and publish a revision. A projection whose tail has moved on since it started is installed only if nothing newer is already present. Projecting tails that are present in the first capture (the Milestone 3 follow-up fixed in ce7103de9) must keep working.
 - Launch failures for requests that never produced a session.
 - The per-action error notices the browser shows when a record's shared `last_error` is empty.
+- Resolved project identities. Keep the existing asynchronous probes and retries. Capture each accepted result with its identity inputs, invalidate it when those inputs change, and keep the terminal's on-demand resolver RPC and cache independent.
 
 These are browser-only payloads. Keep them out of the terminal's serialized frames, in the same way Milestone 3 kept prompt and form bodies off the terminal wire, so the control protocol does not change.
 
-Then give `RuntimeHistory` a browser view: the redacted public `ViewerSnapshot` built from a retained capture, cached the way terminal scoped views are cached. The web events handler waits on the runtime revision watch the same way the terminal long-poll does and encodes deltas between two browser views with the existing `viewer_wire` encoding. The server-sent event ID keeps its `incarnation:revision` text form, now carrying the runtime incarnation and sequence; `viewer.js` needs no change beyond any it already makes for resets. HTTP handlers that read the latest `ViewerSnapshot`, and the transient activity frames of `/api/v1/events`, read the latest browser view. The durable `/api/v1/events` log and its numeric IDs do not change. After a daemon replacement both feeds see a new incarnation and send a fresh snapshot, as today. Build each new browser view by reusing unchanged rows from the previous one, with the dependency rule from Milestone 3: rebuild a row when its own entries, any of its children's entries, or metadata it reads have changed. Waiters in `/api/v1` that await future snapshot values (wait, turn completion, sub-agent readiness, the SQLite activity recorder) subscribe to the history's latest browser view instead of the old watch, and their timing tests must pass unchanged.
+Then give `RuntimeHistory` a browser view: the redacted public `ViewerSnapshot` built from a retained capture. The 2026-11-21 Decision Log revision retains the latest view and rebuilds a reconnect base from its capture. The web events handler waits on the runtime revision watch the same way the terminal long-poll does and encodes deltas between two browser views with the existing `viewer_wire` encoding. An open stream keeps the last view it sent. The server-sent event ID keeps its `incarnation:revision` text form, now carrying the runtime incarnation and sequence; `viewer.js` needs no change beyond any it already makes for resets. HTTP handlers that read the latest `ViewerSnapshot`, and the transient activity frames of `/api/v1/events`, read the latest browser view. The durable `/api/v1/events` log and its numeric IDs do not change. After a daemon replacement both feeds see a new incarnation and send a fresh snapshot, as today. Build each browser view by reusing unchanged rows, with the dependency rule from Milestone 3: rebuild a row when its own entries, any of its children's entries, or metadata it reads have changed. Use only capture data in rows so reconstruction returns the same rows that the earlier view served. Waiters in `/api/v1` that await future snapshot values (wait, turn completion, sub-agent readiness, the SQLite activity recorder) subscribe to the history's latest browser view instead of the old watch, and their timing tests must pass unchanged.
 
 `RuntimeHistory` keeps up to 4,096 captures, and with this change those captures also hold the browser-only payloads (the Milestone 3 review follow-up about retained prompt bodies). Unchanged entries are shared between captures, so the cost should grow only with the number of changes. Measure it rather than assume it: compare the history's retained memory before and after on the 1,200-session fixture from Milestone 3, with a run of conversation updates, and record the numbers here. If the increase is large enough to matter on that store, stop and report before adding any limit. A new cap needs a measured reason (AGENTS.md).
 
@@ -295,3 +319,5 @@ No new crates or external libraries. The shared types live where the current one
 Milestone 2 update, 2026-11-20. The plan now records the shared target coverage, why the refresh request must rebuild targets, how in-flight probes answer a refresh, and the named-instance outcome.
 
 Milestone 3 update, 2026-11-20. The viewer reads the captured runtime state. The plan records the measured row selection cost, the remaining quota wake, and the named-instance browser result.
+
+Milestone 5 update, 2026-11-21. The Decision Log adds resolved project identities to the capture. The first unified-history prototype reached the memory gate. The revised cache keeps the latest view and rebuilds retained reconnect bases.

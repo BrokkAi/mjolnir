@@ -32,55 +32,6 @@ pub(super) fn track_started_phone_session(
     Ok(())
 }
 
-/// Carry a finished action's failure into the session projection, and clear it
-/// once a later action for the same session succeeds.
-///
-/// Nothing is waiting on the request any more, so a failure the action itself
-/// did not record would reach no one but this process's stderr; the overlay
-/// keeps it visible through every later durable reload, where the snapshot's
-/// `has_error` takes it to the phone. Clearing on success matters just as
-/// much: the overlay has no other expiry, so one transient failure would
-/// otherwise badge the session as errored for the daemon's whole lifetime.
-pub(super) fn record_action_result(
-    pending_action_errors: &mut std::collections::BTreeMap<String, String>,
-    session_id: Option<&str>,
-    result: &std::result::Result<(), PhoneActionFailure>,
-) {
-    let Some(session_id) = session_id else {
-        return;
-    };
-    match result {
-        Err(failure) => {
-            pending_action_errors.insert(session_id.to_owned(), failure.detail.clone());
-        }
-        Ok(()) => {
-            pending_action_errors.remove(session_id);
-        }
-    }
-}
-
-/// Retain safe notices even if provisioning removed its provisional session.
-/// This bounded, daemon-lifetime history survives durable controller reloads.
-pub(super) fn record_launch_failure(
-    failures: &mut Vec<crate::server::ViewerLaunchFailure>,
-    action_id: u64,
-    workspace_id: String,
-    session_id: Option<String>,
-    error: Option<String>,
-) {
-    failures.push(crate::server::ViewerLaunchFailure {
-        // The notice id is the same reference a generic 500 reports, so a
-        // browser notice and a CLI failure name the same daemon-log entry.
-        id: action_reference(action_id),
-        workspace_id,
-        session_id,
-        error,
-    });
-    if failures.len() > 16 {
-        failures.remove(0);
-    }
-}
-
 pub(super) struct PhoneActionServices<'a> {
     pub(super) sessions: &'a SessionManagerControl,
     pub(super) daemon_runtime: &'a Arc<RuntimeState>,

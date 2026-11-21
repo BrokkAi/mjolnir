@@ -130,6 +130,7 @@ impl RuntimeState {
             recent_launch: tokio::sync::watch::channel(None).0,
             recent_launch_update: Mutex::new(()),
             feed: Mutex::new(feed::RuntimeHistory::default()),
+            browser: Mutex::default(),
             availability: Mutex::default(),
             availability_requested: tokio::sync::Notify::new(),
             committed: None,
@@ -746,10 +747,6 @@ impl RuntimeState {
         if stopped {
             self.wiki.request_sync(false);
         }
-    }
-
-    pub fn allocate_revision(&self) -> u64 {
-        self.revisions.allocate()
     }
 
     pub(crate) fn publish_revision(&self) -> u64 {

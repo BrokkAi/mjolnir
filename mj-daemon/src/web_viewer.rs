@@ -544,6 +544,10 @@ mod tests {
                 move_preparation_tx: mpsc::channel(1).0,
                 client_state_tx: mpsc::channel(1).0,
             },
+            crate::server::BrowserSource {
+                revisions: watch::channel(0).1,
+                views: Arc::new(|_| anyhow::bail!("this fixture only exercises listener settings")),
+            },
         )
         .unwrap()
     }

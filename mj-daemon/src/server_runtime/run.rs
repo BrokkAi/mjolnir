@@ -29,20 +29,7 @@ impl StartupSteps {
     }
 }
 
-fn quota_reports_for_viewer(
-    publications: &mj_controller::quota::QuotaReportMap,
-) -> std::collections::BTreeMap<String, mj_controller::quota::ProfileQuota> {
-    publications
-        .iter()
-        .filter_map(|(id, publication)| {
-            publication
-                .effective_report(id)
-                .map(|report| (id.clone(), report))
-        })
-        .collect()
-}
-
-fn install_captured_records(
+pub(super) fn install_captured_records(
     controller: &mut Controller,
     runtime: &mj_client::runtime_feed::RuntimeProjection,
 ) {
@@ -73,18 +60,9 @@ pub(crate) async fn run_server(
     let bind = resolved.bind;
     let mut daemon_revisions = daemon_runtime.revisions();
     daemon_revisions.borrow_and_update();
-    let mut quota_updates = services.quotas.clone();
-    let mut quotas = quota_reports_for_viewer(&quota_updates.borrow_and_update());
     let api_backend = services.backend.clone();
-    let mut revision = daemon_runtime.allocate_revision();
-    let mut conversations = mj_core::snapshot_map::SnapshotMap::new();
     let mut project_sources = PhoneProjectSources::default();
-    let mut publication = publication::ViewerPublication::default();
-    let mut native_agents = std::collections::BTreeMap::new();
-    let mut move_recoveries = ViewerMoveRecoveries::new();
     let initial = daemon_runtime.runtime_publication()?;
-    startup.finished("capture runtime publication");
-    publication.observe_runtime(&initial, &mut native_agents, &mut move_recoveries);
     let mut controller = Controller {
         config: initial.metadata.installed_config(),
         state: State::default(),
@@ -92,33 +70,13 @@ pub(crate) async fn run_server(
     install_captured_records(&mut controller, &initial);
     let mut installed_runtime_config = initial.metadata.config.clone();
     let mut workspaces = initial.metadata.workspaces.clone();
-    let mut launch_failures = Vec::new();
-    let mut first_snapshot = publication.snapshot(
-        &controller,
-        &workspaces,
-        &quotas,
-        &PhoneSessionViews {
-            native_agents: &native_agents,
-            conversations: &conversations,
-            sessions: &initial.sessions,
-            project_sources: &project_sources,
-            operations: &initial
-                .metadata
-                .lifecycles
-                .iter()
-                .map(|view| (view.session_id.clone(), viewer_operation(view)))
-                .collect(),
-            move_recoveries: &move_recoveries,
-            capacity: &viewer_capacity(&initial.metadata),
-            launch_failures: &launch_failures,
-            reviews: &viewer_reviews(&initial.metadata.reviews),
-        },
-        revision,
-    );
-    first_snapshot.notices = daemon_runtime.public_notices();
-    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(first_snapshot);
-    startup.finished("build first viewer snapshot");
-    let (conversation_tx, conversation_rx) = tokio::sync::watch::channel(conversations.clone());
+
+    let mut browser_revisions = daemon_runtime.revisions();
+    browser_revisions.borrow_and_update();
+    let initial_view = daemon_runtime.browser_views(None)?;
+    let initial_sequence = initial_view.cursor.sequence;
+    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel((*initial_view.current).clone());
+    startup.finished("capture first browser view");
     let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(32);
     let (bundle_tx, mut bundle_rx) = tokio::sync::mpsc::channel(16);
     let (receipt_tx, mut receipt_rx) = tokio::sync::mpsc::channel(32);
@@ -130,10 +88,11 @@ pub(crate) async fn run_server(
     // Captured before `options` is moved into the server.
     let options_session_ttl = crate::server::default_session_ttl();
     let activity_snapshots = snapshot_rx.clone();
+    let control_snapshots = snapshot_rx.clone();
     let mut options = ServerOptions::new(
         bind,
         snapshot_rx,
-        conversation_rx,
+        daemon_runtime.browser_conversations(),
         crate::server::ServerRequests {
             action_tx,
             bundle_tx,
@@ -141,6 +100,13 @@ pub(crate) async fn run_server(
             preflight_tx,
             move_preparation_tx,
             client_state_tx,
+        },
+        crate::server::BrowserSource {
+            revisions: daemon_runtime.revisions(),
+            views: Arc::new({
+                let runtime = daemon_runtime.clone();
+                move |cursor| runtime.browser_views(cursor)
+            }),
         },
     )?;
     options.set_background_task_stop_tx(background_task_stop_tx);
@@ -268,7 +234,6 @@ pub(crate) async fn run_server(
         let mut move_preparation_jobs = tokio::task::JoinSet::new();
         let mut background_task_stop_jobs = tokio::task::JoinSet::new();
         let mut background_task_stop_open = true;
-        let mut pending_action_errors = std::collections::BTreeMap::<String, String>::new();
         let mut active_actions = std::collections::BTreeSet::new();
         let mut closing_actions = std::collections::BTreeMap::<String, u64>::new();
         let mut next_action_id = 0_u64;
@@ -286,89 +251,19 @@ pub(crate) async fn run_server(
         // exists to follow sessions, so losing that feed is a named failure
         // rather than a silent success.
         let mut failure: Option<anyhow::Error> = None;
-        let mut cache_records = controller.state.sessions.clone();
-        // The transcript tails the browser's conversations are projected
-        // from: the same daemon-owned tails the terminal feed serves, so one
-        // owner decides what changed in every client's transcript.
-        let mut cache_transcripts: Option<
-            mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionTail>,
-        > = None;
-        macro_rules! publish_snapshot {
-            ($control:lifetime, $revision:expr) => {
-                let runtime = match daemon_runtime.runtime_publication() {
-                    Ok(runtime) => runtime,
-                    Err(error) => { failure = Some(error); break $control; }
-                };
-                let mut conversations_changed = false;
-                for (id, record) in cache_records.changes(&runtime.records) {
-                    if record.is_none_or(|record| !record.state.is_active()) {
-                        conversations_changed |= conversations.remove_shared(id).is_some();
-                        conversation_projections.forget(id);
-                    }
-                }
-                cache_records = runtime.records.clone();
-                let transcript_changes = cache_transcripts
-                    .as_ref()
-                    .map(|previous| previous.changes(&runtime.transcripts).collect::<Vec<_>>())
-                    .unwrap_or_else(|| runtime.transcripts.iter().map(|(id, tail)| (id, Some(tail))).collect());
-                for (id, tail) in transcript_changes {
-                    if let Some(tail) = tail
-                        && runtime.records.get(id).is_some_and(|record| record.state.is_active())
-                    {
-                        conversation_projections.enqueue(tail.materialized());
-                    }
-                }
-                cache_transcripts = Some(runtime.transcripts.clone());
-                if conversations_changed { conversation_tx.send_replace(conversations.clone()); }
-                publication.observe_runtime(&runtime, &mut native_agents, &mut move_recoveries);
-                install_captured_records(&mut controller, &runtime);
-                if installed_runtime_config != runtime.metadata.config {
-                    controller.config = runtime.metadata.installed_config();
-                    installed_runtime_config = runtime.metadata.config.clone();
-                }
-                workspaces.clone_from(&runtime.metadata.workspaces);
-                for (session_id, error) in &pending_action_errors {
-                    if let Some(session) = controller.state.sessions.get_mut(session_id)
-                        && session.last_error.is_none()
-                    {
-                        session.last_error = Some(error.clone());
-                    }
-                }
-                let mut snapshot = publication.snapshot(
-                    &controller,
-                    &workspaces,
-                    &quotas,
-                    &PhoneSessionViews {
-                        native_agents: &native_agents,
-                        conversations: &conversations,
-                        sessions: &runtime.sessions,
-                        project_sources: &project_sources,
-                        operations: &runtime.metadata.lifecycles.iter()
-                            .map(|view| (view.session_id.clone(), viewer_operation(view)))
-                            .collect(),
-                        move_recoveries: &move_recoveries,
-                        capacity: &viewer_capacity(&runtime.metadata),
-                        launch_failures: &launch_failures,
-                        reviews: &viewer_reviews(&runtime.metadata.reviews),
-                    },
-                    $revision,
-                );
-                snapshot.notices = daemon_runtime.public_notices();
-                if let Err(error) = snapshot_tx.send(snapshot) {
-                    tracing::debug!(revision = $revision, %error, "phone snapshot delivery failed; no viewer is subscribed");
-                }
-            };
-        }
-        let mut publish_startup_capture = true;
-        'control: loop {
-            project_sources.synchronize(&controller);
-            // Project tails from the startup capture before the phone task can
-            // wait on an unrelated runtime or quota update.
-            if publish_startup_capture {
-                publish_startup_capture = false;
-                revision = daemon_runtime.allocate_revision();
-                publish_snapshot!('control, revision);
+        let mut transcripts = initial.transcripts;
+        for (id, tail) in transcripts.iter() {
+            if controller
+                .state
+                .sessions
+                .get(id)
+                .is_some_and(|record| record.state.is_active())
+            {
+                conversation_projections.enqueue(tail.materialized());
             }
+        }
+        loop {
+            project_sources.synchronize(&controller);
             tokio::select! {
                 _ = termination.cancelled() => break,
                 request = background_task_stop_rx.recv(), if background_task_stop_open => {
@@ -421,8 +316,9 @@ pub(crate) async fn run_server(
                 resolved = project_sources.jobs.join_next(), if !project_sources.jobs.is_empty() => {
                     match resolved {
                         Some(Ok(resolved)) => {
-                            publication.project_changed(resolved.session_id.clone());
-                            project_sources.complete(resolved);
+                            if let Some((id, source)) = project_sources.complete(resolved) {
+                                daemon_runtime.install_browser_project_source(id, source);
+                            }
                         }
                         Some(Err(error)) => {
                             failure = Some(anyhow::anyhow!("web project source task failed: {error}"));
@@ -430,8 +326,6 @@ pub(crate) async fn run_server(
                         }
                         None => unreachable!("project source jobs were not empty"),
                     }
-                    revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!('control, revision);
                 }
                 changed = daemon_revisions.changed() => {
                     if changed.is_err() {
@@ -442,15 +336,36 @@ pub(crate) async fn run_server(
                         break;
                     }
                     daemon_revisions.borrow_and_update();
-                    revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!('control, revision);
+                    let runtime = match daemon_runtime.runtime_publication() {
+                        Ok(runtime) => runtime,
+                        Err(error) => { failure = Some(error); break; }
+                    };
+                    for (id, record) in controller.state.sessions.changes(&runtime.records) {
+                        if record.is_none_or(|record| !record.state.is_active()) {
+                            conversation_projections.forget(id);
+                        } else if controller.state.sessions.get(id).is_none_or(|record| !record.state.is_active())
+                            && let Some(tail) = runtime.transcripts.get(id)
+                        {
+                            conversation_projections.enqueue(tail.materialized());
+                        }
+                    }
+                    for (id, tail) in transcripts.changes(&runtime.transcripts) {
+                        if let Some(tail) = tail
+                            && runtime.records.get(id).is_some_and(|record| record.state.is_active())
+                        {
+                            conversation_projections.enqueue(tail.materialized());
+                        } else {
+                            conversation_projections.forget(id);
+                        }
+                    }
+                    transcripts = runtime.transcripts.clone();
+                    install_captured_records(&mut controller, &runtime);
+                    if installed_runtime_config != runtime.metadata.config {
+                        controller.config = runtime.metadata.installed_config();
+                        installed_runtime_config = runtime.metadata.config.clone();
+                    }
+                    workspaces.clone_from(&runtime.metadata.workspaces);
                     tokio::task::yield_now().await;
-                }
-                changed = quota_updates.changed() => {
-                    if changed.is_err() { anyhow::bail!("daemon quota feed stopped"); }
-                    quotas = quota_reports_for_viewer(&quota_updates.borrow_and_update());
-                    revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!('control, revision);
                 }
                 projected = conversation_projection_rx.recv() => {
                     let Some(projected) = projected else {
@@ -460,36 +375,15 @@ pub(crate) async fn run_server(
                         );
                         break;
                     };
-                    let session_id = projected.session_id.clone();
-                    let session_active = controller
-                        .state
-                        .sessions
-                        .get(&session_id)
-                        .is_some_and(|session| session.state.is_active());
+                    let session_active = daemon_runtime.session_state(&projected.session_id)
+                        .is_some_and(|state| state.is_active());
                     if !session_active {
-                        // Invalidate a late result before it can be applied or
-                        // launch another queued projection. A session that is
-                        // resumed later gets a new generation from its next
-                        // worker snapshot.
-                        conversation_projections.forget(&session_id);
+                        conversation_projections.forget(&projected.session_id);
                     }
-                    if let Some((session_id, _key, transcript)) =
+                    if let Some((session_id, key, transcript)) =
                         conversation_projections.finish(projected, session_active)
                     {
-                        publication.dirty.insert(session_id.clone());
-                        conversations.insert_shared(session_id, transcript);
-                        revision = daemon_runtime.allocate_revision();
-                        conversation_tx.send_replace(conversations.clone());
-                        publish_snapshot!('control, revision);
-                    } else if !session_active && conversations.remove_shared(&session_id).is_some() {
-                        publication.dirty.insert(session_id.clone());
-                        // Controller reload normally removes inactive rows
-                        // first, but this also covers a worker result racing
-                        // that reload and keeps the viewer from seeing a
-                        // conversation for a dead session.
-                        revision = daemon_runtime.allocate_revision();
-                        conversation_tx.send_replace(conversations.clone());
-                        publish_snapshot!('control, revision);
+                        daemon_runtime.install_browser_conversation(session_id, key, transcript);
                     }
                     // SessionManagerUpdates has a synchronous pending fast
                     // path. Yield after each completion so a hot stream of
@@ -745,8 +639,6 @@ pub(crate) async fn run_server(
                     match result {
                         Ok(created) => {
                             let bundle_id = created.bundle_id;
-                            revision = daemon_runtime.allocate_revision();
-                            publish_snapshot!('control, revision);
                             if reply.send(Ok(bundle_id)).is_err() {
                                 tracing::debug!("bundle creation reply dropped after client disconnect");
                             }
@@ -1023,7 +915,7 @@ pub(crate) async fn run_server(
                             continue;
                         }
                         ControllerAction::RefreshCapacity { target_id } => {
-                            let known = snapshot_tx.borrow().capacity.iter().any(|target| &target.id == target_id);
+                            let known = control_snapshots.borrow().capacity.iter().any(|target| &target.id == target_id);
                             let accepted = known && daemon_runtime.capacity_feed().is_some_and(|feed| feed.request_refresh());
                             if known && !accepted {
                                 tracing::warn!("phone capacity refresh rejected: poller stopped");
@@ -1284,8 +1176,6 @@ pub(crate) async fn run_server(
                         )
                     };
                     if publication.is_ok() {
-                        revision = daemon_runtime.allocate_revision();
-                        publish_snapshot!('control, revision);
                         request_daemon_controller_reload(
                             daemon_runtime.clone(),
                             "new session publication",
@@ -1344,18 +1234,15 @@ pub(crate) async fn run_server(
                             Err(failure) => failure.outcome(&reference),
                         },
                     );
-                    if let Some(workspace_id) = launch_workspaces.remove(&action_id)
-                        && result.is_err()
-                        && !session_id.as_ref().is_some_and(|id| closing_actions.contains_key(id))
-                    {
-                        record_launch_failure(
-                            &mut launch_failures,
-                            action_id,
+                    let launch_failure = launch_workspaces.remove(&action_id)
+                        .filter(|_| result.is_err()
+                            && !session_id.as_ref().is_some_and(|id| closing_actions.contains_key(id)))
+                        .map(|workspace_id| crate::server::ViewerLaunchFailure {
+                            id: reference.clone(),
                             workspace_id,
-                            session_id.clone(),
-                            result.as_ref().err().map(|failure| failure.detail.clone()),
-                        );
-                    }
+                            session_id: session_id.clone(),
+                            error: result.as_ref().err().map(|failure| failure.detail.clone()),
+                        });
                     if let Err(failure) = &result {
                         tracing::warn!(
                             action_id,
@@ -1365,13 +1252,11 @@ pub(crate) async fn run_server(
                             "phone action failed"
                         );
                     }
-                    record_action_result(
-                        &mut pending_action_errors,
+                    daemon_runtime.record_browser_action(
                         session_id.as_deref(),
-                        &result,
+                        result.as_ref().err().map(|failure| failure.detail.as_str()),
+                        launch_failure,
                     );
-                    revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!('control, revision);
                     request_daemon_controller_reload(
                         daemon_runtime.clone(),
                         "phone action completion",
@@ -1407,9 +1292,12 @@ pub(crate) async fn run_server(
         activity_snapshots,
         mj_controller::database::record_api_activities,
     ));
+    let browser_views =
+        daemon_runtime.follow_browser_views(browser_revisions, initial_sequence, snapshot_tx);
     let result = tokio::select! {
         result = serve.stopped() => result,
         result = control => result,
+        result = browser_views => result,
     };
     recorder.abort();
     if let Err(error) = recorder.await
