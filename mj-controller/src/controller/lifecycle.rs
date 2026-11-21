@@ -361,14 +361,42 @@ impl Controller {
                             session_id,
                         )?;
                         let mut reader = std::io::Cursor::new(&spec_bytes);
-                        let output = executor.execute_with_stdin(&command, &mut reader)?;
+                        let mut output = executor.execute_with_stdin(&command, &mut reader)?;
                         if output.status != 0 {
                             let stderr = String::from_utf8_lossy(&output.stderr);
-                            if stderr.contains("unrecognized subcommand 'suspend-preflight'") {
-                                bail!(
-                                    "target worker binary does not support suspend-preflight; upgrade or restart the worker before suspending"
-                                );
+                            if stderr.contains("unrecognized subcommand")
+                                && stderr.contains("suspend-preflight")
+                            {
+                                // Pre-upgrade SSH/container workers lack `suspend-preflight`.
+                                // Stage the current worker binary beside `{root}/hel` without
+                                // disturbing the running worker, run preflight once, and let
+                                // `PreparedWorkerBinary`'s drop guard remove the temporary copy.
+                                let worker = super::worker_binary::WorkerInstall::for_target(
+                                    &backend, executor,
+                                )
+                                .context("resolve current worker binary for suspend preflight")?;
+                                let staging =
+                                    super::worker_binary::stage_worker_binary_for_upgrade(
+                                        executor,
+                                        &backend,
+                                        session_id,
+                                        &worker,
+                                    )
+                                    .context(
+                                        "stage current worker binary for suspend preflight",
+                                    )?;
+                                let staged_command = crate::checkpoint_transfer::suspend_preflight_stdin_command_with_binary(
+                                    &backend,
+                                    session_id,
+                                    &staging,
+                                )?;
+                                let mut retry_reader = std::io::Cursor::new(&spec_bytes);
+                                output = executor
+                                    .execute_with_stdin(&staged_command, &mut retry_reader)?;
                             }
+                        }
+                        if output.status != 0 {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
                             bail!(
                                 "target suspend-preflight failed (status {}): {}",
                                 output.status,

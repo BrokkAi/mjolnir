@@ -18,13 +18,33 @@ pub fn suspend_preflight_stdin_command(
     locator: &TargetLocator,
     session_id: &str,
 ) -> Result<CommandSpec> {
-    let mut command = export_command(locator, session_id, EXPORT_SPEC_STDIN)?;
-    for arg in &mut command.args {
-        if arg == "export-checkpoint" {
-            *arg = "suspend-preflight".to_owned();
-        }
-    }
-    Ok(command)
+    suspend_preflight_stdin_command_with_binary(locator, session_id, "hel")
+}
+
+pub fn suspend_preflight_stdin_command_with_binary(
+    locator: &TargetLocator,
+    session_id: &str,
+    binary_name: &str,
+) -> Result<CommandSpec> {
+    ensure!(
+        !binary_name.is_empty() && !binary_name.contains('/') && !binary_name.contains(".."),
+        "invalid worker binary name {binary_name:?}"
+    );
+    let root = worker_root(locator, session_id)?;
+    let args = vec![
+        format!("{root}/{binary_name}"),
+        "worker".into(),
+        "suspend-preflight".into(),
+        "--spec".into(),
+        EXPORT_SPEC_STDIN.into(),
+    ];
+    crate::targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        locator,
+        session_id,
+        args,
+        "suspend preflight target",
+    )
 }
 
 pub fn capture_stdin_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {

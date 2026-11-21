@@ -5295,3 +5295,230 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
         Some("suspend was cancelled")
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn remote_suspend_preflight_stages_current_worker_when_installed_worker_lacks_subcommand() {
+    use std::sync::Mutex;
+
+    const NAME: &str =
+        "remote_suspend_preflight_stages_current_worker_when_installed_worker_lacks_subcommand";
+    const CHILD: &str = "MJ_TEST_REMOTE_PREFLIGHT_STAGED_WORKER";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker_bin = directory.path().join("fake-current-worker");
+        std::fs::write(
+            &worker_bin,
+            format!(
+                "#!/bin/sh\n# {}\nexit 0\n",
+                mj_core::worker_build::worker_build_stamp()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&worker_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            NAME,
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "remote-preflight-staged")
+        .env("MJ_WORKER_BINARY", &worker_bin)
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    #[derive(Default)]
+    struct RemotePreflightStageFake {
+        old_preflight_calls: Mutex<usize>,
+        staged_preflight_binaries: Mutex<Vec<String>>,
+        cleaned_paths: Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for RemotePreflightStageFake {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let joined = command.args.join(" ");
+            if joined.contains("remote.origin.url") {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"https://example.com/org/repo.git\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if joined.contains("uname") {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"Linux x86_64\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if command.purpose.starts_with("read suspend record ") {
+                return Ok(CommandOutput {
+                    status: 44,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            if command.purpose == "discard private worker staging" {
+                self.cleaned_paths.lock().unwrap().push(joined);
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            let mut stdin_bytes = Vec::new();
+            input.read_to_end(&mut stdin_bytes)?;
+            let joined = command.args.join(" ");
+            if command.purpose == "suspend preflight target" {
+                let spec: mj_core::suspend_consent::WorkerSuspendPreflightSpec =
+                    serde_json::from_slice(&stdin_bytes).unwrap();
+                assert_eq!(spec.session_id, "remote-old-worker");
+                if let Some(staged) = command
+                    .args
+                    .iter()
+                    .find(|arg| arg.contains("hel.prepared-"))
+                {
+                    self.staged_preflight_binaries
+                        .lock()
+                        .unwrap()
+                        .push(staged.clone());
+                    let result = mj_core::suspend_consent::WorkerSuspendPreflightResult {
+                        untracked: vec![mj_core::suspend_consent::UntrackedPath {
+                            checkout: mj_core::suspend_consent::CheckoutKey::default(),
+                            path: PathBuf::from("scratch.txt"),
+                            bytes: 42,
+                            identity: mj_core::suspend_consent::FileIdentity::new(
+                                "deadbeef".into(),
+                            ),
+                        }],
+                        ..Default::default()
+                    };
+                    return Ok(CommandOutput {
+                        status: 0,
+                        stdout: serde_json::to_vec(&result).unwrap(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if joined.contains("/hel") {
+                    *self.old_preflight_calls.lock().unwrap() += 1;
+                    return Ok(CommandOutput {
+                        status: 2,
+                        stdout: Vec::new(),
+                        stderr: b"error: unrecognized subcommand 'suspend-preflight'\n".to_vec(),
+                    });
+                }
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
+
+    let session_id = "remote-old-worker";
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "ssh-dev".into();
+    session.target = Some(Box::new(TargetLocator::SshBare {
+        host: "example.test".into(),
+        workspace: PathBuf::from("/home/dev/repo/.mj/clones/remote-old-worker"),
+        worker_id: Some(session_id.into()),
+    }));
+    session.project_directory = Some(PathBuf::from("/home/dev/repo/.mj/clones/remote-old-worker"));
+    session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+        target: mj_core::state::ManagedWorktreeTarget::Ssh {
+            destination: "dev@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        source_project_directory: PathBuf::from("/home/dev/repo"),
+        source_repository: PathBuf::from("/home/dev/repo"),
+        worktree_root: PathBuf::from("/home/dev/repo/.mj/clones/remote-old-worker"),
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        branch: "mj/remote-old-worker".into(),
+        base_commit: None,
+    }));
+    let mut config = Config::default();
+    config.targets.insert(
+        "ssh-dev".into(),
+        TargetTemplate::SshBare {
+            ssh: mj_core::config::SshConnection {
+                host: "example.test".into(),
+                user: Some("dev".into()),
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            permissions: mj_core::config::PermissionMode::Yolo,
+            workspace_prefix: ".local/share/hel/workspaces".into(),
+        },
+    );
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    let fake = RemotePreflightStageFake::default();
+    let preflight = controller
+        .suspend_preflight(session_id, false, false, &fake)
+        .expect("preflight must succeed by staging current worker when installed worker lacks subcommand");
+    assert_eq!(*fake.old_preflight_calls.lock().unwrap(), 1);
+    let staged = fake.staged_preflight_binaries.lock().unwrap();
+    assert_eq!(staged.len(), 1, "expected one staged preflight invocation");
+    let staged_start = staged[0]
+        .find("hel.prepared-")
+        .expect("expected hel.prepared- in staged command");
+    let staged_name: String = staged[0][staged_start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+        .collect();
+    assert!(staged_name.starts_with("hel.prepared-"));
+    assert!(
+        fake.cleaned_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|cmd| cmd.contains(&staged_name)),
+        "expected drop guard to clean up staged binary {staged_name}"
+    );
+    assert_eq!(preflight.untracked.len(), 1);
+    assert_eq!(preflight.untracked[0].path, PathBuf::from("scratch.txt"));
+}
