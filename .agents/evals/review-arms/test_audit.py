@@ -1,9 +1,10 @@
 """Audit recorded commands without treating searched or edited text as access."""
 import json
+from pathlib import Path
 
 import pytest
 
-from audit import audit_pilot
+from audit import audit_pilot, audit_reviewer
 
 
 PIN = "a" * 40
@@ -18,6 +19,79 @@ def audit_call(tmp_path, call, **kwargs):
         {"seq": 1, "role": "tool", "body": {"call": call}},
     ]}]))
     return audit_pilot(transcript, OWN, commits=[PIN], **kwargs)
+
+
+@pytest.fixture
+def antigravity_cards():
+    # Scrubbed ACP cards from 6dd20fb9, fa36c417, d4fa8e03 and f4896f4e.
+    return json.loads(Path(__file__).with_name("fixtures").joinpath("antigravity-tool-cards.json").read_text())
+
+
+# Hard-won: 8c9d945f3: stored Antigravity cards could bypass the transcript audit
+@pytest.mark.parametrize(("card", "hit"), [
+    ("web-search", "github-or-web"),
+    ("history", "memory-or-sessions"),
+    ("native-task", "needs-inspection"),
+    ("schedule", "needs-inspection"),
+    ("title-only-shell", "needs-inspection"),
+    ("structured-shell", "needs-inspection"),
+])
+def test_antigravity_cannot_pass_forbidden_native_calls(tmp_path, antigravity_cards, card, hit):
+    report = audit_call(tmp_path, antigravity_cards[card], cwd=f"/workspace/{OWN}/project")
+    assert not report["passed"]
+    assert {finding["kind"] for finding in report["hits"]} == {hit}
+
+
+@pytest.mark.parametrize("override", [
+    {"name": "mcp_unowned_read_file"},
+    {"name": "mcp__unowned__read_file"},
+    {"name": "mcp_mj-agents_handback_more"},
+    {"name": "future_native_tool"},
+    {"name": "search_files", "kind": "search"},
+    {"rawInput": {"unknown": "value"}, "locations": []},
+    {"rawInput": {"Path": "AGENTS.md", "unknown": "value"}},
+    {"rawInput": None, "locations": [], "title": "Read file 'AGENTS.md'"},
+])
+def test_antigravity_rejects_opaque_calls(tmp_path, antigravity_cards, override):
+    call = {**antigravity_cards["file-read"], **override}
+    report = audit_call(tmp_path, call, cwd=f"/workspace/{OWN}/project")
+    assert not report["passed"]
+    assert {finding["kind"] for finding in report["hits"]} == {"needs-inspection"}
+
+
+@pytest.mark.parametrize("card", ["file-read", "file-edit"])
+def test_antigravity_raw_path_is_screened_independently_of_locations(tmp_path, antigravity_cards, card):
+    call = antigravity_cards[card]
+    call["rawInput"]["Path"] = f"/workspace/{FOREIGN}/project/AGENTS.md"
+    report = audit_call(tmp_path, call)
+    assert not report["passed"]
+    assert "other-workspace" in {finding["kind"] for finding in report["hits"]}
+
+
+def test_antigravity_session_metadata_applies_to_legacy_and_pilot_audits(tmp_path, antigravity_cards):
+    (tmp_path / "session.json").write_text(json.dumps({"harness_kind": "antigravity"}))
+    call = dict(antigravity_cards["file-read"], name="unknown", rawInput={"opaque": True}, locations=[])
+    del call["toolCallId"]
+    report = audit_call(tmp_path, call, allow_rql=True)
+    legacy = audit_reviewer(tmp_path / "transcript.json", OWN)
+    assert not report["passed"]
+    assert report["hits"] == legacy["hits"]
+    assert [finding["kind"] for finding in legacy["hits"]] == ["needs-inspection"]
+
+
+def test_antigravity_rql_title_cannot_authorize_an_unowned_mcp_call(tmp_path, antigravity_cards):
+    call = dict(antigravity_cards["history"], name="mcp_unowned_rql_query", title="rql_query")
+    report = audit_call(tmp_path, call, allow_rql=True)
+    assert not report["passed"]
+    assert [finding["kind"] for finding in report["hits"]] == ["needs-inspection"]
+
+
+# Hard-won: c5d02f5fd: arbitrary structured fields suppressed the missing read-path hit
+def test_unrecognized_raw_read_fields_do_not_supply_path_evidence(tmp_path):
+    report = audit_call(tmp_path, {"name": "Read", "title": "Read", "kind": "read",
+                                   "rawInput": {"unknown": "value"}})
+    assert not report["passed"]
+    assert [finding["kind"] for finding in report["hits"]] == ["needs-inspection"]
 
 
 # Hard-won: 49e16b8: the pilot audit voided a search when its pattern mentioned a protected source or command

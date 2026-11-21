@@ -51,8 +51,9 @@ def call_parts(item):
     return json.dumps(body), ""
 
 
-def audit_reviewer(transcript_path, own_workspace):
-    return scan(json.loads(transcript_path.read_text()), own_workspace)
+def audit_reviewer(transcript_path, own_workspace, *, cwd=None):
+    return scan(json.loads(transcript_path.read_text()), own_workspace,
+                cwd=cwd, antigravity=captured_antigravity(transcript_path))
 
 
 ROLLOUT_DIRECTORY = "codex-rollout"
@@ -127,13 +128,20 @@ def tool_succeeded(call, body, rollout_exit):
 
 
 def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None,
-         rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None, engine=False):
+         rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None, engine=False,
+         antigravity=False):
     first_page = pages[0] if pages else {}
     execution = first_page.get("execution")
     checkout = cwd or first_page.get("cwd") or (execution.get("cwd") if isinstance(execution, dict) else None)
     edit_paths = EditPathEvidence(checkout, tracked_symlinks) if allow_in_place_edits else None
     hits, calls = [], 0
     scripts, written = ScriptEvidence(checkout, tracked_paths), set()
+    # Older transcript pages lack harness metadata. Use native card evidence
+    # from any page so an opaque card cannot bypass the session's catalogue.
+    antigravity = antigravity or any(
+        antigravity_card((item.get("body") or {}).get("call") or {})
+        for page in pages for item in page["items"] if item["role"] == "tool"
+    )
     for page in pages:
         execution = page.get("execution")
         execution = execution if isinstance(execution, dict) else {}
@@ -144,17 +152,26 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                 continue
             body = item.get("body") or {}
             call = body.get("call") or {}
-            if engine:
-                calls += 1
-                hits.extend({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
-                            for name, snippet in engine_hits(call, own_workspace, page_cwd, checkout))
-                continue
-            if commits is not None and not call:
+            if not engine and commits is not None and not call and not (antigravity and item["role"] == "tool"):
                 # Standalone terminal_output rows contain output only. The
                 # originating command is recorded as its own tool call.
                 continue
             calls += 1
-            if allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query") and call.get("kind") != "execute":
+            if antigravity and (call or item["role"] == "tool"):
+                findings = dict.fromkeys(antigravity_hits(call, own_workspace, page_cwd, checkout))
+                hits.extend({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
+                            for name, snippet in findings)
+                if findings and (commits is not None or engine):
+                    scripts.clear()
+                    if edit_paths is not None:
+                        edit_paths.blocked = True
+                    continue
+            if engine:
+                hits.extend({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
+                            for name, snippet in engine_hits(call, own_workspace, page_cwd, checkout))
+                continue
+            if (not antigravity and allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query")
+                    and call.get("kind") != "execute"):
                 continue
             if commits is not None:
                 match = None
@@ -190,6 +207,7 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                 for name, snippet in pilot_hits(call, own_workspace, commits, single_commit, scripts=scripts,
                                                 written=written, cwd=page_cwd, home=page_home,
                                                 edit_paths=edit_paths,
+                                                antigravity=antigravity,
                                                 succeeded=tool_succeeded(call, body, match[2] if match else None)):
                     hit = {"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
                     if name == "in-place-edit":
@@ -548,7 +566,7 @@ MEMORY_TOOLS = {
     "search_sessions", "read_session", "search_session", "get_session_brief",
     "session_files", "trace_file", "blame_file",
 }
-WEB_TOOLS = {"web_search", "web.run", "websearch", "webfetch", "search_query"}
+WEB_TOOLS = {"web_search", "search_web", "web.run", "websearch", "webfetch", "search_query"}
 NETWORK = set("ssh scp sftp rsync nc ncat netcat socat telnet ftp".split())
 READ_COMMANDS = set("""
     cat cd cut diff du file head ls nl paste pwd readlink realpath sort stat tail tee uniq wc
@@ -1997,7 +2015,82 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
             scripts.pop(key, None)
 
 
-PATH_KEYS = {"cwd", "path", "paths", "file_path", "filePath", "directory", "workdir", "target_file"}
+PATH_KEYS = {"cwd", "path", "Path", "paths", "file_path", "filePath", "directory", "workdir", "target_file"}
+
+ANTIGRAVITY_FILES = {
+    "read_file": ("read", {"Path", "StartLine", "EndLine", "ByteOffset"}),
+    "edit_file": ("edit", {"Path", "Replacement", "Target"}),
+    "write_file": ("edit", {"Path", "Content"}),
+}
+
+
+def captured_antigravity(transcript_path):
+    for filename in ("session.json", "receipt.json", "settings.json"):
+        path = transcript_path.with_name(filename)
+        if path.is_file():
+            record = json.loads(path.read_text())
+            if not isinstance(record, dict):
+                continue
+            model = record.get("model")
+            if record.get("harness_kind") == "antigravity" or (
+                    isinstance(model, str) and model.startswith("gemini-")):
+                return True
+    return False
+
+
+def antigravity_card(call):
+    name, raw, identifier = call.get("name"), call.get("rawInput"), call.get("toolCallId")
+    return (
+        isinstance(identifier, str) and bool(re.fullmatch(r"call_[0-9]+", identifier))
+        or isinstance(name, str) and (
+            name in {"search_web", "manage_task"}
+            or bool(re.match(r"mcp_(?!_)", name))
+            or name == "run_command" and (raw is None or isinstance(raw, dict) and "CommandLine" in raw)
+            or name in ANTIGRAVITY_FILES and isinstance(raw, dict) and "Path" in raw
+        )
+    )
+
+
+def antigravity_hits(call, own_workspace, cwd, checkout):
+    name, raw, kind = call.get("name"), call.get("rawInput"), call.get("kind")
+    name = name if isinstance(name, str) else ""
+    tool = name.lower()
+    if tool in WEB_TOOLS or tool.startswith(("mcp_web_", "mcp__web__")):
+        yield "github-or-web", name
+    elif tool in MEMORY_TOOLS or tool.startswith((
+            "mcp_mj-memory_", "mcp_mj_memory_", "mcp__mj-memory__", "mcp__mj_memory__")):
+        yield "memory-or-sessions", name
+    elif name == "run_command":
+        yield "needs-inspection", "Antigravity run_command lacks verified working directory evidence"
+    elif name == "mcp_mj-agents_handback" and kind in (None, "other") and isinstance(raw, dict) and (
+            "message" in raw and raw.keys() <= {"message", "toolSummary"}
+            and all(isinstance(value, str) for value in raw.values())):
+        return  # The owned handback only submits the review.
+    elif name in ANTIGRAVITY_FILES:
+        expected_kind, fields = ANTIGRAVITY_FILES[name]
+        path = raw.get("Path") if isinstance(raw, dict) else None
+        locations = call.get("locations")
+        if locations is None:
+            locations = []
+        if (kind != expected_kind or not isinstance(path, str) or not path or not raw.keys() <= fields
+                or not isinstance(locations, list)
+                or any(not isinstance(location, dict) or not isinstance(location.get("path"), str)
+                       or not location["path"] for location in locations)):
+            yield "needs-inspection", f"unverified Antigravity {name} path or input"
+            return
+        root = recorded_path(checkout, None) if checkout else f"/workspace/{own_workspace}"
+        for operand in dict.fromkeys([path, *(location["path"] for location in locations)]):
+            if operand == "-" or "\0" in operand:
+                yield "needs-inspection", f"unverified Antigravity {name} path: {operand!r}"
+                continue
+            yield from path_hits(operand, own_workspace, cwd)
+            resolved = recorded_path(operand, cwd)
+            if not root or not resolved or not posixpath.isabs(resolved):
+                yield "needs-inspection", f"unresolved Antigravity {name} path: {operand!r}"
+            elif posixpath.commonpath((root, resolved)) != root:
+                yield "outside-workspace", operand
+    else:
+        yield "needs-inspection", f"unrecognized Antigravity tool: {name or '<missing name>'}"
 
 
 def engine_hits(call, own_workspace, cwd, checkout):
@@ -2044,7 +2137,7 @@ def engine_hits(call, own_workspace, cwd, checkout):
 
 
 def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written, cwd, home,
-               edit_paths, succeeded=False):
+               edit_paths, succeeded=False, antigravity=False):
     title = call.get("title") or ""
     kind = call.get("kind")
     raw = call.get("rawInput")
@@ -2078,13 +2171,13 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
     if kind in {"edit", "delete", "move"} and not target_seen:
         scripts.clear()
 
-    listing = kind == "read" and (title == "List files" or title.startswith("List files "))
+    listing = not antigravity and kind == "read" and (title == "List files" or title.startswith("List files "))
     if listing:
         if match := re.fullmatch(r"""List files in (['"])(.+)\1""", title):
             yield from path_hits(match[2], own_workspace, cwd or "")
             target_seen = True
-    elif kind == "read" and not (target_seen or raw or call.get("locations")):
-        if match := re.fullmatch(r"Read file ['\"](.*)['\"]", title):
+    elif kind == "read" and not target_seen:
+        if not antigravity and (match := re.fullmatch(r"Read file ['\"](.*)['\"]", title)):
             yield from path_hits(match[1], own_workspace, cwd or "")
         else:
             yield "needs-inspection", f"missing read path: {title[:400]}"
@@ -2106,7 +2199,7 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
         return
 
     command = raw.get("command", raw.get("cmd", raw.get("argv"))) if isinstance(raw, dict) else raw
-    if command is None and kind in {None, "execute"} and title and raw is None:
+    if not antigravity and command is None and kind in {None, "execute"} and title and raw is None:
         # Some bridges record the command only as their display title.
         command = title
         if title.startswith('"') and title.endswith('"'):
@@ -2151,6 +2244,7 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
         cwd = cwd or before.get("cwd")
         result = scan(pages, own_workspace, commits=commits, allow_rql=allow_rql, single_commit=single_commit,
                       cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits, engine=engine,
+                      antigravity=captured_antigravity(transcript_path),
                       tracked_symlinks=before.get("tracked_symlinks"),
                       tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
                       rollout=rollout_commands(
@@ -2165,7 +2259,7 @@ def audit_run(run):
     own = placement["cwd"].split("/")[2]
     result = {"run": str(run.relative_to(ROOT)), "reviewers": {}}
     for transcript in sorted(run.glob("reviewers/*/transcript.json")):
-        result["reviewers"][transcript.parent.name] = audit_reviewer(transcript, own)
+        result["reviewers"][transcript.parent.name] = audit_reviewer(transcript, own, cwd=placement["cwd"])
     # Since mj 8fe3c40bd a reviewer session is destroyed when its role ends, so driver.py keeps
     # only its stored handback and no transcript: its tool calls cannot be audited. Say so; an
     # empty reviewer list must not read as a clean audit.

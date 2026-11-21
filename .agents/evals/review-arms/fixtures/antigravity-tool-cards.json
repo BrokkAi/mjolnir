@@ -1,0 +1,101 @@
+{
+  "web-search": {
+    "toolCallId": "call_10000000000000000001",
+    "title": "\"example\" on Web",
+    "name": "search_web",
+    "kind": "search",
+    "status": "completed",
+    "rawInput": {
+      "query": "example"
+    }
+  },
+  "history": {
+    "toolCallId": "call_10000000000000000002",
+    "title": "Run mcp_mj-memory_get_session_brief",
+    "name": "mcp_mj-memory_get_session_brief",
+    "status": "completed",
+    "rawInput": {
+      "max_chars": 6000,
+      "session_id": "dddddddd",
+      "toolSummary": "Read session brief for context"
+    }
+  },
+  "native-task": {
+    "toolCallId": "call_10000000000000000003",
+    "title": "Run manage_task",
+    "name": "manage_task",
+    "status": "completed",
+    "rawInput": {
+      "Action": "kill",
+      "TaskId": "00000000-0000-4000-8000-000000000000/task-48"
+    }
+  },
+  "schedule": {
+    "toolCallId": "call_10000000000000000004",
+    "title": "Run schedule",
+    "name": "schedule",
+    "status": "completed",
+    "rawInput": {
+      "DurationSeconds": 45,
+      "Prompt": "Check progress"
+    }
+  },
+  "title-only-shell": {
+    "toolCallId": "call_10000000000000000005",
+    "title": "pwd",
+    "name": "run_command",
+    "kind": "execute",
+    "status": "completed",
+    "content": []
+  },
+  "structured-shell": {
+    "toolCallId": "call_10000000000000000006",
+    "title": "pwd",
+    "name": "run_command",
+    "kind": "execute",
+    "status": "completed",
+    "rawInput": {
+      "CommandLine": "pwd",
+      "WaitMsBeforeAsync": 10000,
+      "toolSummary": "Inspect directory"
+    },
+    "rawOutput": {
+      "output": "/workspace/cccccccccccccccccccccccccccccccc/project",
+      "exit_code": 0
+    }
+  },
+  "file-read": {
+    "toolCallId": "call_10000000000000000007",
+    "title": "File AGENTS.md",
+    "name": "read_file",
+    "kind": "read",
+    "status": "completed",
+    "rawInput": {
+      "EndLine": 800,
+      "Path": "/workspace/cccccccccccccccccccccccccccccccc/project/AGENTS.md",
+      "StartLine": 1
+    },
+    "locations": [
+      {
+        "path": "/workspace/cccccccccccccccccccccccccccccccc/project/AGENTS.md"
+      }
+    ]
+  },
+  "file-edit": {
+    "toolCallId": "call_10000000000000000008",
+    "title": "File src/example.rs",
+    "name": "edit_file",
+    "kind": "edit",
+    "status": "completed",
+    "rawInput": {
+      "Path": "/workspace/cccccccccccccccccccccccccccccccc/project/src/example.rs",
+      "Replacement": "after",
+      "Target": "before"
+    },
+    "locations": [
+      {
+        "path": "/workspace/cccccccccccccccccccccccccccccccc/project/src/example.rs"
+      }
+    ]
+  }
+}
