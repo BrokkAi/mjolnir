@@ -174,13 +174,13 @@ def test_live_shell_forms_preserve_audit_controls(tmp_path, command, kind):
     assert kind in {hit["kind"] for hit in report["hits"]}
 
 
-def audit_calls(tmp_path, calls, **metadata):
+def audit_calls(tmp_path, calls, *, allow_in_place_edits=False, **metadata):
     transcript = tmp_path / "transcript.json"
     transcript.write_text(json.dumps([{**metadata, "items": [
         {"seq": seq, "role": "tool", "body": {"call": call}}
         for seq, call in enumerate(calls, 1)
     ]}]))
-    return audit_pilot(transcript, OWN, commits=[PIN], single_commit=True)
+    return audit_pilot(transcript, OWN, commits=[PIN], single_commit=True, allow_in_place_edits=allow_in_place_edits)
 
 
 def shell(command):
@@ -495,7 +495,7 @@ def test_visible_command_uses_matching_rollout_directory(tmp_path, directory, ex
     "perl -i -pe 's/\\xC2\\xAD//g' brief.md",
 ])
 def test_suffix_free_in_place_brief_edits_pass(tmp_path, command):
-    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo")
+    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
     assert report["passed"], report["hits"]
     assert {hit["kind"] for hit in report["hits"]} == {"in-place-edit"}
 
@@ -513,15 +513,40 @@ def test_suffix_free_in_place_brief_edits_pass(tmp_path, command):
     ("perl -i -n -e 's/a/b/' brief.md", {"needs-inspection"}),
 ])
 def test_in_place_edits_keep_the_workspace_and_read_subset_checks(tmp_path, command, expected):
-    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo")
+    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
     assert not report["passed"]
     assert {hit["kind"] for hit in report["hits"]} == expected
 
 
 def test_in_place_edits_count_separate_commands_in_one_call(tmp_path):
     command = "sed -i 's/a/b/' brief.md; perl -i -lpe 's/b/c/' brief.md"
-    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo")
+    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
     assert report["passed"], report["hits"]
     assert [(hit["kind"], hit["seq"], hit["edit_index"]) for hit in report["hits"]] == [
         ("in-place-edit", 1, 0), ("in-place-edit", 1, 1),
     ]
+
+
+# Hard-won: 59c3dcb: an in-place edit through an alias left the original script cached.
+def test_in_place_edit_invalidates_scripts_recorded_under_another_path(tmp_path):
+    report = audit_calls(tmp_path, [
+        shell("ln -s real alias"),
+        shell("cat > real/script.sh <<'EOF'\ncat README.md\nEOF"),
+        shell("sed -i 's/README.md/notes.md/' alias/script.sh"),
+        shell("sh real/script.sh"),
+    ], cwd=f"/workspace/{OWN}/repo", allow_in_place_edits=True)
+    assert not report["passed"]
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [
+        (3, "in-place-edit"), (4, "needs-inspection"),
+    ]
+
+
+# Hard-won: 59c3dcb: the writer's in-place edit exception applied to every session.
+@pytest.mark.parametrize("writer", [True, False])
+def test_in_place_edit_requires_writer_permission(tmp_path, writer):
+    command = """bash -lc "sed -i 's/a/b/' brief.md" """
+    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}/repo",
+                         **({"allow_in_place_edits": True} if writer else {}))
+    assert report["passed"] is writer
+    expected = "in-place-edit" if writer else "needs-inspection"
+    assert {hit["kind"] for hit in report["hits"]} == {expected}

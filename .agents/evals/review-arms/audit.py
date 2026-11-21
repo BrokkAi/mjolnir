@@ -102,7 +102,8 @@ def call_command(call):
     return command if isinstance(command, str) and command.strip() else None
 
 
-def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None, rollout=None):
+def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None,
+         rollout=None, allow_in_place_edits=False):
     hits, calls = [], 0
     scripts, written = {}, set()
     for page in pages:
@@ -146,7 +147,8 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                 observed = {}
                 edit_index = 0
                 for name, snippet in pilot_hits(call, own_workspace, commits, single_commit, scripts=scripts,
-                                                written=written, cwd=page_cwd, home=page_home):
+                                                written=written, cwd=page_cwd, home=page_home,
+                                                allow_in_place_edits=allow_in_place_edits):
                     hit = {"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
                     if name == "in-place-edit":
                         hits.append({**hit, "edit_index": edit_index})
@@ -977,7 +979,8 @@ def perl_open_operand(value):
     return "read", value
 
 
-def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, scripts, written):
+def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, scripts, written,
+                     allow_in_place_edits):
     sources, values = args, ()
     in_place = False
     try:
@@ -1005,6 +1008,8 @@ def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, 
                 unsafe_edit |= (bool(hazards) or not path or path.startswith(("-", "~"))
                                 or bool(re.search(r"[*?\[]", path)) or not locations
                                 or any(not filename.startswith(prefix) for filename in locations))
+        if in_place and not allow_in_place_edits:
+            raise InspectionRequired("in-place edits are permitted only in writer sessions")
         if in_place and (not paths or unsafe_edit):
             raise InspectionRequired("in-place edit requires literal file paths inside its own workspace")
         if program == "perl":
@@ -1021,11 +1026,10 @@ def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, 
                     elif argument:
                         yield from path_hits(argument, own_workspace, cwd)
         if in_place:
-            for path in paths:
-                if scripts is not None:
-                    forget_script(scripts, path, cwd)
-                if written is not None:
-                    written.add(posixpath.basename(path))
+            if scripts is not None:
+                scripts.clear()  # An edited path may name a script through a directory alias.
+            if written is not None:
+                written.update(posixpath.basename(path) for path in paths)
             yield "in-place-edit", shlex.join(paths)
     except InspectionRequired:
         # Literals in an accepted program are data. In an opaque program
@@ -1081,16 +1085,20 @@ def python_name(expr, imports):
     return ""
 
 
-def subprocess_hits(value, own_workspace, commits, single_commit, cwd="", written=None):
+def subprocess_hits(value, own_workspace, commits, single_commit, cwd="", written=None, *,
+                    allow_in_place_edits=False):
     if isinstance(value, str):
-        yield from shell_hits(value, own_workspace, commits, single_commit, cwd=cwd, written=written)
+        yield from shell_hits(value, own_workspace, commits, single_commit, cwd=cwd, written=written,
+                              allow_in_place_edits=allow_in_place_edits)
     elif isinstance(value, (tuple, list)) and value and all(isinstance(word, str) for word in value):
-        yield from command_hits(list(value), own_workspace, commits, single_commit, cwd=cwd, written=written)
+        yield from command_hits(list(value), own_workspace, commits, single_commit, cwd=cwd, written=written,
+                              allow_in_place_edits=allow_in_place_edits)
     else:
         yield "needs-inspection", "subprocess argv is not visible in interpreter source"
 
 
-def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd="", written=None):
+def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd="", written=None, *,
+                     allow_in_place_edits=False):
     # This screen sees source literals, not runtime values. A protected path
     # built dynamically (e.g. expanduser('~') plus computed pieces) can pass.
     if program in PYTHON:
@@ -1126,7 +1134,8 @@ def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd
                     argv = ast.literal_eval(node.args[0]) if node.args else None
                 except (ValueError, TypeError, SyntaxError):
                     argv = None
-                yield from subprocess_hits(argv, own_workspace, commits, single_commit, cwd, written)
+                yield from subprocess_hits(argv, own_workspace, commits, single_commit, cwd, written,
+                                           allow_in_place_edits=allow_in_place_edits)
     else:
         # Inspect literal strings and recognizable calls in inline non-Python
         # source. Interpolated code remains subject to the literal-only limit.
@@ -1143,7 +1152,8 @@ def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd
             }:
                 literal = re.match(rf"\s*({QUOTED_SOURCE.rstrip()})", source[match.end():])
                 if literal and name.rsplit(".", 1)[-1] in {"exec", "execSync", "system"}:
-                    yield from subprocess_hits(literal[1][1:-1], own_workspace, commits, single_commit, cwd, written)
+                    yield from subprocess_hits(literal[1][1:-1], own_workspace, commits, single_commit, cwd, written,
+                                           allow_in_place_edits=allow_in_place_edits)
                 else:
                     yield "needs-inspection", "subprocess argv is not visible in interpreter source"
     yield "interpreter-screened", program
@@ -1321,7 +1331,7 @@ def link_hits(args, own_workspace, cwd):
 
 
 def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, written=None, cwd="", home=None,
-                 running_scripts=frozenset()):
+                 running_scripts=frozenset(), allow_in_place_edits=False):
     executable, *args = words
     if "/" in executable:
         yield from path_hits(executable, own_workspace, cwd)
@@ -1356,16 +1366,19 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
         if scripts is not None and written is not None:
             record_script_write(scripts, written, inner, (), None, cwd)
         yield from command_hits(inner, own_workspace, commits, single_commit,
-                                scripts=scripts, written=written, cwd=cwd, home=home, running_scripts=running_scripts)
+                                scripts=scripts, written=written, cwd=cwd, home=home, running_scripts=running_scripts,
+                                allow_in_place_edits=allow_in_place_edits)
     elif program in {"bash", "sh"} and len(args) == 2 and args[0] in {"-c", "-lc"}:
         yield from shell_hits(args[1], own_workspace, commits, single_commit, scripts=scripts, written=written, cwd=cwd, home=home,
-                              running_scripts=running_scripts)
+                              running_scripts=running_scripts, allow_in_place_edits=allow_in_place_edits)
     elif program in AWK | {"sed", "perl"}:
-        yield from text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, scripts, written)
+        yield from text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, scripts, written,
+                                    allow_in_place_edits)
     elif program in INLINE_OPTIONS and len(inline) >= 2 and inline[0] == INLINE_OPTIONS[program]:
         for arg in inline[2:]:
             yield from source_literal_hits(arg, own_workspace, cwd)
-        yield from interpreter_hits(program, inline[1], own_workspace, commits, single_commit, cwd, written)
+        yield from interpreter_hits(program, inline[1], own_workspace, commits, single_commit, cwd, written,
+                                    allow_in_place_edits=allow_in_place_edits)
         if scripts is not None:
             scripts.clear()  # A program can modify files through computed paths.
     elif program in SEARCH:
@@ -1507,7 +1520,7 @@ def recorded_script(words, scripts, written, cwd):
 
 
 def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, written=None, cwd="", home=None,
-               running_scripts=frozenset()):
+               running_scripts=frozenset(), allow_in_place_edits=False):
     if scripts is None:
         scripts = {}
     if written is None:
@@ -1526,7 +1539,7 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                     if script is None:
                         yield from command_hits(words, own_workspace, commits, single_commit,
                                                 scripts=scripts, written=written, cwd=start_dir, home=home,
-                                                running_scripts=running_scripts)
+                                                running_scripts=running_scripts, allow_in_place_edits=allow_in_place_edits)
                     else:
                         program, path, arguments, script_source = script
                         yield from path_hits(path, own_workspace, start_dir)
@@ -1538,10 +1551,12 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                                 raise InspectionRequired("recursive recorded script")
                             yield from shell_hits(script_source, own_workspace, commits, single_commit,
                                                   scripts=scripts, written=written, cwd=start_dir, home=home,
-                                                  running_scripts=running_scripts | {key})
+                                                  running_scripts=running_scripts | {key},
+                                                  allow_in_place_edits=allow_in_place_edits)
                             yield "interpreter-screened", program
                         else:
-                            yield from interpreter_hits(program, script_source, own_workspace, commits, single_commit, start_dir, written)
+                            yield from interpreter_hits(program, script_source, own_workspace, commits, single_commit,
+                                                        start_dir, written, allow_in_place_edits=allow_in_place_edits)
                             scripts.clear()
                 else:
                     record_script_write(scripts, written, words, redirections, source, start_dir)
@@ -1558,7 +1573,8 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                     yield from path_hits(words[0], own_workspace, start_dir)
                     for arg in arguments[1:]:
                         yield from source_literal_hits(arg, own_workspace, start_dir)
-                    yield from interpreter_hits(program, source, own_workspace, commits, single_commit, start_dir, written)
+                    yield from interpreter_hits(program, source, own_workspace, commits, single_commit,
+                                                        start_dir, written, allow_in_place_edits=allow_in_place_edits)
                     scripts.clear()
             except InspectionRequired as error:
                 scripts.clear()
@@ -1571,7 +1587,8 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
 PATH_KEYS = {"cwd", "path", "paths", "file_path", "filePath", "directory", "workdir", "target_file"}
 
 
-def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written, cwd, home):
+def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written, cwd, home,
+               allow_in_place_edits):
     title = call.get("title") or ""
     kind = call.get("kind")
     raw = call.get("rawInput")
@@ -1647,7 +1664,8 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
     if isinstance(command, list) and command and all(isinstance(word, str) for word in command):
         command = shlex.join(command)
     if isinstance(command, str) and command.strip() and (kind in {None, "execute", "other"} or listing):
-        yield from shell_hits(command, own_workspace, commits, single_commit, scripts=scripts, written=written, cwd=cwd or "", home=home)
+        yield from shell_hits(command, own_workspace, commits, single_commit, scripts=scripts, written=written,
+                              cwd=cwd or "", home=home, allow_in_place_edits=allow_in_place_edits)
     elif listing and not target_seen:
         yield "needs-inspection", f"missing read path: {title[:400]}"
     elif kind == "execute" or title in {"rql_query", "mcp__rql__rql_query"}:
@@ -1655,7 +1673,7 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
 
 
 def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, single_commit=False,
-                cwd=None, home=None):
+                cwd=None, home=None, allow_in_place_edits=False):
     """Screen pilot inputs; a needs-inspection hit prevents automatic acceptance."""
     try:
         pages = json.loads(transcript_path.read_text())
@@ -1667,7 +1685,7 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
             cwd = cwd or placement.get("cwd")
             home = home or placement.get("home")
         result = scan(pages, own_workspace, commits=commits, allow_rql=allow_rql, single_commit=single_commit,
-                      cwd=cwd, home=home, rollout=rollout_commands(
+                      cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits, rollout=rollout_commands(
                           sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))))
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = {"tool_items": 0, "hits": [{"kind": "missing-or-unreadable-transcript", "snippet": str(error)}]}

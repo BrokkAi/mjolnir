@@ -444,7 +444,8 @@ def pilot_audit(d, sid, allow_rql):
     commits = [*before["commits"], before["head_tree"], before["base_tree"]]
     import audit  # pilot-only; legacy brief_driver commands run without audit.py beside them
 
-    verdict = audit.audit_pilot(d / "transcript.json", sid, commits=commits, allow_rql=allow_rql)
+    verdict = audit.audit_pilot(d / "transcript.json", sid, commits=commits, allow_rql=allow_rql,
+                                allow_in_place_edits=True)
     save(d / "audit.json", verdict)
     return verdict
 
@@ -514,7 +515,7 @@ def finish_pilot_writer(pilot, sid, bug_id, profile):
     if not output.exists():
         output.write_bytes(text)
     state = driver.destroy_captured_pilot(pilot["run_root"], d, sid, profile, *pilot["model"], output.name,
-                                          allow_rql=bool(inputs["rql_tools"]))
+                                          allow_rql=bool(inputs["rql_tools"]), allow_in_place_edits=True)
     if state != "done":
         return state
     if inputs["rql_tools"]:

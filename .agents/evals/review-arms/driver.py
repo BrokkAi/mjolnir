@@ -245,7 +245,8 @@ def capture_pilot_rollouts(d, sid):
     return True
 
 
-def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allow_rql=False):
+def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allow_rql=False,
+                           allow_in_place_edits=False):
     """Validate and flush the recorded evidence before destroying its exact session."""
     import audit
 
@@ -306,7 +307,8 @@ def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allo
     durable_pilot_files(root, d, [*paths, *([rollout_dir] if rollouts else []), receipt])
     before = json.loads((d / "pre-inventory.json").read_text())
     commits = [*before["commits"], before["head_tree"], before["base_tree"]]
-    report = audit.audit_pilot(d / "transcript.json", sid, commits=commits, allow_rql=allow_rql)
+    report = audit.audit_pilot(d / "transcript.json", sid, commits=commits, allow_rql=allow_rql,
+                               allow_in_place_edits=allow_in_place_edits)
     save(d / "audit.json", report)
     if not report["passed"]:
         return retain_pilot_session(d, sid, "stored transcript did not pass the audit", void_reason=report["hits"])
