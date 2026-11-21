@@ -384,27 +384,51 @@ pub(super) async fn run_daemon_runtime(
                 if cancellation.is_cancelled() {
                     return;
                 }
-                let earliest = mj_core::runtime::spawn_blocking(
+                let sleep_for = match mj_core::runtime::spawn_blocking(
                     mj_controller::database::earliest_host_snapshot_cache_written_at,
                 )
                 .await
-                .ok()
-                .and_then(|res| res.ok())
-                .flatten();
-                let sleep_for = earliest
-                    .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-                    .map(|dt| {
-                        let due = dt.with_timezone(&chrono::Utc) + ttl;
-                        let remaining = due - chrono::Utc::now();
-                        if remaining <= chrono::Duration::zero() {
-                            // Overdue row remained (e.g. unreachable host); retry after backoff.
-                            Duration::from_secs(900)
-                        } else {
-                            remaining
-                                .to_std()
-                                .unwrap_or_else(|_| Duration::from_secs(900))
+                {
+                    Ok(Ok(Some(ts))) => match chrono::DateTime::parse_from_rfc3339(&ts) {
+                        Ok(dt) => {
+                            let due = dt.with_timezone(&chrono::Utc) + ttl;
+                            let remaining = due - chrono::Utc::now();
+                            if remaining <= chrono::Duration::zero() {
+                                // Overdue row remained (e.g. unreachable host); retry after backoff.
+                                Some(Duration::from_secs(900))
+                            } else {
+                                Some(
+                                    remaining
+                                        .to_std()
+                                        .unwrap_or_else(|_| Duration::from_secs(900)),
+                                )
+                            }
                         }
-                    });
+                        Err(error) => {
+                            tracing::warn!(
+                                ts,
+                                %error,
+                                "invalid host_snapshot_cache written_at timestamp; retrying expiry sweep after backoff"
+                            );
+                            Some(Duration::from_secs(900))
+                        }
+                    },
+                    Ok(Ok(None)) => None,
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            error = %format!("{error:#}"),
+                            "host_snapshot_cache expiry query failed; retrying after backoff"
+                        );
+                        Some(Duration::from_secs(900))
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "host_snapshot_cache expiry query task failed; retrying after backoff"
+                        );
+                        Some(Duration::from_secs(900))
+                    }
+                };
                 match sleep_for {
                     Some(delay) => {
                         tokio::select! {
