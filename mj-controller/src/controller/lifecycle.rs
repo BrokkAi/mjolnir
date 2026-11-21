@@ -407,10 +407,23 @@ impl Controller {
         let mut origin_delta = (checkpoint_export_policy == CheckpointExportPolicy::OriginDelta)
             .then(|| OriginDeltaSuspend::load(self, session_id))
             .transpose()?;
-        if before_close.is_none()
-            && origin_delta.as_ref().is_some_and(|attempt| !attempt.request_recorded())
+        let legacy_closing_intent = previous.state == SessionState::Closing
+            && origin_delta.as_ref().is_some_and(|attempt| !attempt.accepted());
+        if origin_delta
+            .as_ref()
+            .is_some_and(|attempt| {
+                !attempt.accepted() || (before_close.is_none() && !attempt.request_recorded())
+            })
             && let Err(error) = self.preflight_origin_delta_suspension(session_id, executor)
         {
+            let error = if legacy_closing_intent {
+                mj_core::refusal::Refusal::precondition(format!(
+                    "suspend requested before the upgrade needs consent: {error:#}"
+                ))
+                .into()
+            } else {
+                error
+            };
             if previous.state == SessionState::Closing {
                 let record = self.state.sessions.get_mut(session_id).unwrap();
                 apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
@@ -455,6 +468,136 @@ impl Controller {
                     let record = self.state.sessions.get_mut(session_id).unwrap();
                     apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
                     return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
+                }
+            }
+            if !attempt.request_recorded() && !attempt.worker_capable()? {
+                let mut already_recovered_worker = false;
+                let recovery_result: Result<()> = if let Some(pending) =
+                    crate::database::load_worker_restart(session_id)?
+                    && self.state.sessions[session_id].target.as_deref() == Some(&pending.target)
+                {
+                    // A prior suspend worker swap crashed mid-flight. Finish or
+                    // recover it through `start_worker` (reattaching a live
+                    // replacement or spawning the installed binary if the old
+                    // worker was stopped) before checking whether an upgrade is
+                    // still needed.
+                    match attempt
+                        .start_worker(
+                            self,
+                            admission,
+                            session_id,
+                            executor,
+                            manager,
+                            mj_core::worker_launch::WorkerRunMode::Harness,
+                        )
+                        .await
+                    {
+                        Ok(relay) => {
+                            relay.release();
+                            retire_worker_restart_intent(session_id)
+                        }
+                        Err(error) => {
+                            already_recovered_worker = true;
+                            Err(error)
+                        }
+                    }
+                } else {
+                    Ok(())
+                };
+                let upgrade_result = match recovery_result {
+                    Err(error) => Err(error),
+                    Ok(()) if attempt.worker_capable()? => Ok(()),
+                    Ok(()) => {
+                        if let Some(manager) = manager {
+                            self.upgrade_session_worker_for_suspend(
+                                admission, session_id, executor, manager,
+                            )
+                            .await
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "older worker cannot be upgraded for origin-delta suspend without a session manager"
+                            ))
+                        }
+                    }
+                };
+                if let Err(error) = upgrade_result {
+                    let final_error = if !already_recovered_worker
+                        && WorkerRestartLeftNoWorker::marks(&error)
+                    {
+                        // Swap failed after stopping the old worker: attempt ONE
+                        // in-place recovery restart with the installed binary.
+                        match attempt
+                            .start_worker(
+                                self,
+                                admission,
+                                session_id,
+                                executor,
+                                manager,
+                                mj_core::worker_launch::WorkerRunMode::Harness,
+                            )
+                            .await
+                        {
+                            Ok(relay) => {
+                                relay.release();
+                                if let Err(cleanup) = retire_worker_restart_intent(session_id) {
+                                    tracing::warn!(
+                                        session_id,
+                                        %cleanup,
+                                        "could not clear worker restart intent after in-place recovery"
+                                    );
+                                }
+                                // Recovery succeeded: strip WorkerRestartLeftNoWorker so
+                                // apply_close_checkpoint_failure leaves the session Running.
+                                anyhow::anyhow!("{error:#}")
+                            }
+                            Err(recovery_error) => error
+                                .context(format!(
+                                    "in-place worker recovery also failed; retry suspend or use --without-checkpoint: {recovery_error:#}"
+                                ))
+                                .context(WorkerRestartLeftNoWorker),
+                        }
+                    } else {
+                        error
+                    };
+                    if let Err(cleanup) = attempt.clear_after_restart() {
+                        tracing::warn!(
+                            session_id,
+                            %cleanup,
+                            "could not clear worker suspend records after failed worker upgrade"
+                        );
+                    }
+                    let record = self.state.sessions.get_mut(session_id).unwrap();
+                    apply_close_checkpoint_failure(
+                        record,
+                        &previous,
+                        &final_error,
+                        now(),
+                        harness_failure,
+                    );
+                    return Err(self.persist_failed_checkpoint_state_or_restore(
+                        session_id,
+                        &previous,
+                        final_error,
+                    ));
+                }
+                if !attempt.worker_capable()? {
+                    let error = anyhow::anyhow!(
+                        "upgraded worker did not advertise origin-delta suspend capability"
+                    );
+                    if let Err(cleanup) = attempt.clear_after_restart() {
+                        tracing::warn!(
+                            session_id,
+                            %cleanup,
+                            "could not clear worker suspend records after missing capability"
+                        );
+                    }
+                    let record = self.state.sessions.get_mut(session_id).unwrap();
+                    apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
+                    return Err(self.persist_failed_checkpoint_state_or_restore(
+                        session_id,
+                        &previous,
+                        error,
+                    ));
                 }
             }
             if !attempt.request_recorded() && let Some(manager) = manager {
@@ -1042,6 +1185,11 @@ impl Controller {
             "suspension recovery read the worker's execution state"
         );
         let closed = async {
+            // Legacy sealed-intent compatibility branch (removable only once
+            // the upgrade floor guarantees no older daemon could have left a
+            // sealed legacy Closing intent; also serves crashes after seal on
+            // the current release): wait out Closing and complete teardown from
+            // the already-installed verified checkpoint without any new export.
             match execution {
                 RelayExecutionState::Closed => {}
                 RelayExecutionState::Closing => {

@@ -44,8 +44,10 @@ use super::worktree::{
     managed_worktree_target, plan_raw_to_workspace_for_session,
     plan_raw_to_workspace_from_origin_delta,
     preserve_retained_managed_worktree_branch, raw_checkout_divergence_notice,
-    raw_checkout_position_with_checkout, raw_checkout_snapshot,
-    raw_conversion_preview_with_checkout, restore_managed_worktree,
+    capture_legacy_raw_checkout_snapshot, ensure_managed_worktree_available,
+    raw_checkout_position_with_checkout, raw_conversion_preview_with_checkout,
+    restore_legacy_worktree_as_managed_clone, restore_managed_worktree,
+    upgrade_legacy_worktree_to_clone,
     resume_compatibility_with_checkout,
 };
 use super::{
@@ -1887,6 +1889,29 @@ impl Controller {
                 }
             }
         }
+        if !origin_delta
+            && !transferring_workspace
+            && plan == ResumePlan::RawToWorkspace
+            && let Some(worktree) = previous_managed_worktree.as_ref()
+        {
+            if managed_worktree_checkout_exists(executor, worktree)? {
+                return Err(mj_core::refusal::Refusal::precondition(
+                    "This older session still has a local managed checkout on disk; resume it on its original target first, then suspend or move it.",
+                )
+                .into());
+            }
+            let token = self
+                .github_token_for_repository_preflight(session_id)
+                .await?;
+            ensure_legacy_worktree_cross_target_base_on_origin(
+                &previous,
+                worktree,
+                &archive_path,
+                archive_manifest,
+                executor,
+                token.as_deref(),
+            )?;
+        }
         // A worktree that stays put is reached with the machine's current ssh
         // options; only its location had to match (J-21).
         if plan == ResumePlan::InPlace
@@ -1897,6 +1922,30 @@ impl Controller {
             worktree.target = current;
             let refreshed_checkout = self.state.checkout_for_record(session_id, &previous)?;
             previous_managed_worktree = refreshed_checkout.effective().managed_worktree().cloned();
+        }
+        let mut upgraded_legacy_worktree: Option<(
+            mj_core::state::ManagedWorktree,
+            Option<PathBuf>,
+        )> = None;
+        if !origin_delta
+            && !transferring_workspace
+            && plan == ResumePlan::InPlace
+            && !archive_manifest.repositories.is_empty()
+            && let Some(worktree) = previous_managed_worktree.as_ref()
+            && worktree.kind == mj_core::state::ManagedCheckoutKind::Worktree
+            && matches!(
+                &worktree.target,
+                mj_core::state::ManagedWorktreeTarget::Local
+            )
+            && !managed_worktree_checkout_exists(executor, worktree)?
+        {
+            let (upgraded_clone, upgraded_project_directory) = upgrade_legacy_worktree_to_clone(
+                worktree,
+                session_id,
+                previous.project_directory.as_deref(),
+            );
+            ensure_managed_worktree_available(executor, &upgraded_clone)?;
+            upgraded_legacy_worktree = Some((upgraded_clone, upgraded_project_directory));
         }
         // A converting resume writes its own archive below, from the accepted
         // repository's selected network source, and provisioning reads that
@@ -2100,15 +2149,13 @@ impl Controller {
                 worktree.kind == mj_core::state::ManagedCheckoutKind::Worktree
                     && matches!(worktree.target, mj_core::state::ManagedWorktreeTarget::Local)
             }) {
-                let mut upgraded = worktree.clone();
-                upgraded.kind = mj_core::state::ManagedCheckoutKind::Clone;
-                upgraded.worktree_root = mj_core::target_path::join(
-                    &worktree.source_repository,
-                    &Path::new(".mj").join("clones").join(session_id),
+                let (upgraded, upgraded_project_directory) = upgrade_legacy_worktree_to_clone(
+                    worktree,
+                    session_id,
+                    previous.project_directory.as_deref(),
                 );
-                upgraded.base_commit = None;
-                super::worktree::ensure_managed_worktree_available(executor, &upgraded)?;
-                Some(upgraded)
+                ensure_managed_worktree_available(executor, &upgraded)?;
+                Some((upgraded, upgraded_project_directory))
             } else {
                 None
             }
@@ -2146,22 +2193,12 @@ impl Controller {
                 apply_workspace_to_raw(record, conversion);
             }
             None => {
-                if let Some(upgraded) = upgraded_origin_delta_clone.as_ref() {
-                    let old_root = previous_managed_worktree
-                        .as_ref()
-                        .map(|worktree| worktree.worktree_root.as_path());
-                    let new_project_directory = match (record.project_directory.as_deref(), old_root)
-                    {
-                        (Some(project_dir), Some(old_root)) => project_dir
-                            .strip_prefix(old_root)
-                            .ok()
-                            .filter(|sub| !sub.as_os_str().is_empty())
-                            .map(|sub| mj_core::target_path::join(&upgraded.worktree_root, sub))
-                            .unwrap_or_else(|| upgraded.worktree_root.clone()),
-                        _ => upgraded.worktree_root.clone(),
-                    };
+                if let Some((upgraded, upgraded_project_directory)) = upgraded_origin_delta_clone
+                    .as_ref()
+                    .or(upgraded_legacy_worktree.as_ref())
+                {
                     record.managed_worktree = Some(Box::new(upgraded.clone()));
-                    record.project_directory = Some(new_project_directory);
+                    record.project_directory = upgraded_project_directory.clone();
                 } else if let (Some(worktree), Some(refreshed)) = (
                     record.managed_worktree.as_mut(),
                     previous_managed_worktree.as_ref(),
@@ -2192,9 +2229,10 @@ impl Controller {
         }
 
         let mut recreated_managed_worktree = false;
-        // Set once a conversion has written its archive, so the success path can
-        // retire the archive it replaced and the failure path can remove it.
-        let mut conversion_checkpoint_written: Option<mj_core::state::CheckpointMetadata> = None;
+        // Ephemeral temp directory holding an origin-delta archive for legacy
+        // raw-to-workspace conversion (deleted when this resume finishes; never
+        // replaces `record.checkpoint`).
+        let mut ephemeral_conversion_archive: Option<(tempfile::TempDir, PathBuf)> = None;
         let result = async {
             if origin_delta {
                 ensure!(!transferring_workspace, "origin delta live move is unavailable");
@@ -2203,7 +2241,7 @@ impl Controller {
                     // then applies the origin-delta snapshot into the workspace.
                 } else if plan == ResumePlan::WorkspaceToRaw {
                     // Handled in the WorkspaceToRaw conversion block below.
-                } else if let Some(upgraded) = upgraded_origin_delta_clone.as_ref() {
+                } else if let Some((upgraded, _)) = upgraded_origin_delta_clone.as_ref() {
                     resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
                         executor, upgraded, &archive_path, archive_manifest,
                     )?);
@@ -2218,17 +2256,47 @@ impl Controller {
                     // ManagedWorkspace resuming in place: provisioning clones from origin;
                     // restore_into_target applies the origin-delta snapshot.
                 }
+            } else if let Some((upgraded_clone, _)) = upgraded_legacy_worktree.as_ref() {
+                resume_notices.extend(restore_legacy_worktree_as_managed_clone(
+                    executor,
+                    upgraded_clone,
+                    &archive_path,
+                    archive_manifest,
+                )?);
             } else if let Some(worktree) = previous_managed_worktree.as_ref() {
-                recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
-                if !transferring_workspace && recreated_managed_worktree && plan == ResumePlan::RawToWorkspace {
-                    if worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
-                        mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
-                            &archive_path, &worktree.worktree_root, &SystemGit,
-                        )?;
-                    } else {
-                        mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
-                            &archive_path, &worktree.worktree_root, &worktree.branch, &SystemGit,
-                        )?;
+                if !transferring_workspace
+                    && plan == ResumePlan::RawToWorkspace
+                    && !archive_manifest.repositories.is_empty()
+                {
+                    // Legacy managed checkout (Worktree or Clone) already
+                    // retired: base commit was verified on origin before
+                    // acceptance; provisioning clones origin and
+                    // restore_into_target applies the original legacy archive
+                    // directly (preserving archived untracked files & stashes).
+                } else {
+                    recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
+                    if !transferring_workspace
+                        && recreated_managed_worktree
+                        && plan == ResumePlan::RawToWorkspace
+                    {
+                        if worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
+                            resume_notices.extend(
+                                mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
+                                    &archive_path,
+                                    &worktree.worktree_root,
+                                    &SystemGit,
+                                )?,
+                            );
+                        } else {
+                            resume_notices.extend(
+                                mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
+                                    &archive_path,
+                                    &worktree.worktree_root,
+                                    &worktree.branch,
+                                    &SystemGit,
+                                )?,
+                            );
+                        }
                     }
                 }
             }
@@ -2264,38 +2332,45 @@ impl Controller {
                     if transferring_workspace {
                         // Move installs its separately verified Git/file transfer below.
                     } else if conversion.worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
-                        mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
-                            &archive_path, &conversion.worktree.worktree_root, &SystemGit,
-                        )?;
+                        resume_notices.extend(
+                            mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
+                                &archive_path,
+                                &conversion.worktree.worktree_root,
+                                &SystemGit,
+                            )?,
+                        );
                     } else {
-                        mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
-                            &archive_path,
-                            &conversion.worktree.worktree_root,
-                            &conversion.worktree.branch,
-                            &SystemGit,
-                        )?;
+                        resume_notices.extend(
+                            mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
+                                &archive_path,
+                                &conversion.worktree.worktree_root,
+                                &conversion.worktree.branch,
+                                &SystemGit,
+                            )?,
+                        );
                     }
                 }
             }
-            // A local checkout becomes an isolated workspace by being
-            // re-snapshotted into a new archive whose provenance is the
-            // accepted repository's network source. Provisioning clones that
-            // source, and the restore below lays this snapshot over the clone.
+            // A legacy local raw checkout becomes an isolated workspace by
+            // capturing an origin-delta snapshot directly from the untouched
+            // raw checkout, without replacing `record.checkpoint`.
             if let Some(conversion) = conversion
                 .as_ref()
                 .and_then(ResumeConversion::raw_to_workspace)
                 && !transferring_workspace
                 && !origin_delta
+                && previous_managed_worktree.is_none()
             {
-                let snapshot = raw_checkout_snapshot(
+                ensure!(
+                    conversion.retire.is_none(),
+                    "cannot run raw-checkout conversion when retiring a managed checkout"
+                );
+                let captured = capture_legacy_raw_checkout_snapshot(
                     &conversion.checkout,
                     &conversion.repository_id,
                     &conversion.source,
                     &conversion.destination,
                     &SystemGit,
-                    conversion.retire.as_ref().is_some_and(|checkout| {
-                        checkout.kind == mj_core::state::ManagedCheckoutKind::Clone
-                    }),
                 )
                 .context("snapshot the host checkout for its new target")?;
                 resume_notices.push(conversion_notice(
@@ -2303,35 +2378,29 @@ impl Controller {
                     previous_project_directory
                         .as_deref()
                         .unwrap_or(&conversion.checkout),
-                    snapshot.metadata.branch.as_deref(),
+                    captured.repository.metadata.branch.as_deref(),
                     conversion.retire.as_ref(),
                 ));
-                let archives = mj_core::config::sessions_dir();
-                std::fs::create_dir_all(&archives).with_context(|| {
-                    format!("create the checkpoint directory {}", archives.display())
-                })?;
-                // Named like every other managed archive, so an interrupted
-                // conversion's file is reconciled away, with `converted`
-                // marking where it came from.
-                let output = archives.join(format!(
-                    "{session_id}-converted-{}-{}.hel.zip",
-                    previous
-                        .checkpoint
-                        .as_ref()
-                        .map_or(0, |checkpoint| checkpoint.event_frontier),
-                    new_command_id("archive")?
-                ));
-                let written = conversion_checkpoint(&archive_path, snapshot, &output)?;
-                conversion_checkpoint_written = Some(written.clone());
-                let record = self.state.sessions.get_mut(session_id).unwrap();
-                record.checkpoint = Some(Box::new(written));
-                record.updated_at = now();
-                // Persist the converted archive before provisioning without
-                // restoring client-owned fields from this earlier snapshot.
-                crate::database::save_resumed_session(
-                    &self.state.sessions[session_id],
-                    selected_container_size.as_ref().map(|(host, size)| (host.as_str(), *size)),
-                )?;
+                if conversion.retire.is_none() && !captured.untracked_paths.is_empty() {
+                    let list = captured
+                        .untracked_paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    resume_notices.push(format!(
+                        "Untracked files were not copied and remain in {}: {list}",
+                        conversion.checkout.display()
+                    ));
+                }
+                let temp_dir = tempfile::tempdir()
+                    .context("create temporary directory for legacy raw conversion")?;
+                let temp_archive = temp_dir.path().join("conversion.hel.zip");
+                let ephemeral_meta =
+                    conversion_checkpoint(&archive_path, captured.repository, &temp_archive)?;
+                self.state.sessions.get_mut(session_id).unwrap().checkpoint =
+                    Some(Box::new(ephemeral_meta));
+                ephemeral_conversion_archive = Some((temp_dir, temp_archive));
             }
             let utility_handoff = {
                 let _provisioning = ResumePhaseTimer::new(session_id, "provision destination");
@@ -2360,6 +2429,13 @@ impl Controller {
                     None
                 }
             };
+            if ephemeral_conversion_archive.is_some() {
+                // Provisioning has read the ephemeral conversion metadata;
+                // restore the durable checkpoint on the in-memory record
+                // before restore_into_target or any later persistence runs.
+                self.state.sessions.get_mut(session_id).unwrap().checkpoint =
+                    previous.checkpoint.clone();
+            }
             if transferring_workspace {
                 self.restore_move_workspace(session_id, executor)?;
             }
@@ -2373,17 +2449,16 @@ impl Controller {
                             && !is_attached_checkout))
             } else {
                 !transferring_workspace
+                    && upgraded_legacy_worktree.is_none()
                     && ((resumed_project_directory.is_none() && conversion.is_none())
                         || plan == ResumePlan::RawToWorkspace
                         || (recreated_managed_worktree && plan == ResumePlan::InPlace))
             };
-            // A conversion restores the archive it just wrote, not the raw one
-            // the session was stopped with.
-            let restored_archive = conversion_checkpoint_written
+            // A legacy raw-to-workspace conversion restores the ephemeral
+            // origin-delta archive captured from the untouched raw checkout.
+            let restored_archive = ephemeral_conversion_archive
                 .as_ref()
-                .map_or(archive_path.as_path(), |checkpoint| {
-                    checkpoint.archive_path.as_path()
-                });
+                .map_or(archive_path.as_path(), |(_, path)| path.as_path());
             self.restore_into_target(
                 session_id,
                 RestoreIntoTarget {
@@ -2414,18 +2489,20 @@ impl Controller {
             .await
         }
         .await;
+        if ephemeral_conversion_archive.is_some()
+            && let Some(record) = self.state.sessions.get_mut(session_id)
+        {
+            // Restore the durable checkpoint on every exit path (including a
+            // provisioning error before the post-provision restore above) so
+            // failure handlers never persist the deleted temp archive path.
+            record.checkpoint = previous.checkpoint.clone();
+        }
+        drop(ephemeral_conversion_archive);
         match result {
             Ok(materialized) => {
-                // The session now runs from the conversion archive, so the raw
-                // one it replaced can go.
-                if let Some(written) = &conversion_checkpoint_written {
-                    super::checkpoint::prune_replaced_checkpoint(
-                        previous.checkpoint.as_deref(),
-                        written,
-                    );
-                }
                 let latest = crate::database::load_session_record(session_id)?.context("resumed session disappeared")?;
                 let record = self.state.sessions.get_mut(session_id).unwrap();
+                record.checkpoint = latest.checkpoint;
                 record.resource_allocation = latest.resource_allocation;
                 record.additional_mounts = latest.additional_mounts;
                 Ok(materialized)
@@ -2433,18 +2510,6 @@ impl Controller {
             Err(error) => {
                 if move_operation.is_none() && self.resume_runtime_has_boot_owner(session_id)? {
                     return Err(self.keep_started_resume_after_failure(session_id, error)?);
-                }
-                // The rollback puts back a record that names the previous
-                // archive, so the conversion's archive is nothing but litter.
-                if let Some(written) = &conversion_checkpoint_written
-                    && let Err(remove_error) = std::fs::remove_file(&written.archive_path)
-                    && remove_error.kind() != std::io::ErrorKind::NotFound
-                {
-                    tracing::warn!(
-                        session_id,
-                        path = %written.archive_path.display(),
-                        "could not remove the conversion checkpoint after resume failed: {remove_error}"
-                    );
                 }
                 // Put back whatever this resume wrote to the durable
                 // projection, including the failed worker's own lines.
@@ -2704,6 +2769,67 @@ fn apply_failed_resume_rollback_with_ownership(
             anyhow::anyhow!(failure)
         }
     }
+}
+
+/// Verify that a legacy linked-worktree archive's base commit / bundle
+/// prerequisites are available on its network origin before accepting a
+/// cross-target (`RawToWorkspace`) resume. If the starting commit exists only
+/// in `source_repository` on the original target, refuse with the ExecPlan's
+/// exact guidance.
+pub(super) fn ensure_legacy_worktree_cross_target_base_on_origin(
+    previous: &SessionRecord,
+    worktree: &mj_core::state::ManagedWorktree,
+    archive_path: &Path,
+    archive_manifest: &mj_checkpoint::archive::ArchiveManifest,
+    executor: &impl CommandExecutor,
+    github_token: Option<&str>,
+) -> Result<()> {
+    let refusal = || -> anyhow::Error {
+        mj_core::refusal::Refusal::precondition(format!(
+            "this older session's starting commit exists only in {} on {}; resume it there, push, then move it",
+            worktree.source_repository.display(),
+            previous.target_template_id
+        ))
+        .into()
+    };
+    let [repository] = archive_manifest.repositories.as_slice() else {
+        return Err(refusal());
+    };
+    let origin = repository.metadata.origin.trim();
+    if origin.is_empty() || mj_core::remote_git::validate_network_url(origin).is_err() {
+        return Err(refusal());
+    }
+    let bundles = mj_checkpoint::archive::read_checkpoint_repository_bundles(archive_path)?;
+    let Some(archived) = bundles
+        .into_iter()
+        .find(|bundle| bundle.metadata.id == repository.metadata.id)
+    else {
+        return Err(refusal());
+    };
+    let configured = ProjectRepository {
+        id: repository.metadata.id.clone(),
+        github: None,
+        local: None,
+        git_ref: None,
+        destination: repository.metadata.relative_destination.clone(),
+        mbx_namespace: None,
+    };
+    let accepted_source = mj_core::remote_git::NetworkGitSource {
+        fetch_url: origin.to_owned(),
+        push_urls: repository.metadata.push_urls.clone(),
+    };
+    if checkpoint_source_missing_commit(
+        &configured,
+        Some(&accepted_source),
+        &archived,
+        executor,
+        github_token,
+    )?
+    .is_some()
+    {
+        return Err(refusal());
+    }
+    Ok(())
 }
 
 /// What the conversation is told when a local session moves into a target.

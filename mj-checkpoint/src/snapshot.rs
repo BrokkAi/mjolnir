@@ -1747,6 +1747,18 @@ fn snapshot_exclusions(
             let skip_shared = shared_source_skip_refs(runner, checkout, remote, selected_refs)?;
             origin_exclusions(runner, checkout, remote, refs, &skip_shared)
         }
+        ExclusionSource::Remote(_) => {
+            let skip_shared = shared_source_skip_refs(runner, checkout, remote, selected_refs)?;
+            let mut result = remote_objects(runner, checkout, remote, &[], &skip_shared)?;
+            if result.stale && result.objects.is_empty() {
+                result.notice = Some(
+                    "snapshot carries full history because the selected remote was unreachable"
+                        .to_owned(),
+                );
+                result.stale = false;
+            }
+            Ok(result)
+        }
         ExclusionSource::Commits(commits) => {
             let mut objects = Vec::new();
             for commit in commits {
@@ -1988,33 +2000,38 @@ fn estimate_delta_with_source(
     let capture = CaptureGit::new(runner);
     let runner: &dyn GitCommandRunner = &capture;
     let history_cutoff = matches!(source, ExclusionSource::Commits(_));
-    let (remote, inventory_origin) = if history_cutoff {
-        (String::new(), None)
-    } else {
-        let configured = run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?;
-        let remote = if configured.status == 0 {
-            Some("origin".to_owned())
-        } else {
-            origin_override
-        };
-        let Some(remote) = remote else {
-            ensure!(
-                matches!(ownership, CheckoutOwnership::Raw { .. }),
-                "managed snapshot requires an origin remote or source override"
-            );
-            return Ok(DeltaEstimate {
-                committed_bytes: 0,
-                working_state_bytes: None,
-                total_bytes: None,
-                remote_refs_stale: false,
-            });
-        };
-        let resolved_remote = if configured.status == 0 {
-            remote.clone()
-        } else {
-            absolute_config_url(checkout, &remote)?
-        };
-        (resolved_remote, Some(remote))
+    let (remote, inventory_origin) = match source {
+        ExclusionSource::Commits(_) => (String::new(), None),
+        ExclusionSource::Remote(url) => (
+            absolute_config_url(checkout, url)?,
+            Some(url.clone()),
+        ),
+        ExclusionSource::Origin => {
+            let configured = run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?;
+            let remote = if configured.status == 0 {
+                Some("origin".to_owned())
+            } else {
+                origin_override
+            };
+            let Some(remote) = remote else {
+                ensure!(
+                    matches!(ownership, CheckoutOwnership::Raw { .. }),
+                    "managed snapshot requires an origin remote or source override"
+                );
+                return Ok(DeltaEstimate {
+                    committed_bytes: 0,
+                    working_state_bytes: None,
+                    total_bytes: None,
+                    remote_refs_stale: false,
+                });
+            };
+            let resolved_remote = if configured.status == 0 {
+                remote.clone()
+            } else {
+                absolute_config_url(checkout, &remote)?
+            };
+            (resolved_remote, Some(remote))
+        }
     };
     let inventory = workspace_inventory_scoped(
         runner,
@@ -2105,6 +2122,9 @@ fn estimate_delta_with_source(
 pub enum ExclusionSource {
     #[default]
     Origin,
+    /// Exclude objects reachable from this explicit remote URL even when
+    /// `remote.origin.url` points elsewhere.
+    Remote(String),
     Commits(Vec<String>),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2459,24 +2479,29 @@ fn capture_prepared_workspace(
     let checkout = &repository.checkout;
     let ownership = &repository.ownership;
     let history_cutoff = matches!(repository.exclusions, ExclusionSource::Commits(_));
-    let (origin_url, remote) = if history_cutoff {
-        (None, String::new())
-    } else {
-        let configured = config_values(runner, checkout, "remote.origin.url")?
-            .into_iter()
-            .next();
-        let origin_url = configured
-            .clone()
-            .or_else(|| repository.origin_override.clone());
-        let Some(origin_url) = origin_url else {
-            return capture_in_place_metadata(runner, repository);
-        };
-        let remote = if configured.is_some() {
-            "origin".to_owned()
-        } else {
-            absolute_config_url(checkout, &origin_url)?
-        };
-        (Some(redact_snapshot_url(&origin_url)?), remote)
+    let (origin_url, remote) = match &repository.exclusions {
+        ExclusionSource::Commits(_) => (None, String::new()),
+        ExclusionSource::Remote(url) => {
+            let remote = absolute_config_url(checkout, url)?;
+            (Some(redact_snapshot_url(url)?), remote)
+        }
+        ExclusionSource::Origin => {
+            let configured = config_values(runner, checkout, "remote.origin.url")?
+                .into_iter()
+                .next();
+            let origin_url = configured
+                .clone()
+                .or_else(|| repository.origin_override.clone());
+            let Some(origin_url) = origin_url else {
+                return capture_in_place_metadata(runner, repository);
+            };
+            let remote = if configured.is_some() {
+                "origin".to_owned()
+            } else {
+                absolute_config_url(checkout, &origin_url)?
+            };
+            (Some(redact_snapshot_url(&origin_url)?), remote)
+        }
     };
     let cut = pin_workspace_cut(runner, checkout, ownership)?;
     let refs = selected_refs(runner, checkout, &cut, ownership)?;
