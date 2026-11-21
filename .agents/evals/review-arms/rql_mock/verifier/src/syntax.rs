@@ -7,6 +7,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{BinOp, Block, Expr, FnArg, Pat, Signature, Stmt};
 
+use crate::declarations::{Declaration, Declarations};
 use crate::source::{Bytes, Source};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -86,14 +87,14 @@ struct Scanner<'a> {
     shadowed: BTreeSet<String>,
     indirect_names: BTreeSet<String>,
     wildcard_import: bool,
-    constructor_name_exceptions: BTreeSet<String>,
+    declarations: &'a Declarations,
+    inline_modules: Vec<String>,
+    self_type: Option<syn::Path>,
 }
 
-pub fn scan(source: &mut Source) -> syn::Result<Syntax> {
-    let file = syn::parse_file(&source.text)?;
-    source.set_lexical_prefix(&file);
+pub fn scan(source: &Source, file: &syn::File, declarations: &Declarations) -> Syntax {
     let mut imports = Imports::default();
-    imports.visit_file(&file);
+    imports.visit_file(file);
     let mut scanner = Scanner {
         source,
         syntax: Syntax::default(),
@@ -104,10 +105,12 @@ pub fn scan(source: &mut Source) -> syn::Result<Syntax> {
         shadowed: BTreeSet::new(),
         indirect_names: imports.aliases,
         wildcard_import: imports.wildcard,
-        constructor_name_exceptions: imports.constructor_name_exceptions,
+        declarations,
+        inline_modules: Vec::new(),
+        self_type: None,
     };
-    scanner.visit_file(&file);
-    Ok(scanner.syntax)
+    scanner.visit_file(file);
+    scanner.syntax
 }
 
 #[derive(Default)]
@@ -126,40 +129,11 @@ impl<'ast> Visit<'ast> for Bindings {
 struct Imports {
     aliases: BTreeSet<String>,
     wildcard: bool,
-    constructor_name_exceptions: BTreeSet<String>,
 }
 
 impl<'ast> Visit<'ast> for Imports {
     fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
-        let alias = rename.rename.unraw().to_string();
-        if constructor_name(&rename.ident.unraw().to_string()) != constructor_name(&alias) {
-            self.constructor_name_exceptions.insert(alias.clone());
-        }
-        self.aliases.insert(alias);
-    }
-
-    fn visit_signature(&mut self, signature: &'ast Signature) {
-        let name = signature.ident.unraw().to_string();
-        if constructor_name(&name) {
-            self.constructor_name_exceptions.insert(name);
-        }
-        visit::visit_signature(self, signature);
-    }
-
-    fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
-        let name = item.ident.unraw().to_string();
-        if matches!(item.fields, syn::Fields::Unnamed(_)) && !constructor_name(&name) {
-            self.constructor_name_exceptions.insert(name);
-        }
-        visit::visit_item_struct(self, item);
-    }
-
-    fn visit_variant(&mut self, variant: &'ast syn::Variant) {
-        let name = variant.ident.unraw().to_string();
-        if matches!(variant.fields, syn::Fields::Unnamed(_)) && !constructor_name(&name) {
-            self.constructor_name_exceptions.insert(name);
-        }
-        visit::visit_variant(self, variant);
+        self.aliases.insert(rename.rename.unraw().to_string());
     }
 
     fn visit_use_glob(&mut self, _: &'ast syn::UseGlob) {
@@ -167,20 +141,21 @@ impl<'ast> Visit<'ast> for Imports {
     }
 }
 
-// Rust's non_camel_case_types and non_snake_case lints distinguish type
-// and variant names from function names. Constructor operands have call
-// syntax in syn; classify path callees by their final written segment.
-fn constructor_name(name: &str) -> bool {
+fn upper_camel_case(name: &str) -> bool {
     name.starts_with(char::is_uppercase) && !name.contains('_')
 }
 
-fn call_ident(expr: &Expr) -> Option<&syn::Ident> {
+fn call_path(expr: &Expr) -> Option<&syn::ExprPath> {
     match expr {
-        Expr::Path(path) => Some(&path.path.segments.last()?.ident),
-        Expr::Paren(paren) => call_ident(&paren.expr),
-        Expr::Group(group) => call_ident(&group.expr),
+        Expr::Path(path) => Some(path),
+        Expr::Paren(paren) => call_path(&paren.expr),
+        Expr::Group(group) => call_path(&group.expr),
         _ => None,
     }
+}
+
+fn call_ident(expr: &Expr) -> Option<&syn::Ident> {
+    Some(&call_path(expr)?.path.segments.last()?.ident)
 }
 
 fn formal_base(expr: &Expr) -> Option<String> {
@@ -348,6 +323,22 @@ impl Scanner<'_> {
 }
 
 impl<'ast> Visit<'ast> for Scanner<'_> {
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        let self_type = match &*item.self_ty {
+            syn::Type::Path(ty) if ty.qself.is_none() => Some(ty.path.clone()),
+            _ => None,
+        };
+        let previous = std::mem::replace(&mut self.self_type, self_type);
+        visit::visit_item_impl(self, item);
+        self.self_type = previous;
+    }
+
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        self.inline_modules.push(item.ident.unraw().to_string());
+        visit::visit_item_mod(self, item);
+        self.inline_modules.pop();
+    }
+
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         self.procedure(&node.sig, &node.block, node);
     }
@@ -410,15 +401,32 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                         .as_ref()
                         .is_none_or(|name| self.indirect_names.contains(name))
                     || !matches!(&*call.func, Expr::Path(_));
-                let ambiguous_constructor = name.as_ref().is_some_and(|name| {
-                    self.constructor_name_exceptions.contains(name)
-                        || (constructor_name(name) && self.indirect_names.contains(name))
+                let declaration = call_path(&call.func).and_then(|callee| {
+                    if callee.qself.is_some() {
+                        return None;
+                    }
+                    if callee
+                        .path
+                        .get_ident()
+                        .is_some_and(|name| self.formals.contains(&name.unraw().to_string()))
+                    {
+                        return Some(Declaration::Function);
+                    }
+                    self.declarations.resolve(
+                        self.source,
+                        &self.inline_modules,
+                        self.source.bytes(anchor).start,
+                        &callee.path,
+                        self.self_type.as_ref(),
+                    )
                 });
-                if ambiguous_constructor {
+                if declaration.is_none() && name.as_deref().is_some_and(upper_camel_case) {
                     let span = self.source.bytes(expr.span());
                     self.syntax.uncertain_constructors.push(span);
                     self.syntax.opaque.push(span);
-                } else if !name.as_deref().is_some_and(constructor_name) {
+                // The non_camel_case_types lint is the basis for the pilot's
+                // override: unresolved lowercase callees remain required calls.
+                } else if declaration != Some(Declaration::Constructor) {
                     self.add_at(Kind::Call, expr, anchor, name);
                     self.syntax
                         .constructs

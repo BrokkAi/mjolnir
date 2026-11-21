@@ -301,11 +301,16 @@ fn account_candidate(
                     "unreachable requires a guard_site identifying a condition that encloses the candidate in a branch",
                 );
             }
-            Some("macro-not-call") if file.syntax.macro_invocations.contains(&construct.span) => {
+            Some("macro-not-call")
+                if matches!(construct.kind, Kind::Call | Kind::Argument)
+                    && file.syntax.macro_invocations.contains(&construct.span) =>
+            {
                 valid_exclusion = true;
             }
             Some("macro-not-call") => {
-                false_exclusion = Some("macro-not-call requires a macro invocation");
+                false_exclusion = Some(
+                    "macro-not-call requires a macro invocation selected as a call or argument",
+                );
             }
             Some("duplicate") if detail.is_some_and(|id| covered.contains(id)) => {
                 valid_exclusion = true;

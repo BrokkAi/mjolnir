@@ -64,8 +64,9 @@ such as Ok(text) and Some(x) are outside the call-argument port. Box::new(x)
 is a call and x is its argument.
 
 Use the candidate's exact line span. For duplicate, put the ID of a candidate
-covered directly by a row in detail. Use macro-not-call only for a written
-macro invocation. Use not-the-seed only for an incoming name match whose
+covered directly by a row in detail. Use macro-not-call only when a call or
+argument candidate is itself a macro invocation. A selected panic or raise
+macro still needs a row or another valid exclusion. Use not-the-seed only for an incoming name match whose
 callee is unrelated to the seed. For unreachable, add guard_site with the
 source site of the enclosing if, match arm, while or let-else condition.
 Explain in detail why the candidate's branch cannot run. Use an empty

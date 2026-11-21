@@ -20,7 +20,12 @@ fn query(step: &str, options: &[&str], seed: Value) -> Query {
 }
 
 fn file(query: &Query, text: &str) -> Parsed {
-    Parsed::new(query, Source::new("fixture.rs".into(), text.into())).unwrap()
+    let ast = syn::parse_file(text).unwrap();
+    let mut source = Source::new("fixture.rs".into(), text.into());
+    source.set_lexical_prefix(&ast);
+    let mut declarations = Declarations::default();
+    declarations.add_file(&source, &ast);
+    Parsed::new(query, source, &ast, &declarations)
 }
 
 fn fixture_seed_names(file: &Parsed) -> BTreeSet<&str> {
@@ -437,15 +442,23 @@ fn unreachable_guard_can_cite_match_arm_while_or_let_else() {
 }
 
 #[test]
-fn macro_not_call_requires_a_macro_invocation() {
+fn macro_not_call_requires_a_call_or_argument_macro_candidate() {
     let call = query("guarded-paths", &[":event", "\"call\""], procedure());
     let raise = query("guarded-paths", &[":event", "\"raise\""], procedure());
+    let panic = query("contract-cases", &[":kind", "\"panic\""], procedure());
+    let argument = query("value-transfers", &[":port", "\"argument\""], procedure());
     let answer = json!({"rows": [], "excluded": [
         {"candidate_site": value_site(2, 2), "reason": "macro-not-call", "detail": ""}
     ]});
-    let out = accounting(&call, "fn seed() {\n    invoke();\n}\n", answer.clone());
-    assert_eq!(codes(&out), ["false-exclusion"]);
-    let out = accounting(&raise, "fn seed() {\n    panic!();\n}\n", answer);
+    for (query, text) in [
+        (call, "fn seed() {\n    invoke();\n}\n"),
+        (raise, "fn seed() {\n    assert!(ready);\n}\n"),
+        (panic, "fn seed() {\n    panic!();\n}\n"),
+    ] {
+        let out = accounting(&query, text, answer.clone());
+        assert_eq!(codes(&out), ["false-exclusion"], "{text}");
+    }
+    let out = accounting(&argument, "fn seed() {\n    invoke(make!());\n}\n", answer);
     assert!(out.errors.is_empty());
     assert_eq!(out.candidates.len(), 1);
 }
@@ -468,12 +481,71 @@ fn argument_and_call_candidates_skip_constructors_but_keep_nested_calls() {
 }
 
 #[test]
-fn explicit_aliases_and_names_that_cross_constructor_conventions_stay_unchecked() {
+fn declarations_override_callee_casing_and_unresolved_uppercase_stays_unchecked() {
     let query = query("guarded-paths", &[":event", "\"call\""], procedure());
-    let text = "use Option::Some as wrap;\nfn Upper(x: u8) {}\nstruct lower(u8);\nfn seed() {\n    wrap(1);\n    Upper(2);\n    lower(3);\n}\n";
+    let text = "use std::option::Option::Some as wrap;\nfn Upper(x: u8) {}\nstruct lower(u8);\nenum E { tuple(u8) }\nfn seed() {\n    wrap(1);\n    Upper(2);\n    lower(3);\n    E::tuple(4);\n    Unresolved(5);\n    unresolved(6);\n    Ok(7);\n}\n";
     let source = file(&query, text);
-    assert!(by_kind(&source, &query).is_empty());
-    assert_eq!(source.syntax.uncertain_constructors.len(), 3);
+    assert_eq!(
+        by_kind(&source, &query)["call"],
+        ["Upper(2)", "unresolved(6)"]
+    );
+    let [unknown] = &source.syntax.uncertain_constructors[..] else {
+        panic!("expected exactly one unresolved callee");
+    };
+    assert_eq!(source.source.slice(*unknown), "Unresolved(5)");
+}
+
+#[test]
+fn aliases_that_grow_the_lookup_path_stop_on_the_same_import_binding() {
+    let query = query("guarded-paths", &[":event", "\"call\""], procedure());
+    let text = "use alias::inner as alias;\nfn seed() {\n    alias::method();\n}\n";
+    let source = file(&query, text);
+    assert_eq!(by_kind(&source, &query)["call"], ["alias::method()"]);
+}
+
+#[test]
+fn declaration_resolution_crosses_snapshot_files_and_respects_explicit_imports() {
+    let scratch = std::env::temp_dir().join(format!("rql-declarations-{}", std::process::id()));
+    fs::create_dir_all(scratch.join("a/src")).unwrap();
+    fs::create_dir_all(scratch.join("b/src")).unwrap();
+    fs::write(
+        scratch.join("a/src/lib.rs"),
+        r#"
+        mod declarations;
+        use crate::declarations::{Foreign as Aliased, lowercase};
+        fn seed() {
+            Aliased(1);
+            crate::declarations::Foreign(2);
+            lowercase(3);
+            Elsewhere(4);
+        }
+    "#,
+    )
+    .unwrap();
+    fs::write(
+        scratch.join("a/src/declarations.rs"),
+        "pub fn Foreign(_: u8) {} pub struct lowercase(pub u8);",
+    )
+    .unwrap();
+    fs::write(scratch.join("b/src/lib.rs"), "pub fn Elsewhere(_: u8) {}").unwrap();
+    let input = Input {
+        root: scratch.clone(),
+        step: "guarded-paths".into(),
+        query: form("guarded-paths", &[":event", "\"call\""], procedure()),
+        answer: json!({"rows": []}),
+    };
+    let out = verify(input);
+    fs::remove_dir_all(scratch).unwrap();
+    let out = out.unwrap();
+    let lines: Vec<_> = out
+        .candidates
+        .iter()
+        .map(|candidate| candidate.site.start_line)
+        .collect();
+    assert_eq!(lines, [5, 6]);
+    assert_eq!(out.unchecked.len(), 1);
+    assert_eq!(out.unchecked[0].what, "a/src/lib.rs:8");
+    assert!(out.unchecked[0].why.contains("unresolved callee"));
 }
 
 // Hard-won: 73f3134: exclusions passed with reasons false by construction

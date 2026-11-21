@@ -1,3 +1,4 @@
+mod declarations;
 mod query;
 mod rows;
 mod source;
@@ -12,6 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use declarations::Declarations;
 use query::{Query, Step};
 use source::{Site, Source};
 use syntax::{Construct, Kind, Syntax};
@@ -94,8 +96,8 @@ struct Parsed {
 }
 
 impl Parsed {
-    fn new(query: &Query, mut source: Source) -> syn::Result<Self> {
-        let syntax = syntax::scan(&mut source)?;
+    fn new(query: &Query, source: Source, ast: &syn::File, declarations: &Declarations) -> Self {
+        let syntax = syntax::scan(&source, ast, declarations);
         let mut seeds = BTreeSet::new();
         if query.selects_path(&source.path) {
             if query.procedure_of_call || query.call_seed {
@@ -114,11 +116,11 @@ impl Parsed {
                 );
             }
         }
-        Ok(Self {
+        Self {
             source,
             syntax,
             seeds,
-        })
+        }
     }
 
     fn candidates(&self, query: &Query, seed_names: &BTreeSet<&str>) -> Vec<Selected<'_>> {
@@ -160,8 +162,7 @@ impl Parsed {
 fn scan_directory(
     root: &Path,
     dir: &Path,
-    query: &Query,
-    files: &mut Vec<Parsed>,
+    files: &mut Vec<(Source, syn::File)>,
     out: &mut Output,
 ) -> io::Result<()> {
     let mut entries = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
@@ -178,7 +179,7 @@ fn scan_directory(
             }
         };
         if ty.is_dir() && entry.file_name() != ".git" {
-            if let Err(error) = scan_directory(root, &path, query, files, out) {
+            if let Err(error) = scan_directory(root, &path, files, out) {
                 out.unchecked(display, format!("cannot read directory: {error}"));
             }
         } else if ty.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
@@ -192,8 +193,12 @@ fn scan_directory(
             };
             let repo_path = components.join("/");
             match fs::read_to_string(&path) {
-                Ok(text) => match Parsed::new(query, Source::new(repo_path.clone(), text)) {
-                    Ok(file) => files.push(file),
+                Ok(text) => match syn::parse_file(&text) {
+                    Ok(ast) => {
+                        let mut source = Source::new(repo_path, text);
+                        source.set_lexical_prefix(&ast);
+                        files.push((source, ast));
+                    }
                     Err(error) => out.unchecked(repo_path, format!("Rust parse failed: {error}")),
                 },
                 Err(error) => out.unchecked(repo_path, format!("cannot read source: {error}")),
@@ -217,8 +222,16 @@ fn verify(input: Input) -> io::Result<Output> {
         rows::unchecked_seed_exclusions(&input.answer, &mut out);
         return Ok(out);
     };
-    let mut files = Vec::new();
-    scan_directory(&input.root, &input.root, &query, &mut files, &mut out)?;
+    let mut authored = Vec::new();
+    scan_directory(&input.root, &input.root, &mut authored, &mut out)?;
+    let mut declarations = Declarations::default();
+    for (source, ast) in &authored {
+        declarations.add_file(source, ast);
+    }
+    let files: Vec<_> = authored
+        .into_iter()
+        .map(|(source, ast)| Parsed::new(&query, source, &ast, &declarations))
+        .collect();
     let rows = rows::answer_rows(&input.answer, query.step);
     let seed_names: BTreeSet<_> = files
         .iter()
@@ -251,7 +264,7 @@ fn verify(input: Input) -> io::Result<Output> {
                     let site = source.site(span);
                     out.unchecked(
                         format!("{}:{}", site.path, site.start_line),
-                        "naming exception or alias obscures whether this is a call or constructor",
+                        "unresolved callee could be a constructor or a function",
                     );
                 }
             }
