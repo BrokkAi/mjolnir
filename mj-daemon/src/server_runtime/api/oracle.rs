@@ -84,6 +84,7 @@ impl ApiBackend {
                 initial_prompt: selected.prompt,
                 request_key: request.request_id.clone(),
                 report_root: None,
+                category: "oracle".into(),
             })
             .await;
         match started {

@@ -193,6 +193,30 @@ fn spawn_with_quota_source_reader(
     (services, task)
 }
 
+/// Refresh the power-ranking table at startup and once an hour.
+///
+/// The fetch is its own task so a five-second timeout cannot stall delegation.
+/// Daemon tests do not call the public host unless `MJ_POWER_RANKING_URL` is set.
+fn spawn_power_ranking_refresh(state: &Arc<RuntimeState>, cancellation: CancellationToken) {
+    if cfg!(test) && std::env::var_os("MJ_POWER_RANKING_URL").is_none() {
+        return;
+    }
+    let ranking = state.power_ranking.clone();
+    mj_core::runtime::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                _ = tick.tick() => {
+                    // `refresh` logs and keeps the current snapshot when the fetch fails.
+                    let _ = ranking.refresh(mj_core::clock::epoch_seconds()).await;
+                }
+            }
+        }
+    });
+}
+
 async fn run(
     state: Arc<RuntimeState>,
     mut updates: DelegationUpdates,
@@ -200,6 +224,7 @@ async fn run(
     cancellation: CancellationToken,
 ) -> Result<()> {
     let backend = policy.services.backend.clone();
+    spawn_power_ranking_refresh(&state, cancellation.clone());
     // Housekeeping for stores written by builds that kept acknowledged rows.
     if let Err(error) =
         mj_core::runtime::spawn_blocking(mj_controller::database::prune_acknowledged_delegations)

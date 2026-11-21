@@ -351,7 +351,7 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
             })?;
         let mut stored: SubagentRecord = serde_json::from_str(&stored_json)?;
         subagent.apply_to(&mut stored);
-        super::usage::record_child_accounting(&tx, &stored)?;
+        super::usage::record_child_accounting(&tx, &stored, None)?;
         let record_json = serde_json::to_string(&stored)?;
         tx.execute(
             "INSERT INTO subagent_sessions(

@@ -343,6 +343,7 @@ async fn selection_backend_refusing(
             mj_controller::quota::QuotaReportPublication {
                 login_error: None,
                 cache_identity: "test-identity".into(),
+                last_good: None,
                 report: Some(report),
             },
         )
@@ -8153,6 +8154,7 @@ async fn oracle_backend(exports: Arc<OracleExports>) -> Arc<ApiBackend> {
             mj_controller::quota::QuotaReportPublication {
                 login_error: None,
                 cache_identity: "test-identity".into(),
+                last_good: None,
                 report: Some(report),
             },
         )

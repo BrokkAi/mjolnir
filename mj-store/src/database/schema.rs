@@ -6,6 +6,8 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
+/// Revision 146 adds nullable `category` columns. Older readers ignore them,
+/// and older writers name columns, so this floor stays 145.
 #[cfg(any(test, feature = "test-support"))]
 pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 145;
 
@@ -2810,6 +2812,27 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;"
         ))?;
     }
+    // Compatible: older readers ignore the new nullable columns. Older writers
+    // name columns explicitly, so a category this build records survives their
+    // inserts and updates. The compatibility floor stays at 145.
+    if version < 146 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        if !legacy_schema::table_has_column(&transaction, "session_turn_selections", "category")? {
+            transaction
+                .execute_batch("ALTER TABLE session_turn_selections ADD COLUMN category TEXT;")?;
+        }
+        if !legacy_schema::table_has_column(&transaction, "subagent_accounting", "category")? {
+            transaction
+                .execute_batch("ALTER TABLE subagent_accounting ADD COLUMN category TEXT;")?;
+        }
+        transaction.execute_batch(
+            "INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (146, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=146;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -5087,6 +5110,18 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 146 {
+            for (table, column) in [
+                ("session_turn_selections", "category"),
+                ("subagent_accounting", "category"),
+            ] {
+                if legacy_schema::table_has_column(&connection, table, column).unwrap() {
+                    connection
+                        .execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};"))
+                        .unwrap();
+                }
+            }
+        }
         if version < 145 {
             super::restore_pre145_review_columns(&connection);
         }
@@ -5298,6 +5333,224 @@ mod reader_tests {
         }
         drop(connection);
         forget_verified_schema(path);
+    }
+
+    /// Revision 146 adds nullable category columns without moving the floor.
+    /// Rows written at 145 stay, with category NULL. A new registration and
+    /// its turn selection record the category, a session with no accounting
+    /// row is `primary`, and a named insert or update that omits the column
+    /// leaves an existing value alone.
+    #[test]
+    fn category_column_migration_preserves_rows_and_records_new_categories() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("category.sqlite3");
+        let parent = super::super::tests::session("parent", "project");
+        let old_child = super::super::tests::session("old-child", "project");
+        let new_child = super::super::tests::session("new-child", "project");
+        let top = super::super::tests::session("top", "project");
+        let legacy_writer = super::super::tests::session("legacy-writer", "project");
+        for session in [&parent, &old_child, &new_child, &top, &legacy_writer] {
+            save_session_to(&path, session).unwrap();
+        }
+        stamp_schema_version(&path, 145);
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO subagent_accounting(child_session_id, parent_session_id, task_name)
+                     VALUES ('old-child', 'parent', 'legacy task');
+                 INSERT INTO session_turn_selections(session_id, command_id, model, effort)
+                     VALUES ('old-child', 'legacy-turn', 'claude-opus', 'high');
+                 INSERT INTO session_turn_selections(session_id, command_id, model, effort)
+                     VALUES ('top', 'legacy-top', 'gpt-6', 'medium');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let connection = open(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, 146);
+        assert_eq!(state.minimum_compatible, Some(145));
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        let migrated: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM schema_migrations WHERE version = 146",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migrated, 1);
+
+        let category = |sql: &str| -> Option<String> {
+            connection.query_row(sql, [], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(
+            category("SELECT category FROM subagent_accounting WHERE child_session_id='old-child'"),
+            None,
+            "a row written before the column exists stays NULL"
+        );
+        assert_eq!(
+            category(
+                "SELECT task_name FROM subagent_accounting WHERE child_session_id='old-child'"
+            )
+            .as_deref(),
+            Some("legacy task")
+        );
+        assert_eq!(
+            category(
+                "SELECT category FROM session_turn_selections
+                 WHERE session_id='old-child' AND command_id='legacy-turn'"
+            ),
+            None
+        );
+        assert_eq!(
+            category(
+                "SELECT model FROM session_turn_selections
+                 WHERE session_id='old-child' AND command_id='legacy-turn'"
+            )
+            .as_deref(),
+            Some("claude-opus")
+        );
+
+        let relation = mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
+            child_session_id: new_child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "subtle probe".into(),
+            profile_id: "codex".into(),
+            model: Some("claude-opus-5-5".into()),
+            effort: Some("high".into()),
+            working_directory: std::path::PathBuf::new(),
+            initial_prompt: "look carefully".into(),
+            request_key: "subtle-1".into(),
+            created_at: new_child.created_at.clone(),
+            noticed_turn: None,
+            reported_finish: None,
+            handback_tool: false,
+        };
+        super::super::usage::record_child_accounting(&connection, &relation, Some("subtle"))
+            .unwrap();
+        super::super::usage::record_child_accounting(&connection, &relation, Some("oracle"))
+            .unwrap();
+        assert_eq!(
+            category(
+                "SELECT category FROM subagent_accounting WHERE child_session_id='new-child'"
+            )
+            .as_deref(),
+            Some("subtle"),
+            "a replay does not replace the category already stored"
+        );
+        let configuration: mj_core::state::SessionConfiguration = serde_json::from_value(
+            serde_json::json!({"model": "claude-opus-5-5", "effort": "high"}),
+        )
+        .unwrap();
+        super::super::usage::record_turn_selection(
+            &connection,
+            "new-child",
+            "turn-1",
+            &configuration,
+        )
+        .unwrap();
+        super::super::usage::record_turn_selection(
+            &connection,
+            "new-child",
+            "turn-1",
+            &configuration,
+        )
+        .unwrap();
+        assert_eq!(
+            category(
+                "SELECT category FROM session_turn_selections
+                 WHERE session_id='new-child' AND command_id='turn-1'"
+            )
+            .as_deref(),
+            Some("subtle")
+        );
+        // The accounting row exists and its category is NULL, so the turn
+        // copies NULL instead of becoming primary.
+        super::super::usage::record_turn_selection(
+            &connection,
+            "old-child",
+            "after-migration",
+            &configuration,
+        )
+        .unwrap();
+        assert_eq!(
+            category(
+                "SELECT category FROM session_turn_selections
+                 WHERE session_id='old-child' AND command_id='after-migration'"
+            ),
+            None
+        );
+        super::super::usage::record_turn_selection(&connection, "top", "turn-primary", &configuration)
+            .unwrap();
+        assert_eq!(
+            category(
+                "SELECT category FROM session_turn_selections
+                 WHERE session_id='top' AND command_id='turn-primary'"
+            )
+            .as_deref(),
+            Some("primary")
+        );
+        assert_eq!(
+            category(
+                "SELECT category FROM session_turn_selections
+                 WHERE session_id='top' AND command_id='legacy-top'"
+            ),
+            None,
+            "the turn written before the column exists is not backfilled"
+        );
+
+        connection
+            .execute(
+                "UPDATE subagent_accounting SET task_name='renamed' WHERE child_session_id='new-child'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE session_turn_selections SET model='other-model'
+                 WHERE session_id='new-child' AND command_id='turn-1'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            category(
+                "SELECT category FROM subagent_accounting WHERE child_session_id='new-child'"
+            )
+            .as_deref(),
+            Some("subtle")
+        );
+        assert_eq!(
+            category(
+                "SELECT category FROM session_turn_selections
+                 WHERE session_id='new-child' AND command_id='turn-1'"
+            )
+            .as_deref(),
+            Some("subtle")
+        );
+        connection
+            .execute_batch(
+                "INSERT INTO subagent_accounting(child_session_id, parent_session_id, task_name)
+                     VALUES ('legacy-writer', 'parent', 'omitted');
+                 INSERT INTO session_turn_selections(session_id, command_id, model, effort)
+                     VALUES ('legacy-writer', 'omitted-turn', 'model', 'high');",
+            )
+            .unwrap();
+        assert_eq!(
+            category(
+                "SELECT category FROM subagent_accounting WHERE child_session_id='legacy-writer'"
+            ),
+            None
+        );
+        assert_eq!(
+            category(
+                "SELECT category FROM session_turn_selections
+                 WHERE session_id='legacy-writer' AND command_id='omitted-turn'"
+            ),
+            None
+        );
     }
 
     #[test]

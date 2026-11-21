@@ -22,6 +22,7 @@ pub mod image;
 pub use mj_accounts::opencode_logins;
 pub use mj_accounts::profile_health;
 pub use mj_accounts::profile_login;
+pub use mj_accounts::power_ranking;
 pub use mj_accounts::profile_scheduler;
 pub use mj_accounts::quota;
 pub use mj_import::import;

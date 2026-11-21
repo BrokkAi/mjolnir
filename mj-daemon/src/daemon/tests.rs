@@ -12024,7 +12024,8 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
             },
         )
         .collect();
-    mj_controller::database::register_subagent_with_startup(&child, &relation, rows, None).unwrap();
+    mj_controller::database::register_subagent_with_startup(&child, &relation, rows, None, None)
+        .unwrap();
     let root = tempfile::tempdir().unwrap();
     let model_id = format!("{group_id}-model");
     let prompt_id = format!("{group_id}-prompt");
@@ -14103,6 +14104,12 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
         initial_prompt: "Question:\nWhich option?".into(),
         request_key: request_key.into(),
         report_root: None,
+        category: match kind {
+            mj_core::subagent::SubagentKind::Oracle => "oracle",
+            mj_core::subagent::SubagentKind::Reviewer => "reviewer",
+            mj_core::subagent::SubagentKind::Worker => "straightforward",
+        }
+        .into(),
     };
 
     FAIL_CONTROLLER_RELOAD.store(true, std::sync::atomic::Ordering::SeqCst);

@@ -6571,7 +6571,7 @@ pub(super) fn register_test_subagent(
     let mut connection = open(path)?;
     let tx = connection.transaction()?;
     super::state_io::insert_session_with_parent(&tx, session, Some(&relation.parent_session_id))?;
-    super::usage::record_child_accounting(&tx, relation)?;
+    super::usage::record_child_accounting(&tx, relation, None)?;
     tx.execute(
         "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES (?1,?2,?3,?4)",
         params![relation.child_session_id, relation.parent_session_id, relation.kind.request_key(&relation.request_key), serde_json::to_string(relation)?],

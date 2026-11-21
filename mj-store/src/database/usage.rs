@@ -6,14 +6,19 @@ use mj_core::usage::{TokenUsage, UsageScope, pricing};
 pub(super) fn record_child_accounting(
     connection: &Connection,
     child: &SubagentRecord,
+    category: Option<&str>,
 ) -> Result<()> {
+    // Named columns, so an older writer that omits `category` leaves it NULL
+    // and does not clear a value this build already stored.
     connection.execute(
-        "INSERT INTO subagent_accounting(child_session_id, parent_session_id, task_name)
-        VALUES (?1, ?2, ?3) ON CONFLICT(child_session_id) DO NOTHING",
+        "INSERT INTO subagent_accounting(
+            child_session_id, parent_session_id, task_name, category
+        ) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(child_session_id) DO NOTHING",
         params![
             child.child_session_id,
             child.parent_session_id,
-            child.task_name
+            child.task_name,
+            category
         ],
     )?;
     let stored: (String, String) = connection.query_row(
@@ -57,10 +62,26 @@ pub(super) fn record_turn_selection(
         .map(str::to_owned)
         .or(stored_effort);
     // The session's profile at turn start: a later restart can switch it, and
-    // destroying a sub-agent deletes its session row.
+    // destroying a sub-agent deletes its session row. A child copies its
+    // accounting category, including NULL from a registration that predates
+    // the column. A session with no accounting row is top-level, so it is
+    // `primary`. Older writers name columns and leave `category` untouched.
     connection.execute(
-        "INSERT INTO session_turn_selections(session_id, command_id, model, effort, profile)
-        VALUES (?1, ?2, ?3, ?4, (SELECT last_profile FROM sessions WHERE session_id=?1))
+        "INSERT INTO session_turn_selections(
+            session_id, command_id, model, effort, profile, category
+        ) VALUES (
+            ?1, ?2, ?3, ?4,
+            (SELECT last_profile FROM sessions WHERE session_id=?1),
+            CASE
+                WHEN EXISTS (
+                    SELECT 1 FROM subagent_accounting WHERE child_session_id=?1
+                )
+                THEN (
+                    SELECT category FROM subagent_accounting WHERE child_session_id=?1
+                )
+                ELSE 'primary'
+            END
+        )
         ON CONFLICT(session_id, command_id) DO NOTHING",
         params![session, command, model, effort],
     )?;

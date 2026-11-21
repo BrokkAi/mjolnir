@@ -396,6 +396,30 @@ impl Policy {
         let changed = {
             let mut reports = self.reports.lock().expect("quota reports poisoned");
             let changed = reconcile_quota_publications(&mut reports, &desired);
+            // A restart can fail its first probe before the poller republishes
+            // the stored reading. Seed the last good report now, including one
+            // that is already old enough to probe again.
+            if mj_controller::database::database_writer_installed() {
+                for id in &changed {
+                    let Some(publication) = reports.get_mut(id) else {
+                        continue;
+                    };
+                    if publication.last_good.is_some() {
+                        continue;
+                    }
+                    match mj_controller::database::load_quota_cache(&publication.cache_identity) {
+                        Ok(Some(cached)) if cached.error.is_none() => {
+                            publication.last_good = Some(cached);
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(
+                            profile_id = %id,
+                            %error,
+                            "could not seed the last good quota reading"
+                        ),
+                    }
+                }
+            }
             // ReconcileSources must wake readers even when the source reverted
             // to an identity whose report is still reusable.
             self.quotas_tx.send_replace(reports.clone());
@@ -738,6 +762,9 @@ fn publish_quota_outcome(
         return false;
     }
     publication.report = Some(outcome.report.clone());
+    if outcome.report.error.is_none() {
+        publication.last_good = Some(outcome.report.clone());
+    }
     true
 }
 
@@ -761,6 +788,7 @@ fn reconcile_quota_publications(
                 QuotaReportPublication {
                     login_error: None,
                     cache_identity: identity.clone(),
+                    last_good: None,
                     report: None,
                 },
             );
@@ -1115,6 +1143,7 @@ mod tests {
             QuotaReportPublication {
                 login_error: None,
                 cache_identity: "old-profile".into(),
+                last_good: None,
                 report: Some(ProfileQuota {
                     profile_id: "codex".into(),
                     harness: mj_core::config::HarnessKind::Codex,
@@ -1153,6 +1182,74 @@ mod tests {
         );
         assert!(!publish_quota_outcome(&mut reports, &outcome));
         assert!(reports["codex"].report.is_none());
+        assert!(reports["codex"].last_good.is_none());
+    }
+
+    #[test]
+    fn failed_probe_keeps_the_last_good_reading() {
+        let good = ProfileQuota {
+            profile_id: "claude".into(),
+            harness: mj_core::config::HarnessKind::Claude,
+            windows: vec![mj_controller::quota::QuotaWindow {
+                label: "5-hour".into(),
+                remaining_percent: Some(0),
+                duration_seconds: Some(18_000),
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: Some(9_000),
+            }],
+            paid_credits: None,
+            monthly_price_usd: Some(200),
+            banked_resets: None,
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: 10,
+            rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
+        };
+        let mut reports = BTreeMap::from([(
+            "claude".to_owned(),
+            QuotaReportPublication {
+                login_error: None,
+                cache_identity: "claude-account".into(),
+                last_good: None,
+                report: None,
+            },
+        )]);
+        let success = mj_controller::quota::QuotaRefreshOutcome {
+            cache_identity: "claude-account".into(),
+            report: good.clone(),
+            credentials_changed: false,
+        };
+        assert!(publish_quota_outcome(&mut reports, &success));
+        assert_eq!(reports["claude"].last_good.as_ref(), Some(&good));
+        let failure = mj_controller::quota::QuotaRefreshOutcome {
+            cache_identity: "claude-account".into(),
+            report: ProfileQuota {
+                windows: Vec::new(),
+                error: Some("connection reset by peer".into()),
+                refreshed_at_epoch_seconds: 20,
+                ..good.clone()
+            },
+            credentials_changed: false,
+        };
+        assert!(publish_quota_outcome(&mut reports, &failure));
+        assert_eq!(
+            reports["claude"]
+                .report
+                .as_ref()
+                .and_then(|report| report.error.as_deref()),
+            Some("connection reset by peer")
+        );
+        assert_eq!(reports["claude"].last_good.as_ref(), Some(&good));
+        assert_eq!(
+            reports["claude"]
+                .effective_report("claude")
+                .and_then(|report| report.error),
+            Some("connection reset by peer".into())
+        );
     }
 
     #[test]
@@ -1257,6 +1354,7 @@ mod tests {
                     QuotaReportPublication {
                         login_error: None,
                         cache_identity: "test-identity".into(),
+                        last_good: None,
                         report: Some(report.clone()),
                     },
                 )

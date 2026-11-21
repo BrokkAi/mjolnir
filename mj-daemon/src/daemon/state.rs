@@ -159,6 +159,10 @@ impl RuntimeState {
             review_host,
             reviewer_runtime,
             wiki: mj_controller::sessionwiki::WikiIndexer::spawn(),
+            power_ranking: mj_controller::power_ranking::PowerRankingStore::open(
+                &mj_core::config::data_dir(),
+                mj_core::clock::epoch_seconds(),
+            ),
         }
     }
 

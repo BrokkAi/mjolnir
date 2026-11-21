@@ -1580,6 +1580,7 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
             mj_controller::quota::QuotaReportPublication {
                 login_error: None,
                 cache_identity: request.cache_identity(),
+                last_good: None,
                 report: Some(observed),
             },
         );
@@ -1690,6 +1691,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             QuotaReportPublication {
                 login_error: None,
                 cache_identity: identity.clone(),
+                last_good: None,
                 report: None,
             },
         )])));
@@ -1895,6 +1897,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 QuotaReportPublication {
                     login_error: None,
                     cache_identity: identity.into(),
+                    last_good: None,
                     report: Some(report),
                 },
             );

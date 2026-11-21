@@ -216,6 +216,11 @@ impl RuntimeState {
             initial_prompt: relation.initial_prompt.clone(),
             request_key: relation.request_key.clone(),
             report_root: None,
+            category: match launch.role {
+                mj_core::worker_launch::ReviewChildRole::Reviewer => "reviewer",
+                mj_core::worker_launch::ReviewChildRole::BriefWriter => "brief_writer",
+            }
+            .to_owned(),
         })
         .await?;
         // No total deadline here: one counted queue time and cancelled an
@@ -1293,6 +1298,7 @@ mod delegation_replay_tests {
                     initial_prompt: "must not resend".into(),
                     request_key: relation.request_key.clone(),
                     report_root: None,
+                    category: "straightforward".into(),
                 })
                 .await
                 .unwrap();

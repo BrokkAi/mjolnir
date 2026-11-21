@@ -32,6 +32,9 @@ pub struct RegisterSubagentRequest {
     /// children's report directories, from [`Controller::prepare_subagent_report_root`].
     /// `None` registers a child without one.
     pub report_root: Option<String>,
+    /// Canonical task category stored on the accounting row: `primary`,
+    /// `straightforward`, `subtle`, `oracle`, `reviewer`, or `brief_writer`.
+    pub category: String,
 }
 
 /// Creates a report directory on a target and prints its absolute path.
@@ -487,6 +490,7 @@ impl Controller {
             &relation,
             startup,
             report_dir.as_deref(),
+            Some(request.category.as_str()),
         )?;
         if let Some(registration) = registration {
             registration.publish()?;

@@ -62,6 +62,7 @@ pub(super) async fn spawn_subagent(
             request_key: mj_core::state::new_session_id().map_err(ApiFailure::from)?,
             // The daemon creates the report root when it registers the child.
             report_root: None,
+            category: request.task_type.unwrap_or_default().id().to_owned(),
         })
         .await
         .map_err(|error| ApiFailure::conflict(format!("sub-agent creation failed: {error:#}")))?;

@@ -731,13 +731,14 @@ impl ApiBackend {
             .lock()
             .map_err(|_| anyhow!("profile health lock poisoned"))?;
         let now = std::time::SystemTime::now();
+        let now_seconds = i64::try_from(mj_core::clock::epoch_seconds()).unwrap_or(i64::MAX);
         for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
             match discovery.map(|mut choices| choices.pop()) {
                 Ok(Some(choices)) => {
-                    let quota = crate::server::api::CandidateQuota::from_report(
-                        quota_reports
-                            .get(&profile_id)
-                            .and_then(|publication| publication.report.as_ref()),
+                    let quota = crate::server::api::CandidateQuota::from_publication(
+                        quota_reports.get(&profile_id),
+                        harness,
+                        now_seconds,
                     );
                     let unhealthy = choices
                         .models
@@ -1361,6 +1362,7 @@ impl ApiBackend {
                         initial_prompt: selection.prompt,
                         request_key: request.request_id.clone(),
                         report_root: None,
+                        category: task_type.id().to_owned(),
                     })
                     .await?;
                 let report_dir = blocking("load sub-agent report directory", {
@@ -4267,6 +4269,7 @@ impl SubagentBackend for ApiBackend {
                 .lock()
                 .map_err(|_| anyhow!("profile health lock poisoned"))?;
             let now = std::time::SystemTime::now();
+            let now_seconds = i64::try_from(mj_core::clock::epoch_seconds()).unwrap_or(i64::MAX);
             let mut candidates = crate::server::api::SubagentCandidates {
                 unavailable,
                 ..Default::default()
@@ -4301,10 +4304,10 @@ impl SubagentBackend for ApiBackend {
                         profile_id: profile_id.clone(),
                         harness,
                         choices: choices.clone(),
-                        quota: crate::server::api::CandidateQuota::from_report(
-                            quota_reports
-                                .get(&profile_id)
-                                .and_then(|publication| publication.report.as_ref()),
+                        quota: crate::server::api::CandidateQuota::from_publication(
+                            quota_reports.get(&profile_id),
+                            harness,
+                            now_seconds,
                         ),
                         may_consume_credits: profile.load_balancing_may_consume_credits,
                         unhealthy,

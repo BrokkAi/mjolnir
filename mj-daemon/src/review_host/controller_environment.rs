@@ -192,6 +192,11 @@ impl ReviewEnvironment for ControllerEnvironment {
                     initial_prompt: prompt,
                     request_key,
                     report_root: None,
+                    category: match role {
+                        mj_core::worker_launch::ReviewChildRole::Reviewer => "reviewer",
+                        mj_core::worker_launch::ReviewChildRole::BriefWriter => "brief_writer",
+                    }
+                    .to_owned(),
                 },
                 self.manager
                     .as_ref()

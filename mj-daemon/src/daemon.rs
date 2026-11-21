@@ -334,6 +334,9 @@ pub struct RuntimeState {
     reviewer_runtime: crate::review_host::SharedReviewerRuntime,
     /// Publishes checkpointed sessions into the user's SessionWiki index.
     wiki: mj_controller::sessionwiki::WikiIndexer,
+    /// Power-ranking table. Loaded from disk or the compiled baseline without
+    /// waiting on the network; a background task refreshes it.
+    power_ranking: mj_controller::power_ranking::PowerRankingStore,
 }
 
 /// One monotonic cursor shared by daemon snapshots and their wake-up feed.

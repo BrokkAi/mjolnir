@@ -902,6 +902,7 @@ fn github_credentials_creation_default_is_resolved_once_and_children_can_opt_out
             initial_prompt: "Inspect the source".into(),
             request_key: "credential-child".into(),
             report_root: None,
+            category: "straightforward".into(),
         })
         .unwrap()
         .child_session_id;
@@ -2170,6 +2171,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
             initial_prompt: "Review calc.py".into(),
             request_key: "review-calc".into(),
             report_root: Some("/reports".into()),
+            category: "straightforward".into(),
         })
         .unwrap();
     let child_id = child.child_session_id.clone();
@@ -2328,6 +2330,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
             initial_prompt: "Review calc.py".into(),
             request_key: "review-calc".into(),
             report_root: None,
+            category: "straightforward".into(),
         })
         .unwrap();
     let child_id = child.child_session_id.clone();
@@ -2696,6 +2699,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
             initial_prompt: "Review calc.py".into(),
             request_key: "review-calc".into(),
             report_root: Some("/reports".into()),
+            category: "straightforward".into(),
         })
         .unwrap()
         .child_session_id;
@@ -2985,6 +2989,7 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
             initial_prompt: "test child".into(),
             request_key: "durable-child".into(),
             report_root: None,
+            category: "straightforward".into(),
         })
         .unwrap();
     assert_eq!(
@@ -3437,6 +3442,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         initial_prompt: "Review and hand back JSON".into(),
         request_key: "same-request".into(),
         report_root: None,
+        category: "reviewer".into(),
     };
     let child = controller.register_subagent(request.clone()).unwrap();
     assert_eq!(
@@ -3511,6 +3517,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             initial_prompt: "Question:\nWhich option?".into(),
             request_key: "oracle-first".into(),
             report_root: Some("/reports".into()),
+            category: "oracle".into(),
         })
         .unwrap();
     assert_eq!(
@@ -3581,6 +3588,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             initial_prompt: "Question:\nWhy?".into(),
             request_key: "muse-oracle".into(),
             report_root: Some("/reports".into()),
+            category: "oracle".into(),
         })
         .unwrap();
     assert!(!muse_oracle.handback_tool);
@@ -3630,6 +3638,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             initial_prompt: "work".into(),
             request_key: "same-request".into(),
             report_root: None,
+            category: "straightforward".into(),
         })
         .unwrap();
     assert_ne!(
@@ -3676,6 +3685,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         initial_prompt: "Review the child's commits".into(),
         request_key: "nested-review".into(),
         report_root: None,
+        category: "reviewer".into(),
     };
     let nested = controller.register_subagent(request.clone()).unwrap();
     assert_eq!(nested.parent_session_id, worker.child_session_id);
@@ -3776,6 +3786,7 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
                 initial_prompt: "work".into(),
                 request_key: request_key.into(),
                 report_root: None,
+                category: "straightforward".into(),
             })
             .unwrap()
     };

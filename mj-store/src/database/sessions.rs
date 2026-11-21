@@ -129,7 +129,7 @@ pub fn save_subagent_session(
     session: &SessionRecord,
     subagent: &mj_core::subagent::SubagentRecord,
 ) -> Result<()> {
-    register_subagent_with_startup(session, subagent, Vec::new(), None)
+    register_subagent_with_startup(session, subagent, Vec::new(), None, None)
 }
 
 /// Publish the child and its complete initial input in the same transaction.
@@ -139,10 +139,12 @@ pub fn register_subagent_with_startup(
     subagent: &mj_core::subagent::SubagentRecord,
     startup: Vec<super::startup::StartupDelivery>,
     report_dir: Option<&str>,
+    category: Option<&str>,
 ) -> Result<()> {
     let session = session.clone();
     let subagent = subagent.clone();
     let report_dir = report_dir.map(str::to_owned);
+    let category = category.map(str::to_owned);
     submit_database_write("save_subagent_session", move |_| {
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -182,7 +184,7 @@ pub fn register_subagent_with_startup(
             Some(&subagent.parent_session_id),
         )?;
         super::session_create::insert_create_intent(&tx, &session, false)?;
-        super::usage::record_child_accounting(&tx, &subagent)?;
+        super::usage::record_child_accounting(&tx, &subagent, category.as_deref())?;
         tx.execute(
             "INSERT INTO subagent_sessions(
                  child_session_id, parent_session_id, request_key, record_json

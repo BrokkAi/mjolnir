@@ -3996,6 +3996,7 @@ mod tests {
                     crate::quota::QuotaReportPublication {
                         login_error: None,
                         cache_identity: "test-identity".into(),
+                        last_good: None,
                         report: Some(report),
                     },
                 )
@@ -4078,6 +4079,7 @@ mod tests {
             crate::quota::QuotaReportPublication {
                 login_error: None,
                 cache_identity: "test-identity".into(),
+                last_good: None,
                 report: Some(subscription_report("codex", HarnessKind::Codex)),
             },
         );

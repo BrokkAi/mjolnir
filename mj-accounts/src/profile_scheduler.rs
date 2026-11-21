@@ -35,6 +35,67 @@ impl CandidateQuota {
             QuotaBilling::Unknown => Self::Unknown,
         }
     }
+
+    /// The reading selection should trust.
+    ///
+    /// A probe with no error wins. A failed probe falls back to `last_good`
+    /// when that reading is usage-priced, still has subscription windows, or
+    /// records paid credits.
+    /// `quota_score` treats a window whose reset is at or before `now_seconds`
+    /// as already reset, so an exhausted window stops blocking once its reset
+    /// passes. When the reading's billing class is still unknown, a harness
+    /// that is billed per use (`dsh`, API-only OpenCode) is usage-priced
+    /// rather than unknown.
+    pub fn from_publication(
+        publication: Option<&crate::quota::QuotaReportPublication>,
+        harness: mj_core::config::HarnessKind,
+        now_seconds: i64,
+    ) -> Self {
+        use mj_client::quota::QuotaBilling;
+        let report = publication.and_then(|publication| scheduling_report(publication, now_seconds));
+        let quota = Self::from_report(report);
+        if matches!(quota, Self::Unknown) && quota.billing(harness) == QuotaBilling::Usage {
+            Self::UsagePriced
+        } else {
+            quota
+        }
+    }
+}
+
+fn scheduling_report(
+    publication: &crate::quota::QuotaReportPublication,
+    now_seconds: i64,
+) -> Option<&crate::quota::ProfileQuota> {
+    if publication
+        .report
+        .as_ref()
+        .is_some_and(|report| report.error.is_none())
+    {
+        return publication.report.as_ref();
+    }
+    publication
+        .last_good
+        .as_ref()
+        .filter(|last_good| last_good_schedulable(last_good, now_seconds))
+}
+
+/// A failed probe may reuse `last_good` when it is usage-priced, it still
+/// carries subscription windows, or it records paid credits. An expired
+/// window is still evidence: scoring treats `resets_at_epoch_seconds <=
+/// now_seconds` as a reset. A windowless non-usage reading with no paid
+/// credits is not.
+fn last_good_schedulable(report: &crate::quota::ProfileQuota, now_seconds: i64) -> bool {
+    use mj_client::quota::QuotaBilling;
+    if report.billing_class() == QuotaBilling::Usage || report.paid_credits.is_some() {
+        return true;
+    }
+    report.windows.iter().any(|window| {
+        window.remaining_percent.is_some()
+            || (window.used.is_some() && window.limit.is_some())
+            || window
+                .resets_at_epoch_seconds
+                .is_some_and(|reset| reset <= now_seconds)
+    })
 }
 
 impl CandidateQuota {
@@ -493,5 +554,161 @@ mod tests {
             Some(Ineligible::CreditsNotAllowed)
         );
         assert_eq!(ask(subscription(0, credits), true), None);
+    }
+
+    fn claude_window(remaining: u8, resets_at: Option<i64>, error: Option<&str>) -> crate::quota::ProfileQuota {
+        crate::quota::ProfileQuota {
+            profile_id: "claude".into(),
+            harness: mj_core::config::HarnessKind::Claude,
+            monthly_price_usd: Some(200),
+            paid_credits: None,
+            banked_resets: None,
+            windows: vec![crate::quota::QuotaWindow {
+                label: "5-hour".into(),
+                remaining_percent: Some(remaining),
+                duration_seconds: Some(5 * 60 * 60),
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: resets_at,
+            }],
+            extra: None,
+            error: error.map(str::to_owned),
+            refreshed_at_epoch_seconds: 1,
+            rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
+        }
+    }
+
+    fn publication(
+        report: Option<crate::quota::ProfileQuota>,
+        last_good: Option<crate::quota::ProfileQuota>,
+    ) -> crate::quota::QuotaReportPublication {
+        crate::quota::QuotaReportPublication {
+            login_error: None,
+            cache_identity: "claude-account".into(),
+            report,
+            last_good,
+        }
+    }
+
+    /// A non-429 failure after a 0% Claude reading must stay exhausted.
+    /// Treating the failure as unknown would schedule it ahead of paid and API.
+    #[test]
+    fn failed_probe_after_exhausted_reading_stays_exhausted() {
+        let now = 1_000_000;
+        let last_good = claude_window(0, Some(now + 3_600), None);
+        let failed = crate::quota::ProfileQuota {
+            windows: Vec::new(),
+            error: Some("connection reset by peer".into()),
+            refreshed_at_epoch_seconds: 2,
+            ..last_good.clone()
+        };
+        let quota = CandidateQuota::from_publication(
+            Some(&publication(Some(failed), Some(last_good))),
+            mj_core::config::HarnessKind::Claude,
+            now,
+        );
+        assert!(matches!(quota, CandidateQuota::Subscription { .. }));
+        let mut candidate = candidate(quota, false);
+        candidate.harness = mj_core::config::HarnessKind::Claude;
+        assert_eq!(
+            ineligibility(&candidate, "claude-opus-5-5", now),
+            Some(Ineligible::OutOfQuota)
+        );
+    }
+
+    /// Once the stale 0% window's reset has passed, it no longer blocks.
+    #[test]
+    fn expired_last_good_window_stops_blocking() {
+        let reset_at = 1_000_000;
+        let last_good = claude_window(0, Some(reset_at), None);
+        let failed = crate::quota::ProfileQuota {
+            windows: Vec::new(),
+            error: Some("timed out".into()),
+            ..last_good.clone()
+        };
+        let quota = CandidateQuota::from_publication(
+            Some(&publication(Some(failed), Some(last_good))),
+            mj_core::config::HarnessKind::Claude,
+            reset_at,
+        );
+        assert!(
+            matches!(quota, CandidateQuota::Subscription { .. }),
+            "an expired window is still the last good reading, scored as reset"
+        );
+        let mut candidate = candidate(quota, false);
+        candidate.harness = mj_core::config::HarnessKind::Claude;
+        assert_eq!(
+            ineligibility(&candidate, "claude-opus-5-5", reset_at),
+            None
+        );
+    }
+
+    /// Usage-priced harnesses stay on the API tier when the probe never landed.
+    #[test]
+    fn usage_priced_harness_without_a_report_is_not_unknown() {
+        assert_eq!(
+            CandidateQuota::from_publication(None, mj_core::config::HarnessKind::Dsh, 0),
+            CandidateQuota::UsagePriced
+        );
+        let failed = claude_window(0, None, Some("dns failure"));
+        let failed = crate::quota::ProfileQuota {
+            harness: mj_core::config::HarnessKind::Dsh,
+            profile_id: "deepseek".into(),
+            windows: Vec::new(),
+            ..failed
+        };
+        assert_eq!(
+            CandidateQuota::from_publication(
+                Some(&publication(Some(failed), None)),
+                mj_core::config::HarnessKind::Dsh,
+                0,
+            ),
+            CandidateQuota::UsagePriced
+        );
+        let claude_failed = claude_window(0, None, Some("dns failure"));
+        let claude_failed = crate::quota::ProfileQuota {
+            windows: Vec::new(),
+            ..claude_failed
+        };
+        assert_eq!(
+            CandidateQuota::from_publication(
+                Some(&publication(Some(claude_failed), None)),
+                mj_core::config::HarnessKind::Claude,
+                0,
+            ),
+            CandidateQuota::Unknown
+        );
+    }
+
+    /// Paid credits with no windows are still a last-good subscription reading.
+    #[test]
+    fn paid_credits_without_windows_stay_schedulable() {
+        let last_good = crate::quota::ProfileQuota {
+            windows: Vec::new(),
+            paid_credits: Some(PaidCredits::limited(5.0).expect("finite credits")),
+            ..claude_window(0, None, None)
+        };
+        let failed = crate::quota::ProfileQuota {
+            windows: Vec::new(),
+            paid_credits: None,
+            error: Some("connection reset by peer".into()),
+            ..last_good.clone()
+        };
+        let quota = CandidateQuota::from_publication(
+            Some(&publication(Some(failed), Some(last_good))),
+            mj_core::config::HarnessKind::Claude,
+            0,
+        );
+        assert!(matches!(
+            quota,
+            CandidateQuota::Subscription {
+                paid_credits: Some(_),
+                windows,
+                ..
+            } if windows.is_empty()
+        ));
     }
 }
