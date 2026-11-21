@@ -20,7 +20,7 @@ use super::checkpoint::{
 use super::worker_restart::WorkerRestartLeftNoWorker;
 use super::{Controller, now, persist_session_record_transition_or_restore};
 
-mod origin_delta;
+pub(super) mod origin_delta;
 mod subagent;
 use origin_delta::OriginDeltaSuspend;
 
@@ -123,9 +123,9 @@ impl Controller {
         let checkout = self.state.checkout(session_id)?;
         let origin_delta = match checkout
             .managed_worktree()
-            .filter(|clone| clone.uses_origin_delta_suspend())
+            .filter(|worktree| worktree.uses_origin_delta_suspend())
         {
-            Some(clone) => OriginDeltaSuspend::applies(self, session_id, &clone.worktree_root)?,
+            Some(worktree) => OriginDeltaSuspend::applies(self, session_id, worktree)?,
             None => false,
         };
         if origin_delta {
@@ -162,11 +162,13 @@ impl Controller {
         let checkout = self.state.checkout(session_id)?;
         let worktree = checkout
             .managed_worktree()
-            .context("managed clone is missing")?;
+            .context("managed checkout is missing")?;
+        let origin_override = origin_delta::managed_origin_override(worktree);
         let input = mj_checkpoint::checkpoint::managed_clone_snapshot_input(
             "workspace",
             &worktree.worktree_root,
             PathBuf::new(),
+            origin_override,
         );
         mj_core::runtime::off_async_worker(|| {
             use mj_checkpoint::snapshot::{

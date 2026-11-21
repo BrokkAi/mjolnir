@@ -1981,9 +1981,8 @@ fn retiring_a_remote_worktree_prunes_registration_after_target_removed_checkout(
     )
     .unwrap();
 
-    let purposes = executor
-        .commands
-        .borrow()
+    let commands = executor.commands.borrow();
+    let purposes = commands
         .iter()
         .map(|command| command.purpose.clone())
         .collect::<Vec<_>>();
@@ -1992,9 +1991,15 @@ fn retiring_a_remote_worktree_prunes_registration_after_target_removed_checkout(
         [
             "check managed worktree path",
             "check managed worktree path",
-            "prune managed worktree metadata",
+            "remove missing managed worktree registration",
             "remove empty managed worktree directories",
         ]
+    );
+    assert!(
+        commands
+            .iter()
+            .all(|command| !command.args.iter().any(|arg| arg.contains("worktree prune"))),
+        "scoped removal must never invoke repository-wide git worktree prune: {commands:#?}"
     );
 }
 #[test]
@@ -3011,4 +3016,444 @@ fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
     )
     .unwrap();
     assert!(!worktree_root.exists());
+}
+
+#[test]
+fn scoped_linked_worktree_removal_preserves_siblings_and_locked_registrations() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    test_git(&source, &["init", "-b", "main"]);
+    test_git(&source, &["config", "user.name", "Test"]);
+    test_git(&source, &["config", "user.email", "test@example.com"]);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    test_git(&source, &["add", "README.md"]);
+    test_git(&source, &["commit", "-m", "initial"]);
+
+    let worktrees_admin = source.join(".git/worktrees");
+
+    // Create a prunable (missing-checkout) sibling and a locked missing-checkout sibling.
+    let prunable_sibling = temp.path().join("sibling-prunable");
+    test_git(
+        &source,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "sibling-prunable",
+            prunable_sibling.to_str().unwrap(),
+        ],
+    );
+    let prunable_admin = worktrees_admin.join("sibling-prunable");
+    assert!(prunable_admin.is_dir());
+    std::fs::remove_dir_all(&prunable_sibling).unwrap();
+
+    let locked_sibling = temp.path().join("sibling-locked");
+    test_git(
+        &source,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "sibling-locked",
+            locked_sibling.to_str().unwrap(),
+        ],
+    );
+    test_git(
+        &source,
+        &["worktree", "lock", locked_sibling.to_str().unwrap()],
+    );
+    let locked_sibling_admin = worktrees_admin.join("sibling-locked");
+    assert!(locked_sibling_admin.is_dir());
+    std::fs::remove_dir_all(&locked_sibling).unwrap();
+
+    let make_worktree = |name: &str, branch: &str| ManagedWorktree {
+        kind: ManagedCheckoutKind::Worktree,
+        source_project_directory: source.clone(),
+        source_repository: source.clone(),
+        worktree_root: source.join(".mj/worktrees").join(name),
+        branch: branch.into(),
+        target: ManagedWorktreeTarget::Local,
+        base_commit: None,
+    };
+
+    // Case 1: present checkout is removed without pruning siblings.
+    let present = make_worktree("sess-present", "mj/sess-present");
+    std::fs::create_dir_all(present.worktree_root.parent().unwrap()).unwrap();
+    test_git(
+        &source,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &present.branch,
+            present.worktree_root.to_str().unwrap(),
+        ],
+    );
+    assert!(worktrees_admin.join("sess-present").is_dir());
+    super::super::environment::cleanup_unstarted_checkout(
+        &ProcessExecutor,
+        &present,
+        BranchDisposition::Keep,
+    )
+    .unwrap();
+    assert!(!present.worktree_root.exists());
+    assert!(!worktrees_admin.join("sess-present").exists());
+    assert!(
+        prunable_admin.is_dir(),
+        "prunable sibling admin dir must not be pruned"
+    );
+    assert!(
+        locked_sibling_admin.is_dir(),
+        "locked sibling admin dir must not be pruned"
+    );
+
+    // Case 2: already-missing unlocked checkout removes only its own admin dir.
+    let missing = make_worktree("sess-missing", "mj/sess-missing");
+    std::fs::create_dir_all(missing.worktree_root.parent().unwrap()).unwrap();
+    test_git(
+        &source,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &missing.branch,
+            missing.worktree_root.to_str().unwrap(),
+        ],
+    );
+    assert!(worktrees_admin.join("sess-missing").is_dir());
+    std::fs::remove_dir_all(&missing.worktree_root).unwrap();
+    super::super::environment::cleanup_unstarted_checkout(
+        &ProcessExecutor,
+        &missing,
+        BranchDisposition::Keep,
+    )
+    .unwrap();
+    assert!(!worktrees_admin.join("sess-missing").exists());
+    assert!(
+        prunable_admin.is_dir(),
+        "prunable sibling admin dir must survive missing-checkout cleanup"
+    );
+    assert!(
+        locked_sibling_admin.is_dir(),
+        "locked sibling admin dir must survive missing-checkout cleanup"
+    );
+
+    // Case 3: already-missing LOCKED checkout preserves its admin dir.
+    let missing_locked = make_worktree("sess-locked", "mj/sess-locked");
+    std::fs::create_dir_all(missing_locked.worktree_root.parent().unwrap()).unwrap();
+    test_git(
+        &source,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &missing_locked.branch,
+            missing_locked.worktree_root.to_str().unwrap(),
+        ],
+    );
+    test_git(
+        &source,
+        &[
+            "worktree",
+            "lock",
+            missing_locked.worktree_root.to_str().unwrap(),
+        ],
+    );
+    std::fs::remove_dir_all(&missing_locked.worktree_root).unwrap();
+    super::super::environment::cleanup_unstarted_checkout(
+        &ProcessExecutor,
+        &missing_locked,
+        BranchDisposition::Keep,
+    )
+    .unwrap();
+    assert!(
+        worktrees_admin.join("sess-locked").is_dir(),
+        "locked missing worktree admin dir must be preserved"
+    );
+    assert!(prunable_admin.is_dir());
+    assert!(locked_sibling_admin.is_dir());
+}
+
+#[test]
+fn legacy_linked_worktree_origin_delta_capture_and_restore_as_clone() {
+    use mj_checkpoint::archive::SystemGit;
+    use mj_checkpoint::checkpoint::managed_clone_snapshot_input;
+    use mj_checkpoint::snapshot::{SessionCaptureConsent, capture_session_snapshot};
+
+    for with_origin in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        test_git(&source, &["init", "-b", "main"]);
+        test_git(&source, &["config", "user.name", "Test"]);
+        test_git(&source, &["config", "user.email", "test@example.com"]);
+        std::fs::write(source.join("README.md"), "base\n").unwrap();
+        test_git(&source, &["add", "README.md"]);
+        test_git(&source, &["commit", "-m", "initial"]);
+
+        if with_origin {
+            let origin = temp.path().join("origin.git");
+            test_git(
+                temp.path(),
+                &[
+                    "clone",
+                    "--bare",
+                    source.to_str().unwrap(),
+                    origin.to_str().unwrap(),
+                ],
+            );
+            test_git(
+                &source,
+                &["remote", "add", "origin", origin.to_str().unwrap()],
+            );
+            test_git(&source, &["fetch", "origin"]);
+        }
+
+        // Create an unrelated branch and a repo-global stash in the source repo.
+        test_git(&source, &["branch", "unrelated-source-branch"]);
+        std::fs::write(source.join("README.md"), "stashed in source\n").unwrap();
+        test_git(&source, &["stash", "push", "-m", "source global stash"]);
+
+        // Create a legacy linked worktree for the session.
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let worktree_root = source.join(".mj/worktrees").join(session_id);
+        std::fs::create_dir_all(worktree_root.parent().unwrap()).unwrap();
+        test_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &format!("mj/{session_id}"),
+                worktree_root.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(worktree_root.join("session.txt"), "committed\n").unwrap();
+        test_git(&worktree_root, &["add", "session.txt"]);
+        test_git(&worktree_root, &["commit", "-m", "session commit"]);
+        std::fs::write(worktree_root.join("README.md"), "unstaged edit\n").unwrap();
+
+        let legacy_worktree = ManagedWorktree {
+            kind: ManagedCheckoutKind::Worktree,
+            source_project_directory: source.clone(),
+            source_repository: source.clone(),
+            worktree_root: worktree_root.clone(),
+            branch: format!("mj/{session_id}"),
+            target: ManagedWorktreeTarget::Local,
+            base_commit: None,
+        };
+        assert!(legacy_worktree.uses_origin_delta_suspend());
+
+        let origin_override =
+            super::super::lifecycle::origin_delta::managed_origin_override(&legacy_worktree);
+        if with_origin {
+            assert!(origin_override.is_none());
+        } else {
+            assert_eq!(
+                origin_override.as_deref(),
+                Some(source.to_string_lossy().as_ref())
+            );
+        }
+
+        // Capture OriginDelta from the linked worktree.
+        let pack_path = temp.path().join("workspace.pack");
+        let input = managed_clone_snapshot_input(
+            "workspace",
+            &worktree_root,
+            pack_path,
+            origin_override,
+        );
+        let mut snapshot =
+            capture_session_snapshot(&SystemGit, &[input], &SessionCaptureConsent::default())
+                .unwrap()
+                .repositories
+                .remove("workspace")
+                .unwrap();
+        let origin_url = snapshot.origin_url.clone().unwrap();
+
+        let archive_path = temp.path().join("worktree-origin-delta.hel.zip");
+        let canonical = mj_core::archive::CanonicalSessionSnapshot {
+            command_ledger: None,
+            assessment_state: None,
+            notification_stack: None,
+            event_frontier: 0,
+            event_frontier_digest: "0".repeat(64),
+            session: mj_core::archive::CanonicalSessionState {
+                execution: mj_core::archive::CanonicalExecutionState::Idle,
+                last_activity_at_ms: None,
+                session_title: None,
+                configuration: Default::default(),
+            },
+            transcript: Vec::new(),
+            queued_prompts: Vec::new(),
+            mailbox: Default::default(),
+        };
+        mj_checkpoint::archive::write_archive_atomic(
+            &archive_path,
+            &mj_checkpoint::archive::ArchiveInput {
+                session: mj_core::archive::SessionManifest {
+                    id: session_id.into(),
+                    title: "worktree origin-delta".into(),
+                    harness_kind: mj_core::config::HarnessKind::Codex,
+                    profile_id: "codex".into(),
+                    native_session_id: String::new(),
+                    created_at: "2026-11-21T00:00:00Z".into(),
+                    checkpointed_at: "2026-11-21T00:00:00Z".into(),
+                    hel_version: String::new(),
+                    relay_version: String::new(),
+                    adapter_version: String::new(),
+                },
+                target: mj_core::archive::TargetManifest {
+                    template_id: "local-bare".into(),
+                    target_kind: "local-bare".into(),
+                    details: Default::default(),
+                },
+                bundle: mj_core::archive::BundleManifest {
+                    id: "workspace".into(),
+                    primary_repository: "workspace".into(),
+                },
+                canonical_session: canonical,
+                native_artifacts: Vec::new(),
+                repositories: vec![mj_checkpoint::archive::RepositorySnapshot {
+                    metadata: mj_checkpoint::archive::RepositoryMetadata {
+                        id: "workspace".into(),
+                        relative_destination: PathBuf::from("workspace"),
+                        checkout_subdirectory: None,
+                        origin: origin_url,
+                        push_urls: Vec::new(),
+                        remote_workspace: false,
+                        plain_directory: false,
+                        base_commit: String::new(),
+                        head_commit: snapshot.head.commit().to_owned(),
+                        branch: Some(format!("mj/{session_id}")),
+                        review_refs_metadata_only: false,
+                        review_baseline_ref: None,
+                        saved_refs: Default::default(),
+                        stash_stack: Vec::new(),
+                        git_operation: None,
+                        origin_delta: Some(Box::new(snapshot.metadata)),
+                    },
+                    origin_delta_pack: snapshot.pack.take(),
+                    committed_bundle: Vec::new(),
+                    staged_patch: Vec::new(),
+                    unstaged_patch: Vec::new(),
+                    untracked_tar: Vec::new(),
+                    operation_payloads: None,
+                    linked_worktrees: Vec::new(),
+                }],
+            },
+        )
+        .unwrap();
+        assert!(
+            mj_checkpoint::archive::checkpoint_archive_uses_origin_delta(&archive_path).unwrap()
+        );
+
+        // Retire the linked worktree via scoped removal.
+        super::super::environment::cleanup_unstarted_checkout(
+            &ProcessExecutor,
+            &legacy_worktree,
+            BranchDisposition::Keep,
+        )
+        .unwrap();
+        assert!(!worktree_root.exists());
+
+        // Even if the retained session branch is subsequently deleted and
+        // pruned from the source repository, the OriginDelta pack must carry
+        // the session's commits independently so restore still recovers them.
+        test_git(&source, &["branch", "-D", &format!("mj/{session_id}")]);
+        test_git(&source, &["reflog", "expire", "--expire=now", "--all"]);
+        test_git(&source, &["gc", "--prune=now"]);
+
+        // Restore into a fresh ManagedCheckoutKind::Clone (matching in-place resume upgrade).
+        let upgraded_clone = ManagedWorktree {
+            kind: ManagedCheckoutKind::Clone,
+            worktree_root: source.join(".mj/clones").join(session_id),
+            base_commit: None,
+            ..legacy_worktree
+        };
+        let manifest = mj_checkpoint::archive::read_checkpoint_manifest(&archive_path).unwrap();
+        restore_managed_clone_origin_delta(
+            &ProcessExecutor,
+            &upgraded_clone,
+            &archive_path,
+            &manifest,
+        )
+        .unwrap();
+
+        assert_eq!(
+            test_git(&upgraded_clone.worktree_root, &["branch", "--show-current"]),
+            format!("mj/{session_id}")
+        );
+        assert_eq!(
+            std::fs::read_to_string(upgraded_clone.worktree_root.join("session.txt")).unwrap(),
+            "committed\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(upgraded_clone.worktree_root.join("README.md")).unwrap(),
+            "unstaged edit\n"
+        );
+        assert!(
+            test_git(&upgraded_clone.worktree_root, &["stash", "list"]).is_empty(),
+            "repo-global stash from source must not be captured from a linked worktree"
+        );
+        let branches = test_git(
+            &upgraded_clone.worktree_root,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        );
+        assert!(
+            !branches.contains("unrelated-source-branch"),
+            "unrelated source branches must not be captured from a linked worktree: {branches}"
+        );
+    }
+}
+
+#[test]
+fn plan_workspace_to_raw_origin_delta_skips_source_origin_refresh_and_launch_branch() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    test_git(&source, &["init", "-b", "main"]);
+    test_git(&source, &["config", "user.name", "Test"]);
+    test_git(&source, &["config", "user.email", "test@example.com"]);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    test_git(&source, &["add", "README.md"]);
+    test_git(&source, &["commit", "-m", "initial"]);
+    // Point origin at an unreachable local path so refresh_source_origin would fail if called.
+    test_git(
+        &source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            temp.path().join("missing-origin.git").to_str().unwrap(),
+        ],
+    );
+
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Stopped;
+    session.bundle_id = "project".into();
+    session.launch_branch = Some("deleted-launch-branch".into());
+    let mut config = resume_compatibility_config();
+    config.bundles.insert("project".into(), local_bundle(&source));
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session.clone())].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    let planned = controller
+        .plan_workspace_to_raw(&session, "local-bare", true, &ProcessExecutor)
+        .unwrap();
+    assert!(!planned.reuse_existing_branch);
+    assert_eq!(planned.worktree.kind, ManagedCheckoutKind::Clone);
+    assert_eq!(
+        planned.worktree.worktree_root,
+        source.join(".mj/clones").join(&session.id)
+    );
+    assert_eq!(planned.worktree.branch, format!("mj/{}", session.id));
+    assert_eq!(planned.worktree.base_commit, None);
 }

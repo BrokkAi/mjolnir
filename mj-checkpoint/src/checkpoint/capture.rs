@@ -962,6 +962,7 @@ pub fn managed_clone_snapshot_input(
     id: &str,
     path: &Path,
     pack_path: PathBuf,
+    origin_override: Option<String>,
 ) -> crate::snapshot::RepositoryInput {
     use crate::snapshot::{CheckoutOwnership, ExclusionSource, RepositoryInput};
 
@@ -969,7 +970,7 @@ pub fn managed_clone_snapshot_input(
         id: id.to_owned(),
         checkout: path.to_path_buf(),
         ownership: CheckoutOwnership::Managed,
-        origin_override: None,
+        origin_override,
         pack_path,
         exclusions: ExclusionSource::Origin,
         keep_dir: Some(path.join(".mj/keep")),
@@ -989,6 +990,7 @@ fn collect_origin_delta(
         &repository.id,
         &location.top_level,
         snapshot_directory.join(&repository.id),
+        repository.origin_override.clone(),
     );
     let mut snapshot = capture_session_snapshot(git, &[input], &SessionCaptureConsent::default())?
         .repositories
@@ -1003,7 +1005,7 @@ fn collect_origin_delta(
             origin: snapshot
                 .origin_url
                 .clone()
-                .context("managed clone has no origin")?,
+                .context("managed checkout has no origin")?,
             push_urls: Vec::new(),
             remote_workspace: false,
             plain_directory: false,
