@@ -24,6 +24,7 @@ pub(super) struct RuntimeHistory {
     snapshots: VecDeque<RuntimeCapture>,
     viewer: ViewerPublication,
     latest_view: Option<(u64, Arc<ViewerSnapshot>)>,
+    browser_watch: Option<tokio::sync::watch::Sender<ViewerSnapshot>>,
     bytes: usize,
     native_owners: NativeOwners,
     full: RuntimeProjection,
@@ -142,19 +143,24 @@ impl RuntimeHistory {
         Some(&self.snapshots[self.index(sequence)?].runtime)
     }
 
+    fn latest_browser_view(&mut self) -> Arc<ViewerSnapshot> {
+        if let Some((sequence, view)) = &self.latest_view
+            && *sequence == self.sequence
+        {
+            return view.clone();
+        }
+        let capture = self.snapshots.back().expect("captured browser view");
+        let view = Arc::new(capture.browser_view(&mut self.viewer));
+        self.latest_view = Some((self.sequence, view.clone()));
+        if let Some(watch) = &self.browser_watch {
+            watch.send_replace((*view).clone());
+        }
+        view
+    }
+
     fn browser_views(&mut self, requested: Option<&RuntimeCursor>) -> BrowserViews {
         let cursor = self.cursor();
-        let capture = self.snapshots.back().expect("captured browser view");
-        let (_, current) = self
-            .latest_view
-            .take()
-            .filter(|(sequence, _)| *sequence == cursor.sequence)
-            .unwrap_or_else(|| {
-                (
-                    cursor.sequence,
-                    Arc::new(capture.browser_view(&mut self.viewer)),
-                )
-            });
+        let current = self.latest_browser_view();
         let base = requested
             .filter(|requested| requested.incarnation == cursor.incarnation)
             .and_then(|requested| {
@@ -170,7 +176,6 @@ impl RuntimeHistory {
                     Arc::new(base.browser_view(&mut self.viewer.clone()))
                 }
             });
-        self.latest_view = Some((cursor.sequence, current.clone()));
         BrowserViews {
             cursor,
             current,
@@ -286,21 +291,26 @@ impl RuntimeState {
             .browser_views(requested))
     }
 
+    pub(crate) fn subscribe_browser_views(
+        &self,
+    ) -> Result<tokio::sync::watch::Receiver<ViewerSnapshot>> {
+        self.capture_runtime()?;
+        let mut history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
+        let current = history.latest_browser_view();
+        Ok(history
+            .browser_watch
+            .get_or_insert_with(|| tokio::sync::watch::channel((*current).clone()).0)
+            .subscribe())
+    }
+
     pub(crate) async fn follow_browser_views(
         self: &Arc<Self>,
         mut revisions: tokio::sync::watch::Receiver<u64>,
-        mut sequence: u64,
-        views: tokio::sync::watch::Sender<ViewerSnapshot>,
     ) -> Result<()> {
         while revisions.changed().await.is_ok() {
             revisions.borrow_and_update();
             let runtime = Arc::clone(self);
-            let latest =
-                mj_core::runtime::spawn_blocking(move || runtime.browser_views(None)).await??;
-            if latest.cursor.sequence != sequence {
-                sequence = latest.cursor.sequence;
-                views.send_replace((*latest.current).clone());
-            }
+            mj_core::runtime::spawn_blocking(move || runtime.browser_views(None)).await??;
         }
         bail!("daemon stopped publishing runtime revisions to the browser")
     }
@@ -1360,6 +1370,8 @@ mod tests {
         );
 
         let initial = state.browser_views(None).unwrap();
+        let mut latest_views = state.subscribe_browser_views().unwrap();
+        latest_views.borrow_and_update();
         let terminal_initial = state.feed.lock().unwrap().frame(None);
         let mut revisions = state.revisions();
         revisions.borrow_and_update();
@@ -1398,6 +1410,11 @@ mod tests {
         assert!(revisions.has_changed().unwrap());
         let previewed = state.browser_views(Some(&initial.cursor)).unwrap();
         assert!(previewed.cursor.sequence > initial.cursor.sequence);
+        assert!(latest_views.has_changed().unwrap());
+        assert_eq!(
+            latest_views.borrow_and_update().revision,
+            previewed.cursor.sequence
+        );
         assert!(
             !previewed.base.unwrap().sessions.0[id].conversation_available,
             "the base stays at the served revision",

@@ -44,7 +44,9 @@ This plan does not add a new public API. A later plan will publish this projecti
 - [x] (2026-11-21) Milestone 5 uses one latest view and rebuilds retained reconnect bases. The focused reconnect, preview and terminal-frame regressions passed.
 - [x] (2026-11-21) Repeated both heap runs with the latest-only cache. The retained heap at 4,096 captures fell from 56.19 MiB to 30.63 MiB.
 - [x] (2026-11-21) On the merged tree, daemon library tests passed (595 with two ignored), server library tests passed (275), and Clippy passed for both. The final web run passed 97 unit and 146 Chromium tests, with three provisioned-lab cases skipped.
-- [ ] Complete UTC TUI validation, the named-instance run and review.
+- [x] (2026-11-21) The UTC TUI library suite passed (611 with two ignored). A real Grok session in `feeds-m5` delivered a preview delta in Chromium, replayed a retained cursor after reconnect and sent a fresh snapshot after daemon restart. The attached conversation recovered and delivered a further preview after restart. The test session was suspended and the named daemon stopped.
+- [x] (2026-11-21) After restoring create acknowledgement ordering, the daemon library suite passed again (595 with two ignored). Clippy and the isolated browser run passed on that change.
+- [ ] Complete review.
 
 
 ## Surprises & Discoveries
@@ -93,6 +95,9 @@ This plan does not add a new public API. A later plan will publish this projecti
 
 - Observation: retaining only the latest browser view removes most of that increase.
   Evidence: the repeated runs with the same fixture and conversation updates retained 7.64 MiB at 400 updates and 30.63 MiB at 2,048 updates. The increases relative to the legacy baseline were 0.59 MiB (8.4%) and 7.67 MiB (33.4%). The revised cache saved 25.56 MiB at 4,096 captures relative to the first prototype. Every retained capture remained eligible for reconnect.
+
+- Observation: the create acknowledgement promises that the registered session is already in the browser view. The next `/api/v1` call may be a wait that requires the record immediately.
+  Evidence: `mj-server/src/server/api/wait.rs` checks for the record before subscribing, and the old create action published before sending the ID. `RuntimeHistory` now updates the latest-view watch whenever a reader advances the cached view. The create action advances it off the phone loop before acknowledging the ID.
 
 ## Decision Log
 

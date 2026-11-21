@@ -207,6 +207,10 @@ pub(super) async fn apply_phone_action(
                     publication,
                 )
                 .await?;
+            // The next API call can be a wait that needs the registered
+            // record. Advance the history's view before acknowledging the ID,
+            // while this action is still off the phone control loop.
+            services.daemon_runtime.browser_views(None)?;
             let registered_session_id = registered.session.id.clone();
             started
                 .send(PhoneActionStarted {

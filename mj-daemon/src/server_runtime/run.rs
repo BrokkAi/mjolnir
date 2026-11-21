@@ -73,9 +73,7 @@ pub(crate) async fn run_server(
 
     let mut browser_revisions = daemon_runtime.revisions();
     browser_revisions.borrow_and_update();
-    let initial_view = daemon_runtime.browser_views(None)?;
-    let initial_sequence = initial_view.cursor.sequence;
-    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel((*initial_view.current).clone());
+    let snapshot_rx = daemon_runtime.subscribe_browser_views()?;
     startup.finished("capture first browser view");
     let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(32);
     let (bundle_tx, mut bundle_rx) = tokio::sync::mpsc::channel(16);
@@ -1292,8 +1290,7 @@ pub(crate) async fn run_server(
         activity_snapshots,
         mj_controller::database::record_api_activities,
     ));
-    let browser_views =
-        daemon_runtime.follow_browser_views(browser_revisions, initial_sequence, snapshot_tx);
+    let browser_views = daemon_runtime.follow_browser_views(browser_revisions);
     let result = tokio::select! {
         result = serve.stopped() => result,
         result = control => result,
