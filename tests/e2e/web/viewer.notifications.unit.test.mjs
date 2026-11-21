@@ -92,6 +92,15 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
     isSubagentSession: row => Boolean(row.subagent_parent_id),
     childFormHolder: row => (row.form_holder && row.form_holder !== row.id ? row.form_holder : null),
     sessionById: id => context.viewerState.rows.get(id),
+    // The notifications slice calls these; their definitions live with the conversation cards.
+    sentElicitations: new Set(),
+    reconcileChildren(parent, desired) {
+      const wanted = new Set(desired);
+      parent.children = parent.children.filter(child => wanted.has(child));
+      for (let index = 0; index < desired.length; index += 1) {
+        if (parent.children[index] !== desired[index]) parent.children.splice(index, 0, desired[index]);
+      }
+    },
     canViewConversation: row => row.capabilities?.open === true,
     sessionMessageMs: row => row.last_message_at_ms ?? 0,
     navigate: next => nav.push(next),

@@ -1422,6 +1422,10 @@ let inboxBusy = false;
 let inboxShown = null; // the destination the quick-reply line currently holds
 let inboxShownKey = null; // the text key last rendered, to retry a failed read
 let inboxSelection = null; // { sessionId, itemId } for the displayed stack
+// Kept apart from `#conversation`'s cards: one DOM node cannot sit in both.
+const inboxElicitationCards = new Map();
+const inboxFormDetailLoads = new WeakSet();
+const inboxFormDetailFailures = new WeakMap();
 
 const inboxNodes = (() => {
   const container = document.querySelector('#inbox');
@@ -1432,6 +1436,8 @@ const inboxNodes = (() => {
   header.append(glyph, headerText);
   const body = el('pre', 'inbox-message');
   const message = el('div', 'inbox-message-area');
+  const elicitationHost = el('div', 'inbox-elicitation');
+  elicitationHost.hidden = true;
   const pager = el('div', 'inbox-message-pager');
   const previous = button('Previous', 'secondary');
   const position = el('span', 'dim');
@@ -1460,11 +1466,11 @@ const inboxNodes = (() => {
   const cardError = el('p', 'error');
   cardError.setAttribute('role', 'alert');
   const card = el('div', 'card inbox-card');
-  message.append(pager, body, retry);
+  message.append(pager, body, elicitationHost, retry);
   card.append(header, message, cardError, reply, actions);
   const empty = el('p', 'dim', 'No notifications.');
   container.append(card, empty);
-  return { card, empty, glyph, headerText, body, pager, previous, position, next, retry,
+  return { card, empty, glyph, headerText, body, elicitationHost, pager, previous, position, next, retry,
     input, send, open, clear, skip, cardError, reply };
 })();
 
@@ -1764,7 +1770,14 @@ async function inboxSend(card) {
 bindInboxControl(inboxNodes.open, inboxOpen);
 bindInboxControl(inboxNodes.clear, inboxClearNext);
 bindInboxControl(inboxNodes.skip, inboxSkip);
-bindInboxControl(inboxNodes.retry, key => {
+bindInboxControl(inboxNodes.retry, binding => {
+  if (binding?.kind === 'form-detail') {
+    inboxFormDetailFailures.delete(binding.row);
+    inboxFormDetailLoads.delete(binding.row);
+    renderInbox();
+    return;
+  }
+  const key = binding?.kind === 'text' ? binding.key : null;
   if (key !== inboxShownKey) return;
   inboxTexts.delete(key);
   renderInbox();
@@ -1800,13 +1813,37 @@ function setInboxText(node, text) {
   if (node.textContent !== text) node.textContent = text;
 }
 
+/// Drop inbox cards whose request has left the session. Summary rows omit
+/// `pending_elicitations`, so they must not discard a card that detail still owns.
+function pruneInboxElicitationState() {
+  const stale = key => {
+    const split = key.indexOf('\u001f');
+    if (split < 0) return false;
+    const session = sessionById(key.slice(0, split));
+    if (session && session.detail === false) return false;
+    const requestId = key.slice(split + 1);
+    return !(session?.pending_elicitations || []).some(request => request.id === requestId);
+  };
+  for (const key of [...inboxElicitationCards.keys()]) if (stale(key)) inboxElicitationCards.delete(key);
+  for (const key of [...sentElicitations]) if (stale(key)) sentElicitations.delete(key);
+}
+
 function renderInbox() {
+  pruneInboxElicitationState();
   const entries = inboxEntries();
   const entry = entries[0];
   const nodes = inboxNodes;
   nodes.card.hidden = !entry;
   nodes.empty.hidden = Boolean(entry);
-  if (!entry) { inboxShown = null; inboxShownKey = null; inboxSelection = null; return; }
+  if (!entry) {
+    inboxShown = null;
+    inboxShownKey = null;
+    inboxSelection = null;
+    reconcileChildren(nodes.elicitationHost, []);
+    nodes.elicitationHost.hidden = true;
+    nodes.body.hidden = false;
+    return;
+  }
   const card = inboxCard(entry);
   for (const control of [nodes.open, nodes.clear, nodes.skip, nodes.send]) control._binding = card;
   const launchFailure = entry.launchFailure;
@@ -1840,35 +1877,109 @@ function renderInbox() {
   nodes.next._binding = nodes.next.disabled ? null : { selection: inboxSelection, itemId: itemIds[index + 1] };
 
   let retryable = false;
+  let retryBinding = null;
+  let formOwner = null;
   const item = stack?.entries[index];
   const form = stack?.form;
-  if (failure) {
+  // Quick reply stays for native input, review findings, and unknown forms.
+  // Only a waiting elicitation is answered in place.
+  const formRequested = !failure && waiting && Boolean(stack && !item && form?.source === 'elicitation');
+  if (formRequested) {
     inboxShownKey = null;
-    setInboxText(nodes.body, launchFailure ? launchFailure.error || LAUNCH_FAILURE_TEXT
-      : entry.launch_error || entry.storage_problem || entry.configuration_issue || entry.move_recovery?.failure_notice || label);
-  } else if (stack && !item) {
-    inboxShownKey = null;
-    setInboxText(nodes.body, form?.message ?? 'message not available');
+    const holder = sessionById(card.destination);
+    const candidates = [];
+    for (const candidate of [holder, entry]) {
+      if (candidate && !candidates.includes(candidate)) candidates.push(candidate);
+    }
+    let formRequest = null;
+    for (const candidate of candidates) {
+      const request = candidate.pending_elicitations?.find(pending => pending.id === form.request_id);
+      if (request) {
+        formOwner = candidate;
+        formRequest = request;
+        break;
+      }
+    }
+    if (formOwner && formRequest) {
+      nodes.body.hidden = true;
+      nodes.elicitationHost.hidden = false;
+      const key = elicitationKey(formOwner.id, formRequest.id);
+      const signature = JSON.stringify(formRequest);
+      let cached = inboxElicitationCards.get(key);
+      if (!cached || cached.signature !== signature) {
+        cached = buildElicitationCard(formOwner, formRequest, 'inbox');
+        cached.signature = signature;
+        inboxElicitationCards.set(key, cached);
+      }
+      cached.setSent(sentElicitations.has(key));
+      reconcileChildren(nodes.elicitationHost, [cached.card]);
+    } else {
+      nodes.elicitationHost.hidden = true;
+      reconcileChildren(nodes.elicitationHost, []);
+      nodes.body.hidden = false;
+      const detailTarget = candidates.find(candidate => candidate?.detail === false);
+      if (detailTarget) {
+        const loadError = inboxFormDetailFailures.get(detailTarget);
+        if (loadError) {
+          setInboxText(nodes.body, `Could not load form: ${loadError.message}. Use Go to Session to answer it there.\n\n${form.message}`);
+          retryable = true;
+          retryBinding = { kind: 'form-detail', row: detailTarget };
+        } else {
+          setInboxText(nodes.body, `Loading form…\n\n${form.message}`);
+          if (!inboxFormDetailLoads.has(detailTarget)) {
+            inboxFormDetailLoads.add(detailTarget);
+            ensureSessionDetail(detailTarget.id).then(() => {
+              if (route.name === 'notifications') renderInbox();
+            }, err => {
+              inboxFormDetailFailures.set(detailTarget, err);
+              if (route.name === 'notifications') renderInbox();
+            });
+          }
+        }
+      } else {
+        let status;
+        if (!holder && !entry) status = 'Could not load form: session not found.';
+        else if (holder && inboxSessionFailed(holder)) {
+          status = `Could not load form: ${holder.launch_error || holder.storage_problem || holder.configuration_issue || 'session failed'}.`;
+        } else if (holder?.lifecycle === 'suspended') status = 'Could not load form: the session is suspended.';
+        else status = "Waiting for the session's form update…";
+        setInboxText(nodes.body, `${status}\n\n${form.message}`);
+      }
+    }
   } else {
-    const key = item ? JSON.stringify([entry.id, card.destination, item]) : card.key;
-    // Showing the entry again retries a failed read without looping on a render.
-    if (key !== inboxShownKey && inboxTexts.get(key)?.state === 'error') inboxTexts.delete(key);
-    inboxShownKey = key;
-    const text = inboxText(entry, key, item);
-    retryable = text.state === 'error';
-    setInboxText(nodes.body, text.state === 'loading' || text.state === 'stale' ? 'loading…'
-      : text.state === 'missing' ? 'message not available'
-      : text.state === 'error' ? `Could not read the message: ${text.text}`
-      : text.text || ((item?.kind ?? card.badge) === 'needs_input' ? 'Waiting for your input' : 'Important update'));
+    nodes.body.hidden = false;
+    nodes.elicitationHost.hidden = true;
+    reconcileChildren(nodes.elicitationHost, []);
+    if (failure) {
+      inboxShownKey = null;
+      setInboxText(nodes.body, launchFailure ? launchFailure.error || LAUNCH_FAILURE_TEXT
+        : entry.launch_error || entry.storage_problem || entry.configuration_issue || entry.move_recovery?.failure_notice || label);
+    } else if (stack && !item) {
+      inboxShownKey = null;
+      setInboxText(nodes.body, form?.message ?? 'message not available');
+    } else {
+      const key = item ? JSON.stringify([entry.id, card.destination, item]) : card.key;
+      // Showing the entry again retries a failed read without looping on a render.
+      if (key !== inboxShownKey && inboxTexts.get(key)?.state === 'error') inboxTexts.delete(key);
+      inboxShownKey = key;
+      const text = inboxText(entry, key, item);
+      retryable = text.state === 'error';
+      if (retryable) retryBinding = { kind: 'text', key };
+      setInboxText(nodes.body, text.state === 'loading' || text.state === 'stale' ? 'loading…'
+        : text.state === 'missing' ? 'message not available'
+        : text.state === 'error' ? `Could not read the message: ${text.text}`
+        : text.text || ((item?.kind ?? card.badge) === 'needs_input' ? 'Waiting for your input' : 'Important update'));
+    }
   }
   nodes.retry.hidden = !retryable;
-  nodes.retry._binding = retryable ? inboxShownKey : null;
-  nodes.reply.hidden = failure;
+  nodes.retry._binding = retryable ? retryBinding : null;
+  nodes.reply.hidden = failure || formRequested;
   if (inboxShown !== card.destination) {
     inboxShown = card.destination;
     nodes.input.value = inboxDrafts.get(card.destination) || '';
   }
-  const error = inboxError?.key === card.key || inboxError?.destination === card.destination ? inboxError.text : '';
+  const error = inboxError?.key === card.key || inboxError?.destination === card.destination
+    || (formOwner && inboxError?.destination === formOwner.id) ? inboxError.text : '';
   setInboxText(nodes.cardError, error);
   nodes.cardError.hidden = !error;
   nodes.send.disabled = inboxSending.has(card.destination);
@@ -7885,7 +7996,7 @@ function buildElicitationForm(form, request, register, onEdit) {
   };
   return { questions, collect };
 }
-function buildElicitationCard(session, request) {
+function buildElicitationCard(session, request, surface = 'conversation') {
   const card = el('section', 'card elicitation');
   const heading = el('strong', 'elicitation-heading', request.title || 'Input needed');
   const message = el('pre', 'elicitation-message', request.message);
@@ -7925,7 +8036,7 @@ function buildElicitationCard(session, request) {
   send.type = 'submit';
   const previous = button('Previous', () => navigate(confirming ? unanswered()[0] ?? current : current - 1));
   previous.title = 'Previous question';
-  button('Cancel', () => submitElicitation(session.id, request.id, { action: 'cancel' }), 'danger');
+  button('Cancel', () => submitElicitation(session.id, request.id, { action: 'cancel' }, surface), 'danger');
   const warning = el('div', 'elicitation-warning');
   warning.setAttribute('role', 'alert');
   const warningText = el('p');
@@ -7945,7 +8056,7 @@ function buildElicitationCard(session, request) {
   function submit() {
     if (sent) return;
     const content = collect([...confirmed]);
-    if (content) submitElicitation(session.id, request.id, { action: 'accept', content });
+    if (content) submitElicitation(session.id, request.id, { action: 'accept', content }, surface);
   }
   form.addEventListener('submit', event => {
     event.preventDefault();
@@ -8053,13 +8164,14 @@ function renderElicitations(session) {
   for (const key of [...elicitationCards.keys()]) if (!live.has(key)) elicitationCards.delete(key);
   reconcileChildren(elicitations, cards);
 }
-async function submitElicitation(sessionId, elicitationId, response) {
+async function submitElicitation(sessionId, elicitationId, response, surface = 'conversation') {
   const key = elicitationKey(sessionId, elicitationId);
   if (sentElicitations.has(key)) return;
   sentElicitations.add(key);
   const rerender = () => {
     const session = sessionById(sessionId);
     if (session && sessionId === currentSession) renderElicitations(session);
+    if (route.name === 'notifications') renderInbox();
   };
   rerender();
   try {
@@ -8072,11 +8184,16 @@ async function submitElicitation(sessionId, elicitationId, response) {
         response,
       }),
     });
-    document.querySelector('#conversation-error').textContent = '';
+    if (surface === 'inbox') {
+      if (inboxError?.destination === sessionId) inboxError = null;
+    } else {
+      document.querySelector('#conversation-error').textContent = '';
+    }
     await refresh();
   } catch (err) {
     sentElicitations.delete(key);
-    document.querySelector('#conversation-error').textContent = err.message;
+    if (surface === 'inbox') inboxError = { destination: sessionId, text: err.message };
+    else document.querySelector('#conversation-error').textContent = err.message;
     rerender();
   }
 }
