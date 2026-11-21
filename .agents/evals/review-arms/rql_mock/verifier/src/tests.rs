@@ -32,7 +32,11 @@ fn fixture_seed_names(file: &Parsed) -> BTreeSet<&str> {
 
 fn by_kind(file: &Parsed, query: &Query) -> BTreeMap<&'static str, Vec<String>> {
     let mut kinds = BTreeMap::<_, Vec<_>>::new();
-    for candidate in file.candidates(query, &fixture_seed_names(file)) {
+    for Selected {
+        construct: candidate,
+        ..
+    } in file.candidates(query, &fixture_seed_names(file))
+    {
         kinds
             .entry(candidate.kind.name())
             .or_default()
@@ -351,6 +355,39 @@ fn removed_selection_reasons_cannot_exclude_every_candidate() {
             ["unaccounted-candidate", "unaccounted-candidate"]
         );
     }
+}
+
+#[test]
+fn incoming_at_depth_zero_has_no_candidates() {
+    let incoming = query(
+        "guarded-paths",
+        &[":direction", "\"incoming\"", ":depth", "0"],
+        procedure(),
+    );
+    let text = "fn seed() {}\nfn caller() {\n    seed();\n}\n";
+    let out = accounting(&incoming, text, json!({"rows": [], "excluded": []}));
+    assert!(out.candidates.is_empty());
+    assert!(out.errors.is_empty());
+    assert!(out.unchecked.is_empty());
+}
+
+#[test]
+fn incoming_name_match_can_exclude_an_unrelated_callee() {
+    let incoming = query(
+        "guarded-paths",
+        &[":direction", "\"incoming\""],
+        procedure(),
+    );
+    let text = "fn seed() {}\nfn caller() {\n    seed();\n    external::seed();\n}\n";
+    let event = json!({"kind": "call", "site": value_site(3, 3)});
+    let row = guarded(event, json!([]), json!([]), value_site(3, 3));
+    let answer = json!({"rows": [row], "excluded": [
+        {"candidate_site": value_site(4, 4), "reason": "not-the-seed", "detail": "external::seed"}
+    ]});
+    let out = accounting(&incoming, text, answer);
+    assert_eq!(out.candidates.len(), 2);
+    assert!(out.errors.is_empty());
+    assert!(out.unchecked.is_empty());
 }
 
 #[test]

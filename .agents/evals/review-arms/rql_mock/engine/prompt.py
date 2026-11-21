@@ -55,9 +55,10 @@ a candidate at the row's primary anchor. List each remaining candidate as
 Use the candidate's exact line span and one reason from unreachable,
 not-the-seed, macro-not-call, duplicate or other. For duplicate, put the ID
 of its twin in detail and cover that twin with a row. For other, give a
-nonempty explanation in detail. Use not-the-seed only if seed filters require
-semantic resolution. Use an empty excluded list when there are no exclusions,
-including for documented steps.
+nonempty explanation in detail. Use not-the-seed for unrelated same-named
+incoming callees or when seed filters require semantic resolution. Incoming
+queries at depth zero have no candidates. Use an empty excluded list when
+there are no exclusions, including for documented steps.
 
 For each written operand, literal, field initializer, predicate, operator,
 message and command argument, represent its exact spelling as

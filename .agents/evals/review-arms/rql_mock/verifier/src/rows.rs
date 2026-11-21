@@ -7,7 +7,7 @@ use syn::parse::Parser;
 use crate::query::{Query, Step};
 use crate::source::{Anchor, Bytes, Site, Source};
 use crate::syntax::{Construct, Kind};
-use crate::{Candidate, Finding, Output, Parsed};
+use crate::{Candidate, CandidateOrigin, Finding, Output, Parsed, Selected};
 
 pub struct Row<'a> {
     pub index: usize,
@@ -192,15 +192,16 @@ pub fn account<'a>(
     query: &Query,
     rows: &[Row<'_>],
     answer: &Value,
-    selected: impl IntoIterator<Item = (&'a Parsed, &'a Construct)>,
+    selected: impl IntoIterator<Item = (&'a Parsed, Selected<'a>)>,
     out: &mut Output,
 ) {
     let checked: Vec<_> = selected
         .into_iter()
         .enumerate()
-        .map(|(index, (file, construct))| {
+        .map(|(index, (file, Selected { construct, origin }))| {
             let procedure = &file.syntax.procedures[construct.owner.expect("selected procedure")];
             let candidate = Candidate {
+                origin,
                 id: format!("c{}", index + 1),
                 kind: construct.kind.name(),
                 site: file.source.site(construct.span),
@@ -264,9 +265,13 @@ fn account_candidate(
             Some("duplicate") => {
                 false_exclusion = Some("duplicate detail must name a candidate covered by a row");
             }
-            Some("not-the-seed") => {
-                false_exclusion = Some("candidate matches the syntactically resolved seed");
-            }
+            Some("not-the-seed") => match candidate.origin {
+                // Name-only discovery may include a different callable.
+                CandidateOrigin::IncomingCallSite => valid_exclusion = true,
+                CandidateOrigin::SeedBody | CandidateOrigin::SeedCallSite => {
+                    false_exclusion = Some("candidate matches the syntactically resolved seed");
+                }
+            },
             _ => {}
         }
     }

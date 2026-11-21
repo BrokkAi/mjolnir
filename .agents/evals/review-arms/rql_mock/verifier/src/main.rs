@@ -24,8 +24,22 @@ struct Input {
     answer: Value,
 }
 
+#[derive(Clone, Copy)]
+enum CandidateOrigin {
+    SeedBody,
+    SeedCallSite,
+    IncomingCallSite,
+}
+
+struct Selected<'a> {
+    construct: &'a Construct,
+    origin: CandidateOrigin,
+}
+
 #[derive(Serialize)]
 struct Candidate {
+    #[serde(skip)]
+    origin: CandidateOrigin,
     id: String,
     kind: &'static str,
     site: Site,
@@ -107,33 +121,38 @@ impl Parsed {
         })
     }
 
-    fn candidates(&self, query: &Query, seed_names: &BTreeSet<&str>) -> Vec<&Construct> {
+    fn candidates(&self, query: &Query, seed_names: &BTreeSet<&str>) -> Vec<Selected<'_>> {
+        // An incoming route must cross at least the pivot invocation.
+        if query.incoming && query.depth == 0 {
+            return Vec::new();
+        }
         let mut selected: Vec<_> = self
             .syntax
             .constructs
             .iter()
-            .filter(|construct| {
-                let Some(owner) = construct.owner else {
-                    return false;
-                };
+            .filter_map(|construct| {
+                let owner = construct.owner?;
                 if !query.selects_kind(construct.kind) {
-                    return false;
+                    return None;
                 }
-                if query.incoming {
-                    return construct
+                let origin = if query.incoming {
+                    construct
                         .name
                         .as_deref()
-                        .is_some_and(|name| seed_names.contains(name));
-                }
-                if query.call_seed {
-                    return self.seeds.contains(&owner)
-                        && construct.name.as_deref() == Some(&query.name);
-                }
-                !construct.deferred && self.seeds.contains(&owner)
+                        .is_some_and(|name| seed_names.contains(name))
+                        .then_some(CandidateOrigin::IncomingCallSite)
+                } else if query.call_seed {
+                    (self.seeds.contains(&owner) && construct.name.as_deref() == Some(&query.name))
+                        .then_some(CandidateOrigin::SeedCallSite)
+                } else {
+                    (!construct.deferred && self.seeds.contains(&owner))
+                        .then_some(CandidateOrigin::SeedBody)
+                }?;
+                Some(Selected { construct, origin })
             })
             .collect();
-        selected.sort_unstable_by_key(|c| (c.span, c.kind));
-        selected.dedup_by_key(|c| (c.span, c.kind));
+        selected.sort_unstable_by_key(|item| (item.construct.span, item.construct.kind));
+        selected.dedup_by_key(|item| (item.construct.span, item.construct.kind));
         selected
     }
 }
@@ -239,7 +258,7 @@ fn verify(input: Input) -> io::Result<Output> {
     let selected = files.iter().flat_map(|file| {
         file.candidates(&query, &seed_names)
             .into_iter()
-            .map(move |construct| (file, construct))
+            .map(move |item| (file, item))
     });
     rows::account(&query, &rows, &input.answer, selected, &mut out);
 
