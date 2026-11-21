@@ -1,0 +1,35 @@
+[
+  {
+    "toolCallId": "toolu_01SavedGrep",
+    "title": "grep -n example /workspace/cccccccccccccccccccccccccccccccc/engine-trees/src",
+    "name": "Grep",
+    "kind": "search",
+    "status": "completed",
+    "rawInput": {
+      "pattern": "example",
+      "path": "/workspace/cccccccccccccccccccccccccccccccc/engine-trees/src",
+      "output_mode": "content",
+      "-n": true,
+      "glob": "!**/tests.rs",
+      "head_limit": 0
+    },
+    "_meta": {"claudeCode": {"toolName": "Grep"}}
+  },
+  {
+    "toolCallId": "toolu_01ReadSavedGrep",
+    "title": "Read /var/lib/hel/profiles/cccccccccccccccccccccccccccccccc/projects/hel-aaaaaaaaaaaaaaaa-cccccccccccccccccccccccccccccccc/11111111-1111-4111-8111-111111111111/tool-results/toolu_01SavedGrep.txt",
+    "name": "Read",
+    "kind": "read",
+    "status": "completed",
+    "locations": [
+      {
+        "path": "/var/lib/hel/profiles/cccccccccccccccccccccccccccccccc/projects/hel-aaaaaaaaaaaaaaaa-cccccccccccccccccccccccccccccccc/11111111-1111-4111-8111-111111111111/tool-results/toolu_01SavedGrep.txt",
+        "line": 1
+      }
+    ],
+    "rawInput": {
+      "file_path": "/var/lib/hel/profiles/cccccccccccccccccccccccccccccccc/projects/hel-aaaaaaaaaaaaaaaa-cccccccccccccccccccccccccccccccc/11111111-1111-4111-8111-111111111111/tool-results/toolu_01SavedGrep.txt"
+    },
+    "_meta": {"claudeCode": {"toolName": "Read"}}
+  }
+]

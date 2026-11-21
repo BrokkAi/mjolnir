@@ -16,7 +16,7 @@ import sys
 
 from urllib.parse import unquote, urlsplit
 
-from rql_engine_tools import ENGINE_TOOLS
+from rql_engine_tools import ENGINE_TOOLS, SESSION_PROFILE_ROOT
 
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 
@@ -140,6 +140,7 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
     edit_paths = FilePathEvidence(checkout, tracked_symlinks, tracked_symlink_targets, tracked_head, allow_in_place_edits,
                                   own_workspace, engine)
     hits, calls = [], 0
+    audited_engine_calls = {}
     scripts, written = ScriptEvidence(checkout, tracked_paths), set()
     # Older transcript pages lack harness metadata. Use native card evidence
     # from any page so an opaque card cannot bypass the session's catalogue.
@@ -152,6 +153,7 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
         execution = execution if isinstance(execution, dict) else {}
         page_cwd = page.get("cwd") or execution.get("cwd") or cwd
         page_home = page.get("home") or execution.get("home") or home
+        engine_calls = audited_engine_calls if page.get("session_id") == own_workspace else None
         for item in page["items"]:
             if item["role"] not in ("tool", "terminal"):
                 continue
@@ -172,8 +174,13 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                     scripts.clear()
                     continue
             if engine:
-                hits.extend({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
-                            for name, snippet in engine_hits(call, own_workspace, page_cwd, edit_paths))
+                seq = item["seq"]
+                findings = list(engine_hits(call, own_workspace, page_cwd, edit_paths, engine_calls, seq))
+                hits.extend({"seq": seq, "kind": name, "where": "input", "snippet": snippet}
+                            for name, snippet in findings)
+                identifier = call.get("toolCallId")
+                if not findings and engine_calls is not None and isinstance(identifier, str):
+                    engine_calls.setdefault(identifier, seq)
                 continue
             if (not antigravity and allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query")
                     and call.get("kind") != "execute"):
@@ -2328,7 +2335,21 @@ def engine_location_write(call, cwd, evidence):
     return path
 
 
-def engine_hits(call, own_workspace, cwd, evidence):
+def engine_saved_result(path, workspace, audited_calls, seq):
+    if not audited_calls or not isinstance(path, str) or not re.fullmatch(r"[0-9a-f]{32}", workspace):
+        return False
+    # Claude Code 2.1.326 stores results under the staged project slug
+    # (CLAUDE_CODE_PROJECT_DIR_NAME) and its native session UUID. The
+    # transcript lacks that UUID, so require ownership by tool call ID.
+    profile = re.escape(str(SESSION_PROFILE_ROOT / workspace))
+    uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    match = re.fullmatch(
+        rf"{profile}/projects/hel-[0-9a-f]{{16}}-{workspace}/{uuid}/tool-results/(toolu_[A-Za-z0-9]+)\.txt", path,
+    )
+    return bool(match and match[1] in audited_calls and audited_calls[match[1]] < seq)
+
+
+def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq):
     name = call.get("name") if isinstance(call, dict) else None
     if not isinstance(name, str) or name not in ENGINE_TOOLS or call.get("kind") == "execute":
         yield "needs-inspection", f"tool outside the engine allowlist: {name!r}"
@@ -2350,6 +2371,10 @@ def engine_hits(call, own_workspace, cwd, evidence):
             yield "needs-inspection", f"invalid {name} locations"
             return
         paths.extend(location.get("path") for location in locations)
+    if (name == "Read" and raw.keys() <= {"file_path", "offset", "limit", "pages"}
+            and all(path == paths[0] for path in paths)
+            and engine_saved_result(paths[0], own_workspace, audited_calls, seq)):
+        return
     root = evidence.root
     seen = set()
     for path in paths:

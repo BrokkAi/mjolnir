@@ -1181,3 +1181,70 @@ def test_engine_location_only_write_still_checks_tracked_symlinks(tmp_path, engi
     report = audit_call(tmp_path, engine_write_without_input, engine=True)
     assert not report["passed"]
     assert any("tracked symlink" in finding["snippet"] for finding in report["hits"])
+
+
+@pytest.fixture
+def saved_engine_result():
+    # Scrubbed engine session 9f8e1b11, turn 47, seqs 147 and 162.
+    fixture = Path(__file__).with_name("fixtures") / "engine-saved-tool-result.json"
+    return json.loads(fixture.read_text())
+
+
+def audit_engine_result(tmp_path, calls, *, session_id=OWN):
+    symlink_inventory(tmp_path, {})
+    transcript = tmp_path / "transcript.json"
+    transcript.write_text(json.dumps([{"session_id": session_id, "items": [
+        {"seq": seq, "role": "tool", "body": {"call": call}}
+        for seq, call in enumerate(calls, 1)
+    ]}]))
+    return audit_pilot(transcript, OWN, commits=[PIN], engine=True)
+
+
+# Hard-won: 1d9846951: reading the engine's own saved Grep output voided a live turn
+def test_engine_can_read_its_own_previously_audited_tool_result(tmp_path, saved_engine_result):
+    report = audit_engine_result(tmp_path, saved_engine_result)
+    assert report["passed"], report["hits"]
+
+
+@pytest.mark.parametrize(("original", "replacement"), [
+    ("toolu_01SavedGrep.txt", "toolu_unmatched.txt"),
+    ("tool-results", "memory"),
+    (f"/profiles/{OWN}/", f"/profiles/{FOREIGN}/"),
+    (f"hel-aaaaaaaaaaaaaaaa-{OWN}", f"hel-aaaaaaaaaaaaaaaa-{FOREIGN}"),
+    ("11111111-1111-4111-8111-111111111111", "not-a-uuid"),
+    ("tool-results", "../11111111-1111-4111-8111-111111111111/tool-results"),
+])
+def test_engine_saved_result_enforces_path_and_tool_id(tmp_path, saved_engine_result, original, replacement):
+    read = saved_engine_result[1]
+    path = read["rawInput"]["file_path"].replace(original, replacement)
+    read["rawInput"]["file_path"] = path
+    read["locations"][0]["path"] = path
+    report = audit_engine_result(tmp_path, saved_engine_result)
+    assert not report["passed"]
+    assert any(hit["seq"] == 2 for hit in report["hits"])
+
+
+@pytest.mark.parametrize("source", ["later", "rejected", "other-session"])
+def test_engine_saved_result_requires_prior_audit_in_the_same_session(tmp_path, saved_engine_result, source):
+    grep, read = saved_engine_result
+    read_seq = 1 if source == "later" else 2
+    calls = [read, grep] if source == "later" else [grep, read]
+    if source == "rejected":
+        grep["rawInput"]["path"] = "/etc"
+    report = audit_engine_result(tmp_path, calls, session_id=FOREIGN if source == "other-session" else OWN)
+    assert not report["passed"]
+    assert any(hit["seq"] == read_seq for hit in report["hits"])
+
+
+@pytest.mark.parametrize("name", ["Grep", "Glob", "Write", "Edit"])
+def test_engine_saved_results_are_read_only_and_disallow_search(tmp_path, saved_engine_result, name):
+    read = saved_engine_result[1]
+    read["name"] = name
+    if name in {"Grep", "Glob"}:
+        read["kind"] = "search"
+        read["rawInput"] = {"path": str(Path(read["rawInput"]["file_path"]).parent), "pattern": "*"}
+    else:
+        read["kind"] = "edit"
+    report = audit_engine_result(tmp_path, saved_engine_result)
+    assert not report["passed"]
+    assert any(hit["seq"] == 2 for hit in report["hits"])
