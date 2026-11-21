@@ -321,7 +321,8 @@ impl RuntimeState {
                         "the quota-limited sub-agent is no longer idle"
                     );
                     let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled).with_deadline(UNPARK_TIMEOUT),
+                        CancellableProcessExecutor::new(cancelled.clone())
+                            .with_deadline(UNPARK_TIMEOUT),
                         state.clone(),
                         session_id.clone(),
                     );
@@ -354,13 +355,20 @@ impl RuntimeState {
                     .await?;
                     // Keep the lifecycle visible until the actor observes
                     // the replacement. The outbox already owns the retry.
-                    let observed = async {
-                        state.session_manager
-                            .wait_for_session(&session_id, Duration::from_secs(5))
-                            .await?
-                            .sync_now()
-                            .await
-                    }.await;
+                    let observed = tokio::select! {
+                        biased;
+                        _ = mj_controller::recovery_gate::wait_until_cancelled(&cancelled) => {
+                            Err(anyhow::anyhow!("sub-agent quota switch was cancelled"))
+                        }
+                        result = async {
+                            state
+                                .session_manager
+                                .wait_for_session_ready(&session_id)
+                                .await?
+                                .sync_now()
+                                .await
+                        } => result,
+                    };
                     if let Err(error) = observed {
                         tracing::warn!(%session_id, %error, "replacement child actor could not synchronize");
                     }

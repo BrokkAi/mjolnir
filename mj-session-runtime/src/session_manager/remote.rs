@@ -267,6 +267,8 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
         let mut actors = BTreeMap::<String, RemoteActorRegistration>::new();
         let mut latest = BTreeMap::<String, ManagedSessionView>::new();
         let mut desired = BTreeMap::<String, RelaySessionTarget>::new();
+        let mut waiters =
+            BTreeMap::<String, Vec<oneshot::Sender<Result<ManagedSessionHandle>>>>::new();
         loop {
             tokio::select! {
                 _ = &mut shutdown_rx => break,
@@ -274,7 +276,21 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                     if changed.is_err() {
                         break;
                     }
-                    desired = target_map(&targets_rx.borrow_and_update());
+                    let prev_desired = std::mem::replace(
+                        &mut desired,
+                        target_map(&targets_rx.borrow_and_update()),
+                    );
+                    for session_id in prev_desired.keys() {
+                        if !desired.contains_key(session_id)
+                            && let Some(pending) = waiters.remove(session_id)
+                        {
+                            for reply in pending {
+                                let _ = reply.send(Err(anyhow::anyhow!(
+                                    "session {session_id} was removed before its actor became ready"
+                                )));
+                            }
+                        }
+                    }
                     actors.retain(|session_id, actor| {
                         if desired.contains_key(session_id) {
                             true
@@ -300,6 +316,19 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                                 &mut actors,
                                 &updates_tx,
                             );
+                        }
+                        if let Some(actor) = actors.get(session_id)
+                            && let Some(pending) = waiters.remove(session_id)
+                        {
+                            let handle = ManagedSessionHandle {
+                                session_id: session_id.clone(),
+                                commands: actor.commands.clone(),
+                                releases: actor.releases.clone(),
+                                view: actor.view.clone(),
+                            };
+                            for reply in pending {
+                                let _ = reply.send(Ok(handle.clone()));
+                            }
                         }
                     }
                 }
@@ -338,14 +367,33 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                     }
                 }
                 command = commands_rx.recv() => {
-                    let Some(ManagerCommand::Session { session_id, reply }) = command else { break; };
-                    let handle = actors.get(&session_id).map(|actor| ManagedSessionHandle {
-                        session_id: session_id.clone(),
-                        commands: actor.commands.clone(),
-                        releases: actor.releases.clone(),
-                        view: actor.view.clone(),
-                    });
-                    let _ = reply.send(handle);
+                    let Some(command) = command else { break; };
+                    match command {
+                        ManagerCommand::Session { session_id, reply } => {
+                            let handle = actors.get(&session_id).map(|actor| ManagedSessionHandle {
+                                session_id: session_id.clone(),
+                                commands: actor.commands.clone(),
+                                releases: actor.releases.clone(),
+                                view: actor.view.clone(),
+                            });
+                            let _ = reply.send(handle);
+                        }
+                        ManagerCommand::WaitForSession { session_id, reply } => {
+                            if desired.contains_key(&session_id)
+                                && let Some(actor) = actors.get(&session_id)
+                            {
+                                let handle = ManagedSessionHandle {
+                                    session_id,
+                                    commands: actor.commands.clone(),
+                                    releases: actor.releases.clone(),
+                                    view: actor.view.clone(),
+                                };
+                                let _ = reply.send(Ok(handle));
+                            } else {
+                                waiters.entry(session_id).or_default().push(reply);
+                            }
+                        }
+                    }
                 }
                 published = published_rx.recv() => {
                     let Some(RemoteManagerUpdate::Publish { session_id, view }) = published else {
@@ -360,12 +408,25 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                         continue;
                     }
                     spawn_remote_actor(
-                        session_id,
+                        session_id.clone(),
                         view,
                         &requests_tx,
                         &mut actors,
                         &updates_tx,
                     );
+                    if let Some(actor) = actors.get(&session_id)
+                        && let Some(pending) = waiters.remove(&session_id)
+                    {
+                        let handle = ManagedSessionHandle {
+                            session_id,
+                            commands: actor.commands.clone(),
+                            releases: actor.releases.clone(),
+                            view: actor.view.clone(),
+                        };
+                        for reply in pending {
+                            let _ = reply.send(Ok(handle.clone()));
+                        }
+                    }
                 }
             }
         }

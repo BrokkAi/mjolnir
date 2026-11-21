@@ -28,6 +28,8 @@ pub fn spawn_session_manager_observed(
         let mut actors = BTreeMap::<String, ActorRegistration>::new();
         let mut tasks = tokio::task::JoinSet::<String>::new();
         let mut desired_targets = BTreeMap::<String, RelaySessionTarget>::new();
+        let mut waiters =
+            BTreeMap::<String, Vec<oneshot::Sender<Result<ManagedSessionHandle>>>>::new();
         loop {
             tokio::select! {
                 _ = &mut shutdown_rx => break,
@@ -35,12 +37,21 @@ pub fn spawn_session_manager_observed(
                     if changed.is_err() {
                         break;
                     }
-                    desired_targets = target_map(&targets_rx.borrow_and_update());
+                    let prev_desired = std::mem::replace(
+                        &mut desired_targets,
+                        target_map(&targets_rx.borrow_and_update()),
+                    );
                     reconcile_actors(
                         &desired_targets,
                         &mut actors,
                         &mut tasks,
                         &updates_tx,
+                    );
+                    notify_session_waiters(
+                        &mut waiters,
+                        &actors,
+                        &desired_targets,
+                        Some(&prev_desired),
                     );
                 }
                 event = launches_rx.recv() => {
@@ -78,23 +89,33 @@ pub fn spawn_session_manager_observed(
                     }
                 }
                 command = commands_rx.recv() => {
-                    let Some(ManagerCommand::Session { session_id, reply }) = command else { break; };
-                    let handle = actors
-                        .get(&session_id)
-                        .filter(|actor| !actor.commands.is_closed())
-                        .filter(|actor| desired_targets.get(&session_id) == Some(&actor.target))
-                        .map(|actor| ManagedSessionHandle {
-                            session_id: session_id.clone(),
-                            commands: actor.commands.clone(),
-                            releases: actor.releases.clone(),
-                            view: actor.view.clone(),
-                        });
-                    if reply.send(handle).is_err() {
-                        tracing::debug!(
-                            session_id = %session_id,
-                            operation = "session_lookup",
-                            "session lookup receiver was already closed"
-                        );
+                    let Some(command) = command else { break; };
+                    match command {
+                        ManagerCommand::Session { session_id, reply } => {
+                            let handle = active_actor_handle(&session_id, &actors, &desired_targets);
+                            if reply.send(handle).is_err() {
+                                tracing::debug!(
+                                    session_id = %session_id,
+                                    operation = "session_lookup",
+                                    "session lookup receiver was already closed"
+                                );
+                            }
+                        }
+                        ManagerCommand::WaitForSession { session_id, reply } => {
+                            if let Some(handle) =
+                                active_actor_handle(&session_id, &actors, &desired_targets)
+                            {
+                                if reply.send(Ok(handle)).is_err() {
+                                    tracing::debug!(
+                                        session_id = %session_id,
+                                        operation = "wait_for_session_ready",
+                                        "session waiter receiver was already closed"
+                                    );
+                                }
+                            } else {
+                                waiters.entry(session_id).or_default().push(reply);
+                            }
+                        }
                     }
                 }
                 joined = tasks.join_next_with_id(), if !tasks.is_empty() => {
@@ -111,23 +132,41 @@ pub fn spawn_session_manager_observed(
                             // A watch sender may have published another target while this
                             // completion was already ready. Reconcile against its newest
                             // value so an intermediate replacement is never started.
-                            desired_targets = target_map(&targets_rx.borrow());
+                            let prev_desired = std::mem::replace(
+                                &mut desired_targets,
+                                target_map(&targets_rx.borrow()),
+                            );
                             reconcile_actors(
                                 &desired_targets,
                                 &mut actors,
                                 &mut tasks,
                                 &updates_tx,
                             );
+                            notify_session_waiters(
+                                &mut waiters,
+                                &actors,
+                                &desired_targets,
+                                Some(&prev_desired),
+                            );
                         }
                         Some(Err(error)) if error.is_cancelled() => {
                             let cancelled_task = error.id();
                             let session_id = remove_actor_task(&mut actors, cancelled_task);
-                            desired_targets = target_map(&targets_rx.borrow());
+                            let prev_desired = std::mem::replace(
+                                &mut desired_targets,
+                                target_map(&targets_rx.borrow()),
+                            );
                             reconcile_actors(
                                 &desired_targets,
                                 &mut actors,
                                 &mut tasks,
                                 &updates_tx,
+                            );
+                            notify_session_waiters(
+                                &mut waiters,
+                                &actors,
+                                &desired_targets,
+                                Some(&prev_desired),
                             );
                             tracing::warn!(
                                 session_id = ?session_id,
@@ -137,12 +176,21 @@ pub fn spawn_session_manager_observed(
                         Some(Err(error)) => {
                             let failed_task = error.id();
                             remove_actor_task(&mut actors, failed_task);
-                            desired_targets = target_map(&targets_rx.borrow());
+                            let prev_desired = std::mem::replace(
+                                &mut desired_targets,
+                                target_map(&targets_rx.borrow()),
+                            );
                             reconcile_actors(
                                 &desired_targets,
                                 &mut actors,
                                 &mut tasks,
                                 &updates_tx,
+                            );
+                            notify_session_waiters(
+                                &mut waiters,
+                                &actors,
+                                &desired_targets,
+                                Some(&prev_desired),
                             );
                             tracing::error!(%error, "session relay actor failed");
                         }
@@ -221,4 +269,56 @@ pub async fn shutdown_session_actors(
         duration_ms = aborting.elapsed().as_millis(),
         "aborted session relay actors stopped"
     );
+}
+
+fn active_actor_handle(
+    session_id: &str,
+    actors: &BTreeMap<String, ActorRegistration>,
+    desired_targets: &BTreeMap<String, RelaySessionTarget>,
+) -> Option<ManagedSessionHandle> {
+    actors
+        .get(session_id)
+        .filter(|actor| !actor.commands.is_closed())
+        .filter(|actor| desired_targets.get(session_id) == Some(&actor.target))
+        .map(|actor| ManagedSessionHandle {
+            session_id: session_id.to_owned(),
+            commands: actor.commands.clone(),
+            releases: actor.releases.clone(),
+            view: actor.view.clone(),
+        })
+}
+
+fn notify_session_waiters(
+    waiters: &mut BTreeMap<String, Vec<oneshot::Sender<Result<ManagedSessionHandle>>>>,
+    actors: &BTreeMap<String, ActorRegistration>,
+    desired_targets: &BTreeMap<String, RelaySessionTarget>,
+    prev_desired: Option<&BTreeMap<String, RelaySessionTarget>>,
+) {
+    if let Some(prev) = prev_desired {
+        for session_id in prev.keys() {
+            if !desired_targets.contains_key(session_id)
+                && let Some(pending) = waiters.remove(session_id)
+            {
+                for reply in pending {
+                    let _ = reply.send(Err(anyhow::anyhow!(
+                        "session {session_id} was removed before its actor became ready"
+                    )));
+                }
+            }
+        }
+    }
+    let ready: Vec<(String, ManagedSessionHandle)> = waiters
+        .keys()
+        .filter_map(|session_id| {
+            active_actor_handle(session_id, actors, desired_targets)
+                .map(|handle| (session_id.clone(), handle))
+        })
+        .collect();
+    for (session_id, handle) in ready {
+        if let Some(pending) = waiters.remove(&session_id) {
+            for reply in pending {
+                let _ = reply.send(Ok(handle.clone()));
+            }
+        }
+    }
 }
