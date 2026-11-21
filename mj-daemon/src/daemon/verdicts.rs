@@ -552,53 +552,80 @@ impl InterruptTargetKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(super) enum InterruptAdmissionState {
-    InFlight(InterruptTargetKey),
+    InFlight {
+        key: InterruptTargetKey,
+        result: tokio::sync::watch::Receiver<Option<std::result::Result<(), String>>>,
+    },
     Accepted(InterruptTargetKey),
+}
+
+enum InterruptAdmission<'a> {
+    Leader(Box<InterruptAdmissionGuard<'a>>),
+    WaitInFlight(tokio::sync::watch::Receiver<Option<std::result::Result<(), String>>>),
+    AlreadyAccepted,
 }
 
 struct InterruptAdmissionGuard<'a> {
     admissions: &'a Mutex<BTreeMap<String, InterruptAdmissionState>>,
     session_id: String,
     key: InterruptTargetKey,
-    accepted: bool,
+    result_tx: tokio::sync::watch::Sender<Option<std::result::Result<(), String>>>,
+    settled: bool,
 }
 
 impl InterruptAdmissionGuard<'_> {
-    fn mark_accepted(mut self) {
-        self.accepted = true;
-        let mut guard = self
-            .admissions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if matches!(
-            guard.get(&self.session_id),
-            Some(InterruptAdmissionState::InFlight(current)) if current == &self.key
-        ) {
-            guard.insert(
-                self.session_id.clone(),
-                InterruptAdmissionState::Accepted(self.key.clone()),
-            );
+    fn finish(mut self, result: Result<()>) -> Result<()> {
+        self.settled = true;
+        {
+            let mut guard = self
+                .admissions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if matches!(
+                guard.get(&self.session_id),
+                Some(InterruptAdmissionState::InFlight { key: current, .. }) if current == &self.key
+            ) {
+                if result.is_ok() {
+                    guard.insert(
+                        self.session_id.clone(),
+                        InterruptAdmissionState::Accepted(self.key.clone()),
+                    );
+                } else {
+                    guard.remove(&self.session_id);
+                }
+            }
         }
+        let shared = match &result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(format!("{error:#}")),
+        };
+        let _ = self.result_tx.send(Some(shared));
+        result
     }
 }
 
 impl Drop for InterruptAdmissionGuard<'_> {
     fn drop(&mut self) {
-        if self.accepted {
+        if self.settled {
             return;
         }
-        let mut guard = self
-            .admissions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if matches!(
-            guard.get(&self.session_id),
-            Some(InterruptAdmissionState::InFlight(current)) if current == &self.key
-        ) {
-            guard.remove(&self.session_id);
+        {
+            let mut guard = self
+                .admissions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if matches!(
+                guard.get(&self.session_id),
+                Some(InterruptAdmissionState::InFlight { key: current, .. }) if current == &self.key
+            ) {
+                guard.remove(&self.session_id);
+            }
         }
+        let _ = self
+            .result_tx
+            .send(Some(Err("interrupt submission was cancelled".into())));
     }
 }
 
@@ -608,35 +635,42 @@ impl RuntimeState {
         runtime: &RuntimeProjection,
         id: &str,
         key: InterruptTargetKey,
-    ) -> Option<InterruptAdmissionGuard<'_>> {
+    ) -> InterruptAdmission<'_> {
         let mut guard = self
             .interrupt_admissions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.retain(|session_id, state| {
-            matches!(state, InterruptAdmissionState::InFlight(_))
+            matches!(state, InterruptAdmissionState::InFlight { .. })
                 || runtime.records.contains_key(session_id)
         });
-        let already_admitted = match guard.get(id) {
-            Some(
-                InterruptAdmissionState::InFlight(existing)
-                | InterruptAdmissionState::Accepted(existing),
-            ) => existing == &key,
-            None => false,
-        };
-        if already_admitted {
-            return None;
+        match guard.get(id) {
+            Some(InterruptAdmissionState::InFlight {
+                key: existing,
+                result,
+            }) if existing == &key => {
+                return InterruptAdmission::WaitInFlight(result.clone());
+            }
+            Some(InterruptAdmissionState::Accepted(existing)) if existing == &key => {
+                return InterruptAdmission::AlreadyAccepted;
+            }
+            _ => {}
         }
+        let (result_tx, result_rx) = tokio::sync::watch::channel(None);
         guard.insert(
             id.to_owned(),
-            InterruptAdmissionState::InFlight(key.clone()),
+            InterruptAdmissionState::InFlight {
+                key: key.clone(),
+                result: result_rx,
+            },
         );
-        Some(InterruptAdmissionGuard {
+        InterruptAdmission::Leader(Box::new(InterruptAdmissionGuard {
             admissions: &self.interrupt_admissions,
             session_id: id.to_owned(),
             key,
-            accepted: false,
-        })
+            result_tx,
+            settled: false,
+        }))
     }
 
     pub(crate) async fn interrupt_turn(&self, id: &str) -> Result<()> {
@@ -674,16 +708,29 @@ impl RuntimeState {
             turn_interrupt_command(live)?
         };
         let key = InterruptTargetKey::from_projection(view, live, &command);
-        let Some(admission) = self.admit_turn_interrupt(runtime, id, key) else {
-            return Ok(());
-        };
-        self.session_manager
-            .session(id)
-            .await?
-            .submit(new_command_id("interrupt-turn")?, command)
-            .await?;
-        admission.mark_accepted();
-        Ok(())
+        match self.admit_turn_interrupt(runtime, id, key) {
+            InterruptAdmission::AlreadyAccepted => Ok(()),
+            InterruptAdmission::WaitInFlight(mut rx) => match rx.wait_for(Option::is_some).await {
+                Ok(outcome) => match outcome.as_ref() {
+                    Some(Ok(())) => Ok(()),
+                    Some(Err(message)) => Err(anyhow::anyhow!("{message}")),
+                    None => unreachable!("wait_for(Option::is_some) only returns Some"),
+                },
+                Err(_) => Err(anyhow::anyhow!("interrupt submission was cancelled")),
+            },
+            InterruptAdmission::Leader(admission) => {
+                let result = async {
+                    self.session_manager
+                        .session(id)
+                        .await?
+                        .submit(new_command_id("interrupt-turn")?, command)
+                        .await?;
+                    Ok(())
+                }
+                .await;
+                admission.finish(result)
+            }
+        }
     }
 
     pub(crate) async fn interrupt_all(&self, root: &str) -> Result<InterruptAllResult> {
@@ -1327,5 +1374,70 @@ mod tests {
         assert_eq!(parent_result.requested, 0);
         assert!(parent_result.failures.is_empty());
         assert!(second_commands.is_empty());
+    }
+
+    // Protects overlapping callers from receiving a false success when the
+    // leading in-flight interrupt submission fails.
+    #[tokio::test]
+    async fn overlapping_interrupt_all_propagates_in_flight_failure_to_duplicate_callers() {
+        let mut manager = super::super::tests::TestRemoteManager::for_sessions(&[
+            "grandparent",
+            "parent",
+            "child",
+        ])
+        .await;
+        let runtime = super::super::tests::test_runtime_state_with_manager(&manager);
+        let mut capture = RuntimeProjection::default();
+        for id in ["grandparent", "parent"] {
+            capture.records.insert(
+                id.into(),
+                super::super::tests::runtime_test_session(id, "default", SessionState::Running),
+            );
+            let live = mj_core::relay::RelaySnapshot::new(id.into()).operational_state();
+            let mut view = RuntimeSessionView::from_managed(id.into(), Default::default());
+            view.operational = Some(live.into());
+            capture.sessions.insert(id.into(), view);
+        }
+        let cancel_p1 = RelayCommand::CancelTurnFor {
+            active_prompt_id: "p1".into(),
+        };
+        insert_active_prompt_session(
+            &mut capture,
+            "child",
+            "p1",
+            mj_core::relay::TurnControls {
+                status: mj_core::relay::TurnControlStatus::Ready,
+                primary: None,
+                interrupt: Some(cancel_p1.clone()),
+                message: None,
+            },
+        );
+        insert_subagent_link(&mut capture, "grandparent", "parent");
+        insert_subagent_link(&mut capture, "parent", "child");
+        project(&mut capture, &Default::default());
+
+        let (gp_result, parent_result, commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "grandparent"),
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(vec![mj_client::session::SubmitFailure::from(
+                "worker disconnected".to_owned(),
+            )]),
+        );
+        let gp_result = gp_result.unwrap();
+        let parent_result = parent_result.unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(gp_result.failures.len(), 1);
+        assert!(gp_result.failures[0].1.contains("worker disconnected"));
+        assert_eq!(parent_result.failures.len(), 1);
+        assert!(parent_result.failures[0].1.contains("worker disconnected"));
+
+        // After a failed attempt, a retry submits fresh and succeeds.
+        let (retry_result, retry_commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        assert!(retry_result.unwrap().failures.is_empty());
+        assert_eq!(retry_commands.len(), 1);
+        assert_eq!(retry_commands[0].2, cancel_p1);
     }
 }
