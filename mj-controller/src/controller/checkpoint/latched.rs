@@ -14,6 +14,33 @@ impl Controller {
         requested_operation_id: Option<&str>,
         held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
+        self.checkpoint_session_latched_for_operation_with_consent(
+            admission,
+            session_id,
+            executor,
+            manager,
+            exclusivity,
+            export_policy,
+            requested_operation_id,
+            held_relay,
+            &mj_core::suspend_consent::CaptureConsent::default(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::controller) async fn checkpoint_session_latched_for_operation_with_consent(
+        &self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: Option<&SessionManagerControl>,
+        exclusivity: LatchExclusivity,
+        export_policy: CheckpointExportPolicy,
+        requested_operation_id: Option<&str>,
+        held_relay: Option<ControllerRelayLease>,
+        consent: &mj_core::suspend_consent::CaptureConsent,
+    ) -> Result<LatchedCheckpoint> {
         self.checkpoint_session_latched_with_recovery_stage(
             admission,
             session_id,
@@ -24,6 +51,7 @@ impl Controller {
             exclusivity.holds_through_close(),
             requested_operation_id,
             held_relay,
+            consent,
         )
         .await
     }
@@ -40,6 +68,7 @@ impl Controller {
         recovery_copy: bool,
         requested_operation_id: Option<&str>,
         held_relay: Option<ControllerRelayLease>,
+        consent: &mj_core::suspend_consent::CaptureConsent,
     ) -> Result<LatchedCheckpoint> {
         let mut layout = self.session_export_layout(session_id, executor)?;
         if export_policy == CheckpointExportPolicy::OriginDelta {
@@ -68,7 +97,7 @@ impl Controller {
         // wrappers that follow (up to the daemon action) carry a copy on the
         // thread stack; a direct `mj checkpoint` overflowed a 2 MiB Tokio
         // worker stack that way. Boxing it once here keeps them small.
-        Box::pin(self.checkpoint_session_latched_with_layout(
+        Box::pin(self.checkpoint_session_latched_with_layout_and_consent(
             admission,
             session_id,
             executor,
@@ -79,6 +108,7 @@ impl Controller {
             requested_operation_id,
             layout,
             held_relay,
+            consent,
         ))
         .await
     }
@@ -90,7 +120,7 @@ impl Controller {
     /// such as a Move's hold on its source; the checkpoint uses it instead of
     /// leasing another.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::controller) async fn checkpoint_session_latched_with_layout(
+    pub(in crate::controller) async fn checkpoint_session_latched_with_layout_and_consent(
         &self,
         admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
@@ -102,6 +132,7 @@ impl Controller {
         requested_operation_id: Option<&str>,
         layout: SessionExportLayout,
         held_relay: Option<ControllerRelayLease>,
+        consent: &mj_core::suspend_consent::CaptureConsent,
     ) -> Result<LatchedCheckpoint> {
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
         let pending_legacy_queue = crate::database::load_move_operation(session_id)?.is_some_and(|operation| operation.queue_admission_started && !operation.queue_admission_finished);
@@ -664,7 +695,8 @@ impl Controller {
         let exported: Result<CheckpointArtifact> = async {
             let target_files = target_files.get_or_insert_with(own_target_files);
             let spec = CheckpointExportSpec {
-                ignore_nested_repositories: export_policy == CheckpointExportPolicy::IgnoreNestedRepositories,
+                ignore_nested_repositories: false,
+                consent: consent.clone(),
                 protocol_version: CheckpointRepositoryCapture::export_protocol_version(&repositories),
                 session: session_manifest(&native_session_id),
                 target: target_manifest,
@@ -893,6 +925,17 @@ impl Controller {
                 // Packing removed the stage and the cleanup just removed the
                 // archive, so nothing is left for the exit to remove.
                 target_files.handed_off();
+                // Best-effort atomic publish into host-owned snapshot cache
+                // before the session's environment (e.g. container) is retired.
+                if exclusivity == LatchExclusivity::HoldThroughClose {
+                    super::publish_host_snapshot_cache_best_effort(
+                        session_id,
+                        &backend,
+                        verified.archive_path(),
+                        verified.sha256(),
+                        executor,
+                    );
+                }
                 CheckpointMetadata {
                     archive_path: verified.archive_path().to_path_buf(),
                     sha256: verified.sha256().to_string(),

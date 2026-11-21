@@ -13,11 +13,22 @@ async fn record_resume_sent(
             .context("native resume relay owner disappeared")?;
         static NEXT_RESUME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let resume_id = NEXT_RESUME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (applied, applied_rx) = mj_core::acp::NativeGoalResumeAck::new_pair();
+        // Send through the worker FIFO so every earlier queued observation
+        // applies first (cannot prematurely clear this reservation), then await
+        // the relay apply acknowledgement before dispatching `_session/goal`.
         emit_runtime_event(
             events,
-            RuntimeEvent::NativeGoalResumeSent { resume_id, goal },
+            RuntimeEvent::NativeGoalResumeSent {
+                resume_id,
+                goal,
+                applied,
+            },
         )
         .await?;
+        applied_rx
+            .await
+            .context("native resume relay event loop closed before recording reservation")?;
         return Ok(Some(resume_id));
     }
     Ok(None)
@@ -549,6 +560,7 @@ mod tests {
     // Hard-won: 5c9e20e: guarded Codex identity rejection uses invalidRequest.
     #[tokio::test]
     async fn goal_recovery_resumes_only_when_needed_and_explicit_open_asks() {
+        let _ = mj_core::login_environment::initialize_from_parent();
         for (asking, running, answer, expected_resumes, status, decision, timed_out, reject_code) in [
             (false, false, None, 1, "active", false, false, None),
             (false, true, None, 0, "active", false, false, None),
@@ -675,27 +687,55 @@ for line in sys.stdin:
             let task = mj_core::runtime::spawn(run(spec, rx, events));
             if track_cut {
                 let mut in_flight = BTreeMap::new();
-                // Reopen's automatic resume is not a relay command. Drain the
-                // real ACP setup while its resume request is held by the peer.
-                tokio::time::timeout(Duration::from_secs(10), async {
-                    while !root.path().join("resumes").exists()
-                        || !relay.observe().unwrap().adoption_blockers().iter().any(|blocker| blocker.contains("goal resume")) {
-                        tokio::select! {
-                            event = receive.recv() => { crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event.unwrap()).unwrap(); }
-                            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                // Reopen's automatic resume is not a relay command. Apply every
+                // preceding runtime event in FIFO order until the reservation
+                // marker arrives, then prove `_session/goal` cannot be sent
+                // before the relay records and acknowledges that reservation.
+                let reservation = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let event = receive.recv().await.unwrap();
+                        if matches!(event, RuntimeEvent::NativeGoalResumeSent { .. }) {
+                            break event;
                         }
+                        crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event)
+                            .unwrap();
                     }
-                }).await.unwrap();
+                })
+                .await
+                .unwrap();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert!(
+                    !root.path().join("resumes").exists(),
+                    "_session/goal must not be sent before the FIFO reservation is recorded on the relay"
+                );
+                crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, reservation)
+                    .unwrap();
                 let mut cut = relay.lock().unwrap().reserve_live_baseline();
-                assert!(cut.try_recv().is_err());
+                assert!(
+                    cut.try_recv().is_err(),
+                    "quiescent adoption cut must be blocked as soon as the reservation applies"
+                );
                 assert!(
                     relay
                         .observe()
                         .unwrap()
                         .adoption_blockers()
                         .iter()
-                        .any(|blocker| blocker.contains("goal resume"))
+                        .any(|blocker| blocker.contains("goal resume")),
+                    "relay must report the goal resume blocker before _session/goal reaches the peer"
                 );
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while !root.path().join("resumes").exists() {
+                        tokio::select! {
+                            event = receive.recv() => {
+                                crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event.unwrap()).unwrap();
+                            }
+                            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                        }
+                    }
+                })
+                .await
+                .unwrap();
                 if timed_out {
                     tokio::time::pause();
                     tokio::time::advance(Duration::from_secs(31)).await;
@@ -906,6 +946,7 @@ for line in sys.stdin:
     }
     #[tokio::test]
     async fn goal_controls_work_during_prompts_and_pending_resume_with_large_output() {
+        let _ = mj_core::login_environment::initialize_from_parent();
         use mj_core::goal::GoalControlAction;
         for harness in [HarnessKind::Codex, HarnessKind::Claude] {
             for foreground in [false, true] {

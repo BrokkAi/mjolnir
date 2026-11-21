@@ -3587,3 +3587,634 @@ fn native_use_evidence_uses_schema_15_with_and_without_origin_delta_and_rejects_
         Some(evidence)
     );
 }
+
+fn empty_tar() -> Vec<u8> {
+    let mut body = Vec::new();
+    tar::Builder::new(&mut body).finish().unwrap();
+    body
+}
+
+fn origin_delta_repository(repository: &mut RepositorySnapshot) {
+    repository.committed_bundle.clear();
+    repository.staged_patch.clear();
+    repository.unstaged_patch.clear();
+    repository.untracked_tar.clear();
+    repository.operation_payloads = None;
+    repository.linked_worktrees.clear();
+    repository.metadata.saved_refs.clear();
+    repository.metadata.stash_stack.clear();
+    repository.metadata.git_operation = None;
+    let origin = repository.metadata.origin.clone();
+    let head = repository.metadata.head_commit.clone();
+    let branch = repository
+        .metadata
+        .branch
+        .clone()
+        .unwrap_or_else(|| "main".into());
+    repository.metadata.origin_delta = Some(Box::new(WorkspaceSnapshotMetadata {
+        origin_url: Some(origin),
+        object_format: "sha1".into(),
+        notices: Vec::new(),
+        head: SnapshotHead::Branch {
+            name: branch,
+            commit: head.clone(),
+        },
+        refs: BTreeMap::from([("refs/heads/main".into(), head)]),
+        branch_tracking: BTreeMap::new(),
+        stash: Vec::new(),
+        working_state: None,
+        working_state_skipped: false,
+        has_uncommitted_state: false,
+        worktrees: Vec::new(),
+        initialized_submodules: Vec::new(),
+        index_gitlinks: Vec::new(),
+        remote_refs_stale: false,
+        prerequisites: Vec::new(),
+        history_cutoff: false,
+    }));
+}
+
+fn snapshot_from_verified(
+    archive: &VerifiedArchive,
+    repository: &RepositoryManifest,
+) -> RepositorySnapshot {
+    let id = repository.metadata.id.clone();
+    RepositorySnapshot {
+        origin_delta_pack: None,
+        metadata: repository.metadata.clone(),
+        committed_bundle: archive
+            .payload_by_role(&PayloadRole::GitBundle {
+                repository_id: id.clone(),
+            })
+            .unwrap()
+            .to_vec(),
+        staged_patch: archive
+            .payload_by_role(&PayloadRole::GitStagedPatch {
+                repository_id: id.clone(),
+            })
+            .unwrap()
+            .to_vec(),
+        unstaged_patch: archive
+            .payload_by_role(&PayloadRole::GitUnstagedPatch {
+                repository_id: id.clone(),
+            })
+            .unwrap()
+            .to_vec(),
+        untracked_tar: archive
+            .payload_by_role(&PayloadRole::GitUntrackedTar {
+                repository_id: id.clone(),
+            })
+            .unwrap()
+            .to_vec(),
+        operation_payloads: repository.metadata.git_operation.as_ref().map(|_| {
+            GitOperationPayloads {
+                conflicted_worktree_tar: archive
+                    .payload_by_role(&PayloadRole::GitConflictedWorktreeTar {
+                        repository_id: id.clone(),
+                    })
+                    .unwrap()
+                    .to_vec(),
+                state_tar: archive
+                    .payload_by_role(&PayloadRole::GitOperationStateTar {
+                        repository_id: id.clone(),
+                    })
+                    .unwrap()
+                    .to_vec(),
+            }
+        }),
+        linked_worktrees: repository
+            .linked_worktrees
+            .iter()
+            .enumerate()
+            .map(|(index, worktree)| {
+                let worktree_index = index as u32;
+                LinkedWorktreeSnapshot {
+                    metadata: worktree.metadata.clone(),
+                    staged_patch: archive
+                        .payload_by_role(&PayloadRole::GitLinkedWorktreeStagedPatch {
+                            repository_id: id.clone(),
+                            worktree: worktree_index,
+                        })
+                        .unwrap()
+                        .to_vec(),
+                    unstaged_patch: archive
+                        .payload_by_role(&PayloadRole::GitLinkedWorktreeUnstagedPatch {
+                            repository_id: id.clone(),
+                            worktree: worktree_index,
+                        })
+                        .unwrap()
+                        .to_vec(),
+                    untracked_tar: archive
+                        .payload_by_role(&PayloadRole::GitLinkedWorktreeUntrackedTar {
+                            repository_id: id.clone(),
+                            worktree: worktree_index,
+                        })
+                        .unwrap()
+                        .to_vec(),
+                    operation_payloads: None,
+                }
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn purge_replaces_primary_and_linked_untracked_files_and_restores_without_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let origin = directory.path().join("origin");
+    initialize_repository(&origin);
+    commit_file(&origin, "base.txt", b"base\n", "base");
+    let base = git_line(&origin, &["rev-parse", "HEAD"]);
+    let source = clone_repository(directory.path(), &origin, "source");
+    commit_file(&source, "first.txt", b"first\n", "first");
+    fs::write(source.join("base.txt"), b"stashed tracked\n").unwrap();
+    fs::write(source.join("stash-only.txt"), b"stashed untracked\n").unwrap();
+    git(
+        &source,
+        &["stash", "push", "-u", "-q", "-m", "holds untracked"],
+    );
+    fs::write(source.join("staged.txt"), b"staged\n").unwrap();
+    git(&source, &["add", "staged.txt"]);
+    fs::write(source.join("base.txt"), b"unstaged edit\n").unwrap();
+    fs::write(source.join("scratch.txt"), b"scratch\n").unwrap();
+    git(&source, &["worktree", "add", "-q", "-b", "lane", "lane"]);
+    fs::write(source.join("lane").join("lane-note.txt"), b"lane\n").unwrap();
+    let head = git_line(&source, &["rev-parse", "HEAD"]);
+
+    let snapshot = collect_git_snapshot(
+        &SystemGit,
+        &source,
+        &GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: "repo".into(),
+            history: GitHistoryMode::CloneFrom(base),
+            origin_override: None,
+        },
+    )
+    .unwrap();
+    assert!(!snapshot.untracked_tar.is_empty());
+    assert_eq!(snapshot.linked_worktrees.len(), 1);
+    assert!(!snapshot.linked_worktrees[0].untracked_tar.is_empty());
+    assert!(
+        snapshot
+            .metadata
+            .stash_stack
+            .iter()
+            .any(|entry| entry.message.contains("holds untracked"))
+    );
+
+    let mut archive_input = input();
+    archive_input.bundle.id = "repo".into();
+    archive_input.bundle.primary_repository = "repo".into();
+    archive_input.repositories = vec![snapshot];
+    let source_archive = directory.path().join("legacy.hel.zip");
+    let written = write_archive_atomic(&source_archive, &archive_input).unwrap();
+    let schema = written.manifest.schema_version;
+    assert_ne!(schema, ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA);
+    let before = read_archive_verified(&source_archive).unwrap();
+    let source_len = fs::metadata(&source_archive).unwrap().len();
+
+    let destination = directory.path().join("purged.hel.zip");
+    let dry_missing = directory.path().join("no-such-dir").join("dry.hel.zip");
+    let dry = purge_untracked_from_archive(&source_archive, &dry_missing, true).unwrap();
+    assert!(matches!(dry.kind, ArchiveUntrackedPurgeKind::DryRun));
+    assert!(dry.bytes_reclaimed > 0);
+    assert!(!directory.path().join("no-such-dir").exists());
+    assert!(
+        dry.stash_untracked_notes
+            .iter()
+            .any(|note| note.repository_id == "repo" && note.message.contains("holds untracked"))
+    );
+
+    let report = purge_untracked_from_archive(&source_archive, &destination, false).unwrap();
+    let ArchiveUntrackedPurgeKind::Rewritten { archive_sha256 } = report.kind else {
+        panic!("expected a rewritten archive, got {:?}", report.kind);
+    };
+    assert_eq!(report.schema_version, schema);
+    assert!(report.bytes_reclaimed > 0);
+    assert_eq!(report.stash_untracked_notes, dry.stash_untracked_notes);
+    let streamed = verify_archive_streaming(&destination).unwrap();
+    assert_eq!(streamed.archive_sha256, archive_sha256);
+    assert_eq!(streamed.manifest.schema_version, schema);
+    let after = read_archive_verified(&destination).unwrap();
+    assert_eq!(after.archive_sha256, archive_sha256);
+    assert!(fs::metadata(&destination).unwrap().len() < source_len);
+    for role in [
+        PayloadRole::GitBundle {
+            repository_id: "repo".into(),
+        },
+        PayloadRole::GitStagedPatch {
+            repository_id: "repo".into(),
+        },
+        PayloadRole::GitUnstagedPatch {
+            repository_id: "repo".into(),
+        },
+        PayloadRole::GitLinkedWorktreeStagedPatch {
+            repository_id: "repo".into(),
+            worktree: 0,
+        },
+        PayloadRole::GitLinkedWorktreeUnstagedPatch {
+            repository_id: "repo".into(),
+            worktree: 0,
+        },
+        PayloadRole::CanonicalSession,
+    ] {
+        assert_eq!(
+            before.payload_by_role(&role).unwrap(),
+            after.payload_by_role(&role).unwrap(),
+            "{role:?} changed"
+        );
+    }
+    for role in [
+        PayloadRole::GitUntrackedTar {
+            repository_id: "repo".into(),
+        },
+        PayloadRole::GitLinkedWorktreeUntrackedTar {
+            repository_id: "repo".into(),
+            worktree: 0,
+        },
+    ] {
+        let body = after.payload_by_role(&role).unwrap();
+        assert_eq!(body, empty_tar().as_slice(), "{role:?} was not emptied");
+    }
+
+    let restored = snapshot_from_verified(&after, &after.manifest.repositories[0]);
+    let destination_repo = clone_repository(directory.path(), &origin, "restored");
+    restore_git_snapshot(&SystemGit, &destination_repo, &restored).unwrap();
+    assert_eq!(git_line(&destination_repo, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read(destination_repo.join("first.txt")).unwrap(),
+        b"first\n"
+    );
+    assert_eq!(
+        fs::read(destination_repo.join("staged.txt")).unwrap(),
+        b"staged\n"
+    );
+    assert_eq!(
+        fs::read(destination_repo.join("base.txt")).unwrap(),
+        b"unstaged edit\n"
+    );
+    assert_eq!(
+        git(&destination_repo, &["diff", "--cached"]),
+        git(&source, &["diff", "--cached"])
+    );
+    assert_eq!(git(&destination_repo, &["diff"]), git(&source, &["diff"]));
+    assert!(!destination_repo.join("scratch.txt").exists());
+    assert!(!destination_repo.join("lane").join("lane-note.txt").exists());
+    assert!(destination_repo.join("lane").join(".git").is_file());
+}
+
+#[test]
+fn purge_dry_run_and_already_clean_archives_do_not_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.hel.zip");
+    write_archive_atomic(&source, &input()).unwrap();
+    let destination = directory.path().join("dest.hel.zip");
+    let dry = purge_untracked_from_archive(&source, &destination, true).unwrap();
+    assert!(matches!(dry.kind, ArchiveUntrackedPurgeKind::DryRun));
+    assert!(dry.bytes_reclaimed > 0);
+    assert!(!destination.exists());
+
+    for untracked in [Vec::new(), empty_tar()] {
+        let mut clean = input();
+        for repository in &mut clean.repositories {
+            repository.untracked_tar = untracked.clone();
+        }
+        let clean_path = directory
+            .path()
+            .join(format!("clean-{}.hel.zip", untracked.len()));
+        write_archive_atomic(&clean_path, &clean).unwrap();
+        let clean_dest = directory
+            .path()
+            .join(format!("clean-{}-out.hel.zip", untracked.len()));
+        let report = purge_untracked_from_archive(&clean_path, &clean_dest, false).unwrap();
+        assert!(matches!(
+            report.kind,
+            ArchiveUntrackedPurgeKind::AlreadyClean
+        ));
+        assert_eq!(report.bytes_reclaimed, 0);
+        assert!(!clean_dest.exists());
+    }
+}
+
+#[test]
+fn purge_reports_origin_delta_and_still_rewrites_a_mixed_archive() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = input();
+    for repository in &mut full.repositories {
+        origin_delta_repository(repository);
+    }
+    let full_path = directory.path().join("origin.hel.zip");
+    write_archive_atomic(&full_path, &full).unwrap();
+    let full_dest = directory.path().join("origin-out.hel.zip");
+    let report = purge_untracked_from_archive(&full_path, &full_dest, false).unwrap();
+    assert!(matches!(
+        report.kind,
+        ArchiveUntrackedPurgeKind::AlreadyNewFormat
+    ));
+    assert!(!full_dest.exists());
+
+    let mut mixed = input();
+    origin_delta_repository(&mut mixed.repositories[0]);
+    let mixed_path = directory.path().join("mixed.hel.zip");
+    let written = write_archive_atomic(&mixed_path, &mixed).unwrap();
+    assert!(written.manifest.schema_version >= ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA);
+    let mixed_dest = directory.path().join("mixed-out.hel.zip");
+    let purged = purge_untracked_from_archive(&mixed_path, &mixed_dest, false).unwrap();
+    assert!(matches!(
+        purged.kind,
+        ArchiveUntrackedPurgeKind::Rewritten { .. }
+    ));
+    let verified = verify_archive_streaming(&mixed_dest).unwrap();
+    assert_eq!(
+        verified.manifest.schema_version,
+        written.manifest.schema_version
+    );
+    assert!(
+        verified.manifest.repositories[0]
+            .metadata
+            .origin_delta
+            .is_some()
+    );
+    assert!(
+        verified.manifest.repositories[1]
+            .metadata
+            .origin_delta
+            .is_none()
+    );
+    let after = read_archive_verified(&mixed_dest).unwrap();
+    assert_eq!(
+        after
+            .payload_by_role(&PayloadRole::GitUntrackedTar {
+                repository_id: "worker".into(),
+            })
+            .unwrap(),
+        empty_tar().as_slice()
+    );
+}
+
+#[test]
+fn purge_keeps_schema_3_when_only_the_untracked_tar_was_sharded() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut archive_input = input();
+    let large = tar_with_file("big.bin", &vec![b'x'; TEST_PART_BYTES], 0o644);
+    assert!(large.len() > TEST_PART_BYTES);
+    archive_input.repositories[0].untracked_tar = large;
+    let source = directory.path().join("sharded.hel.zip");
+    write_archive_installed_with_part_size(&source, &archive_input, TEST_PART_BYTES).unwrap();
+    let before = verify_archive_streaming(&source).unwrap();
+    assert_eq!(
+        before.manifest.schema_version,
+        ARCHIVE_SCHEMA_VERSION_SHARDED
+    );
+    assert!(before.manifest.payloads.iter().any(|payload| {
+        matches!(payload.role, PayloadRole::GitUntrackedTar { .. }) && payload.parts.len() > 1
+    }));
+    let destination = directory.path().join("sharded-purged.hel.zip");
+    let report = purge_untracked_from_archive(&source, &destination, false).unwrap();
+    assert!(matches!(
+        report.kind,
+        ArchiveUntrackedPurgeKind::Rewritten { .. }
+    ));
+    let after = verify_archive_streaming(&destination).unwrap();
+    assert_eq!(
+        after.manifest.schema_version,
+        ARCHIVE_SCHEMA_VERSION_SHARDED
+    );
+    let untracked = after
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| {
+            payload.role
+                == PayloadRole::GitUntrackedTar {
+                    repository_id: "hel".into(),
+                }
+        })
+        .unwrap();
+    assert_eq!(untracked.size, 1024);
+    assert!(untracked.parts.len() > 1);
+    let read = read_archive_verified(&destination).unwrap();
+    assert_eq!(
+        read.payload_by_role(&PayloadRole::GitUntrackedTar {
+            repository_id: "hel".into(),
+        })
+        .unwrap(),
+        empty_tar().as_slice()
+    );
+}
+
+#[test]
+fn purge_preserves_operation_state_and_other_payloads() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut archive_input = input();
+    let object = "a".repeat(40);
+    archive_input.repositories[0].metadata.git_operation = Some(SavedGitOperation {
+        unmerged: vec![SavedUnmergedEntry {
+            path: PathBuf::from("conflict.txt"),
+            stage: 2,
+            mode: "100644".into(),
+            object: object.clone(),
+        }],
+        missing_worktree_paths: Vec::new(),
+        objects: vec![object],
+    });
+    archive_input.repositories[0].operation_payloads = Some(GitOperationPayloads {
+        conflicted_worktree_tar: tar_with_file("conflict.txt", b"<<<<<<<\n", 0o644),
+        state_tar: tar_with_file("MERGE_HEAD", b"abc\n", 0o644),
+    });
+    let source = directory.path().join("operation.hel.zip");
+    write_archive_atomic(&source, &archive_input).unwrap();
+    let before = read_archive_verified(&source).unwrap();
+    let destination = directory.path().join("operation-purged.hel.zip");
+    let report = purge_untracked_from_archive(&source, &destination, false).unwrap();
+    assert_eq!(report.schema_version, before.manifest.schema_version);
+    let after = read_archive_verified(&destination).unwrap();
+    assert_eq!(
+        after.manifest.schema_version,
+        before.manifest.schema_version
+    );
+    for role in [
+        PayloadRole::GitOperationStateTar {
+            repository_id: "hel".into(),
+        },
+        PayloadRole::GitConflictedWorktreeTar {
+            repository_id: "hel".into(),
+        },
+        PayloadRole::GitBundle {
+            repository_id: "hel".into(),
+        },
+        PayloadRole::GitStagedPatch {
+            repository_id: "hel".into(),
+        },
+        PayloadRole::NativeArtifact {
+            relative_path: PathBuf::from("sessions/native-1/rollout.jsonl"),
+        },
+    ] {
+        assert_eq!(
+            before.payload_by_role(&role).unwrap(),
+            after.payload_by_role(&role).unwrap(),
+            "{role:?} changed"
+        );
+    }
+    assert_eq!(
+        after
+            .payload_by_role(&PayloadRole::GitUntrackedTar {
+                repository_id: "hel".into(),
+            })
+            .unwrap(),
+        empty_tar().as_slice()
+    );
+}
+
+#[test]
+fn purge_leaves_an_existing_destination_archive_untouched() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.hel.zip");
+    write_archive_atomic(&source, &input()).unwrap();
+    let source_bytes = fs::read(&source).unwrap();
+    let destination = directory.path().join("dest.hel.zip");
+    fs::write(&destination, b"keep-me").unwrap();
+    let error = purge_untracked_from_archive(&source, &destination, false).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("existing"), "{message}");
+    assert_eq!(fs::read(&destination).unwrap(), b"keep-me");
+    assert_eq!(fs::read(&source).unwrap(), source_bytes);
+}
+
+#[test]
+fn purge_detects_untracked_stash_entries_in_a_sharded_bundle_without_buffering_blobs() {
+    let directory = tempfile::tempdir().unwrap();
+    // Identical bytes zlib-compress to a single shard. A counter does not, so
+    // the bundle crosses several part boundaries while its blob stays large.
+    let blob: Vec<u8> = (0..200 * 1024).map(|index| (index * 17) as u8).collect();
+    let (bundle, stash_commit) = bundle_with_untracked_stash(&blob);
+    let mut archive_input = input();
+    archive_input.repositories[0].committed_bundle = bundle;
+    archive_input.repositories[0].metadata.stash_stack = vec![SavedStashEntry {
+        commit: stash_commit,
+        message: "holds untracked".into(),
+    }];
+    let (mut manifest, mut payloads) =
+        prepare_archive_with_part_size(&archive_input, TEST_PART_BYTES).unwrap();
+    let bundle_index = payloads
+        .iter()
+        .position(|payload| {
+            payload.descriptor.role
+                == PayloadRole::GitBundle {
+                    repository_id: "hel".into(),
+                }
+        })
+        .unwrap();
+    let data = payloads[bundle_index].data.as_ref();
+    // Stored bundles are not split by the writer. Cut this one explicitly so
+    // the reader has to walk every shard in order.
+    let part_bytes = (data.len() / 3).max(1);
+    assert!(data.len() > part_bytes);
+    let path = payloads[bundle_index].descriptor.path.clone();
+    let parts = data
+        .chunks(part_bytes)
+        .enumerate()
+        .map(|(index, chunk)| PayloadPartDescriptor {
+            path: payload_part_path(&path, index),
+            sha256: digest_bytes(chunk),
+            size: chunk.len() as u64,
+        })
+        .collect::<Vec<_>>();
+    assert!(parts.len() > 1);
+    payloads[bundle_index].descriptor.parts = parts.clone();
+    manifest
+        .payloads
+        .iter_mut()
+        .find(|payload| payload.path == path)
+        .unwrap()
+        .parts = parts;
+
+    let source = directory.path().join("sharded-bundle.hel.zip");
+    let mut temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+    restrict_archive_permissions(temporary.path()).unwrap();
+    write_zip(
+        temporary.as_file_mut(),
+        directory.path(),
+        &manifest,
+        &payloads,
+    )
+    .unwrap();
+    temporary.as_file_mut().sync_all().unwrap();
+    temporary
+        .persist(&source)
+        .map_err(|error| error.error)
+        .unwrap();
+    restrict_archive_permissions(&source).unwrap();
+    let verified = verify_archive_streaming(&source).unwrap();
+    assert!(verified.manifest.payloads.iter().any(|payload| {
+        payload.role
+            == PayloadRole::GitBundle {
+                repository_id: "hel".into(),
+            }
+            && payload.parts.len() > 1
+    }));
+
+    let destination = directory.path().join("sharded-out.hel.zip");
+    purge::reset_bundle_discard_stats();
+    let report = purge_untracked_from_archive(&source, &destination, true).unwrap();
+    assert!(matches!(report.kind, ArchiveUntrackedPurgeKind::DryRun));
+    assert!(!destination.exists());
+    assert!(
+        report.stash_untracked_notes.iter().any(|note| {
+            note.repository_id == "hel" && note.message.contains("holds untracked")
+        }),
+        "{:?}",
+        report.stash_untracked_notes
+    );
+    let (peak, total) = purge::bundle_discard_stats();
+    assert!(peak > 0 && peak <= 8 * 1024, "discard peak {peak}");
+    assert!(
+        total >= blob.len() as u64,
+        "discarded {total} bytes of a {} byte blob",
+        blob.len()
+    );
+}
+
+fn bundle_with_untracked_stash(blob: &[u8]) -> (Vec<u8>, String) {
+    let commit = b"\
+tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n\
+parent 0000000000000000000000000000000000000001\n\
+parent 0000000000000000000000000000000000000002\n\
+parent 0000000000000000000000000000000000000003\n\
+author T <t@t> 1 +0000\n\
+committer T <t@t> 1 +0000\n\
+\n\
+holds untracked\n";
+    let oid = purge::git_object_id("commit", commit, false);
+    let mut pack = b"PACK".to_vec();
+    pack.extend_from_slice(&2_u32.to_be_bytes());
+    pack.extend_from_slice(&2_u32.to_be_bytes());
+    push_stored_object(&mut pack, 1, commit);
+    push_stored_object(&mut pack, 3, blob);
+    pack.extend_from_slice(&[0_u8; 20]);
+    let mut bundle = b"# v2 git bundle\n\n".to_vec();
+    bundle.extend_from_slice(&pack);
+    (bundle, oid)
+}
+
+fn push_stored_object(pack: &mut Vec<u8>, typ: u8, body: &[u8]) {
+    let mut size = body.len();
+    let mut first = (typ << 4) | ((size & 0x0f) as u8);
+    size >>= 4;
+    if size > 0 {
+        first |= 0x80;
+    }
+    pack.push(first);
+    while size > 0 {
+        let mut byte = (size & 0x7f) as u8;
+        size >>= 7;
+        if size > 0 {
+            byte |= 0x80;
+        }
+        pack.push(byte);
+    }
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, body).unwrap();
+    pack.extend(encoder.finish().unwrap());
+}

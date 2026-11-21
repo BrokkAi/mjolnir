@@ -39,10 +39,28 @@ impl RuntimeState {
                 &ProcessExecutor,
             )
             .await?;
-        self.persist_suspension_intent(session_id).await
+        self.persist_suspension_intent(session_id, None).await
     }
 
-    async fn persist_suspension_intent(self: &Arc<Self>, session_id: &str) -> Result<()> {
+    pub async fn suspend_preflight(
+        self: &Arc<Self>,
+        session_id: String,
+        dry_run: bool,
+        without_checkpoint: bool,
+    ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
+        blocking(move || {
+            let controller = Controller::load()?;
+            controller.suspend_preflight(&session_id, dry_run, without_checkpoint, &ProcessExecutor)
+        })
+        .await
+    }
+
+    async fn persist_suspension_intent(
+        self: &Arc<Self>,
+        session_id: &str,
+        consent: Option<&mj_core::suspend_consent::SuspendConsent>,
+    ) -> Result<()> {
+        let consent = consent.cloned();
         blocking({
             let session_id = session_id.to_owned();
             move || {
@@ -69,7 +87,11 @@ impl RuntimeState {
                 } else if record.public_error().is_some() {
                     record.last_error = None;
                 }
-                mj_controller::database::save_suspension_intent(record, ready_move.as_ref())?;
+                mj_controller::database::save_suspension_intent(
+                    record,
+                    ready_move.as_ref(),
+                    consent.as_ref(),
+                )?;
                 Ok(())
             }
         })
@@ -80,42 +102,19 @@ impl RuntimeState {
     }
 
     pub async fn suspend_session(self: &Arc<Self>, session_id: String) -> Result<()> {
-        // Internal suspension (workspace close, recovery, child teardown) has
-        // already been admitted by its parent operation. Its checkpoint is
-        // still verified before any owned checkout is released.
-        self.suspend_session_with_ack(session_id, true).await
+        self.suspend_session_with_consent(
+            session_id,
+            mj_core::suspend_consent::SuspendConsent::default(),
+        )
+        .await
     }
 
-    pub async fn suspend_session_with_ack(
+    pub async fn suspend_session_with_consent(
         self: &Arc<Self>,
         session_id: String,
-        acknowledge_unpublished_work: bool,
+        consent: mj_core::suspend_consent::SuspendConsent,
     ) -> Result<()> {
-        self.suspend_session_with_options(session_id, acknowledge_unpublished_work, false)
-            .await
-    }
-
-    pub async fn ignore_nested_repositories_and_suspend(
-        self: &Arc<Self>,
-        session_id: String,
-    ) -> Result<()> {
-        self.suspend_session_with_options(session_id, true, true)
-            .await
-    }
-
-    async fn suspend_session_with_options(
-        self: &Arc<Self>,
-        session_id: String,
-        acknowledge_unpublished_work: bool,
-        ignore_nested_repositories: bool,
-    ) -> Result<()> {
-        let started = self
-            .start_suspend_session(
-                session_id,
-                acknowledge_unpublished_work,
-                ignore_nested_repositories,
-            )
-            .await?;
+        let started = self.start_suspend_session(session_id, consent).await?;
         Self::wait_lifecycle_result(started.result).await?;
         Ok(())
     }
@@ -123,29 +122,21 @@ impl RuntimeState {
     pub(super) async fn start_suspend_session(
         self: &Arc<Self>,
         session_id: String,
-        acknowledge_unpublished_work: bool,
-        ignore_nested_repositories: bool,
+        consent: mj_core::suspend_consent::SuspendConsent,
     ) -> Result<StartedLifecycle> {
-        self.start_suspend_session_controlled(
-            session_id,
-            acknowledge_unpublished_work,
-            ignore_nested_repositories,
-            LifecycleControl::default(),
-        )
-        .await
+        self.start_suspend_session_controlled(session_id, consent, LifecycleControl::default())
+            .await
     }
 
     pub(crate) async fn start_suspend_session_controlled(
         self: &Arc<Self>,
         session_id: String,
-        acknowledge_unpublished_work: bool,
-        ignore_nested_repositories: bool,
+        consent: mj_core::suspend_consent::SuspendConsent,
         control: LifecycleControl,
     ) -> Result<StartedLifecycle> {
         self.start_suspend_session_origin(
             session_id,
-            acknowledge_unpublished_work,
-            ignore_nested_repositories,
+            consent,
             control,
             super::lifecycle::LifecycleOrigin::Person,
         )
@@ -153,11 +144,14 @@ impl RuntimeState {
     }
 
     pub(super) async fn recover_suspension(self: &Arc<Self>, session_id: String) -> Result<()> {
+        let id = session_id.clone();
+        let consent = blocking(move || mj_controller::database::load_closing_consent(&id))
+            .await?
+            .unwrap_or_default();
         let started = self
             .start_suspend_session_origin(
                 session_id,
-                true,
-                false,
+                consent,
                 LifecycleControl::default(),
                 super::lifecycle::LifecycleOrigin::Automatic,
             )
@@ -169,8 +163,7 @@ impl RuntimeState {
     async fn start_suspend_session_origin(
         self: &Arc<Self>,
         session_id: String,
-        acknowledge_unpublished_work: bool,
-        ignore_nested_repositories: bool,
+        consent: mj_core::suspend_consent::SuspendConsent,
         control: LifecycleControl,
         origin: super::lifecycle::LifecycleOrigin,
     ) -> Result<StartedLifecycle> {
@@ -178,8 +171,7 @@ impl RuntimeState {
             !control.cancelled.load(Ordering::Acquire),
             "phone action cancelled"
         );
-        let key =
-            serde_json::to_string(&(acknowledge_unpublished_work, ignore_nested_repositories))?;
+        let key = serde_json::to_string(&consent)?;
         let (accepted, acceptance) = tokio::sync::watch::channel(None);
         self.admit_prepared_lifecycle(
             session_id,
@@ -191,7 +183,9 @@ impl RuntimeState {
             Some(acceptance),
             move |state, session_id, _, session_admission| async move {
                 let result = async {
-                    if origin == super::lifecycle::LifecycleOrigin::Person {
+                    if origin == super::lifecycle::LifecycleOrigin::Person
+                        && !consent.without_checkpoint
+                    {
                         let controller = blocking(Controller::load).await?;
                         if controller
                             .state
@@ -214,25 +208,36 @@ impl RuntimeState {
                                 session_id.clone(),
                             );
                             executor.begin_resumable_work()?;
-                            let inventory = controller
-                                .preflight_origin_delta_suspension(&session_id, &executor);
+                            let inventory = controller.preflight_origin_delta_suspension(
+                                &session_id,
+                                &consent,
+                                &executor,
+                            );
                             executor.end_resumable_work("accept managed clone suspend")?;
                             inventory?;
                             mj_core::runtime::off_async_worker(|| {
                                 controller.record_origin_delta_suspend_acceptance(&session_id)
                             })?;
                         }
+                    } else if consent.without_checkpoint && !consent.confirm_no_checkpoint {
+                        let sid = session_id.clone();
+                        let executor = DaemonStageReportingExecutor::new(
+                            CancellableProcessExecutor::new(control.cancelled.clone()),
+                            state.clone(),
+                            session_id.clone(),
+                        );
+                        blocking(move || {
+                            let controller = Controller::load()?;
+                            controller.ensure_without_checkpoint_allowed(&sid, false, &executor)
+                        })
+                        .await?;
                     }
-                    state.persist_suspension_intent(&session_id).await?;
+                    state
+                        .persist_suspension_intent(&session_id, Some(&consent))
+                        .await?;
                     accepted.send_replace(Some(Ok(())));
                     state
-                        .suspend_admitted(
-                            &session_admission,
-                            session_id.clone(),
-                            control,
-                            acknowledge_unpublished_work,
-                            ignore_nested_repositories,
-                        )
+                        .suspend_admitted(&session_admission, session_id.clone(), control, consent)
                         .await
                 }
                 .await;
@@ -573,7 +578,12 @@ impl RuntimeState {
                     .automatic(),
                 move |state, session_id, _cancelled, session_admission| async move {
                     state
-                        .suspend_admitted(&session_admission, session_id, control, true, false)
+                        .suspend_admitted(
+                            &session_admission,
+                            session_id,
+                            control,
+                            mj_core::suspend_consent::SuspendConsent::default(),
+                        )
                         .await
                 },
             )
@@ -592,8 +602,7 @@ impl RuntimeState {
         session_admission: &mj_controller::recovery_gate::SessionAdmission,
         session_id: String,
         control: LifecycleControl,
-        acknowledge_unpublished_work: bool,
-        ignore_nested_repositories: bool,
+        consent: mj_core::suspend_consent::SuspendConsent,
     ) -> Result<DaemonLifecycleResult> {
         let cancelled = control.cancelled.clone();
         let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
@@ -609,8 +618,7 @@ impl RuntimeState {
             &session_id,
             &mut controller,
             &executor,
-            acknowledge_unpublished_work,
-            ignore_nested_repositories,
+            &consent,
             Some(&control),
         )
         .await
@@ -626,8 +634,7 @@ impl RuntimeState {
         session_id: &str,
         controller: &mut Controller,
         executor: &(impl CommandExecutor + Sync),
-        acknowledge_unpublished_work: bool,
-        ignore_nested_repositories: bool,
+        consent: &mj_core::suspend_consent::SuspendConsent,
         commit: Option<&LifecycleControl>,
     ) -> Result<DaemonLifecycleResult> {
         if controller
@@ -676,8 +683,7 @@ impl RuntimeState {
                         session_id,
                         executor,
                         &self.session_manager,
-                        acknowledge_unpublished_work,
-                        ignore_nested_repositories,
+                        consent,
                         Some(self.stop_subagents_before_close(session_id, commit.cloned())),
                     )
                     .await?
@@ -693,7 +699,12 @@ impl RuntimeState {
                     Self::commit_close(control)?;
                 }
                 self.stop_subagents_and_remove_reports(session_id).await?;
-                controller.suspend_session_without_checkpoint(session_id, executor)?
+                let outcome = controller.suspend_without_checkpoint(session_id, true, executor)?;
+                for warning in outcome.warnings {
+                    tracing::warn!(session_id, %warning, "suspend without checkpoint warning");
+                    self.push_public_notice(session_id, warning);
+                }
+                outcome.deferred
             }
             _ => {
                 controller
@@ -702,8 +713,7 @@ impl RuntimeState {
                         session_id,
                         executor,
                         &self.session_manager,
-                        acknowledge_unpublished_work,
-                        ignore_nested_repositories,
+                        consent,
                         Some(self.stop_subagents_before_close(session_id, commit.cloned())),
                     )
                     .await?

@@ -3853,32 +3853,19 @@ async fn a_session_with_no_projection_row_has_no_transcript() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-// Hard-won: #1448: publication preflight refused child close although it preserves the shared checkout.
 #[tokio::test]
-async fn suspend_requires_publication_ack_only_for_owned_clones() {
+async fn suspend_forwards_typed_consent_without_publication_409() {
     let (app, mut actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].publication_state =
                 Some(mj_core::state::PublicationState::Unknown);
         });
 
-    let response = app
-        .clone()
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert!(actions.try_recv().is_err());
-
     let response = mj_core::runtime::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/suspend"))
                 .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"acknowledge_unpublished_work":true}"#))
+                .body(Body::from(r#"{"discard_untracked":"Any"}"#))
                 .unwrap(),
         ),
     );
@@ -3887,7 +3874,10 @@ async fn suspend_requires_publication_ack_only_for_owned_clones() {
         request.action,
         ControllerAction::Suspend {
             session_id: "session-1".into(),
-            acknowledge_unpublished_work: true,
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
+            abort_operations: mj_core::suspend_consent::OperationConsent::None,
+            without_checkpoint: false,
+            confirm_no_checkpoint: false,
         }
     );
     request
@@ -3915,7 +3905,10 @@ async fn suspend_requires_publication_ack_only_for_owned_clones() {
         request.action,
         ControllerAction::Suspend {
             session_id: "session-1".into(),
-            acknowledge_unpublished_work: false,
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
+            abort_operations: mj_core::suspend_consent::OperationConsent::None,
+            without_checkpoint: false,
+            confirm_no_checkpoint: false,
         }
     );
     request
@@ -3957,7 +3950,6 @@ async fn a_forced_close_ignores_active_subagents() {
         request.action,
         ControllerAction::Destroy {
             session_id: "session-1".into(),
-            delete_branch: false,
         }
     );
     request
@@ -3968,38 +3960,20 @@ async fn a_forced_close_ignores_active_subagents() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
-// Hard-won: 472aff0b: destroy deleted user branches without a way to keep them.
 #[tokio::test]
-async fn a_forced_close_asks_to_delete_the_branch_only_when_the_body_does() {
-    let (app, mut actions, _snapshot_tx, _bundles) =
+async fn a_forced_close_rejects_removed_delete_branch_field() {
+    let (app, _actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |_| {});
-
-    for (body, delete_branch) in [(r#"{}"#, false), (r#"{"delete_branch":true}"#, true)] {
-        let response = mj_core::runtime::spawn(
-            app.clone().oneshot(
-                bearer(Request::post("/api/v1/sessions/session-1/destroy"))
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            ),
-        );
-        let request = actions.recv().await.unwrap();
-        assert_eq!(
-            request.action,
-            ControllerAction::Destroy {
-                session_id: "session-1".into(),
-                delete_branch,
-            }
-        );
-        request
-            .reply
-            .send(super::super::ActionOutcome::accepted())
-            .unwrap();
-        assert_eq!(
-            response.await.unwrap().unwrap().status(),
-            StatusCode::ACCEPTED
-        );
-    }
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/destroy"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"delete_branch":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[test]

@@ -89,7 +89,7 @@ pub(crate) fn apply_worker_activity(
 pub(crate) const fn lifecycle_kind(kind: RuntimeLifecycleKind) -> SessionOperationKind {
     match kind {
         RuntimeLifecycleKind::Create => SessionOperationKind::Launching,
-        RuntimeLifecycleKind::Suspend | RuntimeLifecycleKind::ForceStop => {
+        RuntimeLifecycleKind::Suspend => {
             SessionOperationKind::Suspending
         }
         RuntimeLifecycleKind::Resume => SessionOperationKind::Resuming,

@@ -385,6 +385,10 @@ pub(crate) enum DashboardIoUpdate {
         upgrade_only: bool,
         result: std::result::Result<mj_core::state::ContainerUpgradePreview, String>,
     },
+    SuspendPreflight {
+        session_id: String,
+        result: std::result::Result<mj_core::suspend_consent::SuspendPreflight, String>,
+    },
     ContainerUpgradeQueued {
         result: std::result::Result<(), String>,
     },
@@ -1560,6 +1564,23 @@ impl DashboardContext {
                     else { self.dashboard.show_normal_restart(session_id); }
                 }
             },
+            DashboardIoUpdate::SuspendPreflight { session_id, result } => match result {
+                Ok(preflight) => {
+                    if let DashboardAction::Suspend { session_id, consent } =
+                        self.dashboard.apply_suspend_preflight(preflight)
+                    {
+                        super::actions::start_suspension(self, session_id, consent);
+                    }
+                }
+                Err(error) => {
+                    if self.dashboard.dismiss_suspend_preflight(&session_id) {
+                        self.dashboard.set_failure_notice(format!(
+                            "Could not check workspace for {}: {error}",
+                            self.session_notice_name(&session_id)
+                        ));
+                    }
+                }
+            },
             DashboardIoUpdate::ContainerUpgradeQueued { result } => match result {
                 Ok(()) => self.dashboard.set_notice("Container upgrade pending; waiting for accepted work. Cancel through the session operation."),
                 Err(error) => self.dashboard.set_failure_notice(format!("Container upgrade was not accepted: {error}")),
@@ -2170,8 +2191,10 @@ mod tests {
                             &mut client,
                             daemon::SessionLifecycleRequest::Suspend {
                                 session_id,
-                                acknowledge_unpublished_work: true,
-                                ignore_nested_repositories: false,
+                                discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
+                                abort_operations: mj_core::suspend_consent::OperationConsent::None,
+                                without_checkpoint: false,
+                                confirm_no_checkpoint: false,
                             },
                         )
                         .await?;

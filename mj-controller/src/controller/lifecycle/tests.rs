@@ -530,7 +530,7 @@ fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
 
     persist_controller_fixture(&controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
-        controller.force_stop_with(session_id, &ProcessExecutor, |_| Ok(()))
+        controller.suspend_without_checkpoint_with(session_id, true, &ProcessExecutor, |_| Ok(()))
     })
     .unwrap();
 
@@ -593,12 +593,12 @@ fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
     };
 
     persist_controller_fixture(&controller);
-    let deferred = crate::controller::test_support::worker_test_scope(session_id, || {
-        controller.suspend_session_without_checkpoint_with(session_id, &ProcessExecutor, |_| Ok(()))
+    let outcome = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.suspend_without_checkpoint_with(session_id, true, &ProcessExecutor, |_| Ok(()))
     })
     .unwrap();
 
-    assert!(!deferred, "a bare target needs no storage cleanup pass");
+    assert!(!outcome.deferred, "a bare target needs no storage cleanup pass");
     let closed = &controller.state.sessions[session_id];
     assert_eq!(closed.state, SessionState::Stopped);
     assert!(closed.target.is_none());
@@ -642,18 +642,24 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
     };
 
     persist_controller_fixture(&controller);
-    let error = crate::controller::test_support::worker_test_scope(session_id, || {
-        controller.suspend_session_without_checkpoint_with(session_id, &FailingExecutor, |_| Ok(()))
+    let outcome = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.suspend_without_checkpoint_with(session_id, true, &FailingExecutor, |_| Ok(()))
     })
-    .unwrap_err();
+    .unwrap();
 
+    assert!(!outcome.deferred);
     assert!(
-        error.to_string().contains("suspend it instead"),
-        "{error:#}"
+        !outcome.warnings.is_empty(),
+        "best-effort cleanup failure must surface a warning"
     );
     assert_eq!(
         controller.state.sessions[session_id].state,
-        SessionState::Running
+        SessionState::Stopped
+    );
+    assert!(controller.state.sessions[session_id].checkpoint.is_none());
+    assert!(
+        controller.state.sessions[session_id].target.is_some(),
+        "target locator must be preserved when best-effort cleanup fails"
     );
 }
 
@@ -758,7 +764,7 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     let reports = seed_child_reports(&mut controller, session_id, directory.path());
     persist_controller_fixture(&controller);
     crate::controller::test_support::worker_test_scope(session_id, || {
-        controller.suspend_session_without_checkpoint_with(session_id, &ProcessExecutor, |_| Ok(()))
+        controller.suspend_without_checkpoint_with(session_id, true, &ProcessExecutor, |_| Ok(()))
     })
     .unwrap();
 
@@ -1292,18 +1298,18 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     };
 
     persist_controller_fixture(&controller);
-    let error = crate::controller::test_support::worker_test_scope(session_id, || {
-        controller.force_stop_with(session_id, &executor, |_| Ok(()))
+    let outcome = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.suspend_without_checkpoint_with(session_id, true, &executor, |_| Ok(()))
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.to_string().contains("existing recovery archive"));
-    assert_eq!(*executor.calls.lock().unwrap(), 0);
+    assert!(!outcome.deferred);
     assert_eq!(
         controller.state.sessions[session_id].state,
-        SessionState::Running
+        SessionState::Stopped
     );
-    assert!(controller.state.sessions[session_id].target.is_some());
+    assert!(controller.state.sessions[session_id].checkpoint.is_none());
+    assert!(controller.state.sessions[session_id].target.is_none());
 }
 #[test]
 #[cfg_attr(
@@ -3025,13 +3031,13 @@ fn raw_git_session_uses_origin_delta_raw_policy_and_removes_launch_record_on_des
 
     assert_eq!(
         controller
-            .explicit_suspend_export_policy("raw-session", false)
+            .explicit_suspend_export_policy("raw-session")
             .unwrap(),
         CheckpointExportPolicy::OriginDeltaRaw
     );
     assert_eq!(
         controller
-            .explicit_suspend_export_policy("plain-session", false)
+            .explicit_suspend_export_policy("plain-session")
             .unwrap(),
         CheckpointExportPolicy::ReuseUnchangedArchive
     );
@@ -3057,7 +3063,7 @@ fn raw_git_session_uses_origin_delta_raw_policy_and_removes_launch_record_on_des
     };
     assert_eq!(
         cutoff_controller
-            .explicit_suspend_export_policy("cutoff-session", false)
+            .explicit_suspend_export_policy("cutoff-session")
             .unwrap(),
         CheckpointExportPolicy::OriginDeltaCutoff
     );
@@ -3084,6 +3090,520 @@ fn raw_git_session_uses_origin_delta_raw_policy_and_removes_launch_record_on_des
         .is_some()
     );
 }
+
+#[test]
+fn suspend_without_checkpoint_respects_cancellation_without_settling_stopped() {
+    if !in_isolated_store(
+        "suspend_without_checkpoint_respects_cancellation_without_settling_stopped",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    struct CancellingFailingExecutor;
+    impl CommandExecutor for CancellingFailingExecutor {
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            anyhow::bail!("cancelled cleanup")
+        }
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+        fn pause_deadline(&self) -> mj_targets::targets::DeadlinePause {
+            mj_targets::targets::DeadlinePause::none()
+        }
+        fn cancellation_requested(&self) -> bool {
+            true
+        }
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            true
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "cancelled-without-checkpoint";
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "local".into();
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: directory.path().join(session_id),
+    }));
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&controller);
+    let err = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.suspend_without_checkpoint_with(session_id, true, &CancellingFailingExecutor, |_| Ok(()))
+    })
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("cancelled cleanup"));
+    assert_eq!(
+        controller.state.sessions[session_id].state,
+        SessionState::Running
+    );
+    assert!(controller.state.sessions[session_id].target.is_some());
+}
+
+#[test]
+fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
+    if !in_isolated_store("suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "cutoff-preflight-session";
+    let repo = directory.path().join(session_id);
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.com"]);
+    std::fs::write(repo.join("tracked.txt"), "hello\n").unwrap();
+    git(&["add", "tracked.txt"]);
+    git(&["commit", "-m", "initial"]);
+    let head = git(&["rev-parse", "HEAD"]);
+
+    // Add untracked file, session keep-dir file, and an in-progress merge marker.
+    std::fs::write(repo.join(".git/info/exclude"), "/.mj/keep/\n").unwrap();
+    std::fs::write(repo.join("scratch.txt"), "untracked\n").unwrap();
+    let keep_dir = repo.join(".mj/keep").join(session_id);
+    std::fs::create_dir_all(&keep_dir).unwrap();
+    std::fs::write(keep_dir.join("note.txt"), "keep-me\n").unwrap();
+    std::fs::write(repo.join(".git/MERGE_HEAD"), format!("{head}\n")).unwrap();
+
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "local".into();
+    session.project = None;
+    session.project_directory = None;
+    session.managed_worktree = None;
+    session.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
+        repository_id: "workspace".into(),
+        commit: head.clone(),
+        branch: None,
+        no_later_history: true,
+    }));
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: directory.path().join(session_id),
+    }));
+    session.launch_base = Some(head.clone());
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&controller);
+
+    let preflight = controller
+        .suspend_preflight(session_id, true, false, &ProcessExecutor)
+        .unwrap();
+    assert!(
+        preflight
+            .untracked
+            .iter()
+            .any(|u| u.path == std::path::Path::new("scratch.txt")),
+        "expected scratch.txt in untracked: {:?}",
+        preflight.untracked
+    );
+    assert_eq!(preflight.keep_dir_entries.len(), 1);
+    assert_eq!(
+        preflight.keep_dir_entries[0].path,
+        std::path::PathBuf::from(format!("{session_id}/note.txt"))
+    );
+    assert!(preflight.keep_dir_bytes > 0);
+    assert_eq!(preflight.operations.len(), 1);
+    assert_eq!(
+        preflight.operations[0].kind,
+        mj_core::suspend_consent::GitOperationKind::Merge
+    );
+    let dry_run = preflight.dry_run.expect("dry_run estimate");
+    assert_eq!(dry_run.session_state_bytes, None);
+    assert!(
+        dry_run
+            .git_delta_unavailable_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("merge"))
+    );
+}
+
+#[test]
+fn suspend_without_checkpoint_refuses_corrupt_archive_without_confirm_no_checkpoint() {
+    if !in_isolated_store(
+        "suspend_without_checkpoint_refuses_corrupt_archive_without_confirm_no_checkpoint",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "corrupt-archive-refusal";
+    let archive_path = directory.path().join("corrupt.zip");
+    std::fs::write(&archive_path, b"corrupted bytes").unwrap();
+
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "local".into();
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: directory.path().join(session_id),
+    }));
+    session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+        archive_path,
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+        created_at: "2026-11-21T00:00:00Z".into(),
+        event_frontier: 1,
+    }));
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&controller);
+
+    let err = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.suspend_without_checkpoint_with(session_id, false, &FailingExecutor, |_| Ok(()))
+    })
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("No verified checkpoint exists"),
+        "expected refusal, got: {err:#}"
+    );
+    assert_eq!(
+        controller.state.sessions[session_id].state,
+        SessionState::Running
+    );
+    assert!(controller.state.sessions[session_id].target.is_some());
+}
+
+#[tokio::test]
+async fn suspend_without_checkpoint_runs_before_close_before_parent_teardown() {
+    if !in_isolated_store("suspend_without_checkpoint_runs_before_close_before_parent_teardown") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "before-close-order";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "local".into();
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    }));
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&controller);
+
+    let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+    let before_close_order = order.clone();
+    let before_close: BeforeClose = Box::pin(async move {
+        before_close_order.lock().unwrap().push("before_close");
+        Ok(())
+    });
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    let admission = crate::controller::test_support::session_admission(session_id);
+    let consent = mj_core::suspend_consent::SuspendConsent {
+        without_checkpoint: true,
+        confirm_no_checkpoint: true,
+        ..Default::default()
+    };
+    controller
+        .suspend_session_managed_controlled(
+            &admission,
+            session_id,
+            &ProcessExecutor,
+            &channels.control,
+            &consent,
+            Some(before_close),
+        )
+        .await
+        .unwrap();
+    channels.shutdown.shutdown().await.unwrap();
+    assert_eq!(order.lock().unwrap().as_slice(), &["before_close"]);
+    assert_eq!(
+        controller.state.sessions[session_id].state,
+        SessionState::Stopped
+    );
+}
+
+#[test]
+fn suspend_preflight_without_checkpoint_skips_unreachable_target() {
+    if !in_isolated_store("suspend_preflight_without_checkpoint_skips_unreachable_target") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "preflight-offline-target";
+    let archive_path = directory.path().join("corrupt.zip");
+    std::fs::write(&archive_path, b"corrupted bytes").unwrap();
+
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "remote".into();
+    session.target = Some(Box::new(TargetLocator::LocalPodman {
+        container_id: "mj-offline".into(),
+        borrowed_from: None,
+        workspace_storage: Default::default(),
+    }));
+    session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+        archive_path,
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+        created_at: "2026-11-21T00:00:00Z".into(),
+        event_frontier: 1,
+    }));
+    let controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&controller);
+
+    let preflight = controller
+        .suspend_preflight(session_id, false, true, &FailingExecutor)
+        .expect("without_checkpoint preflight must not contact unreachable target");
+    let existing = preflight
+        .existing_checkpoint
+        .expect("existing_checkpoint summary");
+    assert!(!existing.verified, "corrupt archive must report verified=false");
+}
+
+#[tokio::test]
+async fn suspend_without_checkpoint_refusal_does_not_invoke_before_close() {
+    if !in_isolated_store("suspend_without_checkpoint_refusal_does_not_invoke_before_close") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "before-close-refusal";
+    let archive_path = directory.path().join("corrupt.zip");
+    std::fs::write(&archive_path, b"corrupted bytes").unwrap();
+
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "local".into();
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: directory.path().join(session_id),
+    }));
+    session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+        archive_path,
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+        created_at: "2026-11-21T00:00:00Z".into(),
+        event_frontier: 1,
+    }));
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&controller);
+
+    let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let called_clone = called.clone();
+    let before_close: BeforeClose = Box::pin(async move {
+        called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    });
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    let admission = crate::controller::test_support::session_admission(session_id);
+    let consent = mj_core::suspend_consent::SuspendConsent {
+        without_checkpoint: true,
+        confirm_no_checkpoint: false,
+        ..Default::default()
+    };
+    let err = controller
+        .suspend_session_managed_controlled(
+            &admission,
+            session_id,
+            &FailingExecutor,
+            &channels.control,
+            &consent,
+            Some(before_close),
+        )
+        .await
+        .unwrap_err();
+    channels.shutdown.shutdown().await.unwrap();
+    assert!(
+        format!("{err:#}").contains("No verified checkpoint exists"),
+        "expected refusal, got: {err:#}"
+    );
+    assert!(
+        !called.load(std::sync::atomic::Ordering::SeqCst),
+        "before_close must not be invoked when without_checkpoint is refused"
+    );
+}
+
+#[test]
+fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
+    if !in_isolated_store("suspend_preflight_and_capture_align_session_keep_dir_shown_consent") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "keep-dir-roundtrip";
+    let repo = directory.path().join(session_id);
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.com"]);
+    std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-m", "init"]);
+    let head = String::from_utf8(
+        std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    std::fs::write(repo.join(".git/info/exclude"), "/.mj/keep/\n").unwrap();
+    let keep_dir = mj_checkpoint::checkpoint::session_keep_dir(&repo, session_id);
+    std::fs::create_dir_all(keep_dir.join(session_id)).unwrap();
+    std::fs::write(keep_dir.join(session_id).join("notes.txt"), "keep note\n").unwrap();
+    std::fs::write(keep_dir.join("ignored.txt"), "direct keep file\n").unwrap();
+
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "local".into();
+    session.project = None;
+    session.project_directory = None;
+    session.managed_worktree = None;
+    session.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
+        repository_id: "workspace".into(),
+        commit: head.clone(),
+        branch: None,
+        no_later_history: true,
+    }));
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: directory.path().join(session_id),
+    }));
+    session.launch_base = Some(head.clone());
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&controller);
+
+    let preflight = controller
+        .suspend_preflight(session_id, false, false, &ProcessExecutor)
+        .unwrap();
+    let keep_paths: Vec<&std::path::Path> = preflight
+        .keep_dir_entries
+        .iter()
+        .map(|entry| entry.path.as_path())
+        .collect();
+    assert_eq!(keep_paths.len(), 2, "expected both direct and per-session keep files: {keep_paths:?}");
+    assert!(keep_paths.contains(&std::path::Path::new("ignored.txt")));
+    assert!(keep_paths.contains(&std::path::Path::new(&format!("{session_id}/notes.txt"))));
+
+    let consent = preflight.shown_consent().capture_consent();
+    let input = mj_checkpoint::checkpoint::cutoff_snapshot_input(
+        "workspace",
+        &repo,
+        Some(session_id),
+        vec![head],
+        directory.path().join("workspace.pack"),
+    );
+    let checkout = mj_checkpoint::snapshot::CheckoutKey {
+        repository_id: "workspace".into(),
+        checkout_path: std::path::PathBuf::new(),
+    };
+    mj_checkpoint::snapshot::check_keep_dir_consent(
+        &checkout,
+        input.keep_dir.as_deref().unwrap(),
+        &consent.untracked,
+    )
+    .expect("capture check_keep_dir_consent must accept Shown consent built from preflight");
+    let session_consent = mj_checkpoint::snapshot::SessionCaptureConsent {
+        repositories: [("workspace".into(), consent)].into_iter().collect(),
+    };
+    mj_checkpoint::snapshot::capture_session_snapshot(
+        &mj_checkpoint::archive::SystemGit,
+        &[input],
+        &session_consent,
+    )
+    .expect("capture_session_snapshot must succeed with Shown consent built from preflight");
+}
+
 
 #[cfg(unix)]
 fn init_managed_clone_with_origin(
@@ -3245,7 +3765,7 @@ async fn older_worker_suspend_preflight_refuses_before_touching_worker() {
 
     assert_eq!(
         controller
-            .explicit_suspend_export_policy(session_id, false)
+            .explicit_suspend_export_policy(session_id)
             .unwrap(),
         CheckpointExportPolicy::OriginDelta,
         "older worker on local managed clone with origin must not fall back to v2 capture"
@@ -3391,8 +3911,7 @@ async fn older_worker_suspend_fails_clearly_when_lease_cannot_be_acquired_withou
             LATCH_RELAY_SESSION,
             &SkipHarnessPrepExecutor,
             &channels.control,
-            true,
-            false,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             None,
         )
         .await
@@ -3564,8 +4083,7 @@ async fn legacy_closing_with_idle_relay_enters_origin_delta_and_refuses_without_
             LATCH_RELAY_SESSION,
             &ProcessExecutor,
             &channels.control,
-            false,
-            false,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             Some(Box::pin(async { Ok(()) })),
         )
         .await
@@ -3636,8 +4154,7 @@ async fn legacy_closing_with_running_relay_enters_origin_delta_and_refuses_witho
             LATCH_RELAY_SESSION,
             &ProcessExecutor,
             &channels.control,
-            false,
-            false,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             Some(Box::pin(async { Ok(()) })),
         )
         .await
@@ -3738,8 +4255,7 @@ async fn legacy_closing_with_closed_relay_finishes_from_installed_checkpoint() {
             LATCH_RELAY_SESSION,
             &NoExportExecutor,
             &channels.control,
-            false,
-            false,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             None,
         )
         .await
@@ -3835,8 +4351,7 @@ async fn legacy_closing_with_closing_relay_waits_and_finishes_from_installed_che
             LATCH_RELAY_SESSION,
             &NoExportExecutor,
             &channels.control,
-            false,
-            false,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             None,
         )
         .await
@@ -3905,8 +4420,7 @@ async fn legacy_destroying_finishes_from_installed_checkpoint_without_relay_or_e
             session_id,
             &NoExportExecutor,
             &channels.control,
-            false,
-            false,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             None,
         )
         .await
@@ -4180,7 +4694,7 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
 
     assert_eq!(
         controller
-            .explicit_suspend_export_policy_with_executor(session_id, false, &fake)
+            .explicit_suspend_export_policy_with_executor(session_id, &fake)
             .unwrap(),
         CheckpointExportPolicy::OriginDelta
     );
@@ -4414,7 +4928,7 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
 
     assert_eq!(
         controller
-            .explicit_suspend_export_policy_with_executor(session_id, false, &fake)
+            .explicit_suspend_export_policy_with_executor(session_id, &fake)
             .unwrap(),
         CheckpointExportPolicy::OriginDelta
     );
@@ -4461,7 +4975,7 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     };
     assert_eq!(
         cutoff_controller
-            .explicit_suspend_export_policy_with_executor(session_id, false, &fake)
+            .explicit_suspend_export_policy_with_executor(session_id, &fake)
             .unwrap(),
         CheckpointExportPolicy::OriginDeltaCutoff
     );
@@ -4780,4 +5294,231 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
         attempt.restart_reason(&target_fake).unwrap().as_deref(),
         Some("suspend was cancelled")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_suspend_preflight_stages_current_worker_when_installed_worker_lacks_subcommand() {
+    use std::sync::Mutex;
+
+    const NAME: &str =
+        "remote_suspend_preflight_stages_current_worker_when_installed_worker_lacks_subcommand";
+    const CHILD: &str = "MJ_TEST_REMOTE_PREFLIGHT_STAGED_WORKER";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker_bin = directory.path().join("fake-current-worker");
+        std::fs::write(
+            &worker_bin,
+            format!(
+                "#!/bin/sh\n# {}\nexit 0\n",
+                mj_core::worker_build::worker_build_stamp()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&worker_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            NAME,
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "remote-preflight-staged")
+        .env("MJ_WORKER_BINARY", &worker_bin)
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    #[derive(Default)]
+    struct RemotePreflightStageFake {
+        old_preflight_calls: Mutex<usize>,
+        staged_preflight_binaries: Mutex<Vec<String>>,
+        cleaned_paths: Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for RemotePreflightStageFake {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let joined = command.args.join(" ");
+            if joined.contains("remote.origin.url") {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"https://example.com/org/repo.git\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if joined.contains("uname") {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"Linux x86_64\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if command.purpose.starts_with("read suspend record ") {
+                return Ok(CommandOutput {
+                    status: 44,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            if command.purpose == "discard private worker staging" {
+                self.cleaned_paths.lock().unwrap().push(joined);
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            let mut stdin_bytes = Vec::new();
+            input.read_to_end(&mut stdin_bytes)?;
+            let joined = command.args.join(" ");
+            if command.purpose == "suspend preflight target" {
+                let spec: mj_core::suspend_consent::WorkerSuspendPreflightSpec =
+                    serde_json::from_slice(&stdin_bytes).unwrap();
+                assert_eq!(spec.session_id, "remote-old-worker");
+                if let Some(staged) = command
+                    .args
+                    .iter()
+                    .find(|arg| arg.contains("hel.prepared-"))
+                {
+                    self.staged_preflight_binaries
+                        .lock()
+                        .unwrap()
+                        .push(staged.clone());
+                    let result = mj_core::suspend_consent::WorkerSuspendPreflightResult {
+                        untracked: vec![mj_core::suspend_consent::UntrackedPath {
+                            checkout: mj_core::suspend_consent::CheckoutKey::default(),
+                            path: PathBuf::from("scratch.txt"),
+                            bytes: 42,
+                            identity: mj_core::suspend_consent::FileIdentity::new(
+                                "deadbeef".into(),
+                            ),
+                        }],
+                        ..Default::default()
+                    };
+                    return Ok(CommandOutput {
+                        status: 0,
+                        stdout: serde_json::to_vec(&result).unwrap(),
+                        stderr: Vec::new(),
+                    });
+                }
+                if joined.contains("/hel") {
+                    *self.old_preflight_calls.lock().unwrap() += 1;
+                    return Ok(CommandOutput {
+                        status: 2,
+                        stdout: Vec::new(),
+                        stderr: b"error: unrecognized subcommand 'suspend-preflight'\n".to_vec(),
+                    });
+                }
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+
+        fn pause_deadline(&self) -> targets::DeadlinePause {
+            targets::DeadlinePause::none()
+        }
+    }
+
+    let session_id = "remote-old-worker";
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "ssh-dev".into();
+    session.target = Some(Box::new(TargetLocator::SshBare {
+        host: "example.test".into(),
+        workspace: PathBuf::from("/home/dev/repo/.mj/clones/remote-old-worker"),
+        worker_id: Some(session_id.into()),
+    }));
+    session.project_directory = Some(PathBuf::from("/home/dev/repo/.mj/clones/remote-old-worker"));
+    session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+        target: mj_core::state::ManagedWorktreeTarget::Ssh {
+            destination: "dev@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        source_project_directory: PathBuf::from("/home/dev/repo"),
+        source_repository: PathBuf::from("/home/dev/repo"),
+        worktree_root: PathBuf::from("/home/dev/repo/.mj/clones/remote-old-worker"),
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        branch: "mj/remote-old-worker".into(),
+        base_commit: None,
+    }));
+    let mut config = Config::default();
+    config.targets.insert(
+        "ssh-dev".into(),
+        TargetTemplate::SshBare {
+            ssh: mj_core::config::SshConnection {
+                host: "example.test".into(),
+                user: Some("dev".into()),
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            permissions: mj_core::config::PermissionMode::Yolo,
+            workspace_prefix: ".local/share/hel/workspaces".into(),
+        },
+    );
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    let fake = RemotePreflightStageFake::default();
+    let preflight = controller
+        .suspend_preflight(session_id, false, false, &fake)
+        .expect("preflight must succeed by staging current worker when installed worker lacks subcommand");
+    assert_eq!(*fake.old_preflight_calls.lock().unwrap(), 1);
+    let staged = fake.staged_preflight_binaries.lock().unwrap();
+    assert_eq!(staged.len(), 1, "expected one staged preflight invocation");
+    let staged_start = staged[0]
+        .find("hel.prepared-")
+        .expect("expected hel.prepared- in staged command");
+    let staged_name: String = staged[0][staged_start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+        .collect();
+    assert!(staged_name.starts_with("hel.prepared-"));
+    assert!(
+        fake.cleaned_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|cmd| cmd.contains(&staged_name)),
+        "expected drop guard to clean up staged binary {staged_name}"
+    );
+    assert_eq!(preflight.untracked.len(), 1);
+    assert_eq!(preflight.untracked[0].path, PathBuf::from("scratch.txt"));
 }

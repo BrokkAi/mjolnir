@@ -24,7 +24,7 @@ pub use mj_core::archive::*;
 #[cfg(test)]
 use mj_core::config::HarnessKind;
 
-const MANIFEST_PATH: &str = "manifest.json";
+pub(super) const MANIFEST_PATH: &str = "manifest.json";
 const CANONICAL_SESSION_PATH: &str = "canonical/session.json";
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 /// Compressible payloads larger than this are split into parts of this size.
@@ -1289,7 +1289,7 @@ fn tar_payload_validator(role: &PayloadRole) -> Option<fn(&mut dyn Read) -> Resu
     }
 }
 
-fn payload_part_path(path: &str, index: usize) -> String {
+pub(super) fn payload_part_path(path: &str, index: usize) -> String {
     format!("{path}{PAYLOAD_PART_SUFFIX}{index:05}")
 }
 
@@ -1499,7 +1499,7 @@ fn write_payload_entry(
     Ok(())
 }
 
-fn write_stream_entry(
+pub(super) fn write_stream_entry(
     writer: &mut zip::ZipWriter<&mut File>,
     name: &str,
     mode: u32,
@@ -2646,7 +2646,7 @@ fn normalized_mode(mode: u32) -> Result<u32> {
     Ok(mode & 0o0777)
 }
 
-fn digest_bytes(bytes: &[u8]) -> String {
+pub(super) fn digest_bytes(bytes: &[u8]) -> String {
     lower_hex(Sha256::digest(bytes))
 }
 
@@ -2664,14 +2664,14 @@ fn digest_reader(reader: &mut impl Read) -> Result<String> {
 }
 
 #[cfg(unix)]
-fn restrict_archive_permissions(path: &Path) -> Result<()> {
+pub(super) fn restrict_archive_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("set 0600 permissions on {}", path.display()))
 }
 
 #[cfg(not(unix))]
-fn restrict_archive_permissions(_path: &Path) -> Result<()> {
+pub(super) fn restrict_archive_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -2844,16 +2844,22 @@ pub use git::{
     restore_git_snapshot, session_diff, session_diff_details, session_start_scope,
     tree_without_paths, validate_symlink_target,
 };
-#[cfg(test)]
-use git::{build_untracked_tar, restore_untracked_tar};
 pub(crate) use git::{
     LegacyRestoreOptions, ensure_no_symlink_ancestors, restore_git_snapshot_for_session,
     restore_git_snapshot_for_session_with_options,
 };
+#[cfg(test)]
+use git::{build_untracked_tar, restore_untracked_tar};
 use git::{
     validate_conflicted_worktree_tar, validate_conflicted_worktree_tar_reader,
     validate_operation_state_tar, validate_operation_state_tar_reader, validate_untracked_tar,
     validate_untracked_tar_reader,
+};
+
+mod purge;
+pub use purge::{
+    ArchiveUntrackedPurgeKind, ArchiveUntrackedPurgeReport, StashUntrackedNote,
+    purge_untracked_from_archive,
 };
 
 #[cfg(test)]

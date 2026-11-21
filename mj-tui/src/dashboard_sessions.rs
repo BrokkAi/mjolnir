@@ -1343,6 +1343,64 @@ impl DashboardState {
         self.session_preflight_generation = self.session_preflight_generation.wrapping_add(1);
     }
 
+    pub fn apply_suspend_preflight(
+        &mut self,
+        preflight: mj_core::suspend_consent::SuspendPreflight,
+    ) -> DashboardAction {
+        let should_quick_suspend = match &mut self.mode {
+            Mode::Confirm(dialog) => match &mut dialog.confirmation {
+                Confirmation::SuspendSession {
+                    session_id,
+                    children_not_handed_back,
+                    interrupting,
+                    preflight: slot,
+                    checking,
+                    ..
+                } if *session_id == preflight.session_id => {
+                    let quick = !preflight.has_blockers()
+                        && !preflight.has_warnings()
+                        && !*interrupting
+                        && children_not_handed_back.is_empty();
+                    *slot = Some(preflight.clone());
+                    *checking = false;
+                    quick
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if should_quick_suspend {
+            let session_id = preflight.session_id;
+            self.cancel_modal();
+            return DashboardAction::Suspend {
+                session_id,
+                consent: mj_core::suspend_consent::SuspendConsent::default(),
+            };
+        }
+        DashboardAction::None
+    }
+
+    /// Closes the suspend confirmation dialog if it is still waiting on
+    /// `session_id`'s preflight, leaving any unrelated modal untouched.
+    pub fn dismiss_suspend_preflight(&mut self, session_id: &str) -> bool {
+        let matches = matches!(
+            &self.mode,
+            Mode::Confirm(dialog)
+                if matches!(
+                    &dialog.confirmation,
+                    Confirmation::SuspendSession {
+                        session_id: current,
+                        checking: true,
+                        ..
+                    } if current == session_id
+                )
+        );
+        if matches {
+            self.cancel_modal();
+        }
+        matches
+    }
+
     pub fn cancel_modal(&mut self) {
         self.session_preflight_generation = self.session_preflight_generation.wrapping_add(1);
         if matches!(self.mode, Mode::WorkspaceManager(_)) {

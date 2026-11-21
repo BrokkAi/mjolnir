@@ -65,7 +65,7 @@ fn lifecycle_transition(kind: RuntimeLifecycleKind) -> SessionTransitionKind {
         RuntimeLifecycleKind::Create => Starting,
         RuntimeLifecycleKind::Resume => Resuming,
         RuntimeLifecycleKind::Move => Moving,
-        RuntimeLifecycleKind::Suspend | RuntimeLifecycleKind::ForceStop => Suspending,
+        RuntimeLifecycleKind::Suspend => Suspending,
         RuntimeLifecycleKind::DestroyStopped
         | RuntimeLifecycleKind::ForceDestroy
         | RuntimeLifecycleKind::Cleanup => Destroying,

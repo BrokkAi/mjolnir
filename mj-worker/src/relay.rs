@@ -449,7 +449,6 @@ impl DurableRelay {
         }
     }
 
-    #[cfg(any(unix, test))]
     pub(crate) fn native_goal_resume_sent(
         &mut self,
         resume_id: u64,
@@ -460,7 +459,6 @@ impl DurableRelay {
             .push(PendingNativeResume { resume_id, goal });
     }
 
-    #[cfg(any(unix, test))]
     pub(crate) fn native_goal_resume_rejected(&mut self, resume_id: u64) {
         self.pending_native_resumes
             .retain(|pending| pending.resume_id != resume_id);

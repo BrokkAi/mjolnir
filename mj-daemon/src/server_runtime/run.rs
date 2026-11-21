@@ -500,6 +500,13 @@ pub(crate) async fn run_server(
                                 if reply.send(result).is_err() { tracing::debug!("container upgrade preview client disconnected"); }
                             });
                         }
+                        crate::server::ClientStateRequest::SuspendPreflight { session_id, dry_run, without_checkpoint, reply } => {
+                            let runtime = daemon_runtime.clone();
+                            move_preparation_jobs.spawn(async move {
+                                let result = runtime.suspend_preflight(session_id, dry_run, without_checkpoint).await.map_err(|e| format!("{e:#}"));
+                                if reply.send(result).is_err() { tracing::debug!("suspend preflight client disconnected"); }
+                            });
+                        }
 
                         crate::server::ClientStateRequest::Read { client_id, session_id, reply } => {
                             let workspace = workspace_of(&session_id);
@@ -1082,7 +1089,22 @@ pub(crate) async fn run_server(
                                             repository_preflight: None,
                                         }, control.lifecycle.clone().expect("Resume has a lifecycle control")))??)
                                     }
-                                    ControllerAction::Suspend { session_id, acknowledge_unpublished_work } => Some(mj_core::runtime::block_on(daemon_runtime.start_suspend_session_controlled(session_id.clone(), *acknowledge_unpublished_work, false, control.lifecycle.clone().expect("Suspend has a lifecycle control")))??),
+                                    ControllerAction::Suspend {
+                                        session_id,
+                                        discard_untracked,
+                                        abort_operations,
+                                        without_checkpoint,
+                                        confirm_no_checkpoint,
+                                    } => Some(mj_core::runtime::block_on(daemon_runtime.start_suspend_session_controlled(
+                                        session_id.clone(),
+                                        mj_core::suspend_consent::SuspendConsent {
+                                            discard_untracked: discard_untracked.clone(),
+                                            abort_operations: abort_operations.clone(),
+                                            without_checkpoint: *without_checkpoint,
+                                            confirm_no_checkpoint: *confirm_no_checkpoint,
+                                        },
+                                        control.lifecycle.clone().expect("Suspend has a lifecycle control"),
+                                    ))??),
                                     _ => None,
                                 };
                                 if let Some(mut started) = lifecycle {
