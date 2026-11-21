@@ -2001,12 +2001,22 @@ async fn prepare_and_start_harness(
             if step_cancel.is_cancelled() {
                 bail!("preparation cancelled before recording raw launch baseline");
             }
-            mj_checkpoint::snapshot::record_launch_if_absent(
+            if let Err(error) = mj_checkpoint::snapshot::record_launch_if_absent(
                 &mj_checkpoint::archive::SystemGit,
                 &cwd,
                 &session_id,
-            )
-            .with_context(|| format!("record raw launch baseline in {}", cwd.display()))
+            ) {
+                // Capture falls back to keeping all local refs and stashes when
+                // the launch record is absent, so a read-only Git directory
+                // must not block starting the session.
+                tracing::warn!(
+                    session_id = %session_id,
+                    cwd = %cwd.display(),
+                    error = format!("{error:#}"),
+                    "could not record raw launch baseline; continuing without baseline"
+                );
+            }
+            Ok(())
         })
         .await?;
     }
