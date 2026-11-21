@@ -1,6 +1,6 @@
 # Pilot RQL engine
 
-Set the SSH server's `engine` to `rql_mock.engine:answer`. Keep the engine
+Set the SSH server's `engine` to `rql_mock.engine:load_engine`. Keep the engine
 configuration, source Git repositories, manifest, cache and audit files on the
 host. The engine keeps one Fable/high session per introducing commit across
 queries, writer arms and replicates. It serializes turns for that session, clears

@@ -169,7 +169,7 @@ class Engine:
                                 "model_version": self.model_version})
         return runner, sid
 
-    def answer(self, commit, query_text, *, fresh=False, expected_inputs=None):
+    def answer(self, commit, query_text, *, fresh=False):
         provenance = {"model": MODEL, "effort": EFFORT, "steps": [], "turns": [],
                       "validation_retries": 0, "session": None, "turn": None, "tokens": {},
                       "fresh": fresh, "context_id": None}
@@ -181,8 +181,6 @@ class Engine:
                 result["message"] = message
             return result
 
-        if expected_inputs is not None and expected_inputs != self.identity:
-            return response("engine_error", message="RQL engine inputs differ from the frozen writer assignment.")
         try:
             if not isinstance(query_text, str):
                 raise ValueError("RQL query must be a string")
@@ -279,14 +277,3 @@ def load_engine(config_path=None, *, manifest_path=None):
     engine.manifest = manifest
     engine.config = config
     return engine
-
-
-def answer(commit, query_text, *, fresh=False, expected_inputs=None):
-    """Answer a writer query, or make a separate host-only stability re-ask."""
-    try:
-        engine = load_engine()
-    except (OSError, KeyError, ValueError, TypeError) as error:
-        return {"status": "engine_error", "rows": [], "total": 0, "provenance": {"fresh": fresh},
-                "coverage": {"complete": False, "open": []}, "message": f"cannot verify frozen engine inputs: {error}"}
-
-    return engine.answer(commit, query_text, fresh=fresh, expected_inputs=expected_inputs)

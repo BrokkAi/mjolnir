@@ -1,5 +1,5 @@
 """Exercise the pilot scheduler and output contract without a daemon."""
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from decimal import Decimal
 from io import StringIO
 import hashlib
@@ -147,7 +147,6 @@ class PilotTest(unittest.TestCase):
             (path / f"queries-{sid}.jsonl").write_text(
                 json.dumps({"session": sid, "delivered": True, "status": answer["status"]}) + "\n")
             # The launch and teardown IPC are faked here. Use the real writer publication decision.
-            pilot.pop("revoke_tool_assignment", None)
             return brief_driver.finish_pilot_writer(pilot, sid, bug_id, "fixture")
 
         self.addCleanup(setattr, brief_driver, "run", brief_driver.run)
@@ -538,6 +537,75 @@ class PilotTest(unittest.TestCase):
         report = json.loads(out.getvalue().splitlines()[-1])["retained_attempts"]
         self.assertEqual([record["retained_session"] for record in report], receipts)
         self.assertTrue(all(Path(record["receipt"]).is_file() for record in report))
+
+    def test_revoke_failure_keeps_writer_done_and_retries_without_relaunch(self):
+        job = next(job for job in self.manifest["jobs"] if job["kind"] == "writer" and job["arm"] == "R")
+        path = pilot.job_path(self.root, job)
+        sid = "a" * 32
+        brief = b"Accepted brief.\n"
+        hook = self.root / "rql-hook"
+        hook.write_text("""#!/usr/bin/env python3
+from pathlib import Path
+import sys
+
+assert sys.argv[1] == "--revoke"
+attempt = Path(sys.argv[2]).parent
+assert (attempt / "done.json").is_file()
+if not (attempt / "recover").exists():
+    sys.exit(1)
+(attempt / "revoked").touch()
+""")
+        hook.chmod(0o700)
+        runner = pilot.Pilot.__new__(pilot.Pilot)
+        runner.args = SimpleNamespace(run_root=self.root, rql_hook=hook)
+        runner.writer_model = ("gpt-6.1-sol", "high")
+        runner.gate, runner.attested = None, set()
+        inputs = {"rql_tools": ["rql_query"], "prompt_sha256": pilot.digest(b"prompt")}
+        runner.render = lambda _: {"path": path, "bug": {"id": "first"}, "inputs": inputs}
+        launches = []
+
+        def write(bug_id, gate, *, pilot):
+            launches.append(sid)
+            driver = brief_driver.driver
+            driver.save(path / "launch.json", {"session_id": sid})
+            driver.save(path / "tool-assignment.json", {"session_id": sid, "arm": "R"})
+            driver.save(path / "accepted.json", {"brief_sha256": hashlib.sha256(brief).hexdigest()})
+            driver.save(path / "mcp-reconnect-result.json",
+                        {"session_id": sid, "passed": True, "expected_tools": ["rql_query"]})
+            driver.save(path / "audit.json", {"passed": True})
+            driver.save(path / "usage.json", {"totals": {"total_tokens": {"tokens": 12}}})
+            (path / "prompt.txt").write_bytes(b"prompt")
+            (path / "brief-candidate.md").write_bytes(brief)
+            (path / f"queries-{sid}.jsonl").touch()
+            return brief_driver.finish_pilot_writer(pilot, sid, bug_id, "fixture")
+
+        def destroy(root, attempt, session, *args, **kwargs):
+            pilot.driver.save(attempt / "destroy.json", {"session_id": session, "accepted": True})
+            return "done"
+
+        self.addCleanup(setattr, brief_driver, "run", brief_driver.run)
+        self.addCleanup(setattr, brief_driver.driver, "destroy_captured_pilot", brief_driver.driver.destroy_captured_pilot)
+        brief_driver.run = write
+        brief_driver.driver.destroy_captured_pilot = destroy
+        groups = {job["diff"]: [job]}
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as reports:
+            self.assertEqual(pilot.run_matrix(self.root, groups, "fixture", runner.complete, runner.execute,
+                                              FakeQuota("90")), 0)
+        self.assertIn("revocation still pending", reports.getvalue())
+        marker = path / "pending-revoke.json"
+        self.assertEqual(pilot.read_json(marker), {"session_id": sid})
+        self.assertFalse((path / "failed.json").exists())
+        accepted = (path / "done.json").read_bytes()
+        (path / "recover").touch()
+        runner.retry_pending_revokes()
+        self.assertTrue((path / "revoked").exists())
+        self.assertFalse(marker.exists())
+        self.assertEqual(pilot.run_matrix(self.root, groups, "fixture", runner.complete, runner.execute,
+                                          FakeQuota("90")), 0)
+        self.assertEqual(launches, [sid])
+        self.assertEqual((path / "done.json").read_bytes(), accepted)
+        self.assertEqual((path / "brief.md").read_bytes(), brief)
+        self.assertFalse(list(path.parent.glob("writer.superseded-*")))
 
     def captured_job(self, name, sid, model, output, *, forbidden=False):
         path = self.root / name

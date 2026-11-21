@@ -517,9 +517,8 @@ def finish_pilot_writer(pilot, sid, bug_id, profile):
                                           allow_rql=bool(inputs["rql_tools"]))
     if state != "done":
         return state
-    revoke = pilot.get("revoke_tool_assignment")
-    if callable(revoke):
-        revoke(sid)
+    if inputs["rql_tools"]:
+        save(d / "pending-revoke.json", {"session_id": sid})
     if interruption := interrupt_on_rql_quota(pilot, sid):
         return interruption
     save(d / "done.json", dict(accepted, bug=bug_id, session_id=sid,

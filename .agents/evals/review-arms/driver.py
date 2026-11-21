@@ -418,7 +418,7 @@ def wait_idle(sid, limit=1200):
 
 def session_container_id(sid, *, missing_ok=False):
     ids = subprocess.check_output(["podman", "ps", "--filter", f"label=dev.mj.session={sid}",
-                                   "--format", "{{.ID}}"]).decode().split()
+                                   "--format", "{{.ID}}"], timeout=60).decode().split()
     if not ids and missing_ok:
         return None
     assert len(ids) == 1, ids

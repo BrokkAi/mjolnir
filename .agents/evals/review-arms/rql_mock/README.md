@@ -15,19 +15,19 @@ account configured for public-key authentication and the pilot keys. Do not
 enable client-supplied environment variables or user login scripts for it.
 
 Create a JSON config at an absolute host path. OpenSSH's forced command selects
-the config, and the config selects the engine callable and that writer's log.
+the config, and the config selects the engine loader and that writer's log.
 
 ```json
 {
   "manifest": "/mnt/optane/review-arms-pilot/manifest.json",
-  "engine": "rql_mock.stub_engine:answer",
+  "engine": "rql_mock.stub_engine:load_engine",
   "sessions": {
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
       "diff": "mjolnir/123",
       "intro": "1111111111111111111111111111111111111111",
       "arm": "R-loc",
-      "manifest_sha256": "<64 hexadecimal digits>",
-      "engine_inputs_sha256": "<64 hexadecimal digits>",
+      "manifest_sha256": "03adec56bc64db060dc092614ab2d8a8a672d42c69936403c88774ac5686eb8c",
+      "engine_inputs_sha256": "48289d6a9100c185b175af78378819566630419d000910c4acc3f63d6f437c74",
       "log": "/mnt/optane/review-arms-pilot/runs/mjolnir/123/R-loc/r1/writer/queries.jsonl"
     },
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {"arm": "none"}
@@ -38,13 +38,13 @@ the config, and the config selects the engine callable and that writer's log.
 Register G writers and reviewers with arm `none` and issue keys only for the
 R and R-loc sessions. Use the actual frozen manifest path. The server reads `page_rows` from it on
 each connection and verifies the assigned diff and introduction commit against
-it. The `engine` is an importable Python `module:callable`; its callable receives
-`answer(intro, query_text, expected_inputs=...)`. The expected inputs are the
-assignment's manifest digest and the same engine input digest used to key the
-answer cache. The engine refuses the query if they differ from its loaded inputs.
-The forced command can import modules next to
-`server.py` by package name, such as `rql_mock.engine:answer`. Keep engine stdout
-free for the JSON-RPC server. The engine owns the cache shared by R and R-loc.
+it. The `engine` is an importable Python `module:loader` that returns an object
+with `identity` and `answer(intro, query_text)`. Before calling `answer`, the
+server checks both assignment digests against the loaded engine's identity.
+Live assignments use the frozen manifest digest and the input digest used to key
+the answer cache. The example uses the fixed `STUB_IDENTITY` for smoke tests.
+Keep engine stdout free for the JSON-RPC server. The live engine owns the cache
+shared by R and R-loc.
 
 Create the log parent before launching the tool. Replace the assignment file
 atomically when registering a session. Use a serialized registrar if multiple
@@ -108,7 +108,9 @@ MCP preflight so an unreachable address or wrong host pin stops setup. After
 capture, `install-assignment.py --revoke /absolute/path/to/tool-assignment.json`
 removes that session's authorization, transport assignment and staged key. It
 also clears the assignment and SSH credential files in a running container.
-Both operations can be repeated.
+Both operations can be repeated. The pilot records a pending revocation when
+the hook fails after capture and retries it on the next run. The accepted brief
+and its completion receipt remain available.
 
 On a host using rootless Podman with pasta, verify how the guest reaches the
 host before starting sshd. Podman 5.7's default `host.containers.internal`
@@ -132,9 +134,10 @@ using frozen Mjolnir binaries, set `REVIEW_ARMS_MJ` and
 in the invoking shell. The forced command starts the engine independently.
 
 Use a separate transport JSON preconfigured with
-`"engine": "rql_mock.stub_engine:answer"` for a no-model transport test.
-Enrollment preserves an operator-selected engine in that private file and
-defaults a new transport config to the real engine.
+`"engine": "rql_mock.stub_engine:load_engine"` for a no-model transport test.
+Use both digests from `rql_mock.stub_engine.STUB_IDENTITY` in smoke assignments.
+Enrollment preserves the engine selected in the private config and defaults a
+new config to `rql_mock.engine:load_engine`.
 
 ## Slice 5 session setup
 

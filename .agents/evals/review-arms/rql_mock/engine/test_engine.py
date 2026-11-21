@@ -748,14 +748,21 @@ class SessionTests(unittest.TestCase):
             manifest = temp / "manifest.json"
             manifest.write_text(json.dumps({"page_rows": 50, "diffs": [{"key": diff, "intro": COMMIT}]}))
             (temp / "transport_fixture.py").write_text("""
-def answer(commit, query, *, fresh=False, expected_inputs=None):
+from types import SimpleNamespace
+from rql_mock.stub_engine import STUB_IDENTITY
+
+def load_engine():
+    return SimpleNamespace(identity=STUB_IDENTITY, answer=answer)
+
+def answer(commit, query, *, fresh=False):
     return {"status": "ok", "rows": [], "total": 0,
             "coverage": {"complete": True, "open": []}, "provenance": {"fresh": fresh, "commit": commit}}
 """)
             config, log = temp / "transport.json", temp / "queries.jsonl"
+            from rql_mock.stub_engine import STUB_IDENTITY
             config.write_text(json.dumps({
-                "manifest": str(manifest), "engine": "transport_fixture:answer",
-                "sessions": {sid: {"diff": diff, "intro": COMMIT, "arm": "R", "log": str(log)}},
+                "manifest": str(manifest), "engine": "transport_fixture:load_engine",
+                "sessions": {sid: {"diff": diff, "intro": COMMIT, "arm": "R", "log": str(log), **STUB_IDENTITY}},
             }))
             def request(request_id, arguments):
                 return {"jsonrpc": "2.0", "id": request_id, "method": "tools/call",

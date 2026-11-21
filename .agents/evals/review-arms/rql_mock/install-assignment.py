@@ -91,7 +91,7 @@ def host_assignment(assignment, *, revoke):
         Path(entry["log"]).parent.mkdir(parents=True, exist_ok=True)
         private, public = key_pair(key_dir, sid)
         config["manifest"] = str(Path(assignment["manifest"]).resolve())
-        config.setdefault("engine", "rql_mock.engine:answer")
+        config.setdefault("engine", "rql_mock.engine:load_engine")
         sessions[sid] = entry
         atomic_write(transport, json.dumps(config, indent=2) + "\n")
         atomic_write(auth, "".join(f"{line}\n" for line in [*kept, authorized_entry(transport, sid, public)]))

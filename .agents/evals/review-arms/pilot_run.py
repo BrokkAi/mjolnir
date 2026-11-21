@@ -377,6 +377,30 @@ class Pilot:
             return record
         return None
 
+    def revoke_assignment(self, path, sid):
+        assignment = path / "tool-assignment.json"
+        if not assignment.exists():
+            return
+        record = read_json(assignment)
+        if record["session_id"] != sid:
+            raise ValueError("the assignment does not belong to the recorded launch")
+        if record["arm"] != "none":
+            subprocess.run([str(self.args.rql_hook), "--revoke", str(assignment)],
+                           check=True, stdout=subprocess.PIPE)
+
+    def retry_pending_revoke(self, marker):
+        if not marker.exists():
+            return
+        try:
+            self.revoke_assignment(marker.parent, read_json(marker)["session_id"])
+            marker.unlink()
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            print(f"RQL assignment revocation still pending at {marker}: {error}", file=sys.stderr, flush=True)
+
+    def retry_pending_revokes(self):
+        for marker in sorted(self.args.run_root.glob("runs/*/*/*/r*/writer/pending-revoke.json")):
+            self.retry_pending_revoke(marker)
+
     def execute(self, job):
         params = self.render(job)
         if params is None:
@@ -384,17 +408,6 @@ class Pilot:
         path = params["path"]
         launch = path / "launch.json"
         failure = path / "failed.json"
-
-        def revoke_assignment(sid):
-            assignment = path / "tool-assignment.json"
-            if not assignment.exists():
-                return
-            record = read_json(assignment)
-            if record["session_id"] != sid:
-                raise ValueError("the assignment does not belong to the recorded launch")
-            if record["arm"] != "none":
-                subprocess.run([str(self.args.rql_hook), "--revoke", str(assignment)],
-                               check=True, stdout=subprocess.PIPE)
 
         def hold_for_input(sid, error):
             driver.retain_pilot_session(path, sid, str(error), status="input_required",
@@ -439,7 +452,7 @@ class Pilot:
         if (path / "done.json").exists() or failure.exists():
             if launch.exists():
                 try:
-                    revoke_assignment(read_json(launch)["session_id"])
+                    self.revoke_assignment(path, read_json(launch)["session_id"])
                 except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
                     return f"needs-recovery: could not revoke the superseded RQL assignment ({error})"
             archive(path)
@@ -455,7 +468,6 @@ class Pilot:
         params["attest_cache"] = True
         params["publish_tool_assignment"] = lambda sid: publish_tool_assignment(
             path, self.args, job, self.diffs[job["diff"]], sid, engine_identity=self.engine_identity)
-        params["revoke_tool_assignment"] = revoke_assignment
         try:
             if job["kind"] == "writer":
                 params["model"] = self.writer_model
@@ -476,6 +488,7 @@ class Pilot:
                 state = interruption
         if params["attest_cache"] and (path / "cache-attestation.json").exists():
             self.attested.add(job["kind"])
+        self.retry_pending_revoke(path / "pending-revoke.json")
         return state
 
 
@@ -534,6 +547,7 @@ def main():
         with pilot_lock(args.run_root):
             runner = Pilot(args, config, manifest, raw, image, reference, steps, engine_identity=engine_identity)
             try:
+                runner.retry_pending_revokes()
                 return run_matrix(args.run_root, groups, args.profile, runner.complete, runner.execute)
             finally:
                 subprocess.run(driver.mj_invocation("daemon", "stop"), check=True)

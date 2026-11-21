@@ -30,6 +30,12 @@ TOOL = {
     },
 }
 ENGINE_ERROR = "The engine could not produce a valid answer."
+# Existing installations used the answer function as their entry point.
+ENGINE_LOADERS = {
+    "rql_mock.engine:answer": "rql_mock.engine:load_engine",
+    "rql_mock.stub_engine:answer": "rql_mock.stub_engine:load_engine",
+}
+IDENTITY_FIELDS = ("manifest_sha256", "engine_inputs_sha256")
 
 
 def source_site(site):
@@ -50,11 +56,11 @@ def error(status, message, **fields):
 
 
 class Server:
-    def __init__(self, session, assignment, page_rows, answer, log):
+    def __init__(self, session, assignment, page_rows, engine, log):
         self.session = session
         self.assignment = assignment
         self.page_rows = page_rows
-        self.answer = answer
+        self.engine = engine
         self.log = log
 
     def page_answer(self, result, page):
@@ -111,9 +117,11 @@ class Server:
             payload = error("invalid_arguments", "rql_query takes a string query and a positive integer page.")
         else:
             try:
-                expected_inputs = {key: self.assignment.get(key)
-                                   for key in ("manifest_sha256", "engine_inputs_sha256")}
-                result = self.answer(self.assignment["intro"], query, expected_inputs=expected_inputs)
+                expected_inputs = {key: self.assignment[key] for key in IDENTITY_FIELDS}
+                if (not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in expected_inputs.values())
+                        or expected_inputs != self.engine.identity):
+                    raise ValueError("RQL engine inputs differ from the frozen writer assignment.")
+                result = self.engine.answer(self.assignment["intro"], query)
                 payload = self.page_answer(result, page)
                 provenance = result.get("provenance")
                 if result["status"] == "engine_error":
@@ -190,16 +198,17 @@ def main():
         # The forced command executes this file by path, so add the package
         # parent for engine modules that use package-relative imports.
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        module, _, function = config["engine"].partition(":")
-        answer = getattr(import_module(module), function)
-        if not callable(answer):
-            raise ValueError("engine entry point is not callable")
+        entry = config["engine"]
+        module, _, function = ENGINE_LOADERS.get(entry, entry).partition(":")
+        engine = getattr(import_module(module), function)()
+        if not callable(engine.answer):
+            raise ValueError("engine answer is not callable")
     except (OSError, ValueError, KeyError, TypeError, ImportError, AttributeError):
         sys.exit("serve-rql: invalid host transport configuration")
     os.umask(0o077)
     try:
         with open(assignment["log"], "a", encoding="utf-8") as log:
-            server = Server(args.session, assignment, page_rows, answer, log)
+            server = Server(args.session, assignment, page_rows, engine, log)
             serve([TOOL], server.call)
     except OSError:
         sys.exit("serve-rql: transport I/O failed")
