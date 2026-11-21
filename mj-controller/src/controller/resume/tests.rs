@@ -3150,6 +3150,7 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,
+            native_use_evidence: None,
             event_frontier: 0,
             event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
             session: mj_core::archive::CanonicalSessionState {
@@ -3461,6 +3462,7 @@ fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() 
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
+        native_use_evidence: None,
         event_frontier: 0,
         event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
         session: mj_core::archive::CanonicalSessionState {

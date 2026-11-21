@@ -138,6 +138,22 @@ impl DurableRelay {
                     ));
                 }
             },
+            RelayRequest::ReadCheckpointNativeUse {
+                barrier_command_id,
+                cut,
+            } => match self.checkpoint_native_use(barrier_command_id, cut) {
+                Ok(native_use_evidence) => {
+                    RelayResponsePayload::CheckpointNativeUse { native_use_evidence }
+                }
+                Err(message) => {
+                    return Ok(relay_error(
+                        RelayErrorCode::InvalidState,
+                        message,
+                        false,
+                        None,
+                    ));
+                }
+            },
             RelayRequest::ReadPendingElicitation { elicitation_id } => {
                 RelayResponsePayload::PendingElicitation {
                     request: self

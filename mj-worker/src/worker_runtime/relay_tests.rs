@@ -6453,6 +6453,7 @@ async fn restored_relay_seed_records_a_restart_marker() {
             accepted_config: Default::default(),
             native_session_unused: false,
             mailbox: None,
+            native_use_evidence: None,
         })
         .unwrap(),
     )
@@ -6494,6 +6495,7 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
             .collect(),
             native_session_unused: false,
             mailbox: None,
+            native_use_evidence: None,
         })
         .unwrap(),
     )
@@ -6530,6 +6532,7 @@ fn a_restored_never_prompted_session_may_replace_its_native_session() {
                 accepted_config: Default::default(),
                 native_session_unused,
                 mailbox: None,
+                native_use_evidence: None,
             })
             .unwrap(),
         )

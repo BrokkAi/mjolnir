@@ -2825,6 +2825,7 @@ fn snapshot_of(
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
+        native_use_evidence: None,
         event_frontier,
         // Not a relay frontier, so there is no recorded digest to carry. It has
         // to be a well-formed non-genesis digest, and deriving it from the

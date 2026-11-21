@@ -197,7 +197,9 @@ pub const RELAY_CONCURRENT_REVIEW_PROTOCOL: u32 = 77;
 pub const RELAY_RAW_ORIGIN_DELTA_PROTOCOL: u32 = 78;
 /// 79 supports `CheckpointRepositoryCapture::OriginDeltaCutoff` for history-cutoff sessions.
 pub const RELAY_CUTOFF_ORIGIN_DELTA_PROTOCOL: u32 = 79;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CUTOFF_ORIGIN_DELTA_PROTOCOL;
+/// 80 reports the worker's native-session-use evidence at a ready checkpoint cut.
+pub const RELAY_NATIVE_USE_EVIDENCE_PROTOCOL: u32 = 80;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_NATIVE_USE_EVIDENCE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -432,6 +434,11 @@ pub struct RestoredRelaySeed {
     /// dropped. Seeds from older releases omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mailbox: Option<crate::archive::CanonicalMailbox>,
+    /// Worker-owned proof of whether the archived native session was used.
+    /// Preserves `Unknown` vs `Used` vs `Unused` across suspend/resume.
+    /// Seeds from older releases omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_use_evidence: Option<NativeSessionUseEvidence>,
 }
 
 impl RestoredRelaySeed {
@@ -446,6 +453,9 @@ impl RestoredRelaySeed {
         }
         if let Some(mailbox) = &self.mailbox {
             mailbox.validate()?;
+        }
+        if let Some(evidence) = &self.native_use_evidence {
+            crate::archive::validate_native_use_evidence(evidence, self.event_frontier)?;
         }
         validate_relay_digest(
             &self.event_frontier_digest,

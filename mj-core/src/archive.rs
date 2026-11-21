@@ -53,6 +53,10 @@ pub const ARCHIVE_SCHEMA_VERSION_MAILBOX: u32 = 13;
 /// An origin-relative Git pack and workspace snapshot metadata. It can carry
 /// mail as well, so it comes after the mailbox schema.
 pub const ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA: u32 = 14;
+/// Worker-owned proof of whether the archived native session was used. Older
+/// readers reject the canonical field, so an archive that carries it declares
+/// this schema whatever else it carries (including origin-delta and mailbox).
+pub const ARCHIVE_SCHEMA_VERSION_NATIVE_USE: u32 = 15;
 /// Mjolnir's private Git refs: review baselines, review points and reviewed
 /// trees. They are bookkeeping, never pushed, and some name a bare tree.
 pub const MJOLNIR_REF_NAMESPACE: &str = "refs/mj/";
@@ -459,6 +463,11 @@ pub struct CanonicalSessionSnapshot {
     /// had none, and in archives from workers that could not report it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mailbox: Option<CanonicalMailbox>,
+    /// Worker-owned proof of whether the archived native session was used.
+    /// Absent in legacy archives (schema <= 14) and from workers older than
+    /// relay protocol 80.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_use_evidence: Option<crate::relay::NativeSessionUseEvidence>,
 }
 
 /// Mail a worker accepted, as its relay held it at a checkpoint cut. The
@@ -554,6 +563,7 @@ impl CanonicalSessionSnapshot {
             && self.transcript == other.transcript
             && self.queued_prompts == other.queued_prompts
             && self.mailbox == other.mailbox
+            && self.native_use_evidence == other.native_use_evidence
             && self.session.without_activity_watermark()
                 == other.session.without_activity_watermark()
     }
@@ -869,12 +879,39 @@ impl NativeArtifact {
     }
 }
 
+pub fn validate_native_use_evidence(
+    evidence: &crate::relay::NativeSessionUseEvidence,
+    event_frontier: u64,
+) -> Result<()> {
+    ensure!(
+        evidence.version == 1,
+        "unsupported native-session-use evidence version {}",
+        evidence.version
+    );
+    ensure!(
+        !evidence.native_session_id.trim().is_empty(),
+        "native-session-use evidence has an empty native session ID"
+    );
+    if let Some(ordinal) = evidence.opened_ordinal {
+        ensure!(
+            ordinal <= event_frontier,
+            "native-session-use evidence opened_ordinal {} is beyond event frontier {}",
+            ordinal,
+            event_frontier
+        );
+    }
+    Ok(())
+}
+
 fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()> {
     if let Some(stack) = &snapshot.notification_stack {
         stack.validate_at(snapshot.event_frontier)?;
     }
     if let Some(value) = &snapshot.assessment_state {
         crate::assessment::Checkpoint::decode(value)?;
+    }
+    if let Some(evidence) = &snapshot.native_use_evidence {
+        validate_native_use_evidence(evidence, snapshot.event_frontier)?;
     }
     ensure!(
         is_lower_hex_sha256(&snapshot.event_frontier_digest),

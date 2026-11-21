@@ -65,7 +65,7 @@ pub fn relay_seed_for_restore(
             Default::default()
         },
         native_session_unused: native_continuity
-            && !current_native_session_received_prompt(canonical),
+            && current_native_session_is_unused(canonical, None),
         mailbox: canonical.mailbox.as_ref().and_then(|mailbox| {
             let mailbox = mj_core::archive::CanonicalMailbox {
                 pending_events: if queue_policy.defers_mail() {
@@ -82,6 +82,9 @@ pub fn relay_seed_for_restore(
             };
             (!mailbox.is_empty()).then_some(mailbox)
         }),
+        native_use_evidence: native_continuity
+            .then(|| canonical.native_use_evidence.clone())
+            .flatten(),
     };
     seed.validate()?;
     Ok(seed)

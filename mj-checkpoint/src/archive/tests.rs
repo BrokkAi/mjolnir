@@ -284,6 +284,7 @@ pub(super) fn input() -> ArchiveInput {
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,
+            native_use_evidence: None,
             event_frontier: 4,
             event_frontier_digest: "a".repeat(64),
             session: CanonicalSessionState {
@@ -3504,4 +3505,85 @@ fn archive_round_trip_preserves_clear_boundary_and_requires_context_schema() {
     drop(file);
     let error = read_archive_verified(&downgraded).unwrap_err();
     assert!(format!("{error:#}").contains("message transcript entries require archive schema 9"));
+}
+
+#[test]
+fn native_use_evidence_uses_schema_15_with_and_without_origin_delta_and_rejects_downgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let evidence = mj_core::relay::NativeSessionUseEvidence {
+        version: 1,
+        native_session_id: "native-1".into(),
+        opened_ordinal: Some(2),
+        usage: mj_core::relay::NativeSessionUse::Unknown,
+    };
+
+    // Without origin_delta: writes schema 15, reads back accurately, rejects downgrade to 13.
+    let mut archive_input = input();
+    archive_input.canonical_session.native_use_evidence = Some(evidence.clone());
+    let path = directory.path().join("native-use.hel.zip");
+    let verified = write_archive_atomic(&path, &archive_input).unwrap();
+    assert_eq!(
+        verified.manifest.schema_version,
+        ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+    );
+    assert_eq!(
+        verified.canonical_session.native_use_evidence,
+        Some(evidence.clone())
+    );
+
+    let (mut manifest, payloads) = prepare_archive(&archive_input).unwrap();
+    manifest.schema_version = ARCHIVE_SCHEMA_VERSION_MAILBOX;
+    let downgraded = directory.path().join("native-use-downgraded.hel.zip");
+    let mut file = File::create(&downgraded).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
+    drop(file);
+    let error = read_archive_verified(&downgraded).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("native-session-use evidence requires archive schema 15"),
+        "unexpected error: {error:#}"
+    );
+
+    // With origin_delta: also writes schema 15 and verifies cleanly.
+    let mut delta_input = input();
+    delta_input.canonical_session.native_use_evidence = Some(evidence.clone());
+    let repo = &mut delta_input.repositories[0];
+    repo.committed_bundle.clear();
+    repo.staged_patch.clear();
+    repo.unstaged_patch.clear();
+    repo.untracked_tar.clear();
+    repo.metadata.saved_refs.clear();
+    repo.metadata.stash_stack.clear();
+    let origin_url = repo.metadata.origin.clone();
+    let head_commit = repo.metadata.head_commit.clone();
+    repo.metadata.origin_delta = Some(Box::new(WorkspaceSnapshotMetadata {
+        origin_url: Some(origin_url),
+        object_format: "sha1".into(),
+        notices: Vec::new(),
+        head: SnapshotHead::Branch {
+            name: "main".into(),
+            commit: head_commit.clone(),
+        },
+        refs: BTreeMap::from([("refs/heads/main".into(), head_commit)]),
+        branch_tracking: BTreeMap::new(),
+        stash: Vec::new(),
+        working_state: None,
+        working_state_skipped: false,
+        has_uncommitted_state: false,
+        worktrees: Vec::new(),
+        initialized_submodules: Vec::new(),
+        index_gitlinks: Vec::new(),
+        remote_refs_stale: false,
+        prerequisites: Vec::new(),
+        history_cutoff: false,
+    }));
+    let delta_path = directory.path().join("native-use-origin-delta.hel.zip");
+    let delta_verified = write_archive_atomic(&delta_path, &delta_input).unwrap();
+    assert_eq!(
+        delta_verified.manifest.schema_version,
+        ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+    );
+    assert_eq!(
+        delta_verified.canonical_session.native_use_evidence,
+        Some(evidence)
+    );
 }

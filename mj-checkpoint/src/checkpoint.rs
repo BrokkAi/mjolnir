@@ -412,19 +412,42 @@ pub fn repair_origin_refs(git: &dyn GitCommandRunner, path: &Path, id: &str) -> 
     )
 }
 
-/// Whether the native session the checkpoint continues ever received a
-/// prompt. `/clear` replaces the native session, so only the conversation
-/// after the newest context boundary belongs to the current one. Codex writes
-/// a rollout, and Claude Code a transcript, only when a turn runs, so a
-/// session with no prompt here has no native history to lose.
+/// Whether the native session the checkpoint continues is proven unused.
+///
+/// When the archive carries worker-owned `native_use_evidence` (schema >= 15),
+/// that proof is authoritative: only `NativeSessionUse::Unused` (matching the
+/// expected native session ID when supplied) authorizes treating the session as
+/// unused. Both `Used` and `Unknown` return `false`.
+///
+/// Legacy archives (schema <= 14) lack `native_use_evidence` and fall back to
+/// the transcript-based `current_native_session_received_prompt` predicate.
+pub fn current_native_session_is_unused(
+    snapshot: &CanonicalSessionSnapshot,
+    expected_native_session_id: Option<&str>,
+) -> bool {
+    if let Some(evidence) = &snapshot.native_use_evidence {
+        return evidence.version == 1
+            && evidence.usage == mj_core::relay::NativeSessionUse::Unused
+            && expected_native_session_id.is_none_or(|id| evidence.native_session_id == id);
+    }
+    !current_native_session_received_prompt(snapshot)
+}
+
+/// Legacy-archive fallback (schema <= 14) for whether the native session the
+/// checkpoint continues ever received a prompt. New archives carry worker-owned
+/// `native_use_evidence` (schema 15) and consult `current_native_session_is_unused`.
+///
+/// `/clear` replaces the native session, so only the conversation after the
+/// newest context boundary belongs to the current one. Codex writes a rollout,
+/// and Claude Code a transcript, only when a turn runs, so a session with no
+/// prompt here has no native history to lose.
 pub fn current_native_session_received_prompt(snapshot: &CanonicalSessionSnapshot) -> bool {
     let start = snapshot.current_context_start();
     snapshot.transcript.iter().any(|item| {
         item.position >= start
             && (matches!(&item.body, CanonicalTranscriptBody::User { .. })
-                // The shipped canonical format rejects unknown fields. Keep
-                // adoption conservative until its native-use proof can be
-                // carried by the planned archive schema revision.
+                // Legacy schema <= 14 adoption archives lacked native_use_evidence;
+                // keep treating the conservative adoption marker as prompted.
                 || item.stable_id == mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID)
     })
 }

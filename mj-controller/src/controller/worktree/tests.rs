@@ -2852,6 +2852,7 @@ fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
+        native_use_evidence: None,
         event_frontier: 0,
         event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
         session: mj_core::archive::CanonicalSessionState {

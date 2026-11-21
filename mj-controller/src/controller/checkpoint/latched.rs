@@ -564,6 +564,15 @@ impl Controller {
                 if keys.len() == 1 { "It will" } else { "They will" },
             ));
         }
+        if relay.connection_mut().protocol_version()
+            >= mj_core::relay::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL
+        {
+            canonical_session.native_use_evidence = relay
+                .connection_mut()
+                .read_checkpoint_native_use(barrier_command_id.clone(), cursor.clone())
+                .await
+                .context("read the worker's native-session-use evidence at the checkpoint cut")?;
+        }
         let native_session_id = barrier
             .operational
             .native_session_id
@@ -682,8 +691,9 @@ impl Controller {
                     workspace_root: spec.workspace_root.clone(),
                     repositories: spec.repositories.clone(),
                     report_directories: spec.report_directories.clone(),
-                    allow_empty_native: !current_native_session_received_prompt(
+                    allow_empty_native: current_native_session_is_unused(
                         &spec.canonical_session,
+                        Some(spec.session.native_session_id.as_str()),
                     ),
                     stage_path: target_path(&remote_stage),
                     refresh_existing: true,

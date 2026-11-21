@@ -302,6 +302,14 @@ pub enum RelayRequest {
         barrier_command_id: String,
         cut: super::snapshot::RelayCursor,
     },
+    /// The worker-owned native-session-use evidence at the cut of a ready
+    /// checkpoint barrier. Refused unless that barrier is ready at exactly
+    /// `cut` and nothing has been journaled since.
+    /// Protocol 80.
+    ReadCheckpointNativeUse {
+        barrier_command_id: String,
+        cut: super::snapshot::RelayCursor,
+    },
     ReadPendingElicitation {
         elicitation_id: String,
     },
@@ -606,6 +614,7 @@ impl RelayRequest {
             Self::ReadPendingElicitation { .. } => "read_pending_elicitation",
             Self::ReadQueuedCommand { .. } => "read_queued_command",
             Self::ReadCheckpointMailbox { .. } => "read_checkpoint_mailbox",
+            Self::ReadCheckpointNativeUse { .. } => "read_checkpoint_native_use",
             Self::BeginLiveBaseline => "begin_live_baseline",
             Self::ReadLiveBaselinePage { .. } => "read_live_baseline_page",
             Self::AbortLiveBaseline => "abort_live_baseline",
@@ -698,6 +707,7 @@ impl RelayRequest {
             | Self::CommandRetentionStatus
             | Self::UpdateCommandRetention { .. } => super::RELAY_COMMAND_RETENTION_PROTOCOL,
             Self::ReadCheckpointMailbox { .. } => super::RELAY_CHECKPOINT_MAILBOX_PROTOCOL,
+            Self::ReadCheckpointNativeUse { .. } => super::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
             Self::Reviewer {
                 request:
@@ -1009,6 +1019,9 @@ pub enum RelayResponsePayload {
     },
     CheckpointMailbox {
         mailbox: crate::archive::CanonicalMailbox,
+    },
+    CheckpointNativeUse {
+        native_use_evidence: Option<super::snapshot::NativeSessionUseEvidence>,
     },
     PendingElicitation {
         request: Option<crate::elicitation::ElicitationRequest>,

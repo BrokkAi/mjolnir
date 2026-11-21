@@ -1178,6 +1178,7 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
+        native_use_evidence: None,
         event_frontier: 0,
         event_frontier_digest: mj_checkpoint::archive::EVENT_FRONTIER_GENESIS_DIGEST.into(),
         session: CanonicalSessionState {

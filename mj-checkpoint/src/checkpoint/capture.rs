@@ -825,7 +825,10 @@ pub fn export_checkpoint_with_native_state(
     // A native session that never received a prompt legitimately has no
     // harness artifacts yet; requiring them would make an unused session, or
     // one just replaced by `/clear`, impossible to close cleanly (R4-5).
-    let prompted = current_native_session_received_prompt(&spec.canonical_session);
+    let allow_empty_native = current_native_session_is_unused(
+        &spec.canonical_session,
+        Some(spec.session.native_session_id.as_str()),
+    );
     let native_started = std::time::Instant::now();
     let mut native_artifacts = collect_checkpoint_native_artifacts(
         &spec.session,
@@ -833,7 +836,7 @@ pub fn export_checkpoint_with_native_state(
         &harness_home,
         &workspace_root,
         spec.report_directories.as_deref(),
-        !prompted,
+        allow_empty_native,
         native_state,
     )?;
     // The barrier stops dispatch, but a harness can still finish an async

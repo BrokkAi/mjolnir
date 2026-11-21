@@ -828,11 +828,16 @@ impl DurableRelay {
                 // bridge start, exactly as it does after a restart.
                 snapshot.config.extend(restored.accepted_config);
                 snapshot.restored_native_session_unused = restored.native_session_unused;
-                snapshot.record_native_use(if restored.native_session_unused {
-                    NativeSessionUse::Unused
+                if let Some(evidence) = restored.native_use_evidence {
+                    snapshot.native_session_used = evidence.usage == NativeSessionUse::Used;
+                    snapshot.native_use_evidence = Some(evidence);
                 } else {
-                    NativeSessionUse::Unknown
-                });
+                    snapshot.record_native_use(if restored.native_session_unused {
+                        NativeSessionUse::Unused
+                    } else {
+                        NativeSessionUse::Unknown
+                    });
+                }
                 for queued in restored.queued_prompts {
                     anyhow::ensure!(
                         mj_core::continuation::valid_command_id(&queued.command_id),

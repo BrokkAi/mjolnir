@@ -9498,6 +9498,7 @@ fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_o
             .into_iter()
             .collect(),
         native_session_unused: true,
+        native_use_evidence: None,
         mailbox: None,
     };
     fs::write(
@@ -11076,4 +11077,56 @@ fn answered_elicitation_starts_a_new_auxiliary_reply_before_unlabelled_chunks() 
     drop(relay);
     let relay = DurableRelay::open(temp.path(), SESSION, "elicitation-answer-reopen").unwrap();
     check(&relay);
+}
+
+#[test]
+fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "native-use-cut").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "native-cut-1".into(),
+            native_continuity_lost: false,
+            resumed: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let barrier_id = "barrier-native-use".to_owned();
+    let cut = ready_checkpoint(&mut relay, &barrier_id);
+    let envelope = |request_id: &str, request: RelayRequest| RelayRequestEnvelope {
+        request_id: request_id.into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request,
+    };
+    let response = relay.handle(envelope(
+        "read-native-use",
+        RelayRequest::ReadCheckpointNativeUse {
+            barrier_command_id: barrier_id.clone(),
+            cut: cut.clone(),
+        },
+    ));
+    match response.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::CheckpointNativeUse {
+                    native_use_evidence,
+                },
+        } => {
+            let evidence = native_use_evidence.expect("worker owns native-use evidence");
+            assert_eq!(evidence.version, 1);
+            assert_eq!(evidence.native_session_id, "native-cut-1");
+            assert_eq!(evidence.usage, NativeSessionUse::Unused);
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    // Wrong barrier ID is refused.
+    let refused = relay.handle(envelope(
+        "read-native-use-refused",
+        RelayRequest::ReadCheckpointNativeUse {
+            barrier_command_id: "other-barrier".into(),
+            cut,
+        },
+    ));
+    assert!(matches!(refused.body, RelayResponseBody::Error { .. }));
 }
