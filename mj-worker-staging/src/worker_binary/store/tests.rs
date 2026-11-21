@@ -1097,3 +1097,150 @@ fn a_wait_behind_a_held_store_gate_is_reported_as_a_queue_stage() {
         ]
     );
 }
+
+// Hard-won: #1626: concurrent publication after a failed ln misclassified missing source as no hard-link support
+#[cfg(unix)]
+#[test]
+fn concurrent_publication_after_initial_link_miss_hard_links_instead_of_copying() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct WithPathPrefix {
+        bin_dir: PathBuf,
+        copy_calls: AtomicUsize,
+    }
+
+    impl CommandExecutor for WithPathPrefix {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+            if command.purpose == "link shared Mjolnir worker into session" {
+                if command.args.last().map(String::as_str) == Some("copy") {
+                    self.copy_calls.fetch_add(1, Ordering::Relaxed);
+                }
+                let mut wrapped = command.clone();
+                let current_path = std::env::var("PATH").unwrap_or_default();
+                wrapped.env.insert(
+                    "PATH".into(),
+                    format!("{}:{current_path}", self.bin_dir.display()),
+                );
+                return targets::ProcessExecutor.execute(&wrapped);
+            }
+            targets::ProcessExecutor.execute(command)
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let id_race = "44444444444444444444444444444444";
+    let locator_race = target(temp.path(), id_race);
+    let binary = source(temp.path(), "worker-race");
+    let digest = mj_core::worker_launch::worker_executable_digest(&binary).unwrap();
+    let cached = store_root(&locator_race, id_race)
+        .unwrap()
+        .join(&digest)
+        .join("hel");
+
+    // Wrapper `ln`: on the first call, let real `ln` fail on the missing source,
+    // then publish the source before returning the failure so the script's
+    // post-failure existence check sees it present. Subsequent calls use real `ln`.
+    let race_bin = temp.path().join("race-bin");
+    std::fs::create_dir(&race_bin).unwrap();
+    let marker = temp.path().join("ln-first-call");
+    let real_ln = "/bin/ln";
+    let real_ln = if Path::new(real_ln).exists() {
+        real_ln
+    } else {
+        "/usr/bin/ln"
+    };
+    let race_ln = race_bin.join("ln");
+    std::fs::write(
+        &race_ln,
+        format!(
+            "#!/bin/sh\n\
+             if [ ! -e '{marker}' ]; then\n\
+                 : > '{marker}'\n\
+                 '{real_ln}' \"$@\" 2>/dev/null\n\
+                 status=$?\n\
+                 mkdir -p -- '{cached_dir}'\n\
+                 cp -- '{binary}' '{cached}'\n\
+                 exit $status\n\
+             fi\n\
+             exec '{real_ln}' \"$@\"\n",
+            marker = marker.display(),
+            cached_dir = cached.parent().unwrap().display(),
+            binary = binary.display(),
+            cached = cached.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&race_ln, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let race_exec = WithPathPrefix {
+        bin_dir: race_bin,
+        copy_calls: AtomicUsize::new(0),
+    };
+    install(&race_exec, &locator_race, id_race, &binary);
+
+    let dest_race = temp.path().join(id_race).join("hel");
+    assert_eq!(
+        race_exec.copy_calls.load(Ordering::Relaxed),
+        0,
+        "concurrent publication should hard-link on retry instead of copying"
+    );
+    assert_eq!(
+        dest_race.metadata().unwrap().ino(),
+        cached.metadata().unwrap().ino(),
+        "installed worker must share the published store inode"
+    );
+
+    // Genuine no-hard-link fallback: `ln` always fails even though the source is present.
+    let id_nolink = "55555555555555555555555555555555";
+    let locator_nolink = target(temp.path(), id_nolink);
+    let nolink_bin = temp.path().join("nolink-bin");
+    std::fs::create_dir(&nolink_bin).unwrap();
+    let nolink_ln = nolink_bin.join("ln");
+    std::fs::write(&nolink_ln, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&nolink_ln, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let nolink_exec = WithPathPrefix {
+        bin_dir: nolink_bin,
+        copy_calls: AtomicUsize::new(0),
+    };
+    install(&nolink_exec, &locator_nolink, id_nolink, &binary);
+
+    let dest_nolink = temp.path().join(id_nolink).join("hel");
+    assert_eq!(
+        nolink_exec.copy_calls.load(Ordering::Relaxed),
+        1,
+        "genuine hard-link failure must still fall back to copy"
+    );
+    assert_ne!(
+        dest_nolink.metadata().unwrap().ino(),
+        cached.metadata().unwrap().ino(),
+        "copied fallback must have its own inode"
+    );
+    assert_eq!(
+        std::fs::read(&dest_nolink).unwrap(),
+        std::fs::read(&binary).unwrap()
+    );
+}

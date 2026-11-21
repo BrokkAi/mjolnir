@@ -1418,6 +1418,26 @@ pub struct Config {
 
 /// The configuration file's own shape: hosts under `[machines.<id>]` and
 /// runtimes under `[targets.<id>]`, each runtime naming its machine.
+/// Every key the configuration types read but never write: the
+/// `skip_serializing` fields of [`StoredConfig`] and of the types it holds, as
+/// paths, where `*` stands for any table key. They exist so older files still
+/// load, and a save removes them. A save cannot find them from what it
+/// serializes, because a current setting left at its default is absent there
+/// too, and that one the user wrote out must stay.
+const RETIRED_KEYS: &[&[&str]] = &[
+    &["show_stopped_sessions"],
+    &["continuation"],
+    &["mailbox"],
+    &["build_cache"],
+    &["startup"],
+    &["sessionwiki", "enabled"],
+    &["subagents", "enabled"],
+    &["subagents", "eligible_profiles"],
+    &["quota", "runtime"],
+    &["profiles", "*", "muse_auto_review"],
+    &["profiles", "*", "subagents"],
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredConfig {
     /// A retired session filter. Files written before version 7 may still

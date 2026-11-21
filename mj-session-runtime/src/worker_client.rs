@@ -164,6 +164,10 @@ pub struct RelayClient {
         String,
         mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
     )>,
+    /// Whether the relay handshake has finished. An unestablished proxy dropped
+    /// on connect cancellation has no protocol stream to drain, so Drop stops
+    /// its process group immediately instead of waiting for detach grace.
+    handshake_complete: bool,
     /// The shared-connection session the proxy runs on, held for as long as
     /// the proxy runs.
     ssh_session: Option<SshSessionLease>,

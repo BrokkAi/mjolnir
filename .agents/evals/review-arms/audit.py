@@ -51,8 +51,13 @@ def call_parts(item):
     return json.dumps(body), ""
 
 
-def audit_reviewer(transcript_path, own_workspace):
-    return scan(json.loads(transcript_path.read_text()), own_workspace)
+def audit_reviewer(transcript_path, own_workspace, *, cwd=None, inventory=None):
+    before = read_record(transcript_path.with_name("pre-inventory.json")) or inventory or {}
+    return scan(json.loads(transcript_path.read_text()), own_workspace,
+                cwd=cwd or before.get("cwd"), tracked_symlinks=clean_tracked_symlinks(before),
+                tracked_symlink_targets=before.get("tracked_symlink_targets"),
+                tracked_head=before.get("head"),
+                antigravity=captured_antigravity(transcript_path))
 
 
 ROLLOUT_DIRECTORY = "codex-rollout"
@@ -127,13 +132,21 @@ def tool_succeeded(call, body, rollout_exit):
 
 
 def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None,
-         rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None, engine=False):
+         rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None, engine=False,
+         antigravity=False, tracked_head=None, tracked_symlink_targets=None):
     first_page = pages[0] if pages else {}
     execution = first_page.get("execution")
     checkout = cwd or first_page.get("cwd") or (execution.get("cwd") if isinstance(execution, dict) else None)
-    edit_paths = EditPathEvidence(checkout, tracked_symlinks) if allow_in_place_edits else None
+    edit_paths = FilePathEvidence(checkout, tracked_symlinks, tracked_symlink_targets, tracked_head, allow_in_place_edits,
+                                  own_workspace, engine)
     hits, calls = [], 0
     scripts, written = ScriptEvidence(checkout, tracked_paths), set()
+    # Older transcript pages lack harness metadata. Use native card evidence
+    # from any page so an opaque card cannot bypass the session's catalogue.
+    antigravity = antigravity or any(
+        antigravity_card((item.get("body") or {}).get("call") or {})
+        for page in pages for item in page["items"] if item["role"] == "tool"
+    )
     for page in pages:
         execution = page.get("execution")
         execution = execution if isinstance(execution, dict) else {}
@@ -144,17 +157,26 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                 continue
             body = item.get("body") or {}
             call = body.get("call") or {}
-            if engine:
-                calls += 1
-                hits.extend({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
-                            for name, snippet in engine_hits(call, own_workspace, page_cwd, checkout))
-                continue
-            if commits is not None and not call:
+            if not engine and commits is not None and not call and not (antigravity and item["role"] == "tool"):
                 # Standalone terminal_output rows contain output only. The
                 # originating command is recorded as its own tool call.
                 continue
             calls += 1
-            if allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query") and call.get("kind") != "execute":
+            if antigravity and (call or item["role"] == "tool"):
+                findings = dict.fromkeys(antigravity_hits(call, own_workspace, page_cwd, edit_paths))
+                hits.extend({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
+                            for name, snippet in findings)
+                if findings:
+                    edit_paths.blocked = True
+                if findings and (commits is not None or engine):
+                    scripts.clear()
+                    continue
+            if engine:
+                hits.extend({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
+                            for name, snippet in engine_hits(call, own_workspace, page_cwd, edit_paths))
+                continue
+            if (not antigravity and allow_rql and call.get("title") in ("rql_query", "mcp__rql__rql_query")
+                    and call.get("kind") != "execute"):
                 continue
             if commits is not None:
                 match = None
@@ -170,8 +192,7 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                                 hits.append({"seq": item["seq"], "kind": "needs-inspection", "where": "input",
                                              "snippet": "Codex transcript and rollout working directories disagree"})
                                 scripts.clear()
-                                if edit_paths is not None:
-                                    edit_paths.blocked = True
+                                edit_paths.blocked = True
                                 continue
                             directory = recorded
                         call = {**call, "kind": "execute", "rawInput": {"command": command, "cwd": directory}}
@@ -182,26 +203,41 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                         hits.append({"seq": item["seq"], "kind": "needs-inspection", "where": "input",
                                      "snippet": f"missing Codex command evidence: {call.get('title') or 'exec_command'}"})
                         scripts.clear()
-                        if edit_paths is not None:
-                            edit_paths.blocked = True
+                        edit_paths.blocked = True
                         continue
                 observed = {}
                 edit_index = 0
                 for name, snippet in pilot_hits(call, own_workspace, commits, single_commit, scripts=scripts,
                                                 written=written, cwd=page_cwd, home=page_home,
                                                 edit_paths=edit_paths,
+                                                antigravity=antigravity,
                                                 succeeded=tool_succeeded(call, body, match[2] if match else None)):
                     hit = {"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
                     if name == "in-place-edit":
                         hits.append({**hit, "edit_index": edit_index})
                         edit_index += 1
                     else:
-                        if name == "needs-inspection" and edit_paths is not None:
+                        if name == "needs-inspection":
                             edit_paths.blocked = True
                         observed[name] = hit
                 scripts.forget_ambiguous()
                 hits.extend(observed.values())
                 continue
+            if not antigravity:
+                if structured_file_call(call):
+                    hits.extend({"seq": item["seq"], "kind": name, "where": "input", "snippet": snippet}
+                                for name, snippet in structured_symlink_hits(call, page_cwd, edit_paths))
+                    if call.get("kind") == "move":
+                        edit_paths.blocked = True
+                elif shell_call(call):
+                    command = call_command(call)
+                    # Legacy captures lack rollout evidence. Screen any visible
+                    # shell input for mutations, or invalidate the inventory.
+                    if command is None or any(
+                        name not in PASSING_HIT_KINDS for name, _ in shell_hits(
+                            command, own_workspace, (), False, cwd=page_cwd or "", edit_paths=edit_paths)
+                    ):
+                        edit_paths.blocked = True
             inp, out = call_parts(item)
             for name, pattern in INPUT_PATTERNS.items():
                 for m in re.finditer(pattern, inp, re.I | re.M):
@@ -548,7 +584,7 @@ MEMORY_TOOLS = {
     "search_sessions", "read_session", "search_session", "get_session_brief",
     "session_files", "trace_file", "blame_file",
 }
-WEB_TOOLS = {"web_search", "web.run", "websearch", "webfetch", "search_query"}
+WEB_TOOLS = {"web_search", "search_web", "web.run", "websearch", "webfetch", "search_query"}
 NETWORK = set("ssh scp sftp rsync nc ncat netcat socat telnet ftp".split())
 READ_COMMANDS = set("""
     cat cd cut diff du file head ls nl paste pwd readlink realpath sort stat tail tee uniq wc
@@ -1028,28 +1064,127 @@ def perl_open_operand(value):
     return "read", value
 
 
-class EditPathEvidence:
-    def __init__(self, checkout, tracked):
+class FilePathEvidence:
+    def __init__(self, checkout, tracked, targets, head, allow_in_place_edits, workspace, engine):
         self.checkout = checkout if isinstance(checkout, str) and posixpath.isabs(checkout) else None
-        self.root_links = None
+        self.root = recorded_path(self.checkout, None) if self.checkout else None
+        self.workspace = workspace
+        self.links = None
+        self.targets = {}
         if isinstance(tracked, list) and all(
-            isinstance(path, str) and all(part not in {"", ".", ".."} for part in path.split("/"))
-            for path in tracked
+            isinstance(path, str) and "\0" not in path
+            and all(part not in {"", ".", ".."} for part in path.split("/")) for path in tracked
         ):
-            self.root_links = {path for path in tracked if "/" not in path}
+            self.links = frozenset(tuple(path.split("/")) for path in tracked) if self.root else None
+            if isinstance(targets, dict) and targets.keys() == set(tracked):
+                self.targets = {tuple(path.split("/")): target for path, target in targets.items()}
+        # EngineRunner reserves, verifies and clears this exact directory
+        # before a turn. Other paths need evidence from the checkout.
+        self.scratch = (posixpath.join(self.root, f".rql-engine-{workspace}")
+                        if engine and self.root and re.fullmatch(r"[0-9a-f]{32}", workspace) else None)
+        self.head = head if isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40}", head) else None
+        self.allow_in_place_edits = allow_in_place_edits
         self.blocked = False
 
-    def check(self, path, cwd, own_workspace):
+    def resolve(self, parts):
+        resolved = []
+        # Linux follows at most 40 links per path (path_resolution(7)).
+        remaining = 40
+        active = set()
+        stack = [(None, iter(parts))]
+        while stack:
+            link, components = stack[-1]
+            part = next(components, None)
+            if part is None:
+                stack.pop()
+                if link is not None:
+                    active.remove(link)
+                continue
+            if part == "..":
+                if not resolved:
+                    raise InspectionRequired("path can traverse a tracked symlink outside the checkout")
+                resolved.pop()
+                continue
+            candidate = (*resolved, part)
+            if candidate not in (self.links or ()):
+                resolved.append(part)
+                continue
+            target = self.targets.get(candidate)
+            if not isinstance(target, str) or not target or "\0" in target or posixpath.isabs(target):
+                raise InspectionRequired("path can traverse a tracked symlink with an unverified or absolute target")
+            if not remaining or candidate in active:
+                raise InspectionRequired("path can traverse a tracked symlink cycle or overlong chain")
+            remaining -= 1
+            active.add(candidate)
+            stack.append((candidate, iter(pathlib.PurePosixPath(target).parts)))
+        return tuple(resolved)
+
+    def glob_link_targets(self, root):
+        pending = [root]
+        seen = {root}
+        while pending:
+            directory = pending.pop()
+            for link in sorted(self.links or ()):
+                if link[:len(directory)] != directory:
+                    continue
+                target = self.resolve(link)
+                if target not in seen:
+                    seen.add(target)
+                    pending.append(target)
+                    yield target
+
+    def check(self, path, cwd, *, glob=False):
+        if self.blocked:
+            raise InspectionRequired("path follows link handling or an unresolved command")
+        # Inspect raw prefixes too. A traversal can follow a symlink before
+        # the kernel handles a subsequent '..' component.
+        full = pathlib.PurePosixPath(posixpath.join(cwd or "", path))
+        if (not self.root or not full.is_absolute() or not path or path == "-"
+                or path.startswith("~") or "\0" in path):
+            raise InspectionRequired("path is missing or has no verified checkout directory")
+        prefixes = [recorded_path(str(prefix), None) for prefix in (*reversed(full.parents), full)]
+        if not full.is_relative_to(self.root) or any(
+                prefix != self.root and not prefix.startswith(self.root.rstrip("/") + "/")
+                for prefix in prefixes[prefixes.index(self.root):]):
+            raise InspectionRequired("path is outside the recorded checkout")
+        if self.links is None and (not self.scratch or self.scratch not in prefixes):
+            raise InspectionRequired("path requires tracked symlink inventory")
+        if self.scratch in prefixes and any(
+                prefix != self.scratch and not prefix.startswith(self.scratch + "/")
+                for prefix in prefixes[prefixes.index(self.scratch):]):
+            raise InspectionRequired("path leaves the verified scratch directory")
+        resolved = self.resolve(full.relative_to(self.root).parts)
+        target = posixpath.join(self.root, *resolved)
+        if self.scratch in prefixes and target != self.scratch and not target.startswith(self.scratch + "/"):
+            raise InspectionRequired("path leaves the verified scratch directory")
+        targets = {target}
+        if glob:
+            targets.update(posixpath.join(self.root, *link) for link in self.glob_link_targets(resolved))
+        return targets - {prefixes[-1]}
+
+    def check_in_place(self, path, cwd, own_workspace):
         if (not self.checkout or not self.checkout.startswith(f"/workspace/{own_workspace}/")
                 or cwd != self.checkout or not path or path in {".", ".."}
                 or path.startswith(("-", "~")) or re.search(r"[/\x00*?\[]", path)):
             raise InspectionRequired("in-place edit requires a bare filename at the recorded checkout root")
         if self.blocked:
             raise InspectionRequired("in-place edit follows link handling or an unresolved command")
-        if self.root_links is None:
+        if self.links is None:
             raise InspectionRequired("in-place edit requires tracked symlink inventory")
-        if path in self.root_links:
+        if (path,) in self.links:
             raise InspectionRequired("in-place edit names a tracked symlink")
+
+    def check_git(self, args, cwd):
+        while args[:1] == ["-C"] and len(args) > 1:
+            cwd = one_or_many(resolve_paths(args[1], cwd))
+            args = args[2:]
+        if args and args[0] in {"checkout", "switch"}:
+            # The sealed judge detaches at the exact inventoried commit.
+            unchanged = (args[0] == "checkout" and self.head and cwd == self.checkout
+                         and "--detach" in args[1:]
+                         and [arg for arg in args[1:] if arg not in {"-q", "--quiet", "--detach"}] == [self.head])
+            if not unchanged:
+                self.blocked = True
 
 
 def may_relocate_links(program, args):
@@ -1061,7 +1196,7 @@ def may_relocate_links(program, args):
     for arg in args[:end]:
         flag, _, value = arg.partition("=")
         if flag.startswith("--") and any(option.startswith(flag) for option in (
-            "--symbolic-link", "--no-dereference", "--archive", "--recursive",
+            "--symbolic-link", "--link", "--no-dereference", "--archive", "--recursive",
         )):
             return True
         if flag.startswith("--") and "--preserve".startswith(flag) and any(
@@ -1069,7 +1204,7 @@ def may_relocate_links(program, args):
             for attribute in value.split(",")
         ):
             return True
-        if re.match(r"^-[^-]*[sPdaRr]", arg):
+        if re.match(r"^-[^-]*[lsPdaRr]", arg):
             return True
     return False
 
@@ -1098,12 +1233,12 @@ def text_filter_hits(program, args, own_workspace, commits, single_commit, cwd, 
             yield from hazards
             unsafe_edit |= bool(hazards) or path != operand
         if in_place:
-            if edit_paths is None:
+            if edit_paths is None or not edit_paths.allow_in_place_edits:
                 raise InspectionRequired("in-place edits are permitted only in writer sessions")
             if not paths or unsafe_edit:
                 raise InspectionRequired("in-place edit requires screened file operands")
             for path in paths:
-                edit_paths.check(path, cwd, own_workspace)
+                edit_paths.check_in_place(path, cwd, own_workspace)
         if program == "perl":
             for value in values:
                 check_perl_interpolation(value, regex=True)
@@ -1207,6 +1342,10 @@ def subprocess_hits(value, own_workspace, commits, single_commit, cwd="", writte
 
 def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd="", written=None, *,
                      edit_paths=None):
+    # Literal screening does not prove an interpreter cannot move or create
+    # a link indirectly, for example through an alias or an imported module.
+    if edit_paths is not None:
+        edit_paths.blocked = True
     # This screen sees source literals, not runtime values. A protected path
     # built dynamically (e.g. expanduser('~') plus computed pieces) can pass.
     if program in PYTHON:
@@ -1233,8 +1372,6 @@ def interpreter_hits(program, source, own_workspace, commits, single_commit, cwd
             if not isinstance(node, ast.Call):
                 continue
             name = python_name(node.func, imports)
-            if edit_paths is not None and python_may_relocate_links(node, name):
-                edit_paths.blocked = True
             if NETWORK_CALL.match(name):
                 yield "network-command", name
             elif name in OPAQUE_CALLS or name.startswith("base64.") and "decode" in name:
@@ -1454,6 +1591,8 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
     elif program in {"gh", "curl", "wget"}:
         yield "github-or-web", program
     elif program == "git":
+        if edit_paths is not None:
+            edit_paths.check_git(args, cwd)
         yield from git_hits(args, own_workspace, commits, single_commit, cwd)
     elif program in {"mj", "sqlite", "sqlite3"} | MEMORY_TOOLS:
         yield "memory-or-sessions", program
@@ -1997,27 +2136,211 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
             scripts.pop(key, None)
 
 
-PATH_KEYS = {"cwd", "path", "paths", "file_path", "filePath", "directory", "workdir", "target_file"}
+PATH_KEYS = {"cwd", "path", "Path", "paths", "file_path", "filePath", "directory", "workdir", "target_file"}
+
+ANTIGRAVITY_FILES = {
+    "read_file": ("read", {"Path", "StartLine", "EndLine", "ByteOffset"}),
+    "edit_file": ("edit", {"Path", "Replacement", "Target"}),
+    "write_file": ("edit", {"Path", "Content"}),
+}
 
 
-def engine_hits(call, own_workspace, cwd, checkout):
+def read_record(path):
+    return json.loads(path.read_text()) if path.is_file() else {}
+
+
+def clean_tracked_symlinks(inventory):
+    if not inventory.get("status") and not inventory.get("ignored"):
+        return inventory.get("tracked_symlinks")
+    return None
+
+
+def shell_call(call):
+    return call.get("kind") == "execute" or call.get("name") in {"Bash", "exec_command", "run_command"}
+
+
+def structured_file_call(call):
+    return not shell_call(call) and (call.get("kind") in {"read", "search", "edit", "delete", "move"}
+                                     or call.get("name") in ENGINE_TOOLS | {"MultiEdit"})
+
+
+def path_operands(call):
+    for fields in (call.get("rawInput"), *(call.get("locations") or [])):
+        if isinstance(fields, dict):
+            for key in PATH_KEYS & fields.keys():
+                value = fields[key]
+                for path in value if isinstance(value, list) else [value]:
+                    if isinstance(path, str) and path:
+                        yield key, path
+
+
+def symlink_hits(path, cwd, evidence, *, glob=False):
+    try:
+        for target in sorted(evidence.check(path, cwd, glob=glob)):
+            yield from path_hits(target, evidence.workspace)
+    except InspectionRequired as error:
+        yield "needs-inspection", f"{error}: {path}"
+
+
+def search_pattern_symlink_hits(call, cwd, evidence):
+    raw = call.get("rawInput")
+    if not isinstance(raw, dict):
+        return
+    name = call.get("name")
+    if name not in {"Glob", "Grep"}:
+        return
+    # Grep's glob filters results under the separately checked search root.
+    keys = (("pattern",) if name == "Glob" else ()) + (("glob",) if "glob" in raw else ())
+    root = raw.get("path", ".")
+    for key in keys:
+        pattern = raw.get(key)
+        if (not isinstance(pattern, str) or not pattern or posixpath.isabs(pattern)
+                or "\\" in pattern or ".." in pattern or pattern.startswith("~")):
+            yield "needs-inspection", f"unverified {name} {key}: {pattern!r}"
+        elif name == "Glob" and isinstance(root, str) and root:
+            literal = re.split(r"[*?\[{]", pattern, maxsplit=1)[0]
+            if literal != pattern:
+                literal = posixpath.dirname(literal)
+            yield from symlink_hits(posixpath.join(root, literal), cwd, evidence, glob=True)
+
+
+def structured_symlink_hits(call, cwd, evidence):
+    name = call.get("name")
+    raw = call.get("rawInput")
+    operands = [path for key, path in path_operands(call) if key not in {"cwd", "workdir"}]
+    if name in {"Grep", "Glob"} or call.get("kind") == "search" and not operands:
+        root = raw.get("path", ".") if isinstance(raw, dict) else "."
+        if not isinstance(root, str) or not root:
+            yield "needs-inspection", "search root is missing or invalid"
+        elif root not in operands:
+            operands.append(root)
+    if not operands and call.get("kind") == "read":
+        if match := re.fullmatch(r"""(?:Read file |List files in )(['"])(.*)\1""", call.get("title") or ""):
+            operands.append(match[2])
+    if not operands:
+        yield "needs-inspection", "structured file call has no verified path"
+    for operand in dict.fromkeys(operands):
+        yield from symlink_hits(operand, cwd, evidence)
+    yield from search_pattern_symlink_hits(call, cwd, evidence)
+
+
+def captured_antigravity(transcript_path):
+    for filename in ("session.json", "receipt.json", "settings.json"):
+        path = transcript_path.with_name(filename)
+        if path.is_file():
+            record = json.loads(path.read_text())
+            if not isinstance(record, dict):
+                continue
+            model = record.get("model")
+            if record.get("harness_kind") == "antigravity" or (
+                    isinstance(model, str) and model.startswith("gemini-")):
+                return True
+    return False
+
+
+def antigravity_card(call):
+    name, raw, identifier = call.get("name"), call.get("rawInput"), call.get("toolCallId")
+    return (
+        isinstance(identifier, str) and bool(re.fullmatch(r"call_[0-9]+", identifier))
+        or isinstance(name, str) and (
+            name in {"search_web", "manage_task"}
+            or bool(re.match(r"mcp_(?!_)", name))
+            or name == "run_command" and (raw is None or isinstance(raw, dict) and "CommandLine" in raw)
+            or name in ANTIGRAVITY_FILES and isinstance(raw, dict) and "Path" in raw
+        )
+    )
+
+
+def antigravity_hits(call, own_workspace, cwd, evidence):
+    name, raw, kind = call.get("name"), call.get("rawInput"), call.get("kind")
+    name = name if isinstance(name, str) else ""
+    tool = name.lower()
+    if tool in WEB_TOOLS or tool.startswith(("mcp_web_", "mcp__web__")):
+        yield "github-or-web", name
+    elif tool in MEMORY_TOOLS or tool.startswith((
+            "mcp_mj-memory_", "mcp_mj_memory_", "mcp__mj-memory__", "mcp__mj_memory__")):
+        yield "memory-or-sessions", name
+    elif name == "run_command":
+        yield "needs-inspection", "Antigravity run_command lacks verified working directory evidence"
+    elif name == "mcp_mj-agents_handback" and kind in (None, "other") and isinstance(raw, dict) and (
+            "message" in raw and raw.keys() <= {"message", "toolSummary"}
+            and all(isinstance(value, str) for value in raw.values())):
+        return  # The owned handback only submits the review.
+    elif name in ANTIGRAVITY_FILES:
+        expected_kind, fields = ANTIGRAVITY_FILES[name]
+        path = raw.get("Path") if isinstance(raw, dict) else None
+        locations = call.get("locations")
+        if locations is None:
+            locations = []
+        if (kind != expected_kind or not isinstance(path, str) or not path or not raw.keys() <= fields
+                or not isinstance(locations, list)
+                or any(not isinstance(location, dict) or not isinstance(location.get("path"), str)
+                       or not location["path"] for location in locations)):
+            yield "needs-inspection", f"unverified Antigravity {name} path or input"
+            return
+        root = evidence.root or f"/workspace/{own_workspace}"
+        for operand in dict.fromkeys([path, *(location["path"] for location in locations)]):
+            if operand == "-" or "\0" in operand:
+                yield "needs-inspection", f"unverified Antigravity {name} path: {operand!r}"
+                continue
+            yield from path_hits(operand, own_workspace, cwd)
+            resolved = recorded_path(operand, cwd)
+            if not root or not resolved or not posixpath.isabs(resolved):
+                yield "needs-inspection", f"unresolved Antigravity {name} path: {operand!r}"
+            elif posixpath.commonpath((root, resolved)) != root:
+                yield "outside-workspace", operand
+            else:
+                yield from symlink_hits(operand, cwd, evidence)
+    else:
+        yield "needs-inspection", f"unrecognized Antigravity tool: {name or '<missing name>'}"
+
+
+def engine_location_write(call, cwd, evidence):
+    name = call["name"]
+    if name not in {"Write", "Edit"} or not evidence.scratch or call.get("kind") not in {None, "edit"}:
+        return None
+    if call.keys() - {"toolCallId", "title", "name", "kind", "status", "content",
+                      "locations", "_meta", "rawInput"}:
+        return None
+    if call.get("_meta", {"claudeCode": {"toolName": name}}) != {"claudeCode": {"toolName": name}}:
+        return None
+    # Diagnostic text carries no path evidence. Other content forms can
+    # carry separate file targets, so only the plain text form is accepted.
+    content = call.get("content", [])
+    if not isinstance(content, list) or any(
+        not isinstance(row, dict) or row.keys() != {"type", "content"} or row["type"] != "content"
+        or not isinstance(row["content"], dict) or row["content"].keys() != {"type", "text"}
+        or row["content"]["type"] != "text" or not isinstance(row["content"]["text"], str)
+        for row in content
+    ):
+        return None
+    locations = call.get("locations")
+    if (not isinstance(locations, list) or len(locations) != 1 or not isinstance(locations[0], dict)
+            or locations[0].keys() != {"path"} or not isinstance(path := locations[0]["path"], str) or not path):
+        return None
+    target = recorded_path(path, cwd)
+    if not target or not target.startswith(evidence.scratch + "/"):
+        return None
+    # A title can disqualify conflicting evidence, but cannot supply a path.
+    title = call.get("title")
+    if title not in (None, "", name, f"{name} {target}", f"{name} {posixpath.relpath(target, evidence.root)}"):
+        return None
+    return path
+
+
+def engine_hits(call, own_workspace, cwd, evidence):
     name = call.get("name") if isinstance(call, dict) else None
     if not isinstance(name, str) or name not in ENGINE_TOOLS or call.get("kind") == "execute":
         yield "needs-inspection", f"tool outside the engine allowlist: {name!r}"
         return
 
     raw = call.get("rawInput")
+    if raw is None and (path := engine_location_write(call, cwd, evidence)) is not None:
+        raw = {"file_path": path}
     if not isinstance(raw, dict):
         yield "needs-inspection", f"missing or invalid {name} input"
         return
     if name in {"Grep", "Glob"}:
-        # Glob's pattern names paths. Grep's pattern is a regex over file contents,
-        # and only its glob filter names paths.
-        keys = (("pattern",) if name == "Glob" else ()) + (("glob",) if "glob" in raw else ())
-        for key in keys:
-            value = raw.get(key)
-            if not isinstance(value, str) or posixpath.isabs(value) or ".." in value:
-                yield "needs-inspection", f"unverified {name} {key}: {value!r}"
         paths = [raw.get("path", cwd)]
     else:
         paths = [raw.get("file_path")]
@@ -2027,7 +2350,7 @@ def engine_hits(call, own_workspace, cwd, checkout):
             yield "needs-inspection", f"invalid {name} locations"
             return
         paths.extend(location.get("path") for location in locations)
-    root = recorded_path(checkout, None) if checkout else None
+    root = evidence.root
     seen = set()
     for path in paths:
         if not isinstance(path, str) or not path:
@@ -2041,10 +2364,13 @@ def engine_hits(call, own_workspace, cwd, checkout):
         if (not root or not resolved or not posixpath.isabs(resolved)
                 or posixpath.commonpath((root, resolved)) != root):
             yield "outside-workspace", path
+        else:
+            yield from symlink_hits(path, cwd, evidence)
+    yield from search_pattern_symlink_hits(call, cwd, evidence)
 
 
 def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written, cwd, home,
-               edit_paths, succeeded=False):
+               edit_paths, succeeded=False, antigravity=False):
     title = call.get("title") or ""
     kind = call.get("kind")
     raw = call.get("rawInput")
@@ -2058,33 +2384,32 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
 
     base = cwd or ""
     if isinstance(raw, dict) and (directory := raw.get("cwd") or raw.get("workdir")):
-        cwd = (posixpath.join(base, directory) if edit_paths is not None
+        cwd = (posixpath.join(base, directory) if edit_paths.allow_in_place_edits
                else one_or_many(resolve_paths(directory, base)))
-    if edit_paths is not None and kind == "move":
+    if not antigravity and structured_file_call(call) and tool != "apply_patch":
+        yield from structured_symlink_hits(call, cwd, edit_paths)
+    if kind == "move":
         edit_paths.blocked = True
     target_seen = False
-    for fields in [raw, *(call.get("locations") or [])]:
-        if isinstance(fields, dict):
-            for key in PATH_KEYS & fields.keys():
-                paths = fields[key] if isinstance(fields[key], list) else [fields[key]]
-                for path in paths:
-                    if isinstance(path, str):
-                        yield from path_hits(path, own_workspace, base if key in {"cwd", "workdir"} else cwd or "")
-                        if key not in {"cwd", "workdir"} and path:
-                            target_seen = True
-                            if kind in {"edit", "delete", "move"}:
-                                written.add(posixpath.basename(path))
-                                forget_script(scripts, path, cwd or "")
+    for key, path in path_operands(call):
+        if key in {"cwd", "workdir"}:
+            yield from path_hits(path, own_workspace, base)
+            continue
+        yield from path_hits(path, own_workspace, cwd or "")
+        target_seen = True
+        if kind in {"edit", "delete", "move"}:
+            written.add(posixpath.basename(path))
+            forget_script(scripts, path, cwd or "")
     if kind in {"edit", "delete", "move"} and not target_seen:
         scripts.clear()
 
-    listing = kind == "read" and (title == "List files" or title.startswith("List files "))
+    listing = not antigravity and kind == "read" and (title == "List files" or title.startswith("List files "))
     if listing:
         if match := re.fullmatch(r"""List files in (['"])(.+)\1""", title):
             yield from path_hits(match[2], own_workspace, cwd or "")
             target_seen = True
-    elif kind == "read" and not (target_seen or raw or call.get("locations")):
-        if match := re.fullmatch(r"Read file ['\"](.*)['\"]", title):
+    elif kind == "read" and not target_seen:
+        if not antigravity and (match := re.fullmatch(r"Read file ['\"](.*)['\"]", title)):
             yield from path_hits(match[1], own_workspace, cwd or "")
         else:
             yield "needs-inspection", f"missing read path: {title[:400]}"
@@ -2094,19 +2419,20 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
         if isinstance(patch, str) and patch.startswith("*** Begin Patch\n") and patch.rstrip().endswith("*** End Patch"):
             paths = re.findall(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", patch, re.M)
             if paths:
-                if edit_paths is not None and re.search(r"^\*\*\* Move to: ", patch, re.M):
-                    edit_paths.blocked = True
                 for path in paths:
                     yield from path_hits(path, own_workspace, cwd or "")
+                    yield from symlink_hits(path, cwd, edit_paths)
                     written.add(posixpath.basename(path))
                     forget_script(scripts, path, cwd or "")
+                if re.search(r"^\*\*\* Move to: ", patch, re.M):
+                    edit_paths.blocked = True
                 return
         scripts.clear()
         yield "needs-inspection", "unrecognized patch format"
         return
 
     command = raw.get("command", raw.get("cmd", raw.get("argv"))) if isinstance(raw, dict) else raw
-    if command is None and kind in {None, "execute"} and title and raw is None:
+    if not antigravity and command is None and kind in {None, "execute"} and title and raw is None:
         # Some bridges record the command only as their display title.
         command = title
         if title.startswith('"') and title.endswith('"'):
@@ -2146,12 +2472,20 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
             placement = json.loads(placement_path.read_text())
             cwd = cwd or placement.get("cwd")
             home = home or placement.get("home")
-        inventory = transcript_path.with_name("pre-inventory.json")
-        before = json.loads(inventory.read_text()) if inventory.is_file() else {}
+        before = read_record(transcript_path.with_name("pre-inventory.json"))
+        if not before:
+            # Sealed judges persist the same preflight inventory and
+            # placement in their existing successful isolation receipt.
+            isolation = read_record(transcript_path.with_name("isolation.json"))
+            if isolation.get("probe_exit") == 0:
+                before = isolation["checkout"]
+                cwd = cwd or isolation["placement"].get("cwd")
         cwd = cwd or before.get("cwd")
         result = scan(pages, own_workspace, commits=commits, allow_rql=allow_rql, single_commit=single_commit,
                       cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits, engine=engine,
-                      tracked_symlinks=before.get("tracked_symlinks"),
+                      antigravity=captured_antigravity(transcript_path),
+                      tracked_symlinks=clean_tracked_symlinks(before), tracked_head=before.get("head"),
+                      tracked_symlink_targets=before.get("tracked_symlink_targets"),
                       tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
                       rollout=rollout_commands(
                           sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))))
@@ -2164,8 +2498,10 @@ def audit_run(run):
     placement = json.loads((run / "placement.json").read_text())
     own = placement["cwd"].split("/")[2]
     result = {"run": str(run.relative_to(ROOT)), "reviewers": {}}
+    inventory = read_record(run / "pre-inventory.json")
     for transcript in sorted(run.glob("reviewers/*/transcript.json")):
-        result["reviewers"][transcript.parent.name] = audit_reviewer(transcript, own)
+        result["reviewers"][transcript.parent.name] = audit_reviewer(
+            transcript, own, cwd=placement["cwd"], inventory=inventory)
     # Since mj 8fe3c40bd a reviewer session is destroyed when its role ends, so driver.py keeps
     # only its stored handback and no transcript: its tool calls cannot be audited. Say so; an
     # empty reviewer list must not read as a clean audit.

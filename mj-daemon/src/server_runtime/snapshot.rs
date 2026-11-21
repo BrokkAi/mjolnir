@@ -431,7 +431,13 @@ pub(super) fn viewer_snapshot(
             .then_some(id.clone())
         })
         .collect();
-    crate::daemon::verdicts::project(&mut capture, &Default::default());
+    let committed = mj_controller::database::committed_state().ok().flatten();
+    crate::daemon::verdicts::project(
+        &mut capture,
+        &Default::default(),
+        committed.as_deref(),
+        None,
+    );
     viewer_snapshot_selected(
         controller,
         workspaces,

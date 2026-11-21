@@ -75,6 +75,11 @@ pub enum PublishError {
     NotARegularFile,
     /// [`Publish::CreateNew`] found the name already taken.
     AlreadyExists,
+    /// Streamed input did not match the declared length.
+    LengthMismatch {
+        expected: u64,
+        received: u64,
+    },
     Failed(anyhow::Error),
 }
 
@@ -83,6 +88,12 @@ impl std::fmt::Display for PublishError {
         match self {
             Self::NotARegularFile => formatter.write_str("destination is not a regular file"),
             Self::AlreadyExists => formatter.write_str("file already exists"),
+            Self::LengthMismatch { expected, received } => {
+                write!(
+                    formatter,
+                    "incomplete file upload: expected {expected} bytes, received {received}"
+                )
+            }
             Self::Failed(error) => write!(formatter, "{error:#}"),
         }
     }
@@ -248,6 +259,22 @@ impl ConfinedDir {
         body: &[u8],
         publish: Publish,
     ) -> Result<(), PublishError> {
+        let mut reader = body;
+        self.write_atomically_from_reader(name, &mut reader, Some(body.len() as u64), publish)?;
+        Ok(())
+    }
+
+    /// Stream `reader` into a temporary file in this directory in 64 KiB chunks
+    /// and atomically publish it as `name`. When `expected_len` is `Some`,
+    /// rejects both short reads and trailing extra bytes before syncing or
+    /// publishing, removing the temporary file on any error.
+    pub fn write_atomically_from_reader(
+        &self,
+        name: &OsStr,
+        reader: &mut dyn Read,
+        expected_len: Option<u64>,
+        publish: Publish,
+    ) -> Result<u64, PublishError> {
         let path = self.path.join(name);
         let existing = match self.dir.symlink_metadata(name) {
             Ok(metadata) if !metadata.is_file() => return Err(PublishError::NotARegularFile),
@@ -269,7 +296,7 @@ impl ConfinedDir {
             std::process::id(),
             u64::from_le_bytes(random)
         ));
-        let result = (|| -> Result<(), PublishError> {
+        let result = (|| -> Result<u64, PublishError> {
             let mut options = OpenOptions::new();
             options
                 .write(true)
@@ -297,8 +324,40 @@ impl ConfinedDir {
                 #[cfg(not(unix))]
                 None => {}
             }
-            file.write_all(body)
-                .with_context(|| format!("write {}", path.display()))?;
+            let mut buffer = [0u8; 64 * 1024];
+            let mut written = 0u64;
+            loop {
+                let count = match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => count,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        return Err(anyhow::Error::new(error)
+                            .context(format!("read input for {}", path.display()))
+                            .into());
+                    }
+                };
+                let next = written.saturating_add(count as u64);
+                if let Some(expected) = expected_len
+                    && next > expected
+                {
+                    return Err(PublishError::LengthMismatch {
+                        expected,
+                        received: next,
+                    });
+                }
+                file.write_all(&buffer[..count])
+                    .with_context(|| format!("write {}", path.display()))?;
+                written = next;
+            }
+            if let Some(expected) = expected_len
+                && written != expected
+            {
+                return Err(PublishError::LengthMismatch {
+                    expected,
+                    received: written,
+                });
+            }
             file.sync_all()
                 .with_context(|| format!("sync {}", path.display()))?;
             drop(file);
@@ -329,7 +388,7 @@ impl ConfinedDir {
                 }
             }
             self.sync()?;
-            Ok(())
+            Ok(written)
         })();
         if result.is_err() {
             let _ = self.dir.remove_file(&temporary);

@@ -24,7 +24,7 @@ use mj_controller::quota::ProfileQuota;
 
 use crate::server::api::{
     BundleExport, ExportError, PushedBranch, StartFollowup, StartStatus, SubagentBackend,
-    TranscriptPage, TurnSpan, TurnState, TurnSummary,
+    TranscriptPage, TurnSpan, TurnState, TurnSummary, UploadBody,
 };
 use mj_checkpoint::archive::{FetchMode, FetchedPath};
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
@@ -649,28 +649,73 @@ impl QuotaWait {
 }
 
 impl ApiBackend {
-    pub(crate) async fn discover_profile_candidates(
+    /// Partition `ids` into eligible profiles and those unavailable because
+    /// their login was refused or their required native login file is missing.
+    ///
+    /// Runs filesystem checks on a blocking thread pool so the Tokio reactor
+    /// never blocks on disk I/O.
+    async fn filter_eligible_profiles(
         &self,
-        mut ids: Vec<(String, mj_core::config::HarnessKind)>,
-        candidate_kind: &str,
-    ) -> Result<crate::server::api::SubagentCandidates> {
-        let mut candidates = crate::server::api::SubagentCandidates::default();
-        // A profile whose login the provider has refused would start a
-        // session that dies on its first request, so it remains unavailable
-        // until its login file changes.
+        ids: Vec<(String, mj_core::config::HarnessKind)>,
+        config: &mj_core::config::Config,
+    ) -> Result<(
+        Vec<(String, mj_core::config::HarnessKind)>,
+        Vec<(String, String)>,
+    )> {
+        let mut eligible = Vec::with_capacity(ids.len());
+        let mut unavailable = Vec::new();
+        let mut to_check = Vec::new();
         {
             let rejected = self
                 .rejected_logins
                 .lock()
                 .map_err(|_| anyhow!("refused logins lock poisoned"))?;
-            ids.retain(|(profile_id, _)| match rejected.refusal(profile_id) {
-                Some(reason) => {
-                    candidates.unavailable.push((profile_id.clone(), reason));
-                    false
+            for (profile_id, harness) in ids {
+                if let Some(reason) = rejected.refusal(&profile_id) {
+                    unavailable.push((profile_id, reason));
+                    continue;
                 }
-                None => true,
-            });
+                let profile = config.enabled_profile(&profile_id).cloned();
+                to_check.push((profile_id, harness, profile));
+            }
         }
+        let checked = mj_core::runtime::spawn_blocking(move || {
+            to_check
+                .into_iter()
+                .map(|(profile_id, harness, profile)| {
+                    let missing = profile
+                        .as_ref()
+                        .and_then(|profile| profile.missing_native_login_reason(&profile_id));
+                    (profile_id, harness, missing)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .context("profile login check task failed")?;
+        for (profile_id, harness, missing) in checked {
+            if let Some(reason) = missing {
+                unavailable.push((profile_id, reason));
+            } else {
+                eligible.push((profile_id, harness));
+            }
+        }
+        Ok((eligible, unavailable))
+    }
+
+    pub(crate) async fn discover_profile_candidates(
+        &self,
+        ids: Vec<(String, mj_core::config::HarnessKind)>,
+        candidate_kind: &str,
+    ) -> Result<crate::server::api::SubagentCandidates> {
+        let config = self.profile_catalog.live()?;
+        // A profile whose login the provider has refused or whose required
+        // login file was removed would fail at launch, so exclude it before
+        // discovery or cached capability lookup.
+        let (ids, unavailable) = self.filter_eligible_profiles(ids, &config).await?;
+        let mut candidates = crate::server::api::SubagentCandidates {
+            unavailable,
+            ..Default::default()
+        };
         // One discovery per profile, so a profile whose harness cannot be
         // discovered drops out on its own instead of failing the whole answer.
         let discoveries = futures::future::join_all(
@@ -686,7 +731,6 @@ impl ApiBackend {
             .lock()
             .map_err(|_| anyhow!("profile health lock poisoned"))?;
         let now = std::time::SystemTime::now();
-        let config = self.profile_catalog.live()?;
         for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
             match discovery.map(|mut choices| choices.pop()) {
                 Ok(Some(choices)) => {
@@ -3694,14 +3738,28 @@ fn fetch_arguments(
     Ok(arguments)
 }
 
+struct CountingReader<R> {
+    inner: R,
+    bytes: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        self.bytes = self.bytes.saturating_add(count as u64);
+        Ok(count)
+    }
+}
+
 async fn write_workspace_file(
     exports: Arc<dyn ExportRuntime>,
     session_id: String,
     path: PathBuf,
-    bytes: Vec<u8>,
+    body: UploadBody,
+    expected_len: Option<u64>,
     overwrite: bool,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<(), ExportError> {
+) -> Result<u64, ExportError> {
     use std::sync::atomic::Ordering;
     let session_admission = exports
         .workspace_admission(session_id.clone(), cancelled.clone())
@@ -3731,7 +3789,9 @@ async fn write_workspace_file(
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
+    let (reader, upload_abort) = body.into_parts();
     let worker_cancelled = cancelled.clone();
+    let worker_abort = upload_abort.clone();
     let mut transfer = mj_core::runtime::spawn_blocking(move || {
         let binary = format!(
             "{}/hel",
@@ -3741,13 +3801,15 @@ async fn write_workspace_file(
             binary,
             "worker".into(),
             "write-file".into(),
-            "--length".into(),
-            bytes.len().to_string(),
             "--root".into(),
             root,
             "--path".into(),
             relative,
         ];
+        if let Some(len) = expected_len {
+            argv.push("--length".into());
+            argv.push(len.to_string());
+        }
         if overwrite {
             argv.push("--overwrite".into());
         }
@@ -3757,18 +3819,22 @@ async fn write_workspace_file(
             &session_id,
             argv,
             "session file write",
-        )?
-        .with_sensitive_stdin(bytes);
-        CancellableProcessExecutor::new(worker_cancelled)
-            .with_deadline(EXPORT_TIMEOUT)
-            .execute(&command)
+        )?;
+        let mut counting = CountingReader {
+            inner: reader,
+            bytes: 0,
+        };
+        let output = CancellableProcessExecutor::new(worker_cancelled)
+            .execute_with_abortable_stdin(&command, &mut counting, worker_abort.as_ref())?;
+        Ok::<_, anyhow::Error>((output, counting.bytes))
     });
-    let output = loop {
+    let (output, bytes_written) = loop {
         tokio::select! {
             output = &mut transfer => break output.map_err(|e| ExportError::Failed(e.into()))?.map_err(ExportError::Failed)?,
             () = tokio::time::sleep(Duration::from_millis(250)) => {
                 if let Err(error) = tokio::time::timeout(Duration::from_secs(10), lease.verify()).await.context("checking file write barrier timed out").and_then(|r| r) {
                     cancelled.store(true, Ordering::Release);
+                    upload_abort();
                     // Do not release ownership while a subprocess can still write.
                     match transfer.await {
                         Ok(Ok(_)) => {},
@@ -3780,7 +3846,7 @@ async fn write_workspace_file(
             }
         }
     };
-    let result = worker_output(output, "session file write").map(|_| ());
+    let result = worker_output(output, "session file write").map(|_| bytes_written);
     lease.release().await.map_err(|e| {
         ExportError::Failed(
             e.context("file transfer ended but the workspace barrier could not be released"),
@@ -4186,15 +4252,13 @@ impl SubagentBackend for ApiBackend {
         _model: String,
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
-            // Remove refused logins before the shared selector resolves the
-            // requested alias once over the remaining ready profiles.
+            // Remove refused logins and missing native login files before the
+            // shared selector resolves the requested alias once over the
+            // remaining ready profiles.
             let ids = self.profile_catalog.ready_candidates("")?;
             let config = self.profile_catalog.live()?;
+            let (ids, unavailable) = self.filter_eligible_profiles(ids, &config).await?;
             let snapshot = self.profile_catalog.snapshot();
-            let rejected = self
-                .rejected_logins
-                .lock()
-                .map_err(|_| anyhow!("refused logins lock poisoned"))?;
             let quota_reports = self
                 .quota_reports
                 .lock()
@@ -4203,12 +4267,11 @@ impl SubagentBackend for ApiBackend {
                 .lock()
                 .map_err(|_| anyhow!("profile health lock poisoned"))?;
             let now = std::time::SystemTime::now();
-            let mut candidates = crate::server::api::SubagentCandidates::default();
+            let mut candidates = crate::server::api::SubagentCandidates {
+                unavailable,
+                ..Default::default()
+            };
             for (profile_id, harness) in ids {
-                if let Some(reason) = rejected.refusal(&profile_id) {
-                    candidates.unavailable.push((profile_id, reason));
-                    continue;
-                }
                 let Some(profile) = config.enabled_profile(&profile_id) else {
                     continue;
                 };
@@ -4578,9 +4641,10 @@ impl SubagentBackend for ApiBackend {
         &self,
         session_id: String,
         path: PathBuf,
-        bytes: Vec<u8>,
+        body: UploadBody,
+        expected_len: Option<u64>,
         overwrite: bool,
-    ) -> BoxFuture<'_, Result<(), ExportError>> {
+    ) -> BoxFuture<'_, Result<u64, ExportError>> {
         let exports = self.exports.clone();
         Box::pin(async move {
             if matches!(
@@ -4598,7 +4662,13 @@ impl SubagentBackend for ApiBackend {
             let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let _cancel_on_drop = super::ProcessCancellationGuard(cancelled.clone());
             let task = mj_core::runtime::spawn(write_workspace_file(
-                exports, session_id, path, bytes, overwrite, cancelled,
+                exports,
+                session_id,
+                path,
+                body,
+                expected_len,
+                overwrite,
+                cancelled,
             ));
             mj_core::runtime::spawn(async move {
                 let result = task

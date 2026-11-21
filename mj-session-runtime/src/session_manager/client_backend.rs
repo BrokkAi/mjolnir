@@ -249,6 +249,23 @@ impl SessionManagerControl {
         response.await.context("session manager stopped")
     }
 
+    /// Wait until the session manager has a live actor matching the session's
+    /// current target, without polling or a guessed timeout.
+    pub async fn wait_for_session_ready(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<ManagedSessionHandle> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(ManagerCommand::WaitForSession {
+                session_id: session_id.into(),
+                reply,
+            })
+            .await
+            .context("session manager stopped")?;
+        response.await.context("session manager stopped")?
+    }
+
     pub async fn wait_for_session(
         &self,
         session_id: &str,

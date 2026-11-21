@@ -116,7 +116,7 @@ pub(crate) struct NewArgs {
     #[arg(long)]
     project_directory: Option<PathBuf>,
     /// Start the workspace checked out at this full commit ID in the bundle's primary repository.
-    #[arg(long, value_name = "SHA", requires = "bundle")]
+    #[arg(long, value_name = "SHA")]
     at: Option<String>,
     /// With --at, give the workspace the full history up to that commit and
     /// --base, and nothing later: no later commits, branches, tags, or origin
@@ -669,17 +669,37 @@ pub(crate) struct RespondArgs {
 }
 
 pub(crate) async fn put_file(args: PutFileArgs) -> Result<()> {
-    let bytes = if args.source == std::path::Path::new("-") {
-        mj_checkpoint::archive::read_session_file_input(std::io::stdin().lock())?
+    let (body, content_length) = if args.source == std::path::Path::new("-") {
+        (
+            reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(tokio::io::stdin())),
+            None,
+        )
     } else {
-        mj_checkpoint::archive::read_session_file_input(
-            std::fs::File::open(&args.source)
-                .with_context(|| format!("open {}", args.source.display()))?,
-        )?
+        let file = tokio::fs::File::open(&args.source)
+            .await
+            .with_context(|| format!("open {}", args.source.display()))?;
+        let metadata = file
+            .metadata()
+            .await
+            .with_context(|| format!("inspect {}", args.source.display()))?;
+        if metadata.is_file() {
+            (reqwest::Body::from(file), Some(metadata.len()))
+        } else {
+            (
+                reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file)),
+                None,
+            )
+        }
     };
     let written = ApiClient::connect()
         .await?
-        .put_file(&args.session, &args.path, bytes, args.overwrite)
+        .put_file(
+            &args.session,
+            &args.path,
+            body,
+            content_length,
+            args.overwrite,
+        )
         .await?;
     if args.json {
         print_json(&written)
@@ -1265,8 +1285,17 @@ pub(crate) fn session_review(
 /// Create a session and deliver its optional first prompt.
 pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<String>) -> Result<()> {
     let prompt = read_prompt(args.prompt.clone(), args.prompt_file.clone())?;
-    let (client, workspace_id, target_id, project_directory) =
+    let (client, workspace_id, target_id, project_directory, options) =
         infer_new_session_inputs(&args, requested_workspace.as_deref()).await?;
+    let (bundle_id, project_directory) = resolve_new_session_project_target(
+        &client,
+        args.bundle.clone(),
+        project_directory,
+        target_id.as_deref(),
+        options,
+        |dir| async move { crate::go::quick_bundle_for_directory(&dir).await },
+    )
+    .await?;
     let request = StartSessionRequest {
         remember_container_size: false,
         subagents: new_subagent_policy(&args)?,
@@ -1289,7 +1318,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         workspace_id: Some(workspace_id),
         profile_id: args.profile.clone(),
         target_id,
-        bundle_id: args.bundle.clone(),
+        bundle_id,
         project_directory,
         title: args.title.clone(),
         model: args.model.clone(),
@@ -1318,10 +1347,46 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     Ok(())
 }
 
+async fn resolve_new_session_project_target<F, Fut>(
+    client: &ApiClient,
+    bundle_id: Option<String>,
+    project_directory: Option<PathBuf>,
+    target_id: Option<&str>,
+    options: Option<mj_daemon::server::api::LaunchOptions>,
+    create_quick_bundle: F,
+) -> Result<(Option<String>, Option<PathBuf>)>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    if bundle_id.is_none()
+        && let (Some(directory), Some(target_id)) = (project_directory.as_ref(), target_id)
+    {
+        let options = match options {
+            Some(options) => options,
+            None => client.launch_options().await?,
+        };
+        if options
+            .targets
+            .iter()
+            .any(|target| target.id == target_id && !target.requires_project_directory)
+        {
+            return Ok((Some(create_quick_bundle(directory.clone()).await?), None));
+        }
+    }
+    Ok((bundle_id, project_directory))
+}
+
 async fn infer_new_session_inputs(
     args: &NewArgs,
     requested_workspace: Option<&str>,
-) -> Result<(ApiClient, String, Option<String>, Option<PathBuf>)> {
+) -> Result<(
+    ApiClient,
+    String,
+    Option<String>,
+    Option<PathBuf>,
+    Option<mj_daemon::server::api::LaunchOptions>,
+)> {
     use mj_daemon::server::api::resolve_launch_choices;
     let mut open = Vec::new();
     let mut workspace_id = args.workspace_id.clone();
@@ -1344,6 +1409,7 @@ async fn infer_new_session_inputs(
             workspace_id.clone(),
             args.target.clone(),
             args.project_directory.clone(),
+            None,
         ));
     }
     let mut listed = if workspace_id.is_none() {
@@ -1472,13 +1538,15 @@ async fn infer_new_session_inputs(
     }
     // Pin the target used to interpret the directory even if the saved
     // default changes between reading launch options and creating a session.
+    let target_id = selected_target
+        .map(|target| target.id.clone())
+        .or_else(|| args.target.clone());
     Ok((
         client.context("launch options are unavailable")?,
         workspace_id.context("no workspace was selected")?,
-        selected_target
-            .map(|target| target.id.clone())
-            .or_else(|| args.target.clone()),
+        target_id,
         project_directory,
+        options,
     ))
 }
 
@@ -4020,6 +4088,93 @@ mod tests {
         assert!(parse(&["--no-later-history"]).is_err(), "requires --at");
         let refused = name_launch_flags(anyhow::anyhow!("`no_later_history` requires `at`"));
         assert_eq!(refused.to_string(), "--no-later-history requires --at");
+    }
+
+    // Hard-won: #1615: mj new --project-directory on a container target creates a quick bundle and allows --at/--no-later-history
+    #[tokio::test]
+    async fn new_project_directory_on_container_target_resolves_quick_bundle_and_allows_at() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let cli = Cli::try_parse_from([
+            "mj",
+            "new",
+            "--project-directory",
+            "/work/repo",
+            "--target",
+            "podman",
+            "--at",
+            sha,
+            "--no-later-history",
+        ])
+        .expect("--project-directory should allow --at and --no-later-history");
+        let Some(Command::New(args)) = cli.command else {
+            panic!("expected the new command");
+        };
+        assert_eq!(args.at.as_deref(), Some(sha));
+        assert!(args.no_later_history);
+        assert_eq!(
+            args.project_directory.as_deref(),
+            Some(std::path::Path::new("/work/repo"))
+        );
+
+        let options = mj_daemon::server::api::LaunchOptions {
+            revision: 1,
+            profiles: Vec::new(),
+            targets: vec![
+                mj_daemon::server::api::LaunchTarget {
+                    id: "podman".into(),
+                    kind: "podman".into(),
+                    requires_project_directory: false,
+                    availability: mj_daemon::server::api::LaunchAvailability::Ready,
+                    unavailable_reason: None,
+                    runtime_missing: false,
+                    default_candidate: false,
+                    host: None,
+                },
+                mj_daemon::server::api::LaunchTarget {
+                    id: "localhost".into(),
+                    kind: "local-bare".into(),
+                    requires_project_directory: true,
+                    availability: mj_daemon::server::api::LaunchAvailability::Ready,
+                    unavailable_reason: None,
+                    runtime_missing: false,
+                    default_candidate: false,
+                    host: None,
+                },
+            ],
+            bundles: Vec::new(),
+            hosts: Vec::new(),
+            default: None,
+        };
+        let client = ApiClient::new("http://127.0.0.1:1".into(), "test-token".into()).unwrap();
+
+        let (bundle_id, project_dir) = resolve_new_session_project_target(
+            &client,
+            None,
+            Some(PathBuf::from("/work/repo")),
+            Some("podman"),
+            Some(options.clone()),
+            |dir| async move {
+                assert_eq!(dir, PathBuf::from("/work/repo"));
+                Ok("quick-bundle".to_owned())
+            },
+        )
+        .await
+        .expect("container target should resolve quick bundle");
+        assert_eq!(bundle_id.as_deref(), Some("quick-bundle"));
+        assert_eq!(project_dir, None);
+
+        let (bare_bundle, bare_dir) = resolve_new_session_project_target(
+            &client,
+            None,
+            Some(PathBuf::from("/work/repo")),
+            Some("localhost"),
+            Some(options),
+            |_dir| async { panic!("bare target must not create a quick bundle") },
+        )
+        .await
+        .expect("bare target should keep project_directory");
+        assert_eq!(bare_bundle, None);
+        assert_eq!(bare_dir, Some(PathBuf::from("/work/repo")));
     }
 
     // Hard-won: 06cfc1cfe: reviewer-only flags preserve the global trigger.

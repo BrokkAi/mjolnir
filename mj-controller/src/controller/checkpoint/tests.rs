@@ -3809,6 +3809,33 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     std::fs::write(&temporary_marker, b"temporary data survives").unwrap();
     crate::database::save_session(record).unwrap();
 
+    // Mail the worker accepted and never handed to the agent; the daemon has
+    // marked it accepted and will not send it again (#1616). Submit it through
+    // the live worker before retiring it so only one process ever writes to
+    // `relay_root` (a retired actor reaps its stand-in relay asynchronously).
+    let waiting = mj_core::mailbox::MailboxEvent {
+        key: "waiting-message".into(),
+        source: "parent".into(),
+        wake: false,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::PlainText {
+            text: "read this with your next prompt".into(),
+        },
+    };
+    let admission = crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+    let mut previous_lease = previous_worker.lease_connection(&admission).await.unwrap();
+    previous_lease
+        .connection_mut()
+        .submit(
+            "deliver-waiting".into(),
+            RelayCommand::DeliverMailboxEvent {
+                event: waiting.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    drop(previous_lease);
+
     // The prior worker and its session actor are gone. The test publishes a
     // checkpoint-only relay process only once Restart has durably entered its
     // fresh-checkpoint phase, just as target recovery reconnects the journal.
@@ -3820,33 +3847,6 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     })
     .await
     .expect("the dead worker actor did not retire");
-    // Mail the worker accepted and never handed to the agent; the daemon has
-    // marked it accepted and will not send it again (#1616).
-    let waiting = mj_core::mailbox::MailboxEvent {
-        key: "waiting-message".into(),
-        source: "parent".into(),
-        wake: false,
-        created_at_ms: 1,
-        body: mj_core::mailbox::MailboxEventBody::PlainText {
-            text: "read this with your next prompt".into(),
-        },
-    };
-    let accepted = mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
-        .unwrap()
-        .handle(mj_core::relay::RelayRequestEnvelope {
-            request_id: "deliver-waiting".into(),
-            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
-            request: mj_core::relay::RelayRequest::Submit {
-                command_id: "deliver-waiting".into(),
-                command: RelayCommand::DeliverMailboxEvent {
-                    event: waiting.clone(),
-                },
-            },
-        });
-    assert!(
-        matches!(accepted.body, mj_core::relay::RelayResponseBody::Ok { .. }),
-        "{accepted:?}"
-    );
     let mut restored_target =
         latch_relay_target(&relay_root, Some(&starts), ReleaseSupport::Supported, false);
     // A current worker: it exports its notification stack and its mail.
@@ -3878,7 +3878,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     };
     controller
         .suspend_session_for_restart(
-            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+            &admission,
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,

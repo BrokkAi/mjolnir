@@ -128,9 +128,11 @@ enum Freshness {
     /// Provisioning: an answer from the last `RESOLUTION_LIFETIME` will do.
     Memoized,
     /// Configuration a session already depends on: a recent successful answer
-    /// will do, but a remembered failure is asked again. Another caller's
-    /// failure (such as the background policy service timing out on a busy
-    /// link) must not fail a launch that can still reach the host.
+    /// will do, but a remembered failure — including a host inspection whose
+    /// cache was `Unavailable` — is asked again. Another caller's failure (such
+    /// as the background policy service timing out on a busy link, or a
+    /// transient reflink outage) must not fail a launch that can now use the
+    /// host.
     MemoizedSuccess,
     /// The settings screen, which is read precisely when somebody has just
     /// changed something on the host. A fresh answer also replaces the
@@ -151,7 +153,14 @@ fn inspect(
     if freshness != Freshness::Fresh
         && let Some((recorded, inspection)) = RESOLUTIONS.lock().expect("mbx resolutions").get(&key)
         && recorded.elapsed() < RESOLUTION_LIFETIME
-        && (freshness == Freshness::Memoized || inspection.is_ok())
+        && (freshness == Freshness::Memoized
+            || inspection.as_ref().is_ok_and(|inspection| {
+                !(inspection.cache.is_none()
+                    && matches!(
+                        inspection.preview.off_reason,
+                        Some(BuildCacheOff::Unavailable(_))
+                    ))
+            }))
     {
         return inspection.clone().map_err(|error| anyhow::anyhow!(error));
     }
@@ -1833,6 +1842,142 @@ mod tests {
         assert!(
             resolve(&podman(None), &repaired).is_some(),
             "the next session asks the repaired host again instead of reusing the old verdict"
+        );
+    }
+
+    // Hard-won: #1614: a cached Unavailable inspection stayed sticky under MemoizedSuccess for 10 minutes
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
+    fn repaired_reflinks_recover_on_the_next_session_configuration_without_waiting() {
+        struct FailReflinkOnce {
+            base: ProbeExecutor,
+            reflink_attempts: std::sync::atomic::AtomicUsize,
+        }
+
+        impl CommandExecutor for FailReflinkOnce {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                let line = format!("{} {}", command.program, command.args.join(" "));
+                if line.contains("mj-reflink")
+                    && self
+                        .reflink_attempts
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        == 0
+                {
+                    return Ok(CommandOutput {
+                        status: 1,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                self.base.execute(command)
+            }
+        }
+
+        let _isolated = isolated();
+        let mut answers = native_host();
+        answers.push((".mj-apply.lock", 0, ""));
+        let executor = FailReflinkOnce {
+            base: ProbeExecutor::new(&answers),
+            reflink_attempts: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let recorded = SessionBuildCache {
+            host: "local".into(),
+            directory: PathBuf::from("/mnt/fast/mbx-cache"),
+            max_size: None,
+            target_root: None,
+        };
+        let backend = targets::TargetLocator::LocalPodman {
+            container_id: "saved-container".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        };
+
+        let first =
+            prepare_session_configuration(&Config::default(), &backend, &recorded, &executor)
+                .unwrap_err();
+        assert!(
+            format!("{first:#}").contains("does not support reflinks"),
+            "{first:#}"
+        );
+        assert_eq!(
+            executor
+                .reflink_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        let second =
+            prepare_session_configuration(&Config::default(), &backend, &recorded, &executor)
+                .expect(
+                    "a repaired host should recover on the next launch inside RESOLUTION_LIFETIME",
+                );
+        assert_eq!(second, configuration::shared_directory(&recorded.directory));
+        assert_eq!(
+            executor
+                .reflink_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+
+        // A deliberate TurnedOff setting stays memoized under MemoizedSuccess.
+        let disabled = TargetBuildCache {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        let disabled_executor = ProbeExecutor::new(&native_host());
+        let first_off = inspect(
+            &CacheHost::Local,
+            &disabled,
+            Freshness::MemoizedSuccess,
+            &disabled_executor,
+        )
+        .unwrap();
+        assert!(matches!(
+            first_off.preview.off_reason,
+            Some(BuildCacheOff::TurnedOff)
+        ));
+        let probes_after_first = disabled_executor.ran().len();
+        let second_off = inspect(
+            &CacheHost::Local,
+            &disabled,
+            Freshness::MemoizedSuccess,
+            &disabled_executor,
+        )
+        .unwrap();
+        assert!(matches!(
+            second_off.preview.off_reason,
+            Some(BuildCacheOff::TurnedOff)
+        ));
+        assert_eq!(
+            disabled_executor.ran().len(),
+            probes_after_first,
+            "TurnedOff should remain memoized under MemoizedSuccess"
         );
     }
 

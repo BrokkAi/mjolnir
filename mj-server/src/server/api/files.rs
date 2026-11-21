@@ -54,16 +54,230 @@ pub struct WriteFileQuery {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteFileResponse {
     pub path: PathBuf,
-    pub bytes: usize,
+    pub bytes: u64,
+}
+
+const UPLOAD_CHANNEL_CAPACITY: usize = 8;
+
+struct UploadQueueState {
+    chunks: std::collections::VecDeque<axum::body::Bytes>,
+    eof: bool,
+    error: Option<String>,
+    producer_dropped: bool,
+    aborted: bool,
+}
+
+struct UploadChannel {
+    state: std::sync::Mutex<UploadQueueState>,
+    readable: std::sync::Condvar,
+    /// Bounds unread chunks to [`UPLOAD_CHANNEL_CAPACITY`] so a fast HTTP
+    /// client cannot outrun a slow target pipe.
+    space: tokio::sync::Semaphore,
+}
+
+impl UploadChannel {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: std::sync::Mutex::new(UploadQueueState {
+                chunks: std::collections::VecDeque::with_capacity(UPLOAD_CHANNEL_CAPACITY),
+                eof: false,
+                error: None,
+                producer_dropped: false,
+                aborted: false,
+            }),
+            readable: std::sync::Condvar::new(),
+            space: tokio::sync::Semaphore::new(UPLOAD_CHANNEL_CAPACITY),
+        })
+    }
+
+    fn abort(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.aborted = true;
+        state.chunks.clear();
+        self.readable.notify_all();
+        drop(state);
+        self.space.close();
+    }
+}
+
+struct UploadProducer {
+    channel: Arc<UploadChannel>,
+    completed: bool,
+}
+
+impl UploadProducer {
+    fn new(channel: Arc<UploadChannel>) -> Self {
+        Self {
+            channel,
+            completed: false,
+        }
+    }
+
+    async fn push(&self, chunk: axum::body::Bytes) -> bool {
+        let Ok(permit) = self.channel.space.acquire().await else {
+            return false;
+        };
+        permit.forget();
+        let mut state = self
+            .channel
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.aborted {
+            return false;
+        }
+        state.chunks.push_back(chunk);
+        self.channel.readable.notify_one();
+        true
+    }
+
+    fn finish_eof(mut self) {
+        self.completed = true;
+        let mut state = self
+            .channel
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.eof = true;
+        self.channel.readable.notify_all();
+    }
+
+    fn finish_error(mut self, message: String) {
+        self.completed = true;
+        let mut state = self
+            .channel
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.error = Some(message);
+        self.channel.readable.notify_all();
+    }
+}
+
+impl Drop for UploadProducer {
+    fn drop(&mut self) {
+        if !self.completed {
+            let mut state = self
+                .channel
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.producer_dropped = true;
+            self.channel.readable.notify_all();
+        }
+    }
+}
+
+struct UploadChannelReader {
+    channel: Arc<UploadChannel>,
+    current: axum::body::Bytes,
+    finished: bool,
+}
+
+impl UploadChannelReader {
+    fn new(channel: Arc<UploadChannel>) -> Self {
+        Self {
+            channel,
+            current: axum::body::Bytes::new(),
+            finished: false,
+        }
+    }
+}
+
+impl Drop for UploadChannelReader {
+    fn drop(&mut self) {
+        self.channel.abort();
+    }
+}
+
+impl std::io::Read for UploadChannelReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use tokio_util::bytes::Buf as _;
+        if buf.is_empty() || self.finished {
+            return Ok(0);
+        }
+        while self.current.is_empty() {
+            let mut state = self
+                .channel
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            loop {
+                if state.aborted {
+                    self.finished = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "upload cancelled",
+                    ));
+                }
+                if let Some(message) = state.error.clone() {
+                    self.finished = true;
+                    return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, message));
+                }
+                if state.producer_dropped {
+                    self.finished = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "upload stream closed before EOF",
+                    ));
+                }
+                if let Some(chunk) = state.chunks.pop_front() {
+                    drop(state);
+                    self.channel.space.add_permits(1);
+                    if !chunk.is_empty() {
+                        self.current = chunk;
+                        break;
+                    }
+                    state = self
+                        .channel
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    continue;
+                }
+                if state.eof {
+                    self.finished = true;
+                    return Ok(0);
+                }
+                state = self
+                    .channel
+                    .readable
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+        let count = buf.len().min(self.current.len());
+        buf[..count].copy_from_slice(&self.current[..count]);
+        self.current.advance(count);
+        Ok(count)
+    }
 }
 
 pub(super) async fn write_file(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
     Query(query): Query<WriteFileQuery>,
-    bytes: axum::body::Bytes,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Body,
 ) -> Result<Json<WriteFileResponse>, ApiFailure> {
+    use futures::StreamExt as _;
     validate_session_file_path(&query.path)?;
+    let expected_len = match headers.get(axum::http::header::CONTENT_LENGTH) {
+        Some(value) => {
+            let text = value
+                .to_str()
+                .map_err(|_| ApiFailure::bad_request("invalid Content-Length header"))?;
+            let len = text
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| ApiFailure::bad_request("invalid Content-Length header"))?;
+            Some(len)
+        }
+        None => None,
+    };
     {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
@@ -73,18 +287,46 @@ pub(super) async fn write_file(
             ));
         }
     }
-    let count = bytes.len();
-    backend(&state)?
-        .write_file(
-            session_id,
-            query.path.clone(),
-            bytes.to_vec(),
-            query.overwrite,
-        )
-        .await?;
+    let backend = backend(&state)?;
+    let channel = UploadChannel::new();
+    let producer = UploadProducer::new(channel.clone());
+    let abort_channel = channel.clone();
+    let upload = UploadBody::new(
+        Box::new(UploadChannelReader::new(channel)),
+        Arc::new(move || abort_channel.abort()),
+    );
+    let pump = async move {
+        let mut stream = body.into_data_stream();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) if chunk.is_empty() => continue,
+                Ok(chunk) => {
+                    if !producer.push(chunk).await {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    producer.finish_error(format!("read upload body: {error}"));
+                    return;
+                }
+            }
+        }
+        producer.finish_eof();
+    };
+    let mut write_fut = std::pin::pin!(backend.write_file(
+        session_id,
+        query.path.clone(),
+        upload,
+        expected_len,
+        query.overwrite,
+    ));
+    let written = tokio::select! {
+        result = &mut write_fut => result?,
+        () = pump => write_fut.await?,
+    };
     Ok(Json(WriteFileResponse {
         path: query.path,
-        bytes: count,
+        bytes: written,
     }))
 }
 

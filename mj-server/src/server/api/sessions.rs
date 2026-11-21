@@ -213,12 +213,6 @@ pub(super) async fn start_session(
             request.effort.as_deref(),
         )?;
     }
-    // `at` checks out the bundle's primary repository, so it needs a bundle.
-    if request.at.is_some() && request.bundle_id.is_none() {
-        return Err(ApiFailure::bad_request(
-            "`at` requires bundle_id: it checks out the bundle's primary repository",
-        ));
-    }
     if request.no_later_history && request.at.is_none() {
         return Err(ApiFailure::bad_request(
             "`no_later_history` requires `at`: it limits the history of that checkout",
@@ -260,6 +254,12 @@ pub(super) async fn start_session(
             ));
         }
     };
+    // `at` checks out the bundle's primary repository, so it needs a bundle.
+    if request.at.is_some() && bundle_id.is_empty() {
+        return Err(ApiFailure::bad_request(
+            "`at` requires bundle_id: it checks out the bundle's primary repository",
+        ));
+    }
     if !bundle_id.is_empty() {
         match backend.validate_github_bundle(bundle_id.clone()).await {
             Ok(()) => {}

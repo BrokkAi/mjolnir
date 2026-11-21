@@ -194,6 +194,8 @@ impl Controller {
             }
             stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
                 .context("stop the sub-agent's worker")?;
+            self.pull_parked_codex_login(session_id, session, &backend, executor)
+                .await;
             let mut record = session.clone();
             record.state = if failure.is_some() {
                 SessionState::Error
@@ -220,6 +222,170 @@ impl Controller {
             Ok(ParkOutcome::Parked)
         })
         .await
+    }
+
+    /// Pull a refreshed Codex login from a stopped sub-agent's staged home back
+    /// into the canonical profile store before `Parked` is published (#1633).
+    ///
+    /// Keyed by `session.last_profile`, which is the profile the stopped home
+    /// was staged for. Failures are logged rather than aborting `Parked`
+    /// publication because the worker is already stopped.
+    async fn pull_parked_codex_login(
+        &self,
+        session_id: &str,
+        session: &mj_core::state::SessionRecord,
+        backend: &targets::TargetLocator,
+        executor: &(impl CommandExecutor + Sync),
+    ) {
+        use mj_core::config::HarnessKind;
+
+        if session.harness_kind != HarnessKind::Codex {
+            return;
+        }
+        let Some(profile) = self.config.profiles.get(&session.last_profile) else {
+            return;
+        };
+        if !profile.auth_scheme().uses_native_login_file() {
+            return;
+        }
+        let launch = match self.current_worker_launch_config(session_id, backend) {
+            Ok(launch) => launch,
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    profile = %session.last_profile,
+                    error = format!("{error:#}"),
+                    "could not resolve launch config to pull parked Codex login"
+                );
+                return;
+            }
+        };
+        let canonical_marker = profile.authentication_marker();
+        let bytes = match backend {
+            targets::TargetLocator::LocalBare { .. } => {
+                let staged_path = mj_core::config::harness_authentication_marker(
+                    HarnessKind::Codex,
+                    &launch.harness_home,
+                );
+                if staged_path == canonical_marker {
+                    return;
+                }
+                match mj_core::runtime::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
+                    let metadata = match std::fs::symlink_metadata(&staged_path) {
+                        Ok(metadata) => metadata,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            return Ok(None);
+                        }
+                        Err(error) => {
+                            return Err(error).with_context(|| {
+                                format!("inspect parked Codex login {}", staged_path.display())
+                            });
+                        }
+                    };
+                    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                        return Ok(None);
+                    }
+                    std::fs::read(&staged_path)
+                        .with_context(|| {
+                            format!("read parked Codex login {}", staged_path.display())
+                        })
+                        .map(Some)
+                })
+                .await
+                {
+                    Ok(Ok(Some(bytes))) => bytes,
+                    Ok(Ok(None)) => return,
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            session_id,
+                            profile = %session.last_profile,
+                            error = format!("{error:#}"),
+                            "could not read parked Codex login"
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id,
+                            profile = %session.last_profile,
+                            error = format!("{error:#}"),
+                            "parked Codex login read task failed"
+                        );
+                        return;
+                    }
+                }
+            }
+            _ => {
+                let staged_path = format!(
+                    "{}/{}",
+                    launch.harness_home.to_string_lossy().trim_end_matches('/'),
+                    HarnessKind::Codex.credential_file_name()
+                );
+                let command = targets::locator_command(
+                    targets::SshTrafficClass::Control,
+                    backend,
+                    vec![
+                        "sh".into(),
+                        "-c".into(),
+                        "if [ ! -L \"$1\" ] && [ -f \"$1\" ]; then cat -- \"$1\"; fi".into(),
+                        "mj-pull-codex-login".into(),
+                        staged_path,
+                    ],
+                )
+                .purpose("read parked Codex login");
+                match executor.execute(&command) {
+                    Ok(output) if output.status == 0 => {
+                        if output.stdout.is_empty() {
+                            return;
+                        }
+                        output.stdout
+                    }
+                    Ok(output) => {
+                        tracing::warn!(
+                            session_id,
+                            profile = %session.last_profile,
+                            status = output.status,
+                            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                            "could not read parked Codex login from target"
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id,
+                            profile = %session.last_profile,
+                            error = format!("{error:#}"),
+                            "could not execute parked Codex login read"
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        match mj_core::credentials::install_credentials_if_newer(
+            HarnessKind::Codex,
+            &canonical_marker,
+            &bytes,
+        )
+        .await
+        {
+            Ok(install) if install.installed => {
+                tracing::info!(
+                    session_id,
+                    profile = %session.last_profile,
+                    "pulled refreshed Codex login from parked sub-agent"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    profile = %session.last_profile,
+                    error = format!("{error:#}"),
+                    "could not install parked Codex login into canonical store"
+                );
+            }
+        }
     }
 
     /// Accept a durable wake, launch the worker, and observe native readiness.
@@ -1321,5 +1487,171 @@ mod tests {
             message.contains("Cannot fork"),
             "the original error stays: {message}"
         );
+    }
+
+    // Hard-won: #1633: parking a Codex sub-agent discarded a refreshed login in its staged home before the next unpark overwrote it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parking_codex_subagent_pulls_refreshed_login_keyed_by_staged_profile() {
+        if !isolated("parking_codex_subagent_pulls_refreshed_login_keyed_by_staged_profile") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let canonical_a = root.path().join("canonical-a");
+        let canonical_b = root.path().join("canonical-b");
+        std::fs::create_dir_all(&canonical_a).unwrap();
+        std::fs::create_dir_all(&canonical_b).unwrap();
+
+        let stale_a = serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "stale-access-a",
+                "refresh_token": "stale-refresh-a",
+                "id_token": "id-a",
+                "account_id": "acct-a"
+            },
+            "last_refresh": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let refreshed_a = serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "fresh-access-a",
+                "refresh_token": "fresh-refresh-a",
+                "id_token": "id-a",
+                "account_id": "acct-a"
+            },
+            "last_refresh": "2026-02-01T00:00:00Z"
+        }))
+        .unwrap();
+        let stale_b = serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "stale-access-b",
+                "refresh_token": "stale-refresh-b",
+                "id_token": "id-b",
+                "account_id": "acct-b"
+            },
+            "last_refresh": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        std::fs::write(canonical_a.join("auth.json"), &stale_a).unwrap();
+        std::fs::write(canonical_b.join("auth.json"), &stale_b).unwrap();
+
+        let mut config = crate::controller::test_support::resume_compatibility_config();
+        let profile_a = mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            canonical_a.clone(),
+        );
+        let profile_b = mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            canonical_b.clone(),
+        );
+        config.profiles.insert("codex-a".into(), profile_a);
+        config.profiles.insert("codex-b".into(), profile_b);
+
+        let mut parent = checkpoint_test_session("parent-1");
+        parent.last_profile = "codex-a".into();
+        parent.project_directory = Some(root.path().to_path_buf());
+        parent.target_template_id = "local-bare".into();
+        parent.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: root.path().join("parent-1"),
+        }));
+        crate::database::save_session(&parent).unwrap();
+        let mut child = checkpoint_test_session(LATCH_RELAY_SESSION);
+        child.harness_kind = mj_core::config::HarnessKind::Codex;
+        child.last_profile = "codex-a".into();
+        child.project_directory = Some(root.path().to_path_buf());
+        child.target_template_id = "local-bare".into();
+        child.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: root.path().join(LATCH_RELAY_SESSION),
+        }));
+        crate::database::save_subagent_session(
+            &child,
+            &mj_core::subagent::SubagentRecord {
+                kind: mj_core::subagent::SubagentKind::Worker,
+                reviewer_launch: None,
+                child_session_id: LATCH_RELAY_SESSION.into(),
+                parent_session_id: "parent-1".into(),
+                task_name: "refresh test".into(),
+                profile_id: "codex-b".into(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                initial_prompt: "refresh test".into(),
+                request_key: "request-refresh".into(),
+                created_at: "2026-09-25T00:00:00Z".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: true,
+            },
+        )
+        .unwrap();
+
+        let controller = Controller {
+            config,
+            state: crate::database::load_state().unwrap(),
+        };
+        let (backend, _) = controller.worker_placement(LATCH_RELAY_SESSION).unwrap();
+        let launch = controller
+            .current_worker_launch_config(LATCH_RELAY_SESSION, &backend)
+            .unwrap();
+        std::fs::create_dir_all(&launch.harness_home).unwrap();
+        std::fs::write(launch.harness_home.join("auth.json"), &refreshed_a).unwrap();
+
+        let crate::session_manager::SessionManagerChannels {
+            session_cpu: _,
+            targets,
+            control,
+            updates: _updates,
+            shutdown,
+        } = crate::session_manager::spawn_session_manager().unwrap();
+        targets
+            .send(vec![latch_relay_target(
+                root.path(),
+                None,
+                ReleaseSupport::Supported,
+                false,
+            )])
+            .unwrap();
+        control
+            .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        let refresher = mj_core::runtime::spawn(async move {
+            while crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap()
+                != Some(SessionState::Parked)
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            targets.send_replace(Vec::new());
+            targets
+        });
+
+        let executor = RacingStop::default();
+        let outcome = controller
+            .park_subagent_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                &executor,
+                &control,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, ParkOutcome::Parked);
+        assert_eq!(
+            std::fs::read(canonical_a.join("auth.json")).unwrap(),
+            refreshed_a,
+            "refreshed login must be pulled into the staged profile's canonical store"
+        );
+        assert_eq!(
+            std::fs::read(canonical_b.join("auth.json")).unwrap(),
+            stale_b,
+            "unrelated profile's canonical store must not be touched"
+        );
+        let _targets = refresher.await.unwrap();
+        shutdown.shutdown().await.unwrap();
     }
 }

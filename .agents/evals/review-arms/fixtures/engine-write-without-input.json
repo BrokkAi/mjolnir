@@ -1,0 +1,26 @@
+{
+  "toolCallId": "toolu_000000000000000000000000",
+  "title": "Write .rql-engine-cccccccccccccccccccccccccccccccc/answer.json",
+  "name": "Write",
+  "kind": "edit",
+  "status": "failed",
+  "content": [
+    {
+      "type": "content",
+      "content": {
+        "type": "text",
+        "text": "Claude stopped this tool call before it ran."
+      }
+    }
+  ],
+  "locations": [
+    {
+      "path": "/workspace/cccccccccccccccccccccccccccccccc/engine-trees/.rql-engine-cccccccccccccccccccccccccccccccc/answer.json"
+    }
+  ],
+  "_meta": {
+    "claudeCode": {
+      "toolName": "Write"
+    }
+  }
+}

@@ -139,6 +139,7 @@ impl RuntimeState {
             startup_prompts: Mutex::new(BTreeMap::new()),
             startup_enqueue: tokio::sync::Mutex::new(()),
             startup_delivery_gates: Mutex::new(BTreeMap::new()),
+            interrupt_admissions: Mutex::new(BTreeMap::new()),
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(inactivity),
             inactivity_changed: tokio::sync::Notify::new(),

@@ -123,11 +123,72 @@ fn turn_interrupt_command(
             || matches!(command, Some(RelayCommand::CancelTurnFor { .. })),
         "this worker cannot target the current autonomous goal turn; open the session to use its goal controls"
     );
-    Ok(command.cloned().unwrap_or(RelayCommand::CancelTurn))
+    if let Some(command) = command {
+        return Ok(command.clone());
+    }
+    // When a turn-controls-capable worker has an active prompt but publishes no
+    // interrupt command (e.g. cancellation is already pending or a checkpoint
+    // barrier is active), never fall back to raw CancelTurn: it could outlive
+    // the active prompt and cancel the next queued prompt.
+    if let Some(live) = live
+        && live.active_prompt.is_some()
+        && let Some(controls) = live.turn_controls.as_ref()
+    {
+        bail!(
+            "{}",
+            controls
+                .message
+                .as_deref()
+                .unwrap_or("this turn cannot be interrupted right now")
+        );
+    }
+    Ok(RelayCommand::CancelTurn)
+}
+
+fn subagent_waiting_for_background(
+    runtime: &RuntimeProjection,
+    committed: Option<&mj_controller::database::CommittedState>,
+    id: &str,
+    live: Option<&mj_core::relay::RelayOperationalState>,
+) -> bool {
+    let Some(subagent) = runtime.subagents.get(id) else {
+        return false;
+    };
+    if !subagent.handback_tool {
+        return false;
+    }
+    let Some(committed) = committed else {
+        return false;
+    };
+    let Some(live) = live else {
+        return false;
+    };
+    let empty = mj_core::subagent::SubagentReport::default();
+    let report = committed.subagent_reports.get(id).unwrap_or(&empty);
+    let turn = committed.turns.get(id);
+    let active = turn.and_then(|turn| turn.state.1.as_ref());
+    let last = turn.and_then(|turn| turn.state.2.as_ref());
+    let in_flight = active
+        .into_iter()
+        .map(|turn| turn.command_id.as_str())
+        .collect::<Vec<_>>();
+    let liveness = mj_core::subagent::Liveness::Known(live.work_liveness.clone());
+    matches!(
+        mj_core::subagent::report_state(
+            subagent.handback_tool,
+            report,
+            last,
+            &liveness,
+            &in_flight,
+            mj_core::clock::epoch_millis(),
+        ),
+        mj_core::subagent::ReportState::Held { .. }
+    )
 }
 
 fn own_verdict(
     runtime: &RuntimeProjection,
+    committed: Option<&mj_controller::database::CommittedState>,
     id: &str,
     record: &SessionRecord,
     lifecycle: Option<RuntimeLifecycleKind>,
@@ -223,9 +284,9 @@ fn own_verdict(
                     && activity.as_ref().is_some_and(|a| a.is_idle())),
         working: state == SessionState::Running
             && view.is_some_and(|v| v.connected)
-            && live.is_some_and(|live| {
+            && (live.is_some_and(|live| {
                 mj_client::usage_format::SessionActivity::of(live).is_working(None, form)
-            }),
+            }) || subagent_waiting_for_background(runtime, committed, id, live)),
         active_work,
         unfinished: unfinished_turn || active_work,
         interrupt: can_interrupt && running && turn_targetable,
@@ -272,7 +333,12 @@ fn own_verdict(
 
 /// Revisit only changed inputs. A child can affect every ancestor's Interrupt
 /// All offer, and a reparent can affect both its old and new family.
-pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProjection) {
+pub(crate) fn project(
+    runtime: &mut RuntimeProjection,
+    previous: &RuntimeProjection,
+    committed: Option<&mj_controller::database::CommittedState>,
+    previous_committed: Option<&mj_controller::database::CommittedState>,
+) {
     let lifecycles: BTreeMap<_, _> = runtime
         .metadata
         .lifecycles
@@ -343,6 +409,20 @@ pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProject
     {
         changed.extend(runtime.records.keys().map(String::as_str));
     }
+    match (previous_committed, committed) {
+        (Some(prev), Some(curr)) => {
+            changed.extend(
+                prev.subagent_reports
+                    .changes(&curr.subagent_reports)
+                    .map(|(id, _)| id.as_str()),
+            );
+            changed.extend(prev.turns.changes(&curr.turns).map(|(id, _)| id.as_str()));
+        }
+        (None, Some(_)) | (Some(_), None) => {
+            changed.extend(runtime.subagents.keys().map(String::as_str));
+        }
+        (None, None) => {}
+    }
 
     let mut verdicts = previous.verdicts.clone();
     if changed.is_empty() {
@@ -354,6 +434,7 @@ pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProject
         let verdict = if let Some(record) = runtime.records.get(id) {
             Some(own_verdict(
                 runtime,
+                committed,
                 id,
                 record,
                 lifecycles.get(id).copied(),
@@ -482,7 +563,186 @@ pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProject
     runtime.verdicts = verdicts;
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum InterruptTargetKey {
+    ActivePrompt {
+        prompt_id: String,
+    },
+    HarnessTurn {
+        started_at_ms: i64,
+    },
+    DismissQuestion {
+        command: RelayCommand,
+    },
+    Snapshot {
+        projection_ordinal: u64,
+        projection_digest: String,
+        command: RelayCommand,
+    },
+}
+
+impl InterruptTargetKey {
+    fn from_projection(
+        view: Option<&RuntimeSessionView>,
+        live: Option<&mj_core::relay::RelayOperationalState>,
+        command: &RelayCommand,
+    ) -> Self {
+        if matches!(command, RelayCommand::DismissQuestion { .. }) {
+            return Self::DismissQuestion {
+                command: command.clone(),
+            };
+        }
+        if let Some(prompt_id) = live
+            .and_then(|live| live.active_prompt.as_ref())
+            .map(|prompt| prompt.command_id.clone())
+        {
+            return Self::ActivePrompt { prompt_id };
+        }
+        if let Some(started_at_ms) = live
+            .and_then(|live| live.harness_turn.as_ref())
+            .map(|turn| turn.started_at_ms)
+        {
+            return Self::HarnessTurn { started_at_ms };
+        }
+        Self::Snapshot {
+            projection_ordinal: view.map_or(0, |view| view.projection_ordinal),
+            projection_digest: view
+                .map(|view| view.projection_digest.clone())
+                .unwrap_or_default(),
+            command: command.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct InterruptAdmissionEntry {
+    key: InterruptTargetKey,
+    state: InterruptAdmissionState,
+}
+
+#[derive(Debug, Clone)]
+enum InterruptAdmissionState {
+    InFlight(tokio::sync::watch::Receiver<Option<std::result::Result<(), String>>>),
+    Accepted,
+}
+
+enum InterruptAdmission<'a> {
+    Leader(Box<InterruptAdmissionGuard<'a>>),
+    WaitInFlight(tokio::sync::watch::Receiver<Option<std::result::Result<(), String>>>),
+    AlreadyAccepted,
+}
+
+struct InterruptAdmissionGuard<'a> {
+    admissions: &'a Mutex<BTreeMap<String, Vec<InterruptAdmissionEntry>>>,
+    session_id: String,
+    key: InterruptTargetKey,
+    result_tx: tokio::sync::watch::Sender<Option<std::result::Result<(), String>>>,
+    settled: bool,
+}
+
+impl InterruptAdmissionGuard<'_> {
+    fn finish(mut self, result: Result<()>) -> Result<()> {
+        self.settled = true;
+        {
+            let mut guard = self
+                .admissions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(entries) = guard.get_mut(&self.session_id) {
+                if result.is_ok() {
+                    if let Some(entry) = entries.iter_mut().find(|entry| {
+                        entry.key == self.key
+                            && matches!(entry.state, InterruptAdmissionState::InFlight(_))
+                    }) {
+                        entry.state = InterruptAdmissionState::Accepted;
+                    }
+                } else {
+                    entries.retain(|entry| {
+                        !(entry.key == self.key
+                            && matches!(entry.state, InterruptAdmissionState::InFlight(_)))
+                    });
+                    if entries.is_empty() {
+                        guard.remove(&self.session_id);
+                    }
+                }
+            }
+        }
+        let shared = match &result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(format!("{error:#}")),
+        };
+        let _ = self.result_tx.send(Some(shared));
+        result
+    }
+}
+
+impl Drop for InterruptAdmissionGuard<'_> {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        {
+            let mut guard = self
+                .admissions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(entries) = guard.get_mut(&self.session_id) {
+                entries.retain(|entry| {
+                    !(entry.key == self.key
+                        && matches!(entry.state, InterruptAdmissionState::InFlight(_)))
+                });
+                if entries.is_empty() {
+                    guard.remove(&self.session_id);
+                }
+            }
+        }
+        let _ = self
+            .result_tx
+            .send(Some(Err("interrupt submission was cancelled".into())));
+    }
+}
+
 impl RuntimeState {
+    fn admit_turn_interrupt(
+        &self,
+        runtime: &RuntimeProjection,
+        id: &str,
+        key: InterruptTargetKey,
+    ) -> InterruptAdmission<'_> {
+        let mut guard = self
+            .interrupt_admissions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.retain(|session_id, entries| {
+            entries.retain(|entry| {
+                matches!(entry.state, InterruptAdmissionState::InFlight(_))
+                    || runtime.records.contains_key(session_id)
+            });
+            !entries.is_empty()
+        });
+        let entries = guard.entry(id.to_owned()).or_default();
+        if let Some(existing) = entries.iter().find(|entry| entry.key == key) {
+            return match &existing.state {
+                InterruptAdmissionState::InFlight(result) => {
+                    InterruptAdmission::WaitInFlight(result.clone())
+                }
+                InterruptAdmissionState::Accepted => InterruptAdmission::AlreadyAccepted,
+            };
+        }
+        let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+        entries.push(InterruptAdmissionEntry {
+            key: key.clone(),
+            state: InterruptAdmissionState::InFlight(result_rx),
+        });
+        InterruptAdmission::Leader(Box::new(InterruptAdmissionGuard {
+            admissions: &self.interrupt_admissions,
+            session_id: id.to_owned(),
+            key,
+            result_tx,
+            settled: false,
+        }))
+    }
+
     pub(crate) async fn interrupt_turn(&self, id: &str) -> Result<()> {
         let runtime = self.runtime_publication()?;
         ensure!(
@@ -517,12 +777,30 @@ impl RuntimeState {
         } else {
             turn_interrupt_command(live)?
         };
-        self.session_manager
-            .session(id)
-            .await?
-            .submit(new_command_id("interrupt-turn")?, command)
-            .await?;
-        Ok(())
+        let key = InterruptTargetKey::from_projection(view, live, &command);
+        match self.admit_turn_interrupt(runtime, id, key) {
+            InterruptAdmission::AlreadyAccepted => Ok(()),
+            InterruptAdmission::WaitInFlight(mut rx) => match rx.wait_for(Option::is_some).await {
+                Ok(outcome) => match outcome.as_ref() {
+                    Some(Ok(())) => Ok(()),
+                    Some(Err(message)) => Err(anyhow::anyhow!("{message}")),
+                    None => unreachable!("wait_for(Option::is_some) only returns Some"),
+                },
+                Err(_) => Err(anyhow::anyhow!("interrupt submission was cancelled")),
+            },
+            InterruptAdmission::Leader(admission) => {
+                let result = async {
+                    self.session_manager
+                        .session(id)
+                        .await?
+                        .submit(new_command_id("interrupt-turn")?, command)
+                        .await?;
+                    Ok(())
+                }
+                .await;
+                admission.finish(result)
+            }
+        }
     }
 
     pub(crate) async fn interrupt_all(&self, root: &str) -> Result<InterruptAllResult> {
@@ -616,7 +894,7 @@ mod tests {
             let child = native(id, true, state);
             capture.native_agents.insert(child.agent.view_id(), child);
         }
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 1);
 
         let before = capture.clone();
@@ -624,14 +902,14 @@ mod tests {
         let retained = native("active", true, NativeAgentState::Disconnected);
         let id = retained.agent.view_id();
         capture.native_agents.insert(id.clone(), retained);
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 0);
 
         let before = capture.clone();
         let active = capture.native_agents.get_mut(&id).unwrap();
         active.agent.state = NativeAgentState::Running;
         active.agent.availability = mj_core::native_agent::NativeAgentAvailability::Available;
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 1);
     }
 
@@ -654,7 +932,7 @@ mod tests {
                 .native_agents
                 .insert(summary.agent.view_id(), summary);
         }
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
         let scoped = capture.for_subagent_parents(&Default::default());
         assert_eq!(scoped.verdicts["parent"], capture.verdicts["parent"]);
         assert!(capture.verdicts["parent"].interrupt_all);
@@ -674,7 +952,7 @@ mod tests {
         capture
             .native_agents
             .insert(finished.agent.view_id(), finished);
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert!(!capture.verdicts["parent"].interrupt_all);
 
         let before = capture.clone();
@@ -687,7 +965,7 @@ mod tests {
         let mut view = RuntimeSessionView::from_managed("parent".into(), Default::default());
         view.operational = Some(live.into());
         capture.sessions.insert("parent".into(), view);
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert!(capture.verdicts["parent"].active_work);
         assert!(capture.verdicts["parent"].unfinished);
         assert!(!capture.verdicts["parent"].interrupt_all);
@@ -699,7 +977,7 @@ mod tests {
             let before = capture.clone();
             let view = capture.sessions.get_mut("parent").unwrap();
             view.operational.as_mut().unwrap().activity = Some(activity);
-            project(&mut capture, &before);
+            project(&mut capture, &before, None, None);
             assert!(!capture.verdicts["parent"].active_work);
             assert!(!capture.verdicts["parent"].unfinished);
         }
@@ -761,7 +1039,7 @@ mod tests {
         let mut view = RuntimeSessionView::from_managed("parent".into(), Default::default());
         view.operational = Some(live.into());
         capture.sessions.insert("parent".into(), view);
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
         assert!(!capture.verdicts["parent"].interrupt);
         assert!(capture.verdicts["parent"].unfinished);
         assert!(!capture.verdicts["parent"].interrupt_all);
@@ -774,7 +1052,7 @@ mod tests {
 
         let before = capture.clone();
         insert_managed_child(&mut capture);
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert!(capture.verdicts["parent"].interrupt_all);
         assert_eq!(capture.verdicts["parent"].interrupt_count, 1);
         let (outcome, commands) = tokio::join!(
@@ -798,7 +1076,7 @@ mod tests {
             interrupt: Some(exact_interrupt.clone()),
             message: None,
         });
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert!(capture.verdicts["parent"].interrupt);
         assert_eq!(capture.verdicts["parent"].interrupt_count, 2);
         let (outcome, commands) = tokio::join!(
@@ -821,7 +1099,7 @@ mod tests {
         insert_managed_child(&mut capture);
         let native = native("native", true, NativeAgentState::Running);
         capture.native_agents.insert(native.agent.view_id(), native);
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
         assert_eq!(capture.verdicts["parent"].interrupt_count, 3);
 
         let before = capture.clone();
@@ -829,7 +1107,7 @@ mod tests {
             super::super::tests::retained_startup_test_move(&capture.records["parent"]);
         operation.phase = mj_core::state::MovePhase::Failed;
         capture.moves.insert("parent".into(), operation);
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         let parent = capture.verdicts["parent"];
         assert!(!parent.interrupt_member);
         assert!(parent.unfinished);
@@ -862,7 +1140,7 @@ mod tests {
             live.harness_turn = None;
             live.active_agent_terminals.clear();
             live.activity = Some(activity);
-            project(&mut capture, &before);
+            project(&mut capture, &before, None, None);
             assert!(!capture.verdicts["child"].unfinished);
             // Only the native child still counts toward lifecycle warnings.
             assert_eq!(capture.verdicts["parent"].unfinished_children, 1);
@@ -881,9 +1159,529 @@ mod tests {
                     command: "sleep 10".into(),
                     started_at_ms: 1,
                 });
-            project(&mut capture, &before);
+            project(&mut capture, &before, None, None);
             assert!(capture.verdicts["child"].active_work);
             assert_eq!(capture.verdicts["parent"].unfinished_children, 2);
         }
+    }
+
+    fn insert_active_prompt_session(
+        capture: &mut RuntimeProjection,
+        id: &str,
+        prompt_id: &str,
+        turn_controls: mj_core::relay::TurnControls,
+    ) {
+        capture.records.insert(
+            id.into(),
+            super::super::tests::runtime_test_session(id, "default", SessionState::Running),
+        );
+        let mut live = mj_core::relay::RelaySnapshot::new(id.into()).operational_state();
+        live.active_prompt = Some(mj_core::relay::ActiveRelayPrompt {
+            command_id: prompt_id.into(),
+            created_at_ms: 1,
+            started_at_ms: 1,
+        });
+        live.turn_controls = Some(turn_controls);
+        let mut view = RuntimeSessionView::from_managed(id.into(), Default::default());
+        view.operational = Some(live.into());
+        capture.sessions.insert(id.into(), view);
+    }
+
+    fn insert_subagent_link(capture: &mut RuntimeProjection, parent: &str, child: &str) {
+        capture.subagents.insert(
+            child.into(),
+            mj_core::subagent::SubagentMetadata {
+                kind: SubagentKind::Worker,
+                child_session_id: child.into(),
+                parent_session_id: parent.into(),
+                task_name: String::new(),
+                profile_id: "default".into(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                request_key: String::new(),
+                created_at: String::new(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            },
+        );
+    }
+
+    // Hard-won: #1624: Pending turn_controls with interrupt: None fell back to raw CancelTurn.
+    #[tokio::test]
+    async fn pending_cancellation_with_active_prompt_never_falls_back_to_raw_cancel() {
+        let mut manager = super::super::tests::TestRemoteManager::for_session("child").await;
+        let runtime = super::super::tests::test_runtime_state_with_manager(&manager);
+        let mut capture = RuntimeProjection::default();
+        insert_active_prompt_session(
+            &mut capture,
+            "child",
+            "p1",
+            mj_core::relay::TurnControls {
+                status: mj_core::relay::TurnControlStatus::Pending,
+                primary: None,
+                interrupt: None,
+                message: Some("Interrupting…".into()),
+            },
+        );
+        project(&mut capture, &Default::default(), None, None);
+        assert!(!capture.verdicts["child"].interrupt);
+        assert!(!capture.verdicts["child"].interrupt_member);
+        assert!(!capture.verdicts["child"].interrupt_all);
+        assert_eq!(capture.verdicts["child"].interrupt_count, 0);
+
+        let (outcome, commands) = tokio::join!(
+            runtime.submit_turn_interrupt(&capture, "child", false),
+            manager.answer_submissions(Vec::new()),
+        );
+        assert!(outcome.is_err());
+        assert!(commands.is_empty());
+
+        // Steering also sets status: Pending, but publishes an explicit
+        // CancelTurnFor interrupt command that must remain targetable.
+        let before = capture.clone();
+        let exact = RelayCommand::CancelTurnFor {
+            active_prompt_id: "p1".into(),
+        };
+        capture
+            .sessions
+            .get_mut("child")
+            .unwrap()
+            .operational
+            .as_mut()
+            .unwrap()
+            .turn_controls = Some(mj_core::relay::TurnControls {
+            status: mj_core::relay::TurnControlStatus::Pending,
+            primary: None,
+            interrupt: Some(exact.clone()),
+            message: Some("Steering…".into()),
+        });
+        project(&mut capture, &before, None, None);
+        assert!(capture.verdicts["child"].interrupt);
+        assert!(capture.verdicts["child"].interrupt_member);
+        let (outcome, commands) = tokio::join!(
+            runtime.submit_turn_interrupt(&capture, "child", false),
+            manager.answer_submissions(Vec::new()),
+        );
+        outcome.unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].2, exact);
+    }
+
+    // Hard-won: #1624: overlapping Interrupt All from different roots sent duplicate cancels to a shared child.
+    #[tokio::test]
+    async fn overlapping_interrupt_all_from_different_roots_deduplicates_shared_child() {
+        let mut manager = super::super::tests::TestRemoteManager::for_sessions(&[
+            "grandparent",
+            "parent",
+            "child",
+        ])
+        .await;
+        let runtime = super::super::tests::test_runtime_state_with_manager(&manager);
+        let mut capture = RuntimeProjection::default();
+        for id in ["grandparent", "parent"] {
+            capture.records.insert(
+                id.into(),
+                super::super::tests::runtime_test_session(id, "default", SessionState::Running),
+            );
+            let live = mj_core::relay::RelaySnapshot::new(id.into()).operational_state();
+            let mut view = RuntimeSessionView::from_managed(id.into(), Default::default());
+            view.operational = Some(live.into());
+            capture.sessions.insert(id.into(), view);
+        }
+        let cancel_p1 = RelayCommand::CancelTurnFor {
+            active_prompt_id: "p1".into(),
+        };
+        insert_active_prompt_session(
+            &mut capture,
+            "child",
+            "p1",
+            mj_core::relay::TurnControls {
+                status: mj_core::relay::TurnControlStatus::Ready,
+                primary: None,
+                interrupt: Some(cancel_p1.clone()),
+                message: None,
+            },
+        );
+        insert_subagent_link(&mut capture, "grandparent", "parent");
+        insert_subagent_link(&mut capture, "parent", "child");
+        project(&mut capture, &Default::default(), None, None);
+        assert_eq!(capture.verdicts["grandparent"].interrupt_count, 1);
+        assert_eq!(capture.verdicts["parent"].interrupt_count, 1);
+
+        // Concurrent in-flight overlap from two different roots.
+        let (gp_result, parent_result, commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "grandparent"),
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        let gp_result = gp_result.unwrap();
+        let parent_result = parent_result.unwrap();
+        assert_eq!(gp_result.requested, 1);
+        assert_eq!(parent_result.requested, 1);
+        assert!(gp_result.failures.is_empty());
+        assert!(parent_result.failures.is_empty());
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "child");
+        assert_eq!(commands[0].2, cancel_p1);
+
+        // Back-to-back call against the same stale pre-update projection is also deduplicated.
+        let (repeat_result, repeat_commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        let repeat_result = repeat_result.unwrap();
+        assert_eq!(repeat_result.requested, 1);
+        assert!(repeat_result.failures.is_empty());
+        assert!(repeat_commands.is_empty());
+
+        // Once the child advances to a new turn (p2), a fresh Interrupt All is admitted.
+        let before = capture.clone();
+        let cancel_p2 = RelayCommand::CancelTurnFor {
+            active_prompt_id: "p2".into(),
+        };
+        let child_live = capture
+            .sessions
+            .get_mut("child")
+            .unwrap()
+            .operational
+            .as_mut()
+            .unwrap();
+        child_live.active_prompt = Some(mj_core::relay::ActiveRelayPrompt {
+            command_id: "p2".into(),
+            created_at_ms: 2,
+            started_at_ms: 2,
+        });
+        child_live.turn_controls = Some(mj_core::relay::TurnControls {
+            status: mj_core::relay::TurnControlStatus::Ready,
+            primary: None,
+            interrupt: Some(cancel_p2.clone()),
+            message: None,
+        });
+        project(&mut capture, &before, None, None);
+        let (p2_result, p2_commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        let p2_result = p2_result.unwrap();
+        assert_eq!(p2_result.requested, 1);
+        assert!(p2_result.failures.is_empty());
+        assert_eq!(p2_commands.len(), 1);
+        assert_eq!(p2_commands[0].2, cancel_p2);
+    }
+
+    // Hard-won: #1624: overlapping Interrupt All during p1 cancellation must leave queued p2 running.
+    #[tokio::test]
+    async fn overlapping_interrupt_all_leaves_child_queued_prompt_running() {
+        let mut manager = super::super::tests::TestRemoteManager::for_sessions(&[
+            "grandparent",
+            "parent",
+            "child",
+        ])
+        .await;
+        let runtime = super::super::tests::test_runtime_state_with_manager(&manager);
+        let mut capture = RuntimeProjection::default();
+        for id in ["grandparent", "parent"] {
+            capture.records.insert(
+                id.into(),
+                super::super::tests::runtime_test_session(id, "default", SessionState::Running),
+            );
+            let live = mj_core::relay::RelaySnapshot::new(id.into()).operational_state();
+            let mut view = RuntimeSessionView::from_managed(id.into(), Default::default());
+            view.operational = Some(live.into());
+            capture.sessions.insert(id.into(), view);
+        }
+        let cancel_p1 = RelayCommand::CancelTurnFor {
+            active_prompt_id: "p1".into(),
+        };
+        insert_active_prompt_session(
+            &mut capture,
+            "child",
+            "p1",
+            mj_core::relay::TurnControls {
+                status: mj_core::relay::TurnControlStatus::Ready,
+                primary: None,
+                interrupt: Some(cancel_p1.clone()),
+                message: None,
+            },
+        );
+        insert_subagent_link(&mut capture, "grandparent", "parent");
+        insert_subagent_link(&mut capture, "parent", "child");
+        project(&mut capture, &Default::default(), None, None);
+
+        // First Interrupt All from grandparent cancels p1 with CancelTurnFor("p1").
+        let (gp_result, commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "grandparent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        assert!(gp_result.unwrap().failures.is_empty());
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].2, cancel_p1);
+
+        // Worker marks p1 cancellation pending (interrupt: None) before p1 finishes
+        // and queued p2 starts. A second Interrupt All from parent must NOT emit raw CancelTurn.
+        let before = capture.clone();
+        capture
+            .sessions
+            .get_mut("child")
+            .unwrap()
+            .operational
+            .as_mut()
+            .unwrap()
+            .turn_controls = Some(mj_core::relay::TurnControls {
+            status: mj_core::relay::TurnControlStatus::Pending,
+            primary: None,
+            interrupt: None,
+            message: Some("Interrupting…".into()),
+        });
+        project(&mut capture, &before, None, None);
+        let (parent_result, second_commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        let parent_result = parent_result.unwrap();
+        assert_eq!(parent_result.requested, 0);
+        assert!(parent_result.failures.is_empty());
+        assert!(second_commands.is_empty());
+    }
+
+    // Protects overlapping callers from receiving a false success when the
+    // leading in-flight interrupt submission fails.
+    #[tokio::test]
+    async fn overlapping_interrupt_all_propagates_in_flight_failure_to_duplicate_callers() {
+        let mut manager = super::super::tests::TestRemoteManager::for_sessions(&[
+            "grandparent",
+            "parent",
+            "child",
+        ])
+        .await;
+        let runtime = super::super::tests::test_runtime_state_with_manager(&manager);
+        let mut capture = RuntimeProjection::default();
+        for id in ["grandparent", "parent"] {
+            capture.records.insert(
+                id.into(),
+                super::super::tests::runtime_test_session(id, "default", SessionState::Running),
+            );
+            let live = mj_core::relay::RelaySnapshot::new(id.into()).operational_state();
+            let mut view = RuntimeSessionView::from_managed(id.into(), Default::default());
+            view.operational = Some(live.into());
+            capture.sessions.insert(id.into(), view);
+        }
+        let cancel_p1 = RelayCommand::CancelTurnFor {
+            active_prompt_id: "p1".into(),
+        };
+        insert_active_prompt_session(
+            &mut capture,
+            "child",
+            "p1",
+            mj_core::relay::TurnControls {
+                status: mj_core::relay::TurnControlStatus::Ready,
+                primary: None,
+                interrupt: Some(cancel_p1.clone()),
+                message: None,
+            },
+        );
+        insert_subagent_link(&mut capture, "grandparent", "parent");
+        insert_subagent_link(&mut capture, "parent", "child");
+        project(&mut capture, &Default::default(), None, None);
+
+        let (gp_result, parent_result, commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "grandparent"),
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(vec![mj_client::session::SubmitFailure::from(
+                "worker disconnected".to_owned(),
+            )]),
+        );
+        let gp_result = gp_result.unwrap();
+        let parent_result = parent_result.unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(gp_result.failures.len(), 1);
+        assert!(gp_result.failures[0].1.contains("worker disconnected"));
+        assert_eq!(parent_result.failures.len(), 1);
+        assert!(parent_result.failures[0].1.contains("worker disconnected"));
+
+        // After a failed attempt, a retry submits fresh and succeeds.
+        let (retry_result, retry_commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        assert!(retry_result.unwrap().failures.is_empty());
+        assert_eq!(retry_commands.len(), 1);
+        assert_eq!(retry_commands[0].2, cancel_p1);
+
+        // A delayed interrupt captured for an earlier turn (p1) must not evict
+        // a newer turn's (p2) admission and let p2 be cancelled twice.
+        let stale_p1_capture = capture.clone();
+        let before = capture.clone();
+        let cancel_p2 = RelayCommand::CancelTurnFor {
+            active_prompt_id: "p2".into(),
+        };
+        let child_live = capture
+            .sessions
+            .get_mut("child")
+            .unwrap()
+            .operational
+            .as_mut()
+            .unwrap();
+        child_live.active_prompt = Some(mj_core::relay::ActiveRelayPrompt {
+            command_id: "p2".into(),
+            created_at_ms: 2,
+            started_at_ms: 2,
+        });
+        child_live.turn_controls = Some(mj_core::relay::TurnControls {
+            status: mj_core::relay::TurnControlStatus::Ready,
+            primary: None,
+            interrupt: Some(cancel_p2.clone()),
+            message: None,
+        });
+        project(&mut capture, &before, None, None);
+        let (p2_first, p2_first_commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        assert!(p2_first.unwrap().failures.is_empty());
+        assert_eq!(p2_first_commands.len(), 1);
+        // Delayed p1 snapshot is already admitted and must not disturb p2.
+        let (delayed_p1, delayed_commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&stale_p1_capture, "grandparent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        assert!(delayed_p1.unwrap().failures.is_empty());
+        assert!(delayed_commands.is_empty());
+        // Second p2 call remains deduplicated.
+        let (p2_second, p2_second_commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "grandparent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        assert!(p2_second.unwrap().failures.is_empty());
+        assert!(p2_second_commands.is_empty());
+    }
+
+    #[test]
+    fn held_subagent_waiting_for_background_processes_counts_as_working() {
+        let mut capture = RuntimeProjection::default();
+        insert_running_session(&mut capture, "parent");
+        {
+            let view = capture.sessions.get_mut("parent").unwrap();
+            view.connected = true;
+            let live = view.operational.as_mut().unwrap();
+            live.harness_turn = None;
+            live.work_liveness = Some(mj_core::work_facts::WorkLiveness {
+                completed_ordinal: 12,
+                alive: 1,
+                checked_at_ms: 100,
+            });
+        }
+        insert_managed_child(&mut capture);
+        capture.subagents.get_mut("child").unwrap().handback_tool = true;
+        {
+            let view = capture.sessions.get_mut("child").unwrap();
+            view.connected = true;
+            let live = view.operational.as_mut().unwrap();
+            live.harness_turn = None;
+            live.work_liveness = Some(mj_core::work_facts::WorkLiveness {
+                completed_ordinal: 12,
+                alive: 1,
+                checked_at_ms: 100,
+            });
+        }
+
+        let reminder_id = mj_core::subagent::handback_reminder_command_id(7);
+        let turn = mj_core::state::MaterializedTurnOutcome {
+            work_facts: None,
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            command_id: reminder_id.clone(),
+            accepted_ordinal: Some(11),
+            turn_start_position: Some(11),
+            completed_ordinal: 12,
+            completed_at_ms: mj_core::clock::epoch_millis(),
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+        };
+        let mut committed = mj_controller::database::CommittedState {
+            sequence: 1,
+            state: Default::default(),
+            moves: Default::default(),
+            native_agents: Default::default(),
+            startup_groups: Default::default(),
+            subagent_reports: Default::default(),
+            turns: Default::default(),
+            wait_revisions: Default::default(),
+        };
+        committed.turns.insert_shared(
+            "child".into(),
+            mj_controller::database::CommittedTurn {
+                state: (
+                    mj_core::state::MaterializedExecutionState::Idle,
+                    None,
+                    Some(turn),
+                ),
+                pending_form_times: Default::default(),
+                failed_message: None,
+            },
+        );
+
+        project(&mut capture, &Default::default(), Some(&committed), None);
+        assert!(
+            !capture.verdicts["parent"].working,
+            "a top-level session with leftover work_liveness is not held"
+        );
+        assert!(capture.verdicts["child"].working);
+        assert_eq!(capture.verdicts["parent"].working_children, 1);
+
+        // Delivering a handback ends the hold even if a background process remains alive.
+        let before = capture.clone();
+        let prev_committed = committed.clone();
+        committed.subagent_reports.insert_shared(
+            "child".into(),
+            mj_core::subagent::SubagentReport {
+                handback: Some(mj_core::subagent::SubagentHandback {
+                    command_id: reminder_id,
+                    message: "done".into(),
+                    recorded_at_ms: mj_core::clock::epoch_millis(),
+                }),
+                ..Default::default()
+            },
+        );
+        project(
+            &mut capture,
+            &before,
+            Some(&committed),
+            Some(&prev_committed),
+        );
+        assert!(!capture.verdicts["child"].working);
+        assert_eq!(capture.verdicts["parent"].working_children, 0);
+
+        // Re-entering held state and then clearing work_liveness drops the count back to 0.
+        let before = capture.clone();
+        let prev_committed = committed.clone();
+        committed
+            .subagent_reports
+            .insert_shared("child".into(), mj_core::subagent::SubagentReport::default());
+        project(
+            &mut capture,
+            &before,
+            Some(&committed),
+            Some(&prev_committed),
+        );
+        assert!(capture.verdicts["child"].working);
+        assert_eq!(capture.verdicts["parent"].working_children, 1);
+
+        let before = capture.clone();
+        capture
+            .sessions
+            .get_mut("child")
+            .unwrap()
+            .operational
+            .as_mut()
+            .unwrap()
+            .work_liveness = None;
+        project(&mut capture, &before, Some(&committed), Some(&committed));
+        assert!(!capture.verdicts["child"].working);
+        assert_eq!(capture.verdicts["parent"].working_children, 0);
     }
 }

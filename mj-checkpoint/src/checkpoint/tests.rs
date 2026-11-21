@@ -1596,6 +1596,137 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
     );
 }
 
+// Hard-won: #1622: Kimi ACP sessions run without workspaces.json and failed checkpoint export
+#[test]
+fn kimi_checkpoint_export_and_restore_succeed_without_workspaces_registry() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, archive_path) = fixture(temp.path());
+    let kimi_native = format!("session_{NATIVE}");
+    spec.session.harness_kind = HarnessKind::Kimi;
+    spec.session.profile_id = "kimi-1".into();
+    spec.session.native_session_id = kimi_native.clone();
+    spec.harness_home = temp.path().join("kimi-home");
+    let source_workspace = "wd_source_1234567890ab";
+    let session_dir = spec
+        .harness_home
+        .join("sessions")
+        .join(source_workspace)
+        .join(&kimi_native);
+    fs::create_dir_all(session_dir.join("agents/main")).unwrap();
+    fs::write(
+        session_dir.join("state.json"),
+        serde_json::to_vec(&json!({
+            "workDir": "/source/app",
+            "cwd": "/source/app",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(session_dir.join("agents/main/wire.jsonl"), b"{}\n").unwrap();
+    fs::write(
+        spec.harness_home.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            json!({
+                "sessionId": kimi_native,
+                "workDir": "/source/app",
+                "sessionDir": session_dir,
+            })
+        ),
+    )
+    .unwrap();
+
+    export_checkpoint(&spec).unwrap();
+
+    let target_workspace_root = temp.path().join("restored-workspace");
+    let target_cwd = target_workspace_root.join("app");
+    fs::create_dir_all(&target_cwd).unwrap();
+    let restored_home = temp.path().join("restored-kimi-home");
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            report_root: None,
+            archive_path: archive_path.clone(),
+            workspace_root: target_workspace_root.clone(),
+            relay_root: temp.path().join("restored-relay"),
+            harness_home: restored_home.clone(),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+
+    assert!(!restored_home.join("workspaces.json").exists());
+    let expected_state_rel = restored_native_relative_path(
+        HarnessKind::Kimi,
+        Path::new(&format!(
+            "sessions/{source_workspace}/session_{NATIVE}/state.json"
+        )),
+        Some(&target_cwd),
+    )
+    .unwrap();
+    let restored_state: Value =
+        serde_json::from_slice(&fs::read(restored_home.join(&expected_state_rel)).unwrap())
+            .unwrap();
+    assert_eq!(
+        restored_state["workDir"],
+        target_cwd.to_string_lossy().as_ref()
+    );
+    assert_eq!(restored_state["cwd"], target_cwd.to_string_lossy().as_ref());
+
+    let restored_index: Value =
+        serde_json::from_slice(&fs::read(restored_home.join("session_index.jsonl")).unwrap())
+            .unwrap();
+    assert_eq!(
+        restored_index["workDir"],
+        target_cwd.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        restored_index["sessionDir"],
+        restored_home
+            .join(expected_state_rel.parent().unwrap())
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    // Also succeed when session_index.jsonl is absent.
+    fs::remove_file(spec.harness_home.join("session_index.jsonl")).unwrap();
+    let archive_without_index = temp.path().join("worker/no-index.hel.zip");
+    spec.output_path = archive_without_index.clone();
+    export_checkpoint(&spec).unwrap();
+
+    let restored_home_no_index = temp.path().join("restored-kimi-home-no-index");
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            report_root: None,
+            archive_path: archive_without_index,
+            workspace_root: target_workspace_root,
+            relay_root: temp.path().join("restored-relay-no-index"),
+            harness_home: restored_home_no_index.clone(),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+
+    assert!(!restored_home_no_index.join("workspaces.json").exists());
+    assert!(!restored_home_no_index.join("session_index.jsonl").exists());
+    let restored_state: Value = serde_json::from_slice(
+        &fs::read(restored_home_no_index.join(&expected_state_rel)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored_state["workDir"],
+        target_cwd.to_string_lossy().as_ref()
+    );
+    assert_eq!(restored_state["cwd"], target_cwd.to_string_lossy().as_ref());
+}
+
 use crate::test_support::git_line as git;
 
 fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {

@@ -92,7 +92,9 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
             .wait_for_session("muse", Duration::from_millis(20))
             .await
     });
-    let ManagerCommand::Session { mut reply, .. } = requests.recv().await.unwrap();
+    let ManagerCommand::Session { mut reply, .. } = requests.recv().await.unwrap() else {
+        panic!("expected Session lookup command");
+    };
     // Retain the reply without answering, like an unresponsive manager.
     let error = tokio::time::timeout(Duration::from_secs(1), request)
         .await
@@ -4383,4 +4385,48 @@ async fn worker_loss_warns_once_until_reachable_and_warns_on_the_next_loss() {
         log.events()
     );
     actor.retirement.send_replace(true);
+}
+
+// Hard-won: #1629: waiting for a replacement actor must use the manager's readiness signal instead of a guessed 5-second timeout, and must fail promptly on removal or shutdown.
+#[tokio::test]
+async fn wait_for_session_ready_wakes_on_registration_and_fails_on_removal_or_shutdown() {
+    let channels = spawn_session_manager().unwrap();
+    let control = channels.control.clone();
+
+    // 1. Wait before the target is published; it resolves as soon as the actor is registered.
+    let mut waiting = Box::pin(control.wait_for_session_ready("session-1"));
+    assert!(futures::poll!(&mut waiting).is_pending());
+
+    let mut first_target = target("true");
+    first_target.session_id = "session-1".into();
+    channels.targets.send(vec![first_target.clone()]).unwrap();
+
+    let handle = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("wait_for_session_ready must wake on actor registration")
+        .expect("registered actor handle");
+    assert_eq!(handle.session_id(), "session-1");
+
+    // 2. Calling again while the actor matches the current target resolves immediately.
+    let immediate = tokio::time::timeout(
+        Duration::from_secs(5),
+        control.wait_for_session_ready("session-1"),
+    )
+    .await
+    .expect("active actor must resolve immediately")
+    .expect("active actor handle");
+    assert_eq!(immediate.session_id(), "session-1");
+
+    // 3. Removing a session from desired targets or shutting down fails parked waiters promptly.
+    let mut shutdown_wait = Box::pin(control.wait_for_session_ready("session-2"));
+    assert!(futures::poll!(&mut shutdown_wait).is_pending());
+    channels.shutdown.shutdown().await.unwrap();
+    let err = tokio::time::timeout(Duration::from_secs(5), shutdown_wait)
+        .await
+        .expect("shutdown must fail parked waiters promptly")
+        .expect_err("shutdown must return an error");
+    assert!(
+        err.to_string().contains("session manager stopped"),
+        "unexpected shutdown error: {err:#}"
+    );
 }
