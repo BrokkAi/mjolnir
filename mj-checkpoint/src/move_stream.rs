@@ -67,8 +67,8 @@ pub fn write_move_stream<W: Write>(
     // length prefix without buffering large scratch trees in memory.
     let mut keep_tar_temp: Option<NamedTempFile> = None;
     let keep_tar_len = if let Some(dir) = keep_dir {
+        ensure_no_symlinked_keep_ancestors(dir)?;
         if dir.exists() {
-            ensure_no_symlink(dir)?;
             let mut temp = NamedTempFile::new().context("create temp keep tar")?;
             let bytes = build_keep_tar(dir, &normalized_skips, &mut temp)?;
             temp.as_file().sync_all().context("sync temp keep tar")?;
@@ -169,12 +169,14 @@ pub fn receive_move_stream<R: Read>(
     let mut staged_keep: Option<(tempfile::TempDir, &Path)> = None;
     if keep_tar_len > 0 {
         let dest = keep_dest.context("received non-empty keep tar without a keep_dest path")?;
+        ensure_no_symlinked_keep_ancestors(dest)?;
         let keep_parent = dest
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .context("keep_dest must have a parent directory")?;
         fs::create_dir_all(keep_parent)
             .with_context(|| format!("create keep parent dir {}", keep_parent.display()))?;
+        ensure_no_symlinked_keep_ancestors(dest)?;
         let mut keep_temp = NamedTempFile::new().context("create temp keep tar receiver")?;
         let keep_bytes = copy_exact_with_hash(reader, keep_temp.as_file_mut(), keep_tar_len, None)
             .context("receive keep tar payload")?;
@@ -382,14 +384,47 @@ fn is_skipped(rel: &Path, skips: &BTreeSet<PathBuf>) -> bool {
     skips.iter().any(|skip| rel == skip || rel.starts_with(skip))
 }
 
-fn ensure_no_symlink(path: &Path) -> Result<()> {
-    let meta = fs::symlink_metadata(path)
-        .with_context(|| format!("lstat {}", path.display()))?;
-    ensure!(
-        !meta.file_type().is_symlink(),
-        "refusing symlink in keep path: {}",
-        path.display()
-    );
+/// Verify that neither `keep_dir` nor its checkout-owned ancestors (its
+/// immediate parent, and `.mj` when under `.../.mj/keep/<session-id>`) are
+/// symlinks (including dangling symlinks).
+///
+/// Ancestors above the checkout root (such as `/var` -> `/private/var` on
+/// macOS) are intentionally left to the OS while any symlink at `.mj`,
+/// `.mj/keep`, or `.mj/keep/<session-id>` is refused before reading or
+/// creating directories.
+fn ensure_no_symlinked_keep_ancestors(keep_dir: &Path) -> Result<()> {
+    let mut to_check: Vec<&Path> = Vec::new();
+    if let Some(parent) = keep_dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if parent.file_name() == Some(std::ffi::OsStr::new("keep"))
+            && let Some(grandparent) = parent.parent().filter(|p| !p.as_os_str().is_empty())
+            && grandparent.file_name() == Some(std::ffi::OsStr::new(".mj"))
+        {
+            to_check.push(grandparent);
+        }
+        to_check.push(parent);
+    }
+    to_check.push(keep_dir);
+
+    for path in to_check {
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                ensure!(
+                    !meta.file_type().is_symlink(),
+                    "refusing symlink in keep path or ancestor: {}",
+                    path.display()
+                );
+                ensure!(
+                    meta.file_type().is_dir(),
+                    "keep path or ancestor is not a directory: {}",
+                    path.display()
+                );
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("lstat keep path {}", path.display()));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -482,9 +517,10 @@ pub fn extract_keep_tar_strict(tar_path: &Path, dest: &Path) -> Result<()> {
             );
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            ensure_no_symlinked_keep_ancestors(dest)?;
             fs::create_dir_all(dest)
                 .with_context(|| format!("create keep dest {}", dest.display()))?;
-            ensure_no_symlink(dest)?;
+            ensure_no_symlinked_keep_ancestors(dest)?;
         }
         Err(err) => {
             return Err(err).with_context(|| format!("lstat keep dest {}", dest.display()));
@@ -963,5 +999,70 @@ mod tests {
             !dst_keep.join("new.txt").exists(),
             "new keep file must be rolled back on archive persist failure"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_keep_ancestors_on_export_and_receive() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).expect("mkdir outside");
+        fs::write(outside.join("secret.txt"), b"outside-data").expect("write outside");
+
+        let src_archive = dir.path().join("src.hel.zip");
+        fs::write(&src_archive, b"archive-bytes").expect("write archive");
+        let expected_sha = lower_hex(Sha256::digest(b"archive-bytes"));
+
+        // 1. Export must reject a symlinked `.mj/keep` ancestor.
+        let bad_src_checkout = dir.path().join("bad-src");
+        fs::create_dir_all(bad_src_checkout.join(".mj")).expect("mkdir .mj");
+        symlink(&outside, bad_src_checkout.join(".mj/keep")).expect("symlink keep");
+        let mut out = Vec::new();
+        let err = write_move_stream(
+            &mut out,
+            &src_archive,
+            Some(&bad_src_checkout.join(".mj/keep/sess-1")),
+            &[],
+        )
+        .expect_err("export through symlinked .mj/keep must fail");
+        assert!(err.to_string().contains("refusing symlink"));
+
+        // 2. Export must reject a symlinked `.mj` ancestor.
+        let bad_mj_checkout = dir.path().join("bad-mj");
+        fs::create_dir_all(&bad_mj_checkout).expect("mkdir checkout");
+        symlink(&outside, bad_mj_checkout.join(".mj")).expect("symlink .mj");
+        let err = write_move_stream(
+            &mut Vec::new(),
+            &src_archive,
+            Some(&bad_mj_checkout.join(".mj/keep/sess-1")),
+            &[],
+        )
+        .expect_err("export through symlinked .mj must fail");
+        assert!(err.to_string().contains("refusing symlink"));
+
+        // Build a valid framed stream to test receive rejection.
+        let good_keep = dir.path().join("good-keep");
+        fs::create_dir_all(&good_keep).expect("mkdir good keep");
+        fs::write(good_keep.join("note.txt"), b"hello").expect("write note");
+        let mut framed = Vec::new();
+        write_move_stream(&mut framed, &src_archive, Some(&good_keep), &[]).expect("write valid");
+
+        // 3. Receive must reject a symlinked `.mj/keep` ancestor and leave `outside` untouched.
+        let bad_dst_checkout = dir.path().join("bad-dst");
+        fs::create_dir_all(bad_dst_checkout.join(".mj")).expect("mkdir dst .mj");
+        symlink(&outside, bad_dst_checkout.join(".mj/keep")).expect("symlink dst keep");
+        let dst_archive = dir.path().join("dst.hel.zip");
+        let err = receive_move_stream(
+            &mut Cursor::new(&framed),
+            &dst_archive,
+            &expected_sha,
+            Some(&bad_dst_checkout.join(".mj/keep/sess-1")),
+        )
+        .expect_err("receive through symlinked .mj/keep must fail");
+        assert!(err.to_string().contains("refusing symlink"));
+        assert!(!outside.join("sess-1").exists());
+        assert!(!dst_archive.exists());
     }
 }
