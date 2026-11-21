@@ -145,8 +145,50 @@ fn turn_interrupt_command(
     Ok(RelayCommand::CancelTurn)
 }
 
+fn subagent_waiting_for_background(
+    runtime: &RuntimeProjection,
+    committed: Option<&mj_controller::database::CommittedState>,
+    id: &str,
+    live: Option<&mj_core::relay::RelayOperationalState>,
+) -> bool {
+    let Some(subagent) = runtime.subagents.get(id) else {
+        return false;
+    };
+    if !subagent.handback_tool {
+        return false;
+    }
+    let Some(committed) = committed else {
+        return false;
+    };
+    let Some(live) = live else {
+        return false;
+    };
+    let empty = mj_core::subagent::SubagentReport::default();
+    let report = committed.subagent_reports.get(id).unwrap_or(&empty);
+    let turn = committed.turns.get(id);
+    let active = turn.and_then(|turn| turn.state.1.as_ref());
+    let last = turn.and_then(|turn| turn.state.2.as_ref());
+    let in_flight = active
+        .into_iter()
+        .map(|turn| turn.command_id.as_str())
+        .collect::<Vec<_>>();
+    let liveness = mj_core::subagent::Liveness::Known(live.work_liveness.clone());
+    matches!(
+        mj_core::subagent::report_state(
+            subagent.handback_tool,
+            report,
+            last,
+            &liveness,
+            &in_flight,
+            mj_core::clock::epoch_millis(),
+        ),
+        mj_core::subagent::ReportState::Held { .. }
+    )
+}
+
 fn own_verdict(
     runtime: &RuntimeProjection,
+    committed: Option<&mj_controller::database::CommittedState>,
     id: &str,
     record: &SessionRecord,
     lifecycle: Option<RuntimeLifecycleKind>,
@@ -242,9 +284,9 @@ fn own_verdict(
                     && activity.as_ref().is_some_and(|a| a.is_idle())),
         working: state == SessionState::Running
             && view.is_some_and(|v| v.connected)
-            && live.is_some_and(|live| {
+            && (live.is_some_and(|live| {
                 mj_client::usage_format::SessionActivity::of(live).is_working(None, form)
-            }),
+            }) || subagent_waiting_for_background(runtime, committed, id, live)),
         active_work,
         unfinished: unfinished_turn || active_work,
         interrupt: can_interrupt && running && turn_targetable,
@@ -291,7 +333,12 @@ fn own_verdict(
 
 /// Revisit only changed inputs. A child can affect every ancestor's Interrupt
 /// All offer, and a reparent can affect both its old and new family.
-pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProjection) {
+pub(crate) fn project(
+    runtime: &mut RuntimeProjection,
+    previous: &RuntimeProjection,
+    committed: Option<&mj_controller::database::CommittedState>,
+    previous_committed: Option<&mj_controller::database::CommittedState>,
+) {
     let lifecycles: BTreeMap<_, _> = runtime
         .metadata
         .lifecycles
@@ -362,6 +409,20 @@ pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProject
     {
         changed.extend(runtime.records.keys().map(String::as_str));
     }
+    match (previous_committed, committed) {
+        (Some(prev), Some(curr)) => {
+            changed.extend(
+                prev.subagent_reports
+                    .changes(&curr.subagent_reports)
+                    .map(|(id, _)| id.as_str()),
+            );
+            changed.extend(prev.turns.changes(&curr.turns).map(|(id, _)| id.as_str()));
+        }
+        (None, Some(_)) | (Some(_), None) => {
+            changed.extend(runtime.subagents.keys().map(String::as_str));
+        }
+        (None, None) => {}
+    }
 
     let mut verdicts = previous.verdicts.clone();
     if changed.is_empty() {
@@ -373,6 +434,7 @@ pub(crate) fn project(runtime: &mut RuntimeProjection, previous: &RuntimeProject
         let verdict = if let Some(record) = runtime.records.get(id) {
             Some(own_verdict(
                 runtime,
+                committed,
                 id,
                 record,
                 lifecycles.get(id).copied(),
@@ -832,7 +894,7 @@ mod tests {
             let child = native(id, true, state);
             capture.native_agents.insert(child.agent.view_id(), child);
         }
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 1);
 
         let before = capture.clone();
@@ -840,14 +902,14 @@ mod tests {
         let retained = native("active", true, NativeAgentState::Disconnected);
         let id = retained.agent.view_id();
         capture.native_agents.insert(id.clone(), retained);
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 0);
 
         let before = capture.clone();
         let active = capture.native_agents.get_mut(&id).unwrap();
         active.agent.state = NativeAgentState::Running;
         active.agent.availability = mj_core::native_agent::NativeAgentAvailability::Available;
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert_eq!(capture.verdicts["parent"].working_children, 1);
     }
 
@@ -870,7 +932,7 @@ mod tests {
                 .native_agents
                 .insert(summary.agent.view_id(), summary);
         }
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
         let scoped = capture.for_subagent_parents(&Default::default());
         assert_eq!(scoped.verdicts["parent"], capture.verdicts["parent"]);
         assert!(capture.verdicts["parent"].interrupt_all);
@@ -890,7 +952,7 @@ mod tests {
         capture
             .native_agents
             .insert(finished.agent.view_id(), finished);
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert!(!capture.verdicts["parent"].interrupt_all);
 
         let before = capture.clone();
@@ -903,7 +965,7 @@ mod tests {
         let mut view = RuntimeSessionView::from_managed("parent".into(), Default::default());
         view.operational = Some(live.into());
         capture.sessions.insert("parent".into(), view);
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert!(capture.verdicts["parent"].active_work);
         assert!(capture.verdicts["parent"].unfinished);
         assert!(!capture.verdicts["parent"].interrupt_all);
@@ -915,7 +977,7 @@ mod tests {
             let before = capture.clone();
             let view = capture.sessions.get_mut("parent").unwrap();
             view.operational.as_mut().unwrap().activity = Some(activity);
-            project(&mut capture, &before);
+            project(&mut capture, &before, None, None);
             assert!(!capture.verdicts["parent"].active_work);
             assert!(!capture.verdicts["parent"].unfinished);
         }
@@ -977,7 +1039,7 @@ mod tests {
         let mut view = RuntimeSessionView::from_managed("parent".into(), Default::default());
         view.operational = Some(live.into());
         capture.sessions.insert("parent".into(), view);
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
         assert!(!capture.verdicts["parent"].interrupt);
         assert!(capture.verdicts["parent"].unfinished);
         assert!(!capture.verdicts["parent"].interrupt_all);
@@ -990,7 +1052,7 @@ mod tests {
 
         let before = capture.clone();
         insert_managed_child(&mut capture);
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert!(capture.verdicts["parent"].interrupt_all);
         assert_eq!(capture.verdicts["parent"].interrupt_count, 1);
         let (outcome, commands) = tokio::join!(
@@ -1014,7 +1076,7 @@ mod tests {
             interrupt: Some(exact_interrupt.clone()),
             message: None,
         });
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert!(capture.verdicts["parent"].interrupt);
         assert_eq!(capture.verdicts["parent"].interrupt_count, 2);
         let (outcome, commands) = tokio::join!(
@@ -1037,7 +1099,7 @@ mod tests {
         insert_managed_child(&mut capture);
         let native = native("native", true, NativeAgentState::Running);
         capture.native_agents.insert(native.agent.view_id(), native);
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
         assert_eq!(capture.verdicts["parent"].interrupt_count, 3);
 
         let before = capture.clone();
@@ -1045,7 +1107,7 @@ mod tests {
             super::super::tests::retained_startup_test_move(&capture.records["parent"]);
         operation.phase = mj_core::state::MovePhase::Failed;
         capture.moves.insert("parent".into(), operation);
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         let parent = capture.verdicts["parent"];
         assert!(!parent.interrupt_member);
         assert!(parent.unfinished);
@@ -1078,7 +1140,7 @@ mod tests {
             live.harness_turn = None;
             live.active_agent_terminals.clear();
             live.activity = Some(activity);
-            project(&mut capture, &before);
+            project(&mut capture, &before, None, None);
             assert!(!capture.verdicts["child"].unfinished);
             // Only the native child still counts toward lifecycle warnings.
             assert_eq!(capture.verdicts["parent"].unfinished_children, 1);
@@ -1097,7 +1159,7 @@ mod tests {
                     command: "sleep 10".into(),
                     started_at_ms: 1,
                 });
-            project(&mut capture, &before);
+            project(&mut capture, &before, None, None);
             assert!(capture.verdicts["child"].active_work);
             assert_eq!(capture.verdicts["parent"].unfinished_children, 2);
         }
@@ -1163,7 +1225,7 @@ mod tests {
                 message: Some("Interrupting…".into()),
             },
         );
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
         assert!(!capture.verdicts["child"].interrupt);
         assert!(!capture.verdicts["child"].interrupt_member);
         assert!(!capture.verdicts["child"].interrupt_all);
@@ -1195,7 +1257,7 @@ mod tests {
             interrupt: Some(exact.clone()),
             message: Some("Steering…".into()),
         });
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         assert!(capture.verdicts["child"].interrupt);
         assert!(capture.verdicts["child"].interrupt_member);
         let (outcome, commands) = tokio::join!(
@@ -1244,7 +1306,7 @@ mod tests {
         );
         insert_subagent_link(&mut capture, "grandparent", "parent");
         insert_subagent_link(&mut capture, "parent", "child");
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
         assert_eq!(capture.verdicts["grandparent"].interrupt_count, 1);
         assert_eq!(capture.verdicts["parent"].interrupt_count, 1);
 
@@ -1297,7 +1359,7 @@ mod tests {
             interrupt: Some(cancel_p2.clone()),
             message: None,
         });
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         let (p2_result, p2_commands) = tokio::join!(
             runtime.interrupt_all_in_capture(&capture, "parent"),
             manager.answer_submissions(Vec::new()),
@@ -1346,7 +1408,7 @@ mod tests {
         );
         insert_subagent_link(&mut capture, "grandparent", "parent");
         insert_subagent_link(&mut capture, "parent", "child");
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
 
         // First Interrupt All from grandparent cancels p1 with CancelTurnFor("p1").
         let (gp_result, commands) = tokio::join!(
@@ -1373,7 +1435,7 @@ mod tests {
             interrupt: None,
             message: Some("Interrupting…".into()),
         });
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         let (parent_result, second_commands) = tokio::join!(
             runtime.interrupt_all_in_capture(&capture, "parent"),
             manager.answer_submissions(Vec::new()),
@@ -1422,7 +1484,7 @@ mod tests {
         );
         insert_subagent_link(&mut capture, "grandparent", "parent");
         insert_subagent_link(&mut capture, "parent", "child");
-        project(&mut capture, &Default::default());
+        project(&mut capture, &Default::default(), None, None);
 
         let (gp_result, parent_result, commands) = tokio::join!(
             runtime.interrupt_all_in_capture(&capture, "grandparent"),
@@ -1473,7 +1535,7 @@ mod tests {
             interrupt: Some(cancel_p2.clone()),
             message: None,
         });
-        project(&mut capture, &before);
+        project(&mut capture, &before, None, None);
         let (p2_first, p2_first_commands) = tokio::join!(
             runtime.interrupt_all_in_capture(&capture, "parent"),
             manager.answer_submissions(Vec::new()),
@@ -1494,5 +1556,132 @@ mod tests {
         );
         assert!(p2_second.unwrap().failures.is_empty());
         assert!(p2_second_commands.is_empty());
+    }
+
+    #[test]
+    fn held_subagent_waiting_for_background_processes_counts_as_working() {
+        let mut capture = RuntimeProjection::default();
+        insert_running_session(&mut capture, "parent");
+        {
+            let view = capture.sessions.get_mut("parent").unwrap();
+            view.connected = true;
+            let live = view.operational.as_mut().unwrap();
+            live.harness_turn = None;
+            live.work_liveness = Some(mj_core::work_facts::WorkLiveness {
+                completed_ordinal: 12,
+                alive: 1,
+                checked_at_ms: 100,
+            });
+        }
+        insert_managed_child(&mut capture);
+        capture.subagents.get_mut("child").unwrap().handback_tool = true;
+        {
+            let view = capture.sessions.get_mut("child").unwrap();
+            view.connected = true;
+            let live = view.operational.as_mut().unwrap();
+            live.harness_turn = None;
+            live.work_liveness = Some(mj_core::work_facts::WorkLiveness {
+                completed_ordinal: 12,
+                alive: 1,
+                checked_at_ms: 100,
+            });
+        }
+
+        let reminder_id = mj_core::subagent::handback_reminder_command_id(7);
+        let turn = mj_core::state::MaterializedTurnOutcome {
+            work_facts: None,
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            command_id: reminder_id.clone(),
+            accepted_ordinal: Some(11),
+            turn_start_position: Some(11),
+            completed_ordinal: 12,
+            completed_at_ms: mj_core::clock::epoch_millis(),
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+        };
+        let mut committed = mj_controller::database::CommittedState {
+            sequence: 1,
+            state: Default::default(),
+            moves: Default::default(),
+            native_agents: Default::default(),
+            startup_groups: Default::default(),
+            subagent_reports: Default::default(),
+            turns: Default::default(),
+            wait_revisions: Default::default(),
+        };
+        committed.turns.insert_shared(
+            "child".into(),
+            mj_controller::database::CommittedTurn {
+                state: (
+                    mj_core::state::MaterializedExecutionState::Idle,
+                    None,
+                    Some(turn),
+                ),
+                pending_form_times: Default::default(),
+                failed_message: None,
+            },
+        );
+
+        project(&mut capture, &Default::default(), Some(&committed), None);
+        assert!(
+            !capture.verdicts["parent"].working,
+            "a top-level session with leftover work_liveness is not held"
+        );
+        assert!(capture.verdicts["child"].working);
+        assert_eq!(capture.verdicts["parent"].working_children, 1);
+
+        // Delivering a handback ends the hold even if a background process remains alive.
+        let before = capture.clone();
+        let prev_committed = committed.clone();
+        committed.subagent_reports.insert_shared(
+            "child".into(),
+            mj_core::subagent::SubagentReport {
+                handback: Some(mj_core::subagent::SubagentHandback {
+                    command_id: reminder_id,
+                    message: "done".into(),
+                    recorded_at_ms: mj_core::clock::epoch_millis(),
+                }),
+                ..Default::default()
+            },
+        );
+        project(
+            &mut capture,
+            &before,
+            Some(&committed),
+            Some(&prev_committed),
+        );
+        assert!(!capture.verdicts["child"].working);
+        assert_eq!(capture.verdicts["parent"].working_children, 0);
+
+        // Re-entering held state and then clearing work_liveness drops the count back to 0.
+        let before = capture.clone();
+        let prev_committed = committed.clone();
+        committed
+            .subagent_reports
+            .insert_shared("child".into(), mj_core::subagent::SubagentReport::default());
+        project(
+            &mut capture,
+            &before,
+            Some(&committed),
+            Some(&prev_committed),
+        );
+        assert!(capture.verdicts["child"].working);
+        assert_eq!(capture.verdicts["parent"].working_children, 1);
+
+        let before = capture.clone();
+        capture
+            .sessions
+            .get_mut("child")
+            .unwrap()
+            .operational
+            .as_mut()
+            .unwrap()
+            .work_liveness = None;
+        project(&mut capture, &before, Some(&committed), Some(&committed));
+        assert!(!capture.verdicts["child"].working);
+        assert_eq!(capture.verdicts["parent"].working_children, 0);
     }
 }

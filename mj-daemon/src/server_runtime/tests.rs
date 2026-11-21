@@ -2916,7 +2916,7 @@ fn publish_fixture(
 ) -> ViewerSnapshot {
     let mut capture = runtime.clone();
     capture.metadata.config = controller.config.clone().into();
-    crate::daemon::verdicts::project(&mut capture, &Default::default());
+    crate::daemon::verdicts::project(&mut capture, &Default::default(), None, None);
     let runtime = &capture;
     let mut native_agents = BTreeMap::new();
     let mut move_recoveries = BTreeMap::new();
