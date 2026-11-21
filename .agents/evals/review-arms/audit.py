@@ -55,6 +55,7 @@ def audit_reviewer(transcript_path, own_workspace, *, cwd=None, inventory=None):
     before = read_record(transcript_path.with_name("pre-inventory.json")) or inventory or {}
     return scan(json.loads(transcript_path.read_text()), own_workspace,
                 cwd=cwd or before.get("cwd"), tracked_symlinks=clean_tracked_symlinks(before),
+                tracked_symlink_targets=before.get("tracked_symlink_targets"),
                 tracked_head=before.get("head"),
                 antigravity=captured_antigravity(transcript_path))
 
@@ -132,11 +133,11 @@ def tool_succeeded(call, body, rollout_exit):
 
 def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=False, cwd=None, home=None,
          rollout=None, allow_in_place_edits=False, tracked_symlinks=None, tracked_paths=None, engine=False,
-         antigravity=False, tracked_head=None):
+         antigravity=False, tracked_head=None, tracked_symlink_targets=None):
     first_page = pages[0] if pages else {}
     execution = first_page.get("execution")
     checkout = cwd or first_page.get("cwd") or (execution.get("cwd") if isinstance(execution, dict) else None)
-    edit_paths = FilePathEvidence(checkout, tracked_symlinks, tracked_head, allow_in_place_edits,
+    edit_paths = FilePathEvidence(checkout, tracked_symlinks, tracked_symlink_targets, tracked_head, allow_in_place_edits,
                                   own_workspace, engine)
     hits, calls = [], 0
     scripts, written = ScriptEvidence(checkout, tracked_paths), set()
@@ -1064,15 +1065,19 @@ def perl_open_operand(value):
 
 
 class FilePathEvidence:
-    def __init__(self, checkout, tracked, head, allow_in_place_edits, workspace, engine):
+    def __init__(self, checkout, tracked, targets, head, allow_in_place_edits, workspace, engine):
         self.checkout = checkout if isinstance(checkout, str) and posixpath.isabs(checkout) else None
         self.root = recorded_path(self.checkout, None) if self.checkout else None
+        self.workspace = workspace
         self.links = None
+        self.targets = {}
         if isinstance(tracked, list) and all(
             isinstance(path, str) and "\0" not in path
             and all(part not in {"", ".", ".."} for part in path.split("/")) for path in tracked
         ):
-            self.links = frozenset(posixpath.join(self.root, path) for path in tracked) if self.root else None
+            self.links = frozenset(tuple(path.split("/")) for path in tracked) if self.root else None
+            if isinstance(targets, dict) and targets.keys() == set(tracked):
+                self.targets = {tuple(path.split("/")): target for path, target in targets.items()}
         # EngineRunner reserves, verifies and clears this exact directory
         # before a turn. Other paths need evidence from the checkout.
         self.scratch = (posixpath.join(self.root, f".rql-engine-{workspace}")
@@ -1080,6 +1085,53 @@ class FilePathEvidence:
         self.head = head if isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40}", head) else None
         self.allow_in_place_edits = allow_in_place_edits
         self.blocked = False
+
+    def resolve(self, parts):
+        resolved = []
+        # Linux follows at most 40 links per path (path_resolution(7)).
+        remaining = 40
+        active = set()
+        stack = [(None, iter(parts))]
+        while stack:
+            link, components = stack[-1]
+            part = next(components, None)
+            if part is None:
+                stack.pop()
+                if link is not None:
+                    active.remove(link)
+                continue
+            if part == "..":
+                if not resolved:
+                    raise InspectionRequired("path can traverse a tracked symlink outside the checkout")
+                resolved.pop()
+                continue
+            candidate = (*resolved, part)
+            if candidate not in (self.links or ()):
+                resolved.append(part)
+                continue
+            target = self.targets.get(candidate)
+            if not isinstance(target, str) or not target or "\0" in target or posixpath.isabs(target):
+                raise InspectionRequired("path can traverse a tracked symlink with an unverified or absolute target")
+            if not remaining or candidate in active:
+                raise InspectionRequired("path can traverse a tracked symlink cycle or overlong chain")
+            remaining -= 1
+            active.add(candidate)
+            stack.append((candidate, iter(pathlib.PurePosixPath(target).parts)))
+        return tuple(resolved)
+
+    def glob_link_targets(self, root):
+        pending = [root]
+        seen = {root}
+        while pending:
+            directory = pending.pop()
+            for link in sorted(self.links or ()):
+                if link[:len(directory)] != directory:
+                    continue
+                target = self.resolve(link)
+                if target not in seen:
+                    seen.add(target)
+                    pending.append(target)
+                    yield target
 
     def check(self, path, cwd, *, glob=False):
         if self.blocked:
@@ -1101,10 +1153,14 @@ class FilePathEvidence:
                 prefix != self.scratch and not prefix.startswith(self.scratch + "/")
                 for prefix in prefixes[prefixes.index(self.scratch):]):
             raise InspectionRequired("path leaves the verified scratch directory")
-        if self.links:
-            prefix = prefixes[-1].rstrip("/") + "/"
-            if self.links.intersection(prefixes) or glob and any(link.startswith(prefix) for link in self.links):
-                raise InspectionRequired("path can traverse a tracked symlink")
+        resolved = self.resolve(full.relative_to(self.root).parts)
+        target = posixpath.join(self.root, *resolved)
+        if self.scratch in prefixes and target != self.scratch and not target.startswith(self.scratch + "/"):
+            raise InspectionRequired("path leaves the verified scratch directory")
+        targets = {target}
+        if glob:
+            targets.update(posixpath.join(self.root, *link) for link in self.glob_link_targets(resolved))
+        return targets - {prefixes[-1]}
 
     def check_in_place(self, path, cwd, own_workspace):
         if (not self.checkout or not self.checkout.startswith(f"/workspace/{own_workspace}/")
@@ -1115,7 +1171,7 @@ class FilePathEvidence:
             raise InspectionRequired("in-place edit follows link handling or an unresolved command")
         if self.links is None:
             raise InspectionRequired("in-place edit requires tracked symlink inventory")
-        if posixpath.join(self.root, path) in self.links:
+        if (path,) in self.links:
             raise InspectionRequired("in-place edit names a tracked symlink")
 
     def check_git(self, args, cwd):
@@ -2120,7 +2176,8 @@ def path_operands(call):
 
 def symlink_hits(path, cwd, evidence, *, glob=False):
     try:
-        evidence.check(path, cwd, glob=glob)
+        for target in sorted(evidence.check(path, cwd, glob=glob)):
+            yield from path_hits(target, evidence.workspace)
     except InspectionRequired as error:
         yield "needs-inspection", f"{error}: {path}"
 
@@ -2428,6 +2485,7 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
                       cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits, engine=engine,
                       antigravity=captured_antigravity(transcript_path),
                       tracked_symlinks=clean_tracked_symlinks(before), tracked_head=before.get("head"),
+                      tracked_symlink_targets=before.get("tracked_symlink_targets"),
                       tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
                       rollout=rollout_commands(
                           sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))))
