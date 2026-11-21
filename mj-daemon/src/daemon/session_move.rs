@@ -461,15 +461,14 @@ impl RuntimeState {
     ) -> Result<MoveRecoveryOwners> {
         let mut owned = BTreeSet::new();
         let mut closes = BTreeSet::new();
-        let active_op_ids: BTreeSet<String> = operations
-            .iter()
-            .filter(|op| op.is_active())
-            .map(|op| op.operation_id.clone())
-            .collect();
-        // Reconcile any persisted EC2 Move security-group grants in the
-        // background without holding daemon handoff admission.
+        // At daemon startup (before live Move admission opens), no direct
+        // transfer from a previous daemon process is still running, including
+        // for any Move that crashed mid-Transferring. Passing an empty active
+        // set prunes every dead pre-crash user immediately so live-safe
+        // background reconciliation revokes their EC2 ingress rules while
+        // preserving any new Moves admitted after startup.
         mj_controller::controller::move_session::recovery::spawn_ec2_grant_reconcile_background(
-            active_op_ids,
+            BTreeSet::new(),
         );
         // Schedule non-admitted background revocation for any ephemeral Move
         // credentials left on non-active moves without blocking startup on SSH.

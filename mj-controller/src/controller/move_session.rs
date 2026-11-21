@@ -2037,6 +2037,9 @@ impl Controller {
         };
         operation.updated_at = now();
         crate::database::save_move_outcome(operation, last_error.as_deref())?;
+        if !operation.is_active() && !operation.granted_keys.is_empty() {
+            recovery::spawn_move_key_cleanup_background();
+        }
         // The record no longer names these files, so nothing can restore them.
         for path in released_handoffs {
             if let Err(error) = std::fs::remove_file(&path)
@@ -2191,9 +2194,16 @@ impl Controller {
             executor,
         );
         if remaining.len() != operation.granted_keys.len() {
+            let revoked: Vec<_> = operation
+                .granted_keys
+                .iter()
+                .filter(|key| !remaining.contains(key))
+                .cloned()
+                .collect();
             operation.granted_keys = remaining;
-            operation.updated_at = now();
-            let _ = crate::database::save_move_operation(operation);
+            let timestamp = now();
+            operation.updated_at = timestamp.clone();
+            let _ = crate::database::remove_revoked_move_granted_keys(id, &revoked, &timestamp);
         }
     }
 

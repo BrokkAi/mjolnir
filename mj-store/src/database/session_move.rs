@@ -40,6 +40,46 @@ pub fn forget_retained_move_source(operation_id: &str) -> Result<()> {
     })
 }
 
+/// Atomically remove revoked ephemeral SSH credentials from whichever
+/// `MoveOperation` row is currently persisted for `session_id`, without
+/// overwriting any other field (so background cleanup can never clobber a
+/// newer Move admitted concurrently for the same session).
+pub fn remove_revoked_move_granted_keys(
+    session_id: &str,
+    revoked: &[mj_core::state::GrantedMoveKey],
+    updated_at: &str,
+) -> Result<()> {
+    if revoked.is_empty() {
+        return Ok(());
+    }
+    let session_id = session_id.to_owned();
+    let revoked = revoked.to_vec();
+    let updated_at = updated_at.to_owned();
+    submit_database_write("remove_revoked_move_granted_keys", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(mut current) = load_move_operation_with(&tx, &session_id)? else {
+            return Ok(());
+        };
+        let before = current.granted_keys.len();
+        current
+            .granted_keys
+            .retain(|key| !revoked.contains(key));
+        if current.granted_keys.len() != before {
+            current.updated_at = updated_at;
+            tx.execute(
+                "UPDATE session_moves SET operation_json=?2 WHERE session_id=?1 AND operation_id=?3",
+                params![
+                    session_id,
+                    serde_json::to_string(&current)?,
+                    current.operation_id
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
+}
+
 pub fn save_move_operation(operation: &MoveOperation) -> Result<()> {
     let operation = operation.clone();
     submit_database_write("save_move_operation", move |connection| {
