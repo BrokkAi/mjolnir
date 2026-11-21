@@ -58,10 +58,10 @@ pub(in crate::controller) fn managed_origin_override(
 impl OriginDeltaSuspend {
     /// Whether this suspend captures OriginDelta. An accepted suspend keeps
     /// the capture it started with, even after its worker has exited. A new
-    /// one needs a live worker that can quiesce the checkout and either an
-    /// `origin` remote or a local source repository to delta against; otherwise
-    /// it keeps the capture this release replaced, so an older worker suspends
-    /// as it did before the upgrade.
+    /// one applies to any local managed checkout with an `origin` remote or
+    /// local source repository to delta against; if the running worker predates
+    /// `suspend-worker.json`, suspend upgrades it in place instead of falling
+    /// back to version-2 capture.
     pub(super) fn applies(
         controller: &Controller,
         session_id: &str,
@@ -73,13 +73,6 @@ impl OriginDeltaSuspend {
         mj_core::runtime::off_async_worker(move || -> Result<bool> {
             if wire::read::<String>(&root, wire::ACCEPTED)?.is_some() {
                 return Ok(true);
-            }
-            let capable = match wire::read::<wire::WorkerIdentity>(&root, wire::CAPABILITY)? {
-                Some(worker) => worker.is_alive()?,
-                None => false,
-            };
-            if !capable {
-                return Ok(false);
             }
             use mj_checkpoint::archive::GitCommandRunner;
             let origin = mj_checkpoint::archive::SystemGit.run(
@@ -95,6 +88,18 @@ impl OriginDeltaSuspend {
                 return Ok(true);
             }
             Ok(managed_origin_override(&worktree).is_some())
+        })
+    }
+
+    /// Whether the session's live worker advertises origin-delta quiescence
+    /// capability (`suspend-worker.json` with a live PID).
+    pub(super) fn worker_capable(&self) -> Result<bool> {
+        let root = self.root.clone();
+        mj_core::runtime::off_async_worker(|| -> Result<bool> {
+            match wire::read::<wire::WorkerIdentity>(&root, wire::CAPABILITY)? {
+                Some(worker) => worker.is_alive(),
+                None => Ok(false),
+            }
         })
     }
 
