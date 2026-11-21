@@ -138,6 +138,14 @@ pub fn restore_checkpoint_with_native_state(
     git: &dyn GitCommandRunner,
     native_state: &dyn NativeCheckpointState,
 ) -> Result<()> {
+    restore_checkpoint_with_notices(spec, git, native_state).map(drop)
+}
+
+pub fn restore_checkpoint_with_notices(
+    spec: &CheckpointRestoreSpec,
+    git: &dyn GitCommandRunner,
+    native_state: &dyn NativeCheckpointState,
+) -> Result<Vec<String>> {
     ensure!(spec.workspace_root.is_dir(), "restore workspace is missing");
     // A restore seeds a relay that has no durable state yet. Existing state
     // means either a leaked worker still writing here or an unfinished
@@ -159,14 +167,15 @@ pub fn restore_checkpoint_with_native_state(
     // commands still queued, and nothing else. The transcript stays in the
     // archive; the controller already holds it as the durable projection.
     let seed = relay_seed_for_restore(&canonical_session, spec.restore_native, spec.queue_policy)?;
-    if spec.restore_repositories {
+    let notices = if spec.restore_repositories {
         restore_repositories_from_archive(
             &spec.archive_path,
             &archive,
             &spec.workspace_root,
+            spec.primary_repository_root.as_deref(),
             git,
             true,
-        )?;
+        )?
     } else {
         // Move has already transported workspace files. Review refs still
         // need their destination checkout names without changing its index.
@@ -174,10 +183,11 @@ pub fn restore_checkpoint_with_native_state(
             &spec.archive_path,
             &archive,
             &spec.workspace_root,
+            spec.primary_repository_root.as_deref(),
             git,
             false,
-        )?;
-    }
+        )?
+    };
 
     // Attachment data belongs to the relay, even when native harness history
     // is deliberately not restored. Install before publishing the queue seed.
@@ -217,7 +227,7 @@ pub fn restore_checkpoint_with_native_state(
     if spec.restore_native {
         restore_native_artifacts(&archive, &mut payload_reader, spec, native_state, false)?;
     }
-    Ok(())
+    Ok(notices)
 }
 
 /// Retryable reconstruction in a private staging checkout. Publishing must
@@ -577,16 +587,19 @@ pub fn restore_repositories(
 ) -> Result<()> {
     ensure!(workspace_root.is_dir(), "restore workspace is missing");
     let archive = crate::archive::read_archive_repositories(archive_path)?;
-    restore_repositories_from_archive(archive_path, &archive, workspace_root, git, true)
+    restore_repositories_from_archive(archive_path, &archive, workspace_root, None, git, true)
+        .map(drop)
 }
 
 pub(super) fn restore_repositories_from_archive(
     archive_path: &Path,
     archive: &crate::archive::VerifiedArchive,
     workspace_root: &Path,
+    primary_repository_root: Option<&Path>,
     git: &dyn GitCommandRunner,
     restore_contents: bool,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut all_notices = Vec::new();
     for repository in &archive.manifest.repositories {
         // A plain project folder is the user's own directory on a bare local
         // target. Its files were never captured, so a restore must never
@@ -626,16 +639,30 @@ pub(super) fn restore_repositories_from_archive(
                 metadata: delta.clone(),
                 pack: pack_file.as_ref().map(|file| file.path().to_path_buf()),
             };
-            let path = checkout_top_level(
-                &workspace_root.join(&repository.metadata.relative_destination),
-                &repository.metadata,
-            )
-            .with_context(|| format!("restore repository {id:?}"))?;
+            let path = if repository.metadata.id == archive.manifest.bundle.primary_repository
+                && let Some(primary) = primary_repository_root
+            {
+                if let Some(subdirectory) = &repository.metadata.checkout_subdirectory
+                    && primary.ends_with(subdirectory)
+                {
+                    checkout_top_level(primary, &repository.metadata)
+                        .with_context(|| format!("restore repository {id:?}"))?
+                } else {
+                    primary.to_path_buf()
+                }
+            } else {
+                checkout_top_level(
+                    &workspace_root.join(&repository.metadata.relative_destination),
+                    &repository.metadata,
+                )
+                .with_context(|| format!("restore repository {id:?}"))?
+            };
             let notices = crate::snapshot::restore_workspace_snapshot(git, &snapshot, &path)
                 .with_context(|| format!("restore repository {id:?}"))?;
-            for notice in notices {
+            for notice in &notices {
                 tracing::info!(repository_id = %id, "{notice}");
             }
+            all_notices.extend(notices);
             crate::snapshot::repair_workspace_snapshot(git, &snapshot, &path)
                 .with_context(|| format!("repair repository {id:?}"))?;
             continue;
@@ -668,7 +695,7 @@ pub(super) fn restore_repositories_from_archive(
         )
         .with_context(|| format!("restore repository {id:?}"))?;
     }
-    Ok(())
+    Ok(all_notices)
 }
 
 /// The top level of the checkout a repository's session directory belongs to.

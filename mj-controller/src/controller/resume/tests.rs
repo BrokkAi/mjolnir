@@ -3091,12 +3091,15 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
     let profile_home = temp.path().join("profile");
     std::fs::create_dir_all(&profile_home).unwrap();
 
-    for (case_name, origin_url, expected_message) in [
-        ("originless", None, "no Git origin remote"),
+    let local_origin = format!("file://{}", repo.display());
+    for (case_name, origin_url, expect_preflight_pass, expected_message) in [
+        ("originless", None, false, "no Git origin remote"),
+        ("local-origin", Some(local_origin), false, "network Git URL"),
         (
             "origin-backed",
             Some("https://example.com/repo.git".to_owned()),
-            "original target for now",
+            true,
+            "resume before rejecting cross-target origin-delta",
         ),
     ] {
         let session_id = format!("raw-resume-{case_name}");
@@ -3119,8 +3122,30 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
         let archive_path = temp.path().join(format!("{session_id}.hel.zip"));
         let mut session = checkpoint_test_session(&session_id);
         session.target_template_id = "local-bare".into();
-        session.project_directory = Some(repo.clone());
+        session.project_directory = Some(temp.path().join("absent-retired-clone"));
         session.state = SessionState::Stopped;
+        let bundle = mj_core::config::ProjectBundle {
+            primary_repo: "repo".into(),
+            repositories: vec![mj_core::config::ProjectRepository {
+                id: "repo".into(),
+                github: None,
+                local: Some(repo.clone()),
+                destination: std::path::PathBuf::from("repo"),
+                git_ref: None,
+                mbx_namespace: None,
+            }],
+        };
+        session.project = Some(std::sync::Arc::new(mj_core::repository::ProjectBundleSnapshot {
+            bundle: bundle.clone(),
+            identities: [(
+                "repo".into(),
+                mj_core::repository::RepositoryIdentity::Local(repo.clone()),
+            )]
+            .into_iter()
+            .collect(),
+            network_sources: Default::default(),
+            plain_directories: Default::default(),
+        }));
         let canonical = mj_core::archive::CanonicalSessionSnapshot {
             command_ledger: None,
             assessment_state: None,
@@ -3240,11 +3265,124 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
             ))
             .expect_err("cross-target resume must be refused");
         let detail = format!("{error:#}");
-        assert!(
-            detail.contains(expected_message),
-            "{case_name}: unexpected error: {detail}"
-        );
+        if expect_preflight_pass {
+            assert!(
+                !detail.contains("original target") && !detail.contains("no Git origin remote"),
+                "{case_name}: origin-backed OriginDelta should pass cross-target preflight: {detail}"
+            );
+            let verified = mj_checkpoint::archive::verify_archive_streaming(
+                &controller.state.sessions[&session_id]
+                    .checkpoint
+                    .as_ref()
+                    .unwrap()
+                    .archive_path,
+            )
+            .unwrap();
+            let derived = super::super::network_git::bundle_from_manifest_for_session(
+                &verified.manifest,
+                Some(&controller.state.sessions[&session_id]),
+                Some(&controller.config),
+            )
+            .unwrap();
+            assert_eq!(derived.primary, "repo");
+            assert_eq!(
+                derived.repositories[0].url.as_deref(),
+                Some("https://example.com/repo.git")
+            );
+            assert_eq!(derived.repositories[0].destination, "repo");
+        } else {
+            assert!(
+                detail.contains(expected_message),
+                "{case_name}: unexpected error: {detail}"
+            );
+        }
     }
+}
+
+#[test]
+fn workspace_to_raw_origin_delta_creates_managed_clone_instead_of_reusing_linked_worktree() {
+    let temp = tempfile::tempdir().unwrap();
+    let origin = temp.path().join("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    let run_git = |dir: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_git(&origin, &["init", "--bare", "--initial-branch=main"]);
+    let source = temp.path().join("source");
+    let clone = std::process::Command::new("git")
+        .args(["clone"])
+        .arg(&origin)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(clone.status.success());
+    std::fs::write(source.join("README.md"), "hello\n").unwrap();
+    run_git(&source, &["add", "README.md"]);
+    run_git(&source, &["commit", "-m", "initial"]);
+    run_git(&source, &["push", "-u", "origin", "main"]);
+
+    let session_id = "w2r-origin-delta";
+    // Create a legacy retained linked-worktree branch that non-OriginDelta would reuse.
+    run_git(&source, &["branch", &format!("mj/{session_id}")]);
+
+    let mut session = checkpoint_test_session(session_id);
+    session.project = Some(std::sync::Arc::new(mj_core::repository::ProjectBundleSnapshot {
+        bundle: mj_core::config::ProjectBundle {
+            primary_repo: "repo".into(),
+            repositories: vec![mj_core::config::ProjectRepository {
+                id: "repo".into(),
+                github: None,
+                local: Some(source.clone()),
+                destination: std::path::PathBuf::from("repo"),
+                git_ref: None,
+                mbx_namespace: None,
+            }],
+        },
+        identities: [(
+            "repo".into(),
+            mj_core::repository::RepositoryIdentity::Local(source.clone()),
+        )]
+        .into_iter()
+        .collect(),
+        network_sources: Default::default(),
+        plain_directories: Default::default(),
+    }));
+
+    let config = resume_compatibility_config();
+    let controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let conversion = controller
+        .plan_workspace_to_raw(
+            &session,
+            "local-bare",
+            true,
+            &crate::targets::ProcessExecutor,
+        )
+        .unwrap();
+    assert!(
+        !conversion.reuse_existing_branch,
+        "OriginDelta WorkspaceToRaw must never reuse a legacy linked-worktree branch"
+    );
+    assert_eq!(
+        conversion.worktree.kind,
+        mj_core::state::ManagedCheckoutKind::Clone
+    );
 }
 
 #[test]

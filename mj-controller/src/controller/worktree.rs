@@ -241,6 +241,7 @@ impl Controller {
         &self,
         session: &SessionRecord,
         target_id: &str,
+        origin_delta: bool,
         executor: &impl CommandExecutor,
     ) -> Result<WorkspaceToRawConversion> {
         let bundle = session
@@ -273,7 +274,7 @@ impl Controller {
             base_commit: None,
         };
         let reuse_existing_branch =
-            retained_managed_worktree_branch_available(executor, &worktree)?;
+            !origin_delta && retained_managed_worktree_branch_available(executor, &worktree)?;
         if !reuse_existing_branch {
             // The archived delta restored into this clone needs the session's
             // base, which the network remote served after the host's last fetch.
@@ -991,6 +992,95 @@ pub(super) struct RawToWorkspaceConversion {
     pub(super) source: mj_core::remote_git::NetworkGitSource,
     /// Removed once the target holds the checkout, and only then.
     pub(super) retire: Option<ManagedWorktree>,
+}
+
+/// Plan a raw-to-workspace transition from an `OriginDelta` archive without
+/// touching the (possibly retired or deleted) local checkout on disk.
+pub(super) fn plan_raw_to_workspace_from_origin_delta(
+    session: &SessionRecord,
+    archive_manifest: &mj_checkpoint::archive::ArchiveManifest,
+    config: &Config,
+    executor: &impl CommandExecutor,
+) -> Result<RawToWorkspaceConversion> {
+    let [archived] = archive_manifest.repositories.as_slice() else {
+        bail!("a raw checkout can only transition with a single-repository archive");
+    };
+    let metadata = &archived.metadata;
+    let delta = metadata
+        .origin_delta
+        .as_deref()
+        .context("origin delta metadata is missing")?;
+    ensure!(
+        !delta.history_cutoff,
+        "a history-cutoff origin-delta archive cannot convert from a raw checkout"
+    );
+    ensure!(
+        !metadata.origin.is_empty(),
+        "This raw session has no Git origin remote and can only be resumed on its original target."
+    );
+    ensure!(
+        metadata.checkout_subdirectory.is_none(),
+        "only a whole checkout can move into a target"
+    );
+    mj_core::remote_git::validate_network_url(&metadata.origin).with_context(|| {
+        format!(
+            "archived origin {:?} is not a network Git URL that an isolated target can clone",
+            metadata.origin
+        )
+    })?;
+    let project = accepted_project_snapshot(session, config, executor)?;
+    ensure!(
+        !project.primary_is_plain_directory(),
+        "a directory project without a committed Git checkout cannot move into a target"
+    );
+    ensure!(
+        project.bundle.repositories.len() == 1,
+        "a raw checkout can only transition with a single-repository bundle"
+    );
+    project.key()?;
+    let repository = project
+        .bundle
+        .repositories
+        .iter()
+        .find(|repository| repository.id == project.bundle.primary_repo)
+        .context("accepted project primary repository is missing")?;
+    let archive_source = mj_core::remote_git::NetworkGitSource {
+        fetch_url: metadata.origin.clone(),
+        push_urls: metadata.push_urls.clone(),
+    };
+    let source = if repository.github.is_some() {
+        let configured = mj_core::remote_git::resolve_repository(repository, executor)?;
+        let configured_id = RepositoryIdentity::from_remote(&configured.fetch_url);
+        let archive_id = RepositoryIdentity::from_remote(&archive_source.fetch_url);
+        if configured_id.is_some() && configured_id == archive_id {
+            configured
+        } else {
+            archive_source
+        }
+    } else {
+        archive_source
+    };
+    let retire = match session.managed_worktree.as_ref() {
+        Some(worktree)
+            if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? =>
+        {
+            Some((**worktree).clone())
+        }
+        _ => None,
+    };
+    let checkout = session
+        .checkout()
+        .project_directory()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| metadata.relative_destination.clone());
+    Ok(RawToWorkspaceConversion {
+        checkout,
+        repository_id: repository.id.clone(),
+        destination: repository.destination.clone(),
+        project,
+        source,
+        retire,
+    })
 }
 
 /// Resolve a raw session's accepted project and plan its checkout transition.
@@ -2147,114 +2237,157 @@ fn create_managed_clone_with_snapshot(
         .purpose("create managed clone parent"),
     )?;
     let mut published = false;
+    let seed_from_source = match snapshot {
+        None => true,
+        Some(snapshot) => {
+            path_exists_on_managed_target(executor, &checkout.target, &checkout.source_repository)?
+                && executor
+                    .execute(&managed_git_command(
+                        SshTrafficClass::Control,
+                        &checkout.target,
+                        &checkout.source_repository,
+                        ["rev-parse", "--show-object-format"],
+                        "check source repository object format before seeding clone",
+                    ))
+                    .is_ok_and(|output| {
+                        output.status == 0
+                            && String::from_utf8_lossy(&output.stdout).trim()
+                                == snapshot.metadata.object_format
+                    })
+        }
+    };
     let create = (|| -> Result<Vec<String>> {
-        execute_checked(
-            executor,
-            managed_target_command(
-                SshTrafficClass::Bulk,
-                &checkout.target,
-                "git",
-                [
-                    "clone",
-                    "--local",
-                    "--dissociate",
-                    "--no-checkout",
-                    "--",
-                    &checkout.source_repository.to_string_lossy(),
-                    &staging.to_string_lossy(),
-                ],
-            )
-            .purpose("seed independent managed clone"),
-        )?;
-        let origin = executor.execute(&managed_git_command(
-            SshTrafficClass::Control,
-            &checkout.target,
-            &checkout.source_repository,
-            ["config", "--get", "remote.origin.url"],
-            "read source origin URL",
-        ))?;
-        execute_checked(
-            executor,
-            managed_git_command(
+        if seed_from_source {
+            execute_checked(
+                executor,
+                managed_target_command(
+                    SshTrafficClass::Bulk,
+                    &checkout.target,
+                    "git",
+                    [
+                        "clone",
+                        "--local",
+                        "--dissociate",
+                        "--no-checkout",
+                        "--",
+                        &checkout.source_repository.to_string_lossy(),
+                        &staging.to_string_lossy(),
+                    ],
+                )
+                .purpose("seed independent managed clone"),
+            )?;
+            let origin = executor.execute(&managed_git_command(
                 SshTrafficClass::Control,
                 &checkout.target,
-                &staging,
-                ["remote", "remove", "origin"],
-                "discard local seed as clone remote",
-            ),
-        )?;
-        match origin.status {
-            0 => {
-                let url = String::from_utf8(origin.stdout)?;
+                &checkout.source_repository,
+                ["config", "--get", "remote.origin.url"],
+                "read source origin URL",
+            ))?;
+            execute_checked(
+                executor,
+                managed_git_command(
+                    SshTrafficClass::Control,
+                    &checkout.target,
+                    &staging,
+                    ["remote", "remove", "origin"],
+                    "discard local seed as clone remote",
+                ),
+            )?;
+            match origin.status {
+                0 => {
+                    let url = String::from_utf8(origin.stdout)?;
+                    execute_checked(
+                        executor,
+                        managed_git_command(
+                            SshTrafficClass::Control,
+                            &checkout.target,
+                            &staging,
+                            ["remote", "add", "origin", url.trim()],
+                            "set clone fetch and push remote",
+                        ),
+                    )?;
+                    copy_clone_push_configuration(executor, checkout, &staging)?;
+                    copy_source_origin_refs(executor, checkout, &staging)?;
+                }
+                1 => {}
+                status => bail!(
+                    "read source origin URL failed with status {status}: {}",
+                    String::from_utf8_lossy(&origin.stderr).trim()
+                ),
+            }
+            copy_clone_local_git_preferences(executor, checkout, &staging)?;
+            if snapshot.is_none() {
                 execute_checked(
                     executor,
                     managed_git_command(
                         SshTrafficClass::Control,
                         &checkout.target,
                         &staging,
-                        ["remote", "add", "origin", url.trim()],
-                        "set clone fetch and push remote",
+                        [
+                            "switch",
+                            "--no-track",
+                            "-C",
+                            &checkout.branch,
+                            checkout
+                                .base_commit
+                                .as_deref()
+                                .context("managed clone has no launch commit")?,
+                        ],
+                        "select managed clone starting branch",
                     ),
                 )?;
-                copy_clone_push_configuration(executor, checkout, &staging)?;
-                copy_source_origin_refs(executor, checkout, &staging)?;
+                if origin.status == 0 {
+                    execute_checked(
+                        executor,
+                        managed_git_command(
+                            SshTrafficClass::Control,
+                            &checkout.target,
+                            &staging,
+                            [
+                                "config",
+                                "--local",
+                                &format!("branch.{}.remote", checkout.branch),
+                                "origin",
+                            ],
+                            "set clone branch push remote",
+                        ),
+                    )?;
+                    execute_checked(
+                        executor,
+                        managed_git_command(
+                            SshTrafficClass::Control,
+                            &checkout.target,
+                            &staging,
+                            [
+                                "config",
+                                "--local",
+                                &format!("branch.{}.merge", checkout.branch),
+                                &format!("refs/heads/{}", checkout.branch),
+                            ],
+                            "set clone branch tracking name",
+                        ),
+                    )?;
+                }
             }
-            1 => {}
-            status => bail!(
-                "read source origin URL failed with status {status}: {}",
-                String::from_utf8_lossy(&origin.stderr).trim()
-            ),
-        }
-        copy_clone_local_git_preferences(executor, checkout, &staging)?;
-        execute_checked(
-            executor,
-            managed_git_command(
-                SshTrafficClass::Control,
-                &checkout.target,
-                &staging,
-                [
-                    "switch",
-                    "--no-track",
-                    "-C",
-                    &checkout.branch,
-                    checkout
-                        .base_commit
-                        .as_deref()
-                        .context("managed clone has no launch commit")?,
-                ],
-                "select managed clone starting branch",
-            ),
-        )?;
-        if origin.status == 0 {
+        } else {
+            let origin = snapshot
+                .and_then(|snapshot| snapshot.metadata.origin_url.as_deref())
+                .context("origin-seeded managed clone requires a snapshot origin URL")?;
             execute_checked(
                 executor,
-                managed_git_command(
-                    SshTrafficClass::Control,
+                managed_target_command(
+                    SshTrafficClass::Bulk,
                     &checkout.target,
-                    &staging,
+                    "git",
                     [
-                        "config",
-                        "--local",
-                        &format!("branch.{}.remote", checkout.branch),
-                        "origin",
+                        "clone",
+                        "--no-checkout",
+                        "--",
+                        origin,
+                        &staging.to_string_lossy(),
                     ],
-                    "set clone branch push remote",
-                ),
-            )?;
-            execute_checked(
-                executor,
-                managed_git_command(
-                    SshTrafficClass::Control,
-                    &checkout.target,
-                    &staging,
-                    [
-                        "config",
-                        "--local",
-                        &format!("branch.{}.merge", checkout.branch),
-                        &format!("refs/heads/{}", checkout.branch),
-                    ],
-                    "set clone branch tracking name",
-                ),
+                )
+                .purpose("seed independent managed clone from origin"),
             )?;
         }
         let notices = if let Some(snapshot) = snapshot {
@@ -2537,12 +2670,24 @@ pub(super) fn restore_managed_clone_origin_delta(
         metadata,
         pack: pack.as_ref().map(|pack| pack.path().to_owned()),
     };
-    ensure_managed_worktree_excluded(
-        executor,
-        &worktree.target,
-        &worktree.source_repository,
-        worktree.kind,
-    )?;
+    if path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)?
+        && executor
+            .execute(&managed_git_command(
+                SshTrafficClass::Control,
+                &worktree.target,
+                &worktree.source_repository,
+                ["rev-parse", "--git-dir"],
+                "check whether source repository is a Git repository",
+            ))
+            .is_ok_and(|output| output.status == 0)
+    {
+        ensure_managed_worktree_excluded(
+            executor,
+            &worktree.target,
+            &worktree.source_repository,
+            worktree.kind,
+        )?;
+    }
     create_managed_clone_with_snapshot(executor, worktree, Some(&snapshot))
 }
 
@@ -2776,6 +2921,37 @@ pub(super) fn preserve_retained_managed_worktree_branch(
     }
 }
 
+/// Whether retiring a managed clone still depends on its launch commit in
+/// `source_repository`.
+///
+/// Legacy checkpoints resume a clone by re-cloning `source_repository` and
+/// selecting `base_commit`, so retiring the clone requires that commit to
+/// remain reachable there. `OriginDelta` checkpoints seed from `origin` and
+/// carry every other required object in their pack, and permanent destroys or
+/// rollbacks do not retain a legacy recovery checkpoint, so they do not depend
+/// on `source_repository`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CloneRetirementPrerequisite {
+    LegacySourceCommit,
+    None,
+}
+
+pub(super) fn clone_retirement_prerequisite_for_checkpoint(
+    checkpoint: &mj_core::state::CheckpointMetadata,
+) -> CloneRetirementPrerequisite {
+    match mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path) {
+        Ok(manifest)
+            if manifest
+                .repositories
+                .iter()
+                .any(|repository| repository.metadata.origin_delta.is_some()) =>
+        {
+            CloneRetirementPrerequisite::None
+        }
+        _ => CloneRetirementPrerequisite::LegacySourceCommit,
+    }
+}
+
 /// Remove a managed worktree's checkout and keep its branch.
 ///
 /// A session that moved into a target still checkpoints as a delta against
@@ -2786,8 +2962,11 @@ pub(super) fn retire_managed_worktree(
     authority: &super::environment::CheckoutRemoval<'_>,
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
+    prerequisite: CloneRetirementPrerequisite,
 ) -> Result<()> {
-    if worktree.kind == ManagedCheckoutKind::Clone {
+    if worktree.kind == ManagedCheckoutKind::Clone
+        && prerequisite == CloneRetirementPrerequisite::LegacySourceCommit
+    {
         let base = worktree
             .base_commit
             .as_deref()
@@ -2801,7 +2980,8 @@ pub(super) fn retire_managed_worktree(
                 ["cat-file", "-e", &format!("{base}^{{commit}}")],
                 "verify clone recovery prerequisite in source repository",
             ),
-        )?;
+        )
+        .context("verify clone recovery prerequisite in source repository")?;
     }
     cleanup_managed_worktree(authority, executor, worktree, BranchDisposition::Keep)
 }
@@ -2816,9 +2996,6 @@ fn remove_managed_worktree_checkout(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
 ) -> Result<bool> {
-    if !path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)? {
-        return Ok(false);
-    }
     let release = || {
         super::mbx::release::BuildStateRelease::managed_checkout(
             managed_target_ssh(&worktree.target),
@@ -2841,6 +3018,9 @@ fn remove_managed_worktree_checkout(
             release();
         }
         return Ok(true);
+    }
+    if !path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)? {
+        return Ok(false);
     }
     if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? {
         execute_checked(

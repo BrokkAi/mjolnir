@@ -264,6 +264,7 @@ impl Controller {
                 session_id,
                 &session,
                 executor,
+                crate::controller::worktree::CloneRetirementPrerequisite::None,
                 &crate::database::save_lifecycle_session,
             );
             if let Some(relay) = relay {

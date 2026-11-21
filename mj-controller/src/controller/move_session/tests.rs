@@ -3111,7 +3111,7 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
 
     // Resume gives the session its checkout before the transfer fills it.
     let conversion = controller
-        .plan_workspace_to_raw(&source, "local-bare", &executor)
+        .plan_workspace_to_raw(&source, "local-bare", false, &executor)
         .unwrap();
     create_managed_worktree(
         &executor,

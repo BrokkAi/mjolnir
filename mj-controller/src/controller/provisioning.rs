@@ -897,7 +897,7 @@ impl Controller {
                 if history_cutoff_origin_delta {
                     Some(backend_session_bundle(&session, &self.config, executor)?)
                 } else {
-                    Some(super::network_git::checkpoint_bundle(&session)?)
+                    Some(super::network_git::checkpoint_bundle(&session, &self.config)?)
                 }
             } else {
                 Some(backend_session_bundle(&session, &self.config, executor)?)

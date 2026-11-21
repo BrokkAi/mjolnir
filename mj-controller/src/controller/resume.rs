@@ -42,6 +42,7 @@ use super::worktree::{
     PrimaryCheckoutRequirement, ResumeConversion, ResumePlan, apply_raw_to_workspace,
     apply_workspace_to_raw, create_managed_worktree, managed_worktree_checkout_exists,
     managed_worktree_target, plan_raw_to_workspace_for_session,
+    plan_raw_to_workspace_from_origin_delta,
     preserve_retained_managed_worktree_branch, raw_checkout_divergence_notice,
     raw_checkout_position_with_checkout, raw_checkout_snapshot,
     raw_conversion_preview_with_checkout, restore_managed_worktree,
@@ -990,10 +991,22 @@ impl Controller {
                 )?;
                 {
                     let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                    execute_checked(
+                    let output = execute_checked(
                         restoring,
                         restore_command(&backend, session_id, &remote_spec)?,
                     )?;
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let trimmed = stdout.trim();
+                    if !trimmed.is_empty() {
+                        #[derive(serde::Deserialize)]
+                        struct RestoreCommandOutput {
+                            #[serde(default)]
+                            notices: Vec<String>,
+                        }
+                        if let Ok(parsed) = serde_json::from_str::<RestoreCommandOutput>(trimmed) {
+                            resume_notices.extend(parsed.notices);
+                        }
+                    }
                 }
                 if should_install_attached_resources {
                     let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
@@ -1833,27 +1846,46 @@ impl Controller {
         let is_history_cutoff_origin_delta =
             super::network_git::manifest_has_history_cutoff_origin_delta(archive_manifest)
                 && super::backend::session_history_cutoff(&previous)?.is_some();
-        // An origin-delta checkpoint restores only into its own target so far.
-        // Refuse a move to another target here, before Resume is accepted.
-        if (transferring_workspace || plan != ResumePlan::InPlace)
-            && archive_manifest
-                .repositories
-                .iter()
-                .any(|repository| repository.metadata.origin_delta.is_some())
-        {
-            let originless = archive_manifest.repositories.iter().any(|repository| {
-                repository
-                    .metadata
-                    .origin_delta
-                    .as_ref()
-                    .is_some_and(|delta| !delta.history_cutoff && delta.origin_url.is_none())
-            });
-            let message = if originless {
-                "This raw session has no Git origin remote and can only be resumed on its original target."
-            } else {
-                "This session's checkpoint can be resumed only on its original target for now. Resume it there; it can then be moved."
-            };
-            return Err(mj_core::refusal::Refusal::precondition(message).into());
+        let origin_delta = archive_manifest
+            .repositories
+            .iter()
+            .any(|repository| repository.metadata.origin_delta.is_some());
+        if origin_delta {
+            if transferring_workspace {
+                return Err(mj_core::refusal::Refusal::precondition(
+                    "This session's checkpoint can be resumed only on its original target for now. Resume it there; it can then be moved.",
+                )
+                .into());
+            }
+            if plan != ResumePlan::InPlace {
+                let originless = archive_manifest.repositories.iter().any(|repository| {
+                    repository
+                        .metadata
+                        .origin_delta
+                        .as_ref()
+                        .is_some_and(|delta| !delta.history_cutoff && delta.origin_url.is_none())
+                });
+                if originless {
+                    return Err(mj_core::refusal::Refusal::precondition(
+                        "This raw session has no Git origin remote and can only be resumed on its original target.",
+                    )
+                    .into());
+                }
+                if is_history_cutoff_origin_delta && plan == ResumePlan::WorkspaceToRaw {
+                    return Err(mj_core::refusal::Refusal::precondition(
+                        "A history-cutoff session cannot be resumed into a bare checkout.",
+                    )
+                    .into());
+                }
+                if plan == ResumePlan::WorkspaceToRaw
+                    && !matches!(target_template, mj_core::config::TargetTemplate::LocalBare)
+                {
+                    return Err(mj_core::refusal::Refusal::precondition(
+                        "Resuming an OriginDelta checkpoint onto an SSH bare target is not supported yet; resume on a local bare or container target.",
+                    )
+                    .into());
+                }
+            }
         }
         // A worktree that stays put is reached with the machine's current ssh
         // options; only its location had to match (J-21).
@@ -1874,7 +1906,11 @@ impl Controller {
             && !transferring_workspace
             && !is_history_cutoff_origin_delta
         {
-            super::network_git::bundle_from_manifest(archive_manifest)?;
+            super::network_git::bundle_from_manifest_for_session(
+                archive_manifest,
+                Some(&previous),
+                Some(&self.config),
+            )?;
         }
         if plan == ResumePlan::InPlace
             && matches!(checkout.effective(), mj_core::state::Checkout::Attached { .. })
@@ -1886,11 +1922,20 @@ impl Controller {
         let conversion = match plan {
             ResumePlan::InPlace => None,
             ResumePlan::RawToWorkspace => Some(ResumeConversion::RawToWorkspace(Box::new(
-                plan_raw_to_workspace_for_session(&previous, &checkout, &self.config, executor)
-                    .context("prepare the raw checkout for its new target")?,
+                if origin_delta && !transferring_workspace {
+                    plan_raw_to_workspace_from_origin_delta(
+                        &previous,
+                        archive_manifest,
+                        &self.config,
+                        executor,
+                    )
+                } else {
+                    plan_raw_to_workspace_for_session(&previous, &checkout, &self.config, executor)
+                }
+                .context("prepare the raw checkout for its new target")?,
             ))),
             ResumePlan::WorkspaceToRaw => Some(ResumeConversion::WorkspaceToRaw(
-                self.plan_workspace_to_raw(&previous, target_id, executor)
+                self.plan_workspace_to_raw(&previous, target_id, origin_delta, executor)
                     .context("prepare a checkout for this session")?,
             )),
         };
@@ -1948,6 +1993,7 @@ impl Controller {
         // A checkout Mjolnir did not retire remains the truth for a raw session.
         // A retired checkout is recreated from the branch and archive below.
         if managed_checkout_present
+            && !(origin_delta && plan == ResumePlan::RawToWorkspace)
             && let Some(project_directory) = previous_project_directory.as_deref()
         {
             let checkout = self.state.checkout(session_id)?;
@@ -2109,18 +2155,18 @@ impl Controller {
             self.state.remember_container_size(host, *size);
         }
 
-        let origin_delta = archive_manifest.repositories.iter()
-            .any(|repository| repository.metadata.origin_delta.is_some());
         let mut recreated_managed_worktree = false;
         // Set once a conversion has written its archive, so the success path can
         // retire the archive it replaced and the failure path can remove it.
         let mut conversion_checkpoint_written: Option<mj_core::state::CheckpointMetadata> = None;
         let result = async {
             if origin_delta {
-                ensure!(!transferring_workspace && plan == ResumePlan::InPlace, "origin delta conversion is unavailable");
-                if is_history_cutoff_origin_delta {
-                    // Provisioning builds the cutoff-bounded clone from the configured
-                    // bundle; restore_into_target then applies the origin-delta snapshot.
+                ensure!(!transferring_workspace, "origin delta live move is unavailable");
+                if is_history_cutoff_origin_delta || plan == ResumePlan::RawToWorkspace {
+                    // Provisioning clones from the origin/bundle; restore_into_target
+                    // then applies the origin-delta snapshot into the workspace.
+                } else if plan == ResumePlan::WorkspaceToRaw {
+                    // Handled in the WorkspaceToRaw conversion block below.
                 } else if let Some(worktree) = previous_managed_worktree.as_ref() {
                     resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
                         executor, worktree, &archive_path, archive_manifest,
@@ -2129,7 +2175,8 @@ impl Controller {
                 } else if is_attached_checkout {
                     // Raw checkout resuming in place: the existing checkout is authoritative.
                 } else {
-                    anyhow::bail!("origin delta resume requires a managed clone or in-place raw checkout");
+                    // ManagedWorkspace resuming in place: provisioning clones from origin;
+                    // restore_into_target applies the origin-delta snapshot.
                 }
             } else if let Some(worktree) = previous_managed_worktree.as_ref() {
                 recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
@@ -2151,34 +2198,43 @@ impl Controller {
                 .as_ref()
                 .and_then(ResumeConversion::workspace_to_raw)
             {
-                if conversion.reuse_existing_branch {
-                    let recovery_ref =
-                        preserve_retained_managed_worktree_branch(executor, &conversion.worktree)?;
-                    restore_managed_worktree(executor, &conversion.worktree)?;
-                    resume_notices.push(format!(
-                        "Before restoring this session's retained branch, Mjolnir preserved its tip at {recovery_ref}."
-                    ));
-                } else {
-                    create_managed_worktree(
+                if origin_delta && !transferring_workspace {
+                    resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
                         executor,
                         &conversion.worktree,
-                        None,
-                        PrimaryCheckoutRequirement::Any,
-                    )?;
-                }
-                if transferring_workspace {
-                    // Move installs its separately verified Git/file transfer below.
-                } else if conversion.worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
-                    mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
-                        &archive_path, &conversion.worktree.worktree_root, &SystemGit,
-                    )?;
-                } else {
-                    mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
                         &archive_path,
-                        &conversion.worktree.worktree_root,
-                        &conversion.worktree.branch,
-                        &SystemGit,
-                    )?;
+                        archive_manifest,
+                    )?);
+                } else {
+                    if conversion.reuse_existing_branch {
+                        let recovery_ref =
+                            preserve_retained_managed_worktree_branch(executor, &conversion.worktree)?;
+                        restore_managed_worktree(executor, &conversion.worktree)?;
+                        resume_notices.push(format!(
+                            "Before restoring this session's retained branch, Mjolnir preserved its tip at {recovery_ref}."
+                        ));
+                    } else {
+                        create_managed_worktree(
+                            executor,
+                            &conversion.worktree,
+                            None,
+                            PrimaryCheckoutRequirement::Any,
+                        )?;
+                    }
+                    if transferring_workspace {
+                        // Move installs its separately verified Git/file transfer below.
+                    } else if conversion.worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
+                        mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
+                            &archive_path, &conversion.worktree.worktree_root, &SystemGit,
+                        )?;
+                    } else {
+                        mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
+                            &archive_path,
+                            &conversion.worktree.worktree_root,
+                            &conversion.worktree.branch,
+                            &SystemGit,
+                        )?;
+                    }
                 }
             }
             // A local checkout becomes an isolated workspace by being
@@ -2189,6 +2245,7 @@ impl Controller {
                 .as_ref()
                 .and_then(ResumeConversion::raw_to_workspace)
                 && !transferring_workspace
+                && !origin_delta
             {
                 let snapshot = raw_checkout_snapshot(
                     &conversion.checkout,
@@ -2266,11 +2323,20 @@ impl Controller {
             if transferring_workspace {
                 self.restore_move_workspace(session_id, executor)?;
             }
-            let restore_repositories = (!origin_delta || is_history_cutoff_origin_delta)
-                && !transferring_workspace
-                && ((resumed_project_directory.is_none() && conversion.is_none())
-                    || plan == ResumePlan::RawToWorkspace
-                    || (recreated_managed_worktree && plan == ResumePlan::InPlace));
+            let restore_repositories = if origin_delta {
+                !transferring_workspace
+                    && (is_history_cutoff_origin_delta
+                        || plan == ResumePlan::RawToWorkspace
+                        || (plan == ResumePlan::InPlace
+                            && resumed_project_directory.is_none()
+                            && previous_managed_worktree.is_none()
+                            && !is_attached_checkout))
+            } else {
+                !transferring_workspace
+                    && ((resumed_project_directory.is_none() && conversion.is_none())
+                        || plan == ResumePlan::RawToWorkspace
+                        || (recreated_managed_worktree && plan == ResumePlan::InPlace))
+            };
             // A conversion restores the archive it just wrote, not the raw one
             // the session was stopped with.
             let restored_archive = conversion_checkpoint_written
