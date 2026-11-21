@@ -241,6 +241,10 @@ class EngineQuotaHold(RuntimeError):
     pass
 
 
+class StopRequested(Exception):
+    pass
+
+
 def checkpointed_answer(engine, directory, commit, text, *, fresh=False):
     receipt = directory / ("fresh-engine.json" if fresh else "engine.json")
     if receipt.exists():
@@ -254,10 +258,12 @@ def checkpointed_answer(engine, directory, commit, text, *, fresh=False):
     return response
 
 
-def run_sample(run, queries, fresh, engine, models):
+def run_sample(run, queries, fresh, engine, models, *, stop_request):
     """Checkpoint engine answers for both phases and measure only with gold models."""
     records = {}
     for query in queries:
+        if stop_request.exists():
+            raise StopRequested
         directory = run / query.key
         path = directory / "measurement.json"
         if path.exists():
@@ -345,7 +351,10 @@ def main(argv=None):
         adapter = None if args.phase == "engine" else LiveModels(
             config, manifest, documents, run, args.terra_profile, claude_version)
         try:
-            records = run_sample(run, queries, fresh, engine, adapter)
+            records = run_sample(run, queries, fresh, engine, adapter, stop_request=directory / "stop-requested")
+        except StopRequested:
+            print(json.dumps({"status": "stop_requested"}), flush=True)
+            return 3
         except EngineQuotaHold as hold:
             print(json.dumps({"status": "quota_hold", "phase": args.phase, "reason": str(hold)}), flush=True)
             return 1

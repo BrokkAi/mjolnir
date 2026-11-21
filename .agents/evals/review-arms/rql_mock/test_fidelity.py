@@ -252,6 +252,7 @@ class EnginePhase(unittest.TestCase):
         self.calls = []
         self.gold_calls = []
         self.hold_at = None
+        self.stop_at = None
         self.identity = {"manifest_sha256": digest, "engine_inputs_sha256": "b" * 64}
         engine = SimpleNamespace(
             identity=self.identity, model_version="claude-sonnet-5-5", answer=self.answer,
@@ -277,6 +278,10 @@ class EnginePhase(unittest.TestCase):
     def answer(self, commit, text, *, fresh=False):
         call = (text, fresh)
         self.calls.append(call)
+        if self.stop_at is not None:
+            stop_on, request = self.stop_at
+            if call == stop_on:
+                request.touch()
         if call == self.hold_at:
             return {"status": "quota_hold", "message": "fixture hold"}
         return {"status": "ok", "rows": self.rows}
@@ -338,6 +343,27 @@ class EnginePhase(unittest.TestCase):
         self.assertEqual(self.calls, self.expected[held:])
         self.assertEqual(self.gold_calls, [])
         self.assertFalse((self.root / "fidelity/gate-report.json").exists())
+
+    def test_stop_request_finishes_the_current_query_before_stopping(self):
+        request = self.root / "fidelity/stop-requested"
+        self.stop_at = ((self.queries[1].text, False), request)
+        status, output = self.run_phase(self.root, "--terra-profile", "fixture")
+        self.assertEqual(status, 3)
+        self.assertEqual(output[-1], {"status": "stop_requested"})
+        self.assertEqual(self.calls, self.expected[:3])
+        self.assertTrue(request.is_file())
+        self.assertEqual(len(list(self.root.rglob("measurement.json"))), 2)
+        self.assertFalse((request.parent / "gate-report.json").exists())
+
+        self.calls.clear()
+        self.gold_calls.clear()
+        self.assertEqual(self.run_phase(self.root, "--terra-profile", "fixture")[0], 3)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.gold_calls, ["started"])
+        request.unlink()
+        self.stop_at = None
+        self.assertEqual(self.run_phase(self.root, "--terra-profile", "fixture")[0], 0)
+        self.assertEqual(self.calls, self.expected[3:])
 
 
 class TerraOutput(unittest.TestCase):
