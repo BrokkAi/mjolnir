@@ -67,6 +67,8 @@ The study plan says *what* is measured and *why*. This ExecPlan says how the har
 
 - 2026-11-21: user decisions: the engine may also spend on claude4 and claude7 after their resets, with the study's floors (25% weekly, 20% five-hour). claude5 has no floor ("you can remove the claude5 floor, nobody else is consuming it and i don't want to waste it"): every pilot use of claude5 (engine, fidelity adjudicator, judges) runs to the provider's limit, where a refusal is a hold as before. The floors are per login in one table, `driver.PILOT_CLAUDE_FLOORS`.
 
+- 2026-11-21: a repair round counts as progress when it has fewer distinct errors than the round before, not only when its errors are a strict subset of the last round's. This matches the user's "repairing until the output verifies or stops improving". In the live gate, a repair that cut 51 unaccounted candidates to 36 depth errors was stopped as a stall under the subset rule, and the query ended the run. The count must strictly fall, so every loop still ends; a round that only swaps errors stops, and the query gets its one fresh session. The engine and the judges share the rule (`driver.repair_progress`).
+
 ## Outcomes & Retrospective
 
 (none yet)

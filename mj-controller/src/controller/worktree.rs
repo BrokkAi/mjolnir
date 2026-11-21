@@ -275,7 +275,13 @@ impl Controller {
         };
         let reuse_existing_branch =
             !origin_delta && retained_managed_worktree_branch_available(executor, &worktree)?;
-        if !reuse_existing_branch {
+        if origin_delta {
+            worktree.kind = ManagedCheckoutKind::Clone;
+            worktree.worktree_root =
+                target_path::join(source, &Path::new(".mj").join("clones").join(&session.id));
+            worktree.branch = format!("mj/{}", session.id);
+            worktree.base_commit = None;
+        } else if !reuse_existing_branch {
             // The archived delta restored into this clone needs the session's
             // base, which the network remote served after the host's last fetch.
             refresh_source_origin(executor, &worktree.target, source)?;
@@ -1024,7 +1030,7 @@ pub(super) fn plan_raw_to_workspace_from_origin_delta(
     );
     mj_core::remote_git::validate_network_url(&metadata.origin).with_context(|| {
         format!(
-            "archived origin {:?} is not a network Git URL that an isolated target can clone",
+            "archived origin {:?} is not a network Git URL that an isolated target can clone; resume this session on its original target",
             metadata.origin
         )
     })?;
@@ -2772,7 +2778,7 @@ pub(super) fn restore_managed_worktree(
     Ok(true)
 }
 
-fn ensure_managed_worktree_available(
+pub(super) fn ensure_managed_worktree_available(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
 ) -> Result<()> {
@@ -2939,15 +2945,8 @@ pub(super) enum CloneRetirementPrerequisite {
 pub(super) fn clone_retirement_prerequisite_for_checkpoint(
     checkpoint: &mj_core::state::CheckpointMetadata,
 ) -> CloneRetirementPrerequisite {
-    match mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path) {
-        Ok(manifest)
-            if manifest
-                .repositories
-                .iter()
-                .any(|repository| repository.metadata.origin_delta.is_some()) =>
-        {
-            CloneRetirementPrerequisite::None
-        }
+    match mj_checkpoint::archive::checkpoint_archive_uses_origin_delta(&checkpoint.archive_path) {
+        Ok(true) => CloneRetirementPrerequisite::None,
         _ => CloneRetirementPrerequisite::LegacySourceCommit,
     }
 }
@@ -2986,8 +2985,8 @@ pub(super) fn retire_managed_worktree(
     cleanup_managed_worktree(authority, executor, worktree, BranchDisposition::Keep)
 }
 
-/// Remove the checkout and prune its metadata. Returns whether the repository
-/// is still there to act on at all.
+/// Remove the checkout and its own registration without pruning sibling
+/// worktrees. Returns whether the repository is still there to act on at all.
 ///
 /// Every caller has stopped the session's worker first, so once the checkout
 /// is gone nothing can build in it again, and mbx is told to drop its build
@@ -3023,6 +3022,8 @@ fn remove_managed_worktree_checkout(
         return Ok(false);
     }
     if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? {
+        // Use a single `--force` so Git removes dirty checkouts while still
+        // refusing locked registrations (a second `--force` would override the lock).
         execute_checked(
             executor,
             managed_git_command(
@@ -3033,24 +3034,185 @@ fn remove_managed_worktree_checkout(
                     "worktree",
                     "remove",
                     "--force",
+                    "--",
                     &worktree.worktree_root.to_string_lossy(),
                 ],
                 "remove managed raw-session worktree",
             ),
         )?;
         release();
+    } else {
+        remove_missing_linked_worktree_admin(executor, worktree)?;
     }
-    execute_checked(
-        executor,
-        managed_git_command(
-            SshTrafficClass::Control,
-            &worktree.target,
-            &worktree.source_repository,
-            ["worktree", "prune"],
-            "prune managed worktree metadata",
-        ),
-    )?;
     Ok(true)
+}
+
+/// Canonicalize as much of `path` as exists on disk so missing checkouts under
+/// symlinked parents (such as `/var` vs `/private/var`) compare equal.
+fn canonicalize_missing_path(path: &Path) -> PathBuf {
+    let mut existing = path.to_path_buf();
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            break;
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = existing.parent() else {
+            break;
+        };
+        existing = parent.to_path_buf();
+    }
+    let mut resolved = std::fs::canonicalize(&existing).unwrap_or(existing);
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    resolved
+}
+
+/// Remove only the single `<common_dir>/worktrees/<name>` admin directory whose
+/// `gitdir` points at `worktree.worktree_root/.git`, without running
+/// repository-wide `git worktree prune`. Keeps locked registrations untouched.
+fn remove_missing_linked_worktree_admin(
+    executor: &impl CommandExecutor,
+    worktree: &ManagedWorktree,
+) -> Result<()> {
+    match &worktree.target {
+        ManagedWorktreeTarget::Local => {
+            let common_raw = managed_git_stdout(
+                executor,
+                &worktree.target,
+                &worktree.source_repository,
+                ["rev-parse", "--git-common-dir"],
+                "locate managed worktree git common directory",
+            )?;
+            let common_path = PathBuf::from(common_raw);
+            let common_dir = if common_path.is_relative() {
+                worktree.source_repository.join(common_path)
+            } else {
+                common_path
+            };
+            let worktrees_dir = common_dir.join("worktrees");
+            if !worktrees_dir.is_dir() {
+                return Ok(());
+            }
+            let target_root = canonicalize_missing_path(&worktree.worktree_root);
+            for entry in std::fs::read_dir(&worktrees_dir).with_context(|| {
+                format!("read worktrees directory {}", worktrees_dir.display())
+            })? {
+                let entry = entry?;
+                let admin_dir = entry.path();
+                if !admin_dir.is_dir() {
+                    continue;
+                }
+                let gitdir_file = admin_dir.join("gitdir");
+                let Ok(raw_gitdir) = std::fs::read_to_string(&gitdir_file) else {
+                    continue;
+                };
+                let trimmed = raw_gitdir.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let gitdir_path = PathBuf::from(trimmed);
+                let resolved_gitdir = if gitdir_path.is_relative() {
+                    admin_dir.join(gitdir_path)
+                } else {
+                    gitdir_path
+                };
+                let Some(checkout_root) = resolved_gitdir.parent() else {
+                    continue;
+                };
+                if canonicalize_missing_path(checkout_root) == target_root {
+                    if admin_dir.join("locked").exists() {
+                        tracing::warn!(
+                            worktree_root = %worktree.worktree_root.display(),
+                            admin_dir = %admin_dir.display(),
+                            "keeping locked managed worktree registration after checkout removal"
+                        );
+                        return Ok(());
+                    }
+                    std::fs::remove_dir_all(&admin_dir).with_context(|| {
+                        format!(
+                            "remove managed worktree admin directory {}",
+                            admin_dir.display()
+                        )
+                    })?;
+                    return Ok(());
+                }
+            }
+            Ok(())
+        }
+        ManagedWorktreeTarget::Ssh { .. } => {
+            const SCRIPT: &str = r#"set -eu
+src="$1"
+target="$2"
+common=$(git -C "$src" rev-parse --git-common-dir)
+case "$common" in
+  /*) ;;
+  *) common="$src/$common" ;;
+esac
+wt_dir="$common/worktrees"
+[ -d "$wt_dir" ] || exit 0
+norm_path() {
+  p="$1"
+  suffix=""
+  while [ -n "$p" ] && [ "$p" != "/" ] && [ ! -d "$p" ]; do
+    base=$(basename "$p")
+    suffix="/$base$suffix"
+    p=$(dirname "$p")
+  done
+  if [ -d "$p" ]; then
+    p=$(cd "$p" 2>/dev/null && pwd -P) || p="$p"
+  fi
+  case "$p" in
+    /) printf '%s' "${suffix:-/}" ;;
+    *) printf '%s%s' "$p" "$suffix" ;;
+  esac
+}
+norm_target=$(norm_path "$target")
+for admin in "$wt_dir"/*; do
+  [ -d "$admin" ] && [ -f "$admin/gitdir" ] || continue
+  IFS= read -r gd < "$admin/gitdir" || [ -n "$gd" ] || continue
+  [ -n "$gd" ] || continue
+  case "$gd" in
+    /*) ;;
+    *) gd="$admin/$gd" ;;
+  esac
+  parent=$(dirname "$gd")
+  if [ "$(norm_path "$parent")" = "$norm_target" ]; then
+    if [ -e "$admin/locked" ]; then
+      printf 'LOCKED\n'
+      exit 0
+    fi
+    rm -rf -- "$admin"
+    exit 0
+  fi
+done
+"#;
+            let output = execute_checked(
+                executor,
+                managed_target_command(
+                    SshTrafficClass::Control,
+                    &worktree.target,
+                    "sh",
+                    [
+                        "-c",
+                        SCRIPT,
+                        "--",
+                        &worktree.source_repository.to_string_lossy(),
+                        &worktree.worktree_root.to_string_lossy(),
+                    ],
+                )
+                .purpose("remove missing managed worktree registration"),
+            )?;
+            if String::from_utf8_lossy(&output.stdout).trim() == "LOCKED" {
+                tracing::warn!(
+                    worktree_root = %worktree.worktree_root.display(),
+                    "keeping locked remote managed worktree registration after checkout removal"
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Whether the session branch is contained in a branch that is not a Mjolnir

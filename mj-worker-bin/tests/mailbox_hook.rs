@@ -388,6 +388,7 @@ fn a_lost_drain_response_keeps_mailbox_events_for_a_restarted_worker() {
         protocol_version: RELAY_PROTOCOL_VERSION,
         request: RelayRequest::DrainMailbox {
             hook_event: "PostToolBatch".into(),
+            conversation_id: None,
         },
     });
     assert!(matches!(
@@ -715,4 +716,125 @@ fn openai_codex_mailbox_hook_delivers_at_the_tool_boundary() {
             .count(),
         1
     );
+}
+
+#[test]
+fn antigravity_mailbox_hook_formats_inject_steps_and_filters_conversation_id() {
+    let root = tempfile::tempdir().expect("isolated mailbox hook root");
+    let relay_root = root.path().join("relay");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let socket = root.path().join("control.sock");
+    let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
+    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    relay.set_mailbox_delivery_mode(MailboxDeliveryMode::ToolBoundary);
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "agy-root-conv".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let event = MailboxEvent {
+        key: "api:agy-pre-invocation".into(),
+        source: "api".into(),
+        wake: false,
+        created_at_ms: 1,
+        body: MailboxEventBody::PlainText {
+            text: "Antigravity receives this via PreInvocation.".into(),
+        },
+    };
+    let accepted = relay.handle(RelayRequestEnvelope {
+        request_id: "seed-agy-event".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "seed-agy-event-command".into(),
+            command: RelayCommand::DeliverMailboxEvent {
+                event: event.clone(),
+            },
+        },
+    });
+    assert!(matches!(accepted.body, RelayResponseBody::Ok { .. }));
+
+    // 1 connection for mismatched sub-agent drain (empty, no ack) +
+    // 2 connections for matching root drain + ack.
+    let server = std::thread::spawn(move || {
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().expect("accept mailbox hook connection");
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            serve_relay_json_lines(&mut reader, &mut writer, &mut relay)
+                .expect("serve the actual durable relay protocol");
+        }
+        relay
+    });
+
+    let run_agy_hook = |conversation_id: &str| {
+        let mut command = CommandSpec::new(
+            env!("CARGO_BIN_EXE_mj-worker"),
+            [
+                "worker",
+                "mailbox-hook",
+                "--socket",
+                socket.to_str().unwrap(),
+                "--event",
+                "PostToolBatch",
+                "--format",
+                "antigravity",
+            ],
+        )
+        .with_sensitive_stdin(
+            serde_json::to_vec(&serde_json::json!({
+                "conversationId": conversation_id,
+            }))
+            .unwrap(),
+        );
+        command.clear_env = true;
+        command.env.extend([
+            (
+                "MJ_DATA_DIR".into(),
+                data_dir.to_string_lossy().into_owned(),
+            ),
+            (
+                "MJ_CONFIG_DIR".into(),
+                config_dir.to_string_lossy().into_owned(),
+            ),
+        ]);
+        let output = CancellableProcessExecutor::with_timeout(Duration::from_secs(20))
+            .execute(&command)
+            .expect("run the real antigravity mailbox hook command");
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("mailbox hook writes JSON")
+    };
+
+    let mismatched = run_agy_hook("agy-subagent-conv");
+    assert_eq!(mismatched, serde_json::json!({}));
+
+    let matched = run_agy_hook("agy-root-conv");
+    let mut relay = server.join().expect("relay socket server thread");
+
+    assert_eq!(
+        matched["injectSteps"][0]["systemMessage"]["systemMessage"],
+        mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&event))
+    );
+    let journal = relay_events(&mut relay, "inspect-agy-delivery");
+    assert!(journal.iter().any(|record| matches!(
+        &record.observation,
+        RelayObservation::MailboxEventsDelivered {
+            event_keys,
+            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+            hook_event: Some(hook_event),
+            ..
+        } if event_keys.as_slice() == ["api:agy-pre-invocation"]
+            && hook_event == "PostToolBatch"
+    )));
 }

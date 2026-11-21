@@ -438,8 +438,12 @@ def pilot_claude_hold(profile):
 
 
 def repair_progress(previous, current):
-    """Admit the first repair, then require a proper subset of the previous errors."""
-    return previous is None or current < previous
+    """Admit the first repair, then require fewer errors than the previous round.
+
+    Fixing some errors can introduce others (51 unaccounted candidates became 36
+    depth errors in the live gate); that is still improvement. The count strictly
+    falls, so the loop ends; a round that swaps errors without fewer of them stops."""
+    return previous is None or len(current) < len(previous)
 
 
 def expected_provider_model(manifest, role="judge"):

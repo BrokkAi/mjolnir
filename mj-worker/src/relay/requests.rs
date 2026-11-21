@@ -201,7 +201,10 @@ impl DurableRelay {
                 )?;
                 RelayResponsePayload::Status(state)
             }
-            RelayRequest::DrainMailbox { hook_event } => self.drain_mailbox(hook_event)?,
+            RelayRequest::DrainMailbox {
+                hook_event,
+                conversation_id,
+            } => self.drain_mailbox(hook_event, conversation_id.as_deref())?,
             RelayRequest::AckMailbox { lease_id } => self.ack_mailbox(lease_id)?,
             RelayRequest::ReserveIdle { command_id } => {
                 let already_accepted = self.snapshot.handled_commands.contains_key(command_id);
