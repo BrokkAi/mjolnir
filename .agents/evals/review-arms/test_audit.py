@@ -25,7 +25,7 @@ def audit_call(tmp_path, call, **kwargs):
     "rg -ni sqlite src/analyzer/store/mod.rs",
     "find src -type f -path '/run/hel/git-cache'",
     "git log --grep='git fetch /run/hel/git-cache' HEAD",
-    "sed -i 's|before|curl https://example.invalid .mj/store.db|g' notes.txt",
+    "sed 's|before|curl https://example.invalid .mj/store.db|g' notes.txt",
     "grep -in 'curl https://github.com' README.md",
     "git grep -n 'git fetch /run/hel/git-cache' HEAD -- docs",
     "rg '/home/jonathan' src",
@@ -241,3 +241,247 @@ def test_recursively_invoked_script_requires_inspection(tmp_path):
     ])
     assert not report["passed"]
     assert "needs-inspection" in {hit["kind"] for hit in report["hits"]}
+
+
+# Hard-won: b9ceb96: live engine query voided for awk line slice
+def test_live_engine_awk_line_slice_is_a_read(tmp_path):
+    command = "awk 'NR>=102 && NR<=110' src/hel_database/events.rs"
+    report = audit_call(tmp_path, {"kind": "execute", "rawInput": {"command": command}})
+    assert report["passed"], report["hits"]
+
+
+def test_awk_system_call_still_flags_network_access(tmp_path):
+    command = """awk 'BEGIN { system("curl https://example.invalid") }' src/hel_database/events.rs"""
+    report = audit_call(tmp_path, {"kind": "execute", "rawInput": {"command": command}})
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"github-or-web", "needs-inspection"}
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    # Hard-won: 343e9f0: perl effects passed a denylist
+    ("""perl -ne 'use File::Copy; copy("/workspace/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/secret", "out")' input""",
+     {"needs-inspection", "other-workspace"}),
+    # Hard-won: 343e9f0: perl imported socket code outside the read subset
+    ("perl -ne 'use IO::Socket::INET; print' input", {"needs-inspection"}),
+    # Hard-won: 343e9f0: awk hid a later read behind backslash-newline
+    ("awk 'BEGIN { x = 1; " + "\\" + "\ngetline < input }'", {"needs-inspection"}),
+    # Hard-won: 343e9f0: awk hid print redirection after a trailing comma
+    ("awk '{ print $1,\n$2 > output }' input", {"needs-inspection"}),
+    # Hard-won: 343e9f0: gawk changed git's environment before a subprocess
+    ("""gawk 'BEGIN { ENVIRON["GIT_DIR"]="/tmp/other"; system("git show HEAD") }'""", {"needs-inspection"}),
+    # Hard-won: 343e9f0: perl substitution with whitespace hid its execution flag
+    ("perl -pe 's {x}{print}e' input", {"needs-inspection"}),
+    # Hard-won: 343e9f0: sed backup suffix could change the destination
+    ("sed '--in-place=*/../../outside' 'p' README.md", {"needs-inspection"}),
+    # Hard-won: 343e9f0: relative operands missed the recorded workspace boundary
+    (f"cat ../{FOREIGN}/README.md", {"other-workspace"}),
+])
+def test_text_filter_review_findings_still_void(tmp_path, command, expected):
+    report = audit_calls(tmp_path, [shell(command)], cwd=f"/workspace/{OWN}")
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} >= expected
+
+
+@pytest.mark.parametrize("command", [
+    "awk -F: -v minimum=2 'NR >= minimum { print substr($1, 1, 4) }' input",
+    "sed -n -E -e '2,4p' -e '/x/{s/x/y/g; p;}' input",
+    "perl -ne 'print if /x/' input",
+    """perl -F: -lape 'my $word = lc $_; print join(",", @F) if length $word' input""",
+])
+def test_text_filter_read_subset_passes(tmp_path, command):
+    report = audit_call(tmp_path, shell(command))
+    assert report["passed"], report["hits"]
+
+
+# Hard-won: 3717f81: sed replacement text read as web access
+def test_read_only_sed_substitution_treats_quoted_url_as_data(tmp_path):
+    command = """sed 's|"https://example.invalid"|"local"|g' notes.txt"""
+    report = audit_call(tmp_path, shell(command))
+    assert report["passed"], report["hits"]
+
+
+def test_sed_write_still_flags_protected_path(tmp_path):
+    command = "sed 'w /run/hel/git-cache/config' notes.txt"
+    report = audit_call(tmp_path, shell(command))
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"git-history-escape", "needs-inspection"}
+
+
+# Hard-won: 3c1a690: scratch executables were screened as system binaries
+@pytest.mark.parametrize(("executable", "passed"), [
+    ("./awk", False), ("/tmp/x/awk", False), ("$PWD/bin/awk", False),
+    ("awk", True), ("/usr/bin/awk", True),
+])
+def test_audit_verifies_the_system_tool_path(tmp_path, executable, passed):
+    report = audit_calls(tmp_path, [shell(f"{executable} 'NR < 2' input")], cwd=f"/workspace/{OWN}/repo")
+    assert report["passed"] is passed
+    if not passed:
+        assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+def test_bare_name_previously_written_in_the_session_needs_inspection(tmp_path):
+    report = audit_calls(tmp_path, [
+        shell("printf '%s\\n' '#!/bin/sh' 'cat README.md' > awk"),
+        shell("awk 'NR < 2' input"),
+    ])
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+# Hard-won: 3c1a690: relative reads after cd missed one side of the workspace boundary
+@pytest.mark.parametrize("separator", [";", "\n"])
+def test_relative_paths_are_checked_at_both_cd_outcomes(tmp_path, separator):
+    report = audit_calls(
+        tmp_path, [shell(f"cd src{separator} awk 'NR < 2' ../../{FOREIGN}/x")], cwd=f"/workspace/{OWN}/repo",
+    )
+    assert not report["passed"]
+    assert "other-workspace" in {hit["kind"] for hit in report["hits"]}
+
+
+def test_unknown_cd_requires_auditable_absolute_operands(tmp_path):
+    report = audit_calls(tmp_path, [shell("cd -; cat relative.txt")], cwd=f"/workspace/{OWN}/repo")
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+@pytest.mark.parametrize("command", [
+    "mktemp", "date", "env sh -c 'cat README.md'",
+    "rg -n -i -g '*.rs' -t rust --type-add 'my:*.rs' --max-depth 2 -uu needle src",
+    "rg -n 'ref' src/{left,{right,center}}.rs",
+    "nl -ba src/{01..05..2}.rs | sed -n '1,40p'",
+    "cat src/{a..e..2}.rs",
+    "rg -n '{.mj,other}' src",
+])
+def test_visible_reads_and_wrappers_pass(tmp_path, command):
+    report = audit_call(tmp_path, shell(command))
+    assert report["passed"], report["hits"]
+
+
+@pytest.mark.parametrize(("command", "kind"), [
+    ("env sh -c 'cat /run/hel/git-cache/config'", "git-history-escape"),
+    ("cat {.mj,src}/store.txt", "memory-or-sessions"),
+    ("cat src/{1..1025}.rs", "needs-inspection"),
+    ("cat src/{a,other.rs", "needs-inspection"),
+    ("ln -s /run/hel/git-cache/config local", "git-history-escape"),
+    ("jq '.id' .mj/results.json", "memory-or-sessions"),
+])
+def test_expansion_and_wrappers_keep_protected_access_visible(tmp_path, command, kind):
+    report = audit_call(tmp_path, shell(command))
+    assert not report["passed"]
+    assert kind in {hit["kind"] for hit in report["hits"]}
+
+
+# Hard-won: 23e9afc: title-only list inferred a target from the working directory
+@pytest.mark.parametrize("raw", [None, {"cwd": f"/workspace/{OWN}/repo"}])
+def test_title_only_list_requires_target_evidence(tmp_path, raw):
+    list_call = {"name": "exec_command", "kind": "read", "title": "List files", "rawInput": raw}
+    prior = shell("pwd")
+    prior["rawInput"]["cwd"] = f"/workspace/{OWN}/repo"
+    report = audit_calls(tmp_path, [prior, list_call], cwd=f"/workspace/{OWN}/repo")
+    assert not report["passed"]
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(2, "needs-inspection")]
+
+
+@pytest.mark.parametrize("evidence", [
+    {"name": "list_files", "locations": [{"path": "src"}]},
+    {"rawInput": {"argv": ["ls"]}},
+])
+def test_list_with_recorded_target_or_visible_default_passes(tmp_path, evidence):
+    report = audit_calls(tmp_path, [{"name": "exec_command", "kind": "read", "title": "List files", **evidence}],
+                         cwd=f"/workspace/{OWN}/repo")
+    assert report["passed"], report["hits"]
+
+
+# Hard-won: 23e9afc: wrapped file writers left a stale recorded script
+@pytest.mark.parametrize("overwrite", [
+    "env cp incoming.py script.py", "timeout 2 env tee script.py",
+    # Hard-won: f0beee63: xxd left overwritten script evidence active.
+    "xxd bytes.bin script.py", "xxd -r -c 16 hex.txt script.py",
+])
+def test_writes_invalidate_recorded_scripts(tmp_path, overwrite):
+    report = audit_calls(tmp_path, [
+        shell("cat > script.py <<'PY'\nprint('recorded content')\nPY"),
+        shell(overwrite),
+        shell("python3 script.py"),
+    ])
+    assert not report["passed"]
+    assert [(hit["seq"], hit["kind"]) for hit in report["hits"]] == [(3, "needs-inspection")]
+
+
+# Hard-won: 23e9afc: relative symlink target was screened from the shell directory
+@pytest.mark.parametrize("destination", ["../alias", f"-t /workspace/{OWN}"])
+def test_relative_symbolic_link_target_uses_link_directory(tmp_path, destination):
+    report = audit_calls(tmp_path, [shell(f"ln -s ../{FOREIGN}/x {destination}")], cwd=f"/workspace/{OWN}/repo")
+    assert not report["passed"]
+    assert "other-workspace" in {hit["kind"] for hit in report["hits"]}
+
+
+def test_relative_link_with_unknown_destination_directory_requires_inspection(tmp_path):
+    report = audit_call(tmp_path, shell("ln -s relative-file link-name"))
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+# Hard-won: 23e9afc: dash-prefixed file operands were skipped after --
+@pytest.mark.parametrize("command", ["cat -- -state.db", "sort -- --compress-state.db", "xxd input -state.db"])
+def test_dash_prefixed_path_after_end_of_options_is_screened(tmp_path, command):
+    report = audit_call(tmp_path, shell(command))
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"memory-or-sessions"}
+
+
+def summarized_ls(tmp_path, cwd, *, command="ls", title="List files", rollout=True, raw=None):
+    transcript = {"toolCallId": "exec-terminal-1", "name": "exec_command", "title": title,
+                  "kind": "read", "status": "completed"}
+    if raw is not None:
+        transcript["rawInput"] = raw
+    if rollout:
+        directory = tmp_path / "codex-rollout"
+        directory.mkdir()
+        item = {"type": "CommandExecution", "id": transcript["toolCallId"],
+                "command": ["/bin/bash", "-lc", command], "cwd": f"file://{cwd}",
+                "parsed_cmd": [{"type": "list_files", "path": "summary only"}]}
+        row = {"type": "event_msg", "payload": {"type": "item_completed", "item": item}}
+        (directory / "rollout-fixture.jsonl").write_text(json.dumps(row) + "\n")
+    return audit_calls(tmp_path, [transcript], cwd=f"/workspace/{OWN}")
+
+
+# Hard-won: 23e9afc: summarized list events hid their target
+def test_summarized_ls_uses_rollout_workdir_instead_of_placement(tmp_path):
+    report = summarized_ls(tmp_path, "/run/hel/git-cache")
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"git-history-escape"}
+
+
+def test_summarized_ls_in_the_session_workspace_passes(tmp_path):
+    report = summarized_ls(tmp_path, f"/workspace/{OWN}/repo")
+    assert report["passed"], report["hits"]
+
+
+@pytest.mark.parametrize(("command", "title"), [
+    ("ls --ignore README.md mj-cli", "List files in 'README.md'"),
+    ("ls --ignore /run/hel/git-cache mj-cli", "List files in '/run/hel/git-cache'"),
+])
+def test_summarized_ls_uses_real_operands_instead_of_the_parsed_title(tmp_path, command, title):
+    report = summarized_ls(tmp_path, f"/workspace/{OWN}/repo", command=command, title=title)
+    assert report["passed"], report["hits"]
+
+
+@pytest.mark.parametrize("title", ["List files", "List files in 'mj-cli'", "Read file 'README.md'"])
+def test_summarized_exec_without_rollout_needs_inspection(tmp_path, title):
+    report = summarized_ls(tmp_path, f"/workspace/{OWN}/repo", title=title, rollout=False)
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {"needs-inspection"}
+
+
+# Hard-won: f0beee63: visible argv suppressed the rollout working directory.
+@pytest.mark.parametrize(("directory", "expected"), [
+    ({}, "git-history-escape"),
+    ({"workdir": f"/workspace/{OWN}"}, "needs-inspection"),
+])
+def test_visible_command_uses_matching_rollout_directory(tmp_path, directory, expected):
+    command = "cat config"
+    report = summarized_ls(tmp_path, "/run/hel/git-cache", command=command,
+                           raw={"command": command, **directory})
+    assert not report["passed"]
+    assert {hit["kind"] for hit in report["hits"]} == {expected}

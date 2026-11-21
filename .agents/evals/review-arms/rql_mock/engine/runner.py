@@ -7,16 +7,14 @@ import time
 from uuid import uuid4
 
 from .evidence import file_digests, save_bytes, save_json
-from .prompt import CONTEXT_PROTOCOL, CONTEXT_RECALL, CONTEXT_SEED, assert_blind, semantics_only, turn_prompt
+from .prompt import assert_blind, semantics_only, turn_prompt
 from .snapshot import PRIVATE_PATHS
 
 
 MODEL = "fable"
 EFFORT = "high"
-CONTEXT_BOUNDARY = "context-cleared:"
 SESSION_ID = re.compile(r"[a-f0-9]{32}")
-# Use the same readiness window as the shared driver's wait_idle.
-CONTEXT_TIMEOUT = 1200
+QUERY_SESSION_PROTOCOL = "sealed-session-per-query-v1"
 RUN_ERRORS = (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError)
 
 # Runs via Podman admin before the first prompt, outside the model's transcript.
@@ -48,27 +46,40 @@ for host in ("127.0.0.1", "host.containers.internal", "host.docker.internal"):
 """
 
 
-# The only workspace writes the host owns are under a reserved scratch path.
-# Clear it while the worker is idle, then check for unexpected tree changes.
-CHECKOUT_CLEAN = """
+# Verify the frozen checkout outside the reserved scratch directory.
+CHECKOUT_CLEAN = r"""
 from pathlib import Path
-import shutil, subprocess, sys
+import os, shutil, subprocess, sys
 
 scratch = Path(sys.argv[1])
+orphan, action = sys.argv[2:]
 
 def git(*args):
-    return subprocess.check_output(["git", "-c", "safe.directory=*", *args])
+    return subprocess.check_output(["git", "--no-optional-locks", "-c", "safe.directory=*",
+                                    "-c", "core.fsmonitor=false", "-c", "core.filemode=true", *args])
 
+if orphan and git("rev-parse", "HEAD").decode().strip() != orphan:
+    raise SystemExit("engine checkout is no longer at its frozen orphan")
 if git("ls-files", "--", str(scratch)):
     raise SystemExit("engine scratch path overlaps tracked source")
-if git("status", "--porcelain", "--untracked-files=all", "--ignored=matching",
+indexed = git("ls-files", "-v", "-z").rstrip(b"\0").split(b"\0")
+if any(not item.startswith(b"H ") for item in indexed if item):
+    raise SystemExit("engine checkout has unexpected index flags")
+if git("status", "--porcelain", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none",
        "--", ".", f":(exclude){scratch}"):
     raise SystemExit("engine workspace has unexpected changes outside its scratch path")
+tracked = {Path(os.fsdecode(item[2:])) for item in indexed if item}
+for directory, children, files in os.walk("."):
+    if directory == ".":
+        children[:] = [child for child in children if child not in {".git", str(scratch)}]
+    elif not children and not files and Path(directory) not in tracked:
+        # Git status omits empty directories, except as tracked gitlinks.
+        raise SystemExit("engine workspace has an untracked empty directory")
 if scratch.is_symlink():
-    scratch.unlink()
-elif scratch.is_dir():
+    raise SystemExit("engine scratch path is a symlink")
+if scratch.is_dir() and action == "clear":
     shutil.rmtree(scratch)
-elif scratch.exists():
+elif scratch.exists() and not scratch.is_dir():
     raise SystemExit("engine scratch path is occupied by an unexpected file")
 """
 
@@ -109,6 +120,10 @@ class IsolationFailure(TurnFailure):
 
 class QuotaTurnFailure(TurnFailure):
     """The provider refused an accepted engine turn for quota or rate limits."""
+
+
+class DestroyUncertain(RuntimeError):
+    pass
 
 
 class LaunchHeld(RuntimeError):
@@ -223,76 +238,13 @@ class SealedRunner:
             raise RuntimeError("engine request did not receive an accepted turn id")
         return turn
 
-    def clear_context(self, sid, timeout=CONTEXT_TIMEOUT):
-        self.verify(sid)
-        page = self.driver.mj("transcript", "--session", sid, "--role", "system", "--limit", 1)
-        cursor = page["latest_seq"]
-        command = f"engine-clear-{uuid4().hex}"
-        self.message(sid, "/clear", command)
-        deadline = time.monotonic() + timeout
-        while True:
-            page = self.driver.mj("transcript", "--session", sid, "--role", "system",
-                                  "--after-seq", cursor)
-            if any(item["stable_id"] == CONTEXT_BOUNDARY + command for item in page["items"]):
-                # Completion can replace the native ACP session and restore
-                # the selectors. Recheck both settings before the next prompt.
-                self.verify(sid)
-                return command
-            cursor = max(cursor, page["next_after_seq"])
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"engine did not confirm /clear ({command})")
-            time.sleep(1)
-
-    def context_probe(self, sid, directory):
-        path = directory / "context-probe.json"
-        identity = {"session": sid, "protocol": CONTEXT_PROTOCOL,
-                    "model_version": self.config["model_version"]}
-        if path.is_file():
-            old = json.loads(path.read_text(encoding="utf-8"))
-            if all(old.get(key) == value for key, value in identity.items()) and old["status"] != "error":
-                return old
-        result = {**identity, "status": "error", "context_id": None,
-                  "primer": None, "recall": None}
-        try:
-            self.verify(sid)
-            self.capture_pending(sid, directory)
-            self.clean_checkout(sid)
-            query = f'(function :name "context_probe_{uuid4().hex}")'
-            primer = CONTEXT_SEED.format(query=query)
-            assert_blind((primer, CONTEXT_RECALL), self.manifest)
-            response, result["primer"] = self.prompt(sid, primer)
-            if response != "ACK":
-                raise RuntimeError("engine did not acknowledge the synthetic context primer")
-            result["context_id"] = self.clear_context(sid)
-            response, result["recall"] = self.prompt(sid, CONTEXT_RECALL, result["context_id"])
-            try:
-                empty = json.loads(response or "null") == ""
-            except ValueError:
-                empty = False
-            result["status"] = "passed" if empty else "failed"
-            if not empty:
-                result["message"] = "engine recalled prior query text or failed to report empty context after /clear"
-        except LaunchHeld:
-            raise
-        except TurnFailure as error:
-            key = "recall" if result["context_id"] else "primer"
-            result[key] = error.record
-            result["message"] = str(error)
-            if isinstance(error, QuotaTurnFailure):
-                self.driver.save(path, result)
-                raise
-        except RUN_ERRORS as error:
-            result["message"] = str(error)
-        self.driver.save(path, result)
-        return result
-
-    def clean_checkout(self, sid):
+    def clean_checkout(self, sid, orphan="", *, clear=True):
         scratch = f".rql-engine-{sid}"
         place = self.driver.container(sid)
         cwd = f"/workspace/{sid}/{self.config['destination']}"
         proc = subprocess.run(
             ["podman", "exec", "--workdir", cwd, place["container"], "python3", "-c",
-             CHECKOUT_CLEAN, scratch], capture_output=True, timeout=300,
+             CHECKOUT_CLEAN, scratch, orphan, "clear" if clear else "check"], capture_output=True, timeout=300,
         )
         if proc.returncode:
             raise RuntimeError(f"engine workspace check failed: {proc.stderr.decode(errors='replace').strip()}")
@@ -354,13 +306,16 @@ class SealedRunner:
         return output, []
 
     def capture_pending(self, sid, directory):
-        pending = [path for path in (directory / "answers").glob("*/pending.json")
-                   if not ((path.parent / "answer.raw").is_file() or (path.parent / "absent.json").is_file())]
+        pending = []
+        for path in (directory / "answers").glob("*/pending.json"):
+            record = json.loads(path.read_bytes())
+            captured = (path.parent / "answer.raw").is_file() or (path.parent / "absent.json").is_file()
+            if not captured and not (path.parent / "checkout-invalid.json").is_file():
+                pending.append((path, record))
         if len(pending) > 1:
             raise RuntimeError("more than one engine answer is pending capture")
         if pending:
-            path = pending[0]
-            record = json.loads(path.read_text(encoding="utf-8"))
+            path, record = pending[0]
             expected = f".rql-engine-{sid}/answer.json"
             if record["path"] != expected:
                 raise RuntimeError("pending engine answer path does not match its session")
@@ -397,7 +352,7 @@ class SealedRunner:
         if receipt.exists():
             return
         if sent.exists():
-            raise RuntimeError(f"destroy status for {sid} is uncertain; inspect {sent}")
+            raise DestroyUncertain(f"destroy status for {sid} is uncertain; inspect {sent}")
 
         try:
             expected_model = record.get("model_version") or self.config.get("model_version")
@@ -421,7 +376,7 @@ class SealedRunner:
             if any(hit["kind"] == "missing-or-unreadable-transcript" for hit in result["hits"]):
                 raise RuntimeError("the audit could not read the captured transcript")
             if require_clean_audit and not result["passed"]:
-                raise RuntimeError("the stored fidelity transcript did not pass the audit")
+                raise RuntimeError("the stored transcript did not pass the audit")
             hashes = file_digests(directory)
             hashes.pop("capture.json", None)
             save_json(directory / "capture.json", {
@@ -432,16 +387,20 @@ class SealedRunner:
             raise RuntimeError(f"could not capture engine {sid}; session preserved: {error}") from error
 
         save_json(sent, {"session": sid, "instance": self.config["instance"]})
-        accepted = json.loads(self.command("destroy", "--session", sid, "--json"))
-        if accepted.get("session_id") != sid or accepted.get("accepted") is not True:
-            raise RuntimeError(f"destroy was not confirmed for {sid}; inspect {sent}")
-        save_json(receipt, accepted)
+        try:
+            accepted = json.loads(self.command("destroy", "--session", sid, "--json"))
+            if (not isinstance(accepted, dict) or accepted.get("session_id") != sid
+                    or accepted.get("accepted") is not True):
+                raise RuntimeError("missing matching acceptance receipt")
+            save_json(receipt, accepted)
+        except RUN_ERRORS as error:
+            raise DestroyUncertain(f"destroy was not confirmed for {sid}; inspect {sent}: {error}") from error
 
     def turn(self, sid, query, catalogue, menu, errors, directory_on_host):
         self.verify(sid)
-        self.capture_pending(sid, directory_on_host)
-        directory = self.clean_checkout(sid)
-        context_id = self.clear_context(sid)
+        orphan = json.loads((directory_on_host / "session.json").read_bytes())["orphan"]
+        directory = self.clean_checkout(sid, orphan)
+        context_id = f"engine-answer-{uuid4().hex}"
         catalogue_path = f"{directory}/catalogue.md"
         menu_path = f"{directory}/menu.md"
         output_path = f"{directory}/answer.json"
@@ -461,13 +420,17 @@ class SealedRunner:
         try:
             save_json(evidence / "turn.json", record)
             try:
+                self.clean_checkout(sid, orphan, clear=False)
+            except RUN_ERRORS as error:
+                save_json(evidence / "checkout-invalid.json", {"reason": str(error)})
+                raise IsolationFailure(str(error), record) from error
+            try:
                 passed = self.audit_turn(sid, record["turn"], directory_on_host)
             except RUN_ERRORS as error:
                 raise IsolationFailure(f"could not audit the engine session: {error}", record) from error
             if not passed:
                 raise IsolationFailure("engine session failed transcript isolation audit", record)
             output, errors = self.capture_answer(sid, output_path, evidence)
-            self.clean_checkout(sid)
         except IsolationFailure:
             raise
         except RUN_ERRORS as error:

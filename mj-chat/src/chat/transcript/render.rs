@@ -95,9 +95,7 @@ pub(crate) fn render_transcript(
 
 pub(crate) fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line<'static> {
     let separator = theme::glyphs().footer_separator;
-    let review_activity = chat
-        .turn_review()
-        .and_then(|review| review.view.activity_label());
+    let review_activity = mj_client::review::combined_activity_label(chat.review_views());
     let summary = if chat.header_target.is_empty() || chat.header_profile.is_empty() {
         review_activity.map_or_else(
             || "Conversation".to_owned(),

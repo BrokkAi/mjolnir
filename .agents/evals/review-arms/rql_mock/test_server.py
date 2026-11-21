@@ -8,9 +8,10 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from types import SimpleNamespace
 import unittest
 
-from stub_engine import answer
+from stub_engine import STUB_IDENTITY, answer
 
 
 HERE = Path(__file__).resolve().parent
@@ -48,7 +49,8 @@ class TransportTest(unittest.TestCase):
             "manifest": str(self.manifest),
             "engine": "rql_mock.stub_engine:answer",
             "sessions": {SESSION_NONE: {"arm": "none"}} | {
-                session: {"diff": DIFF, "intro": COMMIT, "arm": arm, "log": str(self.logs[session])}
+                session: {"diff": DIFF, "intro": COMMIT, "arm": arm, "log": str(self.logs[session]),
+                          **STUB_IDENTITY}
                 for session, arm in ((SESSION_R, "R"), (SESSION_LOC, "R-loc"))
             },
         }))
@@ -62,6 +64,7 @@ class TransportTest(unittest.TestCase):
         source = self.root / "sshd_public_key"
         source.write_text("ssh-ed25519 dGVzdA== pilot-host\n")
         auth.write_text("# dedicated pilot authorizations\n")
+        transport.write_text(json.dumps({"engine": "rql_mock.stub_engine:answer"}))
         pilot.write_text(
             '[profiles.fixture]\nkind = "codex"\ncodex_profile = "review_arms_rql"\n'
             '[profiles.fixture.environment]\n'
@@ -69,7 +72,7 @@ class TransportTest(unittest.TestCase):
             f'RQL_SSH_CONFIG = {json.dumps(str(HERE / "ssh_config"))}\n'
             f'RQL_SSH_KEY = {json.dumps(str(key))}\n'
             f'RQL_SSH_KNOWN_HOSTS = {json.dumps(str(pin))}\n'
-            'RQL_SSH_TARGET = "ssh://pilot@host.containers.internal:22222"\n')
+            'RQL_SSH_TARGET = "ssh://pilot@127.0.0.1:22222"\n')
         podman = self.root / "podman"
         podman.write_text("""#!/usr/bin/env python3
 import os, sys
@@ -87,11 +90,11 @@ else:
 import os, re, shlex, subprocess, sys
 from pathlib import Path
 sid = sys.argv[-1]
-assert sys.argv[-2] == "ssh://pilot@host.containers.internal:22222"
+assert sys.argv[-2] == "ssh://pilot@127.0.0.1:22222"
 key = sys.argv[sys.argv.index("-i")+1]
 assert Path(key).stat().st_mode & 0o777 == 0o600
 assert Path(os.environ["RQL_SSH_KNOWN_HOSTS"]).read_text() == \
-    "[host.containers.internal]:22222 ssh-ed25519 dGVzdA==\\n"
+    "[127.0.0.1]:22222 ssh-ed25519 dGVzdA==\\n"
 public = subprocess.check_output(["ssh-keygen", "-y", "-f", key], text=True).strip().split()
 lines = Path(os.environ["RQL_AUTHORIZED_KEYS"]).read_text().splitlines()
 entry, = [line for line in lines if line.endswith(" rql-pilot-" + sid)]
@@ -107,8 +110,7 @@ os.execve(command[0], command, {**os.environ, "SSH_ORIGINAL_COMMAND": sid})
                        "RQL_PILOT_CONFIG": str(pilot), "RQL_AUTHORIZED_KEYS": str(auth),
                        "RQL_TRANSPORT_CONFIG": str(transport), "RQL_SSH_HOST_PUBLIC_KEY": str(source)}
         r, none = self.root / "R.json", self.root / "none.json"
-        identity = {"manifest_sha256": hashlib.sha256(self.manifest.read_bytes()).hexdigest(),
-                    "engine_inputs_sha256": "9" * 64}
+        identity = STUB_IDENTITY
         r.write_text(json.dumps({"session_id": SESSION_R, "arm": "R", "diff": DIFF, "intro": COMMIT,
                                  "manifest": str(self.manifest), "log": str(self.logs[SESSION_R]), **identity}))
         none.write_text(json.dumps({"session_id": SESSION_NONE, "arm": "none"}))
@@ -122,6 +124,7 @@ os.execve(command[0], command, {**os.environ, "SSH_ORIGINAL_COMMAND": sid})
             self.assertEqual(json.loads(invoke(r)), {"session_id": SESSION_R, "tools": ["rql_query"]})
             self.assertEqual(json.loads(invoke(none)), {"session_id": SESSION_NONE, "tools": []})
             sessions = json.loads(transport.read_text())["sessions"]
+            self.assertEqual(json.loads(transport.read_text())["engine"], "rql_mock.stub_engine:answer")
             self.assertEqual(set(sessions), {SESSION_R})
             self.assertEqual({key: sessions[SESSION_R][key] for key in identity}, identity)
             self.assertEqual(len(auth.read_text().splitlines()), 2)
@@ -130,6 +133,11 @@ os.execve(command[0], command, {**os.environ, "SSH_ORIGINAL_COMMAND": sid})
                                  {"session_id": session, "arm": arm})
         self.assertEqual(invoke("--revoke", r), "")
         self.assertEqual(invoke("--revoke", r), "")
+        self.assertEqual(invoke("--revoke", none), "")
+        self.assertFalse(key.exists())
+        self.assertFalse(pin.exists())
+        self.assertFalse((assignments / f"{SESSION_R}.json").exists())
+        self.assertFalse((assignments / f"{SESSION_NONE}.json").exists())
         self.assertEqual(json.loads(transport.read_text())["sessions"], {})
         self.assertEqual(auth.read_text(), "# dedicated pilot authorizations\n")
 
@@ -147,6 +155,27 @@ os.execve(command[0], command, {**os.environ, "SSH_ORIGINAL_COMMAND": sid})
         process = self.run_server(session, *requests)
         self.assertEqual(process.returncode, 0, process.stderr)
         return [json.loads(line) for line in process.stdout.splitlines()]
+
+    # Hard-won: 6472a57: stub served a live assignment
+    def test_stub_only_serves_assignments_bound_to_its_identity(self):
+        config = json.loads(self.config.read_text())
+        live = {"manifest_sha256": hashlib.sha256(self.manifest.read_bytes()).hexdigest(),
+                "engine_inputs_sha256": "9" * 64}
+        config["sessions"][SESSION_R].update(live)
+        self.config.write_text(json.dumps(config))
+        _, tools = self.run_client(SESSION_R, "R", rpc("initialize", 1), rpc("tools/list", 2))
+        self.assertEqual(tools["result"], {"tools": []})
+        diagnostic = json.loads((self.root / "engine-identity-error.jsonl").read_text())
+        self.assertEqual(diagnostic["session"], SESSION_R)
+        self.assertIn(live["engine_inputs_sha256"], diagnostic["error"])
+        self.assertIn(STUB_IDENTITY["engine_inputs_sha256"], diagnostic["error"])
+        refused, = self.exchange(SESSION_R, call(1, query="demo"))
+        accepted, = self.exchange(SESSION_LOC, call(2, query="demo"))
+        self.assertTrue(refused["result"]["isError"])
+        self.assertEqual(payload(refused)["status"], "engine_error")
+        self.assertIsNone(json.loads(self.logs[SESSION_R].read_text())["provenance"])
+        self.assertEqual(payload(accepted)["status"], "ok")
+        self.assertEqual(len(payload(accepted)["rows"]), 3)
 
     def run_client(self, session, arm, *requests, preflight=False):
         if arm is not None:
@@ -328,10 +357,12 @@ os.execve(command[0], command, {**os.environ, "SSH_ORIGINAL_COMMAND": sid})
         from server import Server
 
         details = "rows[3].fields.binding: src/private.rs does not contain the claimed expression"
+        engine = SimpleNamespace(identity=STUB_IDENTITY,
+                                 answer=lambda *args: {"status": "engine_error", "message": details})
         # Use a real file because the writer delivery audit takes an flock.
         with self.logs[SESSION_LOC].open("w") as output:
-            server = Server(SESSION_LOC, {"intro": COMMIT, "diff": DIFF, "arm": "R-loc"}, 50,
-                            lambda *args, **kwargs: {"status": "engine_error", "message": details}, output)
+            assignment = {"intro": COMMIT, "diff": DIFF, "arm": "R-loc", **STUB_IDENTITY}
+            server = Server(SESSION_LOC, assignment, 50, engine, output)
             response = server.call({"name": "rql_query", "arguments": {"query": "demo"}})
             response.pop("_after_write")(True)
             self.assertEqual(payload({"result": response}),

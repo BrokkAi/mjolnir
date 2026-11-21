@@ -36,7 +36,7 @@ def serve(tools, call=None, *, close_after_list=False):
                 "serverInfo": {"name": "rql_mock", "version": "1"},
             })
         elif method == "tools/list":
-            reply(request_id, {"tools": tools})
+            reply(request_id, {"tools": tools() if callable(tools) else tools})
             if close_after_list:
                 return
         elif method == "tools/call" and call is not None:

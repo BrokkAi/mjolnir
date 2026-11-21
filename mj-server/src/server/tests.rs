@@ -3356,6 +3356,8 @@ fn a_running_review_projects_to_the_phone() {
     use mj_core::review::driver::{RoleState, RoleStatus, TurnReviewPhase};
 
     let review = RuntimeReviewView {
+        review_id: String::new(),
+        roots: Vec::new(),
         child_session_id: None,
         session_id: "session-1".into(),
         questions: Vec::new(),

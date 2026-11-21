@@ -155,6 +155,33 @@ Review running · 2 reviewers
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
 PromptInput rect=(3, 20, 95, 2)
 
+=== two reviews running (100x24) ===
+╭ Conversation · Reviewing ────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+a: Reviewing · c: Reviewing
+╭  mic ────────────────────────────────────────────────────────────────────────────── ●··········· ╮
+│> Anything else to review?                                                                        │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+PromptInput rect=(3, 20, 95, 2)
+
 === autocomplete popup and hit target (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
 │ No messages yet — send a prompt to begin.                                   ▐│

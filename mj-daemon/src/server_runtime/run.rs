@@ -111,12 +111,7 @@ pub(crate) async fn run_server(
             move_recoveries: &move_recoveries,
             capacity: &viewer_capacity(&initial.metadata),
             launch_failures: &launch_failures,
-            reviews: &initial
-                .metadata
-                .reviews
-                .iter()
-                .map(|review| (review.session_id.clone(), review.clone()))
-                .collect(),
+            reviews: &viewer_reviews(&initial.metadata.reviews),
         },
         revision,
     );
@@ -354,9 +349,7 @@ pub(crate) async fn run_server(
                         move_recoveries: &move_recoveries,
                         capacity: &viewer_capacity(&runtime.metadata),
                         launch_failures: &launch_failures,
-                        reviews: &runtime.metadata.reviews.iter()
-                            .map(|review| (review.session_id.clone(), review.clone()))
-                            .collect(),
+                        reviews: &viewer_reviews(&runtime.metadata.reviews),
                     },
                     $revision,
                 );

@@ -450,9 +450,7 @@ impl ChatState {
             ),
         };
         (self.activity_reachable && primary_working)
-            || self
-                .turn_review()
-                .is_some_and(|review| review.view.is_working())
+            || mj_client::review::any_working(self.review_views())
     }
 
     /// Whether the transcript or task clocks differ from the last drawn frame.

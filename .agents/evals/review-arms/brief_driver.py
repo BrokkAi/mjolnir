@@ -453,6 +453,7 @@ def retain_pilot_writer_failure(pilot, sid, error):
     d = pilot["path"]
     save(d / "transcript.json", driver.transcript(sid))
     save(d / "usage.json", mj("usage", "--session", sid))
+    driver.capture_pilot_rollouts(d, sid)
     verdict = pilot_audit(d, sid, bool(pilot["inputs"]["rql_tools"]))
     return driver.retain_pilot_session(d, sid, str(error),
                                        **({"void_reason": verdict["hits"]} if not verdict["passed"] else {}))
@@ -516,9 +517,8 @@ def finish_pilot_writer(pilot, sid, bug_id, profile):
                                           allow_rql=bool(inputs["rql_tools"]))
     if state != "done":
         return state
-    revoke = pilot.get("revoke_tool_assignment")
-    if callable(revoke):
-        revoke(sid)
+    if inputs["rql_tools"]:
+        save(d / "pending-revoke.json", {"session_id": sid})
     if interruption := interrupt_on_rql_quota(pilot, sid):
         return interruption
     save(d / "done.json", dict(accepted, bug=bug_id, session_id=sid,

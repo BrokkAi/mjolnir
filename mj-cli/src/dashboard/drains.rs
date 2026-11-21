@@ -265,12 +265,15 @@ impl DashboardContext {
         let Some(reviews) = latest else {
             return;
         };
-        self.runtime_review_views = reviews
-            .into_iter()
-            .map(|review| (review.session_id.clone(), review))
-            .collect();
+        self.runtime_review_views.clear();
+        for review in reviews {
+            self.runtime_review_views
+                .entry(review.session_id.clone())
+                .or_default()
+                .push(review);
+        }
         self.dashboard
-            .set_session_reviews(self.runtime_review_views.values().cloned());
+            .set_session_reviews(self.runtime_review_views.values().flatten().cloned());
         self.apply_runtime_reviews_to_chats();
     }
 
@@ -320,8 +323,12 @@ impl DashboardContext {
     /// meaningful: it closes a review the previous projection held.
     pub(crate) fn apply_runtime_reviews_to_chats(&mut self) {
         for chat in self.chats.values_mut() {
-            let review = self.runtime_review_views.get(chat.session_id()).cloned();
-            chat.apply_review_view(review);
+            let reviews = self
+                .runtime_review_views
+                .get(chat.session_id())
+                .cloned()
+                .unwrap_or_default();
+            chat.apply_review_views(reviews);
         }
     }
 
@@ -330,8 +337,12 @@ impl DashboardContext {
         let Some(chat) = self.chats.get_mut(session_id) else {
             return;
         };
-        let review = self.runtime_review_views.get(session_id).cloned();
-        chat.apply_review_view(review);
+        let reviews = self
+            .runtime_review_views
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default();
+        chat.apply_review_views(reviews);
     }
 
     pub(crate) fn drain_quota_updates(&mut self) {

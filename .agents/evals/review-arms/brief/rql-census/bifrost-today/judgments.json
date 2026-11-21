@@ -1,0 +1,275 @@
+{
+ "max-sixty/worktrunk|pre-remove-hook-failure-still-emits-cd-directive|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "All 100 returned rows (both variants) are `dominates` from the procedure entry boundary to a point (e.g. entry dominates 458-458, 459-459, 460-460, 493-504); no row relates change_directory/flush (458-460) to execute_pre_remove_commands (503). Result stops at the 100-row query limit (result_limit_reached, pipeline_budget_exhausted), so a point-to-point row may exist beyond it."
+ },
+ "max-sixty/worktrunk|user-hooks-lose-toml-order-missing-config-preserve-order|0|2": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "Unfiltered `(configuration-facts)` seed stops at its 101-row cap (environment_row_budget_exhausted) and the 100-row query limit; returned rows cover only .cargo/config.toml, .claude-plugin/*, .config/lychee.toml (path order), never Cargo.toml:48. Same with --workspace-scaled-limits."
+ },
+ "max-sixty/worktrunk|state-ci-status-json-ignores-forge-platform-override|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "0 rows from 47 call sites (call-input/call-sites-from shape of #15017); 14 call_relation_analysis_failed for calls inside macros."
+ },
+ "uutils/coreutils|coreutils-echo-double-hyphen-injected-after-positional-arg|0|1": {
+  "decisive_row_present": true,
+  "decisive_row": "row #2 of 12: {\"result_type\":\"call_argument\",\"path\":\"src/uu/echo/src/echo.rs\",\"range\":{\"start_line\":316,\"start_column\":27,\"end_line\":316,\"end_column\":31},\"argument_index\":0,\"site\":{\"text\":\"true\",\"role\":{\"kind\":\"argument\",\"index\":0},\"value\":{\"kind\":\"unknown\",\"cause\":{\"kind\":\"not_constant\"}}}}",
+  "notes": "Decisive row states the argument text `true` at echo.rs:316; the callee (trailing_var_arg in uu_app) comes from the query's call-shape/provenance, not a row field. The literal `true` gets value kind unknown/not_constant rather than a decoded boolean. 12 rows = one trailing_var_arg(true) per utility's uu_app. Incomplete: semantic_analysis_partial (resolution_open_boundary, resolution_unsupported_semantic, depth_limit, Rust route evidence incomplete)."
+ },
+ "uutils/coreutils|coreutils-checksum-compute-binary-vs-validate-text-crlf|0|1": {
+  "decisive_row_present": true,
+  "decisive_row": "row #1 of 2: {\"result_type\":\"expression_site\",\"path\":\"src/uucore/src/lib/features/checksum/validate.rs\",\"range\":{\"start_line\":680},\"input_kind\":\"parameter\",\"parameter_index\":2,\"parameter_name\":\"binary\",\"text\":\"false\",\"site\":{\"value\":{\"kind\":\"unknown\",\"cause\":{\"kind\":\"not_constant\"}}}}",
+  "notes": "Row #0 is compute.rs:293 binary=true (the other caller). Literal false reported as value unknown/not_constant. Incomplete: native incoming caller inventory Incomplete for digest_reader (reverse call inventory open at self_cell!/include! sites), Rust route evidence incomplete. call-sites-to did NOT panic here."
+ },
+ "uutils/coreutils|coreutils-cut-newline-delim-drops-only-delimited-flag|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "`(function :name \"uu_app\")` matches every utility's uu_app: call-sites-from produced 0 rows from 102 declarations after semantic_budget_exhausted (resident rows 32283 > 29959) plus 8 macro-invocation enumeration failures. --workspace-scaled-limits variant timed out at 1800 s."
+ },
+ "uutils/coreutils|coreutils-printenv-localized-clap-exit-code-1-not-2|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "possible_fail_open: FAIL-OPEN: reported complete (only advisory diagnostics) with 0 rows, but the fact exists. call-sites-from returns only the 2 external method calls (try_get_matches_from, unwrap_or_else) and silently omits handle_clap_error_with_exit_code(err, crate::util_name(), 1) written inside the closure argument at clap_localization.rs:173. Evidence: /tmp/rql-census/report/evidence/call-sites-from-omits-closure-calls-coreutils-b06b.md.",
+  "possible_fail_open": "closure argument (call inside |err| ... passed to unwrap_or_else not enumerated by call-sites-from)"
+ },
+ "uutils/coreutils|coreutils-ls-acl-inflates-link-count-padding-per-entry|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "All 100 rows (both variants) are entry-dominates rows of one calculate_padding_collection procedure at ls.rs:3662 (another cfg variant); none touches the claim's loop 3603 / increment 3640. Stops at the 100-row limit, path-ordered, so the claimed procedure's rows were never reached."
+ },
+ "uutils/coreutils|coreutils-ls-acl-inflates-link-count-padding-per-entry|0|2": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "Labelled `:text/regex` on field_access was accepted verbatim. field-write-value produced 0 rows from 5 member targets: `field_write_value requires one precise static member target`; member_targets receiver analysis exceeded summary_expansions."
+ },
+ "uutils/coreutils|coreutils-chown-verbose-early-return-skips-recursion|0|2": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "All 100 rows (both variants) are `dominates` from traverse's entry (perms.rs:305) to points; e.g. entry dominates 379-385, 387-398. No row relates the new return in the chown-result match to the later safe_dive_into/dive_into calls (387-394). Stops at the 100-row limit."
+ },
+ "uutils/coreutils|coreutils-sort-fast-locale-collation-drops-bytewise-tiebreak|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "field-write-value produced 0 rows from 3 member targets: `field_write_value requires one precise static member target`; receiver analysis exceeded summary_expansions."
+ },
+ "uutils/coreutils|coreutils-env-command-exec-resets-sigpipe-breaking-ignore-signal|0|2": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "0 rows from 5 call sites (#15017 shape); call-sites-from could not enumerate a call inside a macro invocation; the decisive callee `signal` is external (nix)."
+ },
+ "j178/prek|prek-check-added-large-files-flags-already-tracked-files|0|1": {
+  "decisive_row_present": false,
+  "notes": "0 rows from 11 call sites (#15017). The decisive argument \"--diff-filter=ACMRTUXB\" goes to project Cmd::arg at src/git.rs:143. Evidence: /tmp/rql-census/report/evidence/call-input-zero-rows-prek-48a9.md."
+ },
+ "j178/prek|prek-trailing-whitespace-and-mixed-line-ending-flush-to-raw-filename|1|1": {
+  "decisive_row_present": false,
+  "notes": "0 rows from 8 call sites (#15017 shape); decisive callee fs_err::tokio::write is external."
+ },
+ "j178/prek|prek-pre-push-diffs-non-ancestor-remote-sha-after-rebase|0|2": {
+  "decisive_row_present": false,
+  "notes": "0 rows from 12 call sites (#15017 shape); one call inside a macro (format!) not enumerable."
+ },
+ "j178/prek|prek-check-hooks-apply-falsely-fails-builtin-illegal-windows-names|0|2": {
+  "decisive_row_present": false,
+  "notes": "`(callable :name \"build\")` matches 32 call-site inputs across many build fns; 0 rows (#15017 shape)."
+ },
+ "j178/prek|prek-meta-hooks-workspace-path-mismatch|1|2": {
+  "decisive_row_present": false,
+  "notes": "Default: call-sites-from itself produced 0 rows from 2 declarations (semantic_budget_exhausted 36802 > 29959). Scaled: 65 call sites, call-input 0 rows (#15017 shape); decisive callee std::fs::symlink_metadata is external."
+ },
+ "Helvesec/rmux|rmux-copy-pipe-ignores-copy-command-option|0|1": {
+  "decisive_row_present": true,
+  "decisive_row": "rows #0,#1,#4,#5,#7 of 11 (one call_argument group of the option(...) call at crates/rmux-core/src/options/table.rs): 108 text \"OptionName::CopyCommand\"; 109 text \"\\\"copy-command\\\"\" value {\"kind\":\"str\",\"value\":\"copy-command\"}; 112 text \"SCOPE_SERVER\"; 113 text \"GlobalRoot::Server\"; 115 text \"DefaultValue::Scalar(\\\"\\\")\"",
+  "notes": "Complete (no diagnostics, not truncated), both variants. The fact is stated jointly by five argument rows of the single matched call; only the string literals get decoded values."
+ },
+ "Helvesec/rmux|rmux-prompt-renderer-ignores-edit-cursor-position|0|1": {
+  "decisive_row_present": true,
+  "decisive_row": "row #8 of 16: {\"result_type\":\"field_write\",\"path\":\"crates/rmux-server/src/handler_prompt.rs\",\"range\":{\"start_line\":260,\"end_line\":260},\"completeness\":\"complete\",\"proof\":\"proven\",\"site\":{\"text\":\"self.cursor = 0\",\"value\":{\"kind\":\"known\",\"value\":{\"kind\":\"int\",\"value\":\"0\"}}}}",
+  "notes": "Decisive field_write row states the constant 0 at handler_prompt.rs:260 (move_home), proven and decoded. Default run took 1077 s. Incomplete: references_of inventory incomplete for ClientPromptState.cursor, derive(Debug) unexpanded, 2 unproven usage sites, many semantic gaps per procedure."
+ },
+ "Helvesec/rmux|rmux-diagnose-windows-shell-misses-windowsapps-filter|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "possible_fail_open": "cfg(windows)-gated caller: detected_windows_pane_shell and find_windows_command_on_path are both #[cfg(windows)]; enclosing-decl finds the callee but call-sites-to returns no rows with no inactive-cfg diagnostic",
+  "notes": "possible_fail_open: complete, 0 rows (`step call_sites_to found no rows for 1 input row(s)`, advisory). The call find_windows_command_on_path(\"pwsh.exe\") at src/cli/diagnose.rs:366 sits in a #[cfg(windows)] fn; the index runs on Linux. The callee declaration (same cfg) IS found by enclosing-decl, so the answer is configuration-dependent but reported complete."
+ },
+ "Helvesec/rmux|rmux-show-options-serde-default-breaks-bincode-compat|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "Partial: the single complete row is {\"result_type\":\"call_shape\",\"path\":\"crates/rmux-proto/src/codec.rs\",\"range\":{\"start_line\":230,\"start_column\":5,\"end_column\":34},\"callee_name\":\"deserialize\",\"callee_provenance\":\"declared\",\"callee_supplier\":null,\"call_kind\":\"method\"}. It locates the call inside decode_payload and names `deserialize`, but no field states the `bincode::` qualifier the claim rests on (callee_supplier null), and call_kind says method for a path call. Judged not stating the fact; counts as absent with this note."
+ },
+ "Helvesec/rmux|rmux-windows-mouse-tracker-misses-1003-and-clears-flag-wrong|1|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "call-input found no rows for 37 call sites; out.extend_from_slice is external (Vec), reported only as advisory `no indexed declaration for an external or unresolved call target`. Incomplete via a macro-invocation enumeration failure and route evidence."
+ },
+ "Helvesec/rmux|rmux-pane-index-format-ignores-pane-base-index|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "field-write-value produced 0 rows from 1 member target: `field_write_value requires one precise static member target`; receiver analysis exceeded summary_expansions. Fact is a plain `self.pane_index = Some(pane.index())` at context.rs:469."
+ },
+ "carthage-software/mago|formatter-unary-cast-in-binary-adjacent-span-parens|0|1": {
+  "decisive_row_present": true,
+  "decisive_row": "row #19 of 31: {\"result_type\":\"declaration\",\"path\":\"crates/syntax/src/ast/ast/unary.rs\",\"kind\":\"field\",\"fq_name\":\"mago_syntax.ast.ast.unary.UnaryPrefixOperator.StringCast\"}",
+  "notes": "Complete, both variants. Variants are reported with kind=field; the `(string)` spelling is not a row field, but the StringCast variant membership is the fact."
+ },
+ "carthage-software/mago|analyzer-method-exists-drops-string-to-never|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "2 signature_parameter rows at core.php (970): $object_or_class index 0, $method index 1, but no declared_type field although the PHP source declares `object|string $object_or_class` and `string $method`; the claim's type fact is not stated. Incomplete only through unrelated diagnostics (.vue JS not searched, recovered syntax region at core.php:1313)."
+ },
+ "carthage-software/mago|analyzer-method-exists-drops-string-to-never|1|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "2 signature_parameter rows at core.php (980): $object_or_class index 0, $property index 1, but no declared_type field although the PHP source declares `object|string $object_or_class` and `string $property`; the claim's type fact is not stated. Incomplete only through unrelated diagnostics (.vue JS not searched, recovered syntax region at core.php:1313)."
+ },
+ "carthage-software/mago|iterator-to-array-wrong-arg-index-and-default|0|2": {
+  "decisive_row_present": true,
+  "decisive_row": "row #3 of 4: {\"result_type\":\"signature_parameter\",\"path\":\"crates/prelude/assets/extensions/spl.php\",\"range\":{\"start_line\":2878,\"end_line\":2880},\"parameter_index\":1,\"label\":\"$preserve_keys\"}",
+  "notes": "Complete, both variants. Rows #0-1 are a test-fixture copy (issue_359.php). Types and the `= true` default are not row fields (declared_type absent), but the claim is the ordinal."
+ },
+ "carthage-software/mago|docblock-amp-continuation-breaks-by-ref-param|0|1": {
+  "decisive_row_present": true,
+  "decisive_row": "row #7 of 23: {\"result_type\":\"declaration\",\"path\":\"crates/docblock/src/tag.rs\",\"kind\":\"function\",\"fq_name\":\"mago_docblock.tag.parse_param_tag\"}",
+  "notes": "Incomplete: native incoming caller inventory Incomplete for split_tag_content (reverse inventory open at a bitflags! site), .vue JS not searched."
+ },
+ "carthage-software/mago|analyzer-docblock-parameter-narrowing-flags-overriding-methods|0|1": {
+  "decisive_row_present": true,
+  "decisive_row": "rows #3 and #0 of 5: {\"result_type\":\"declaration\",\"path\":\"crates/analyzer/src/statement/class_like/method.rs\",\"kind\":\"function\",\"fq_name\":\"mago_syntax.ast.Method.analyze\"} with {\"fq_name\":\"mago_analyzer.statement.function_like.analyze_function_like\",\"path\":\"crates/analyzer/src/statement/function_like/mod.rs\"}",
+  "notes": "Complete, both variants. Method::analyze appears as a depth-2 caller beside the depth-1 caller analyze_function_like; the hop is carried in provenance, not a row field."
+ },
+ "nushell/nushell|mkdir-verbose-reports-existing-dir-as-created|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "possible_fail_open": "Rust `const` item: (declaration :name \"IS_RECURSIVE\") matches nothing for `const IS_RECURSIVE: bool = true;` (umkdir.rs:9), with no diagnostic; (literal :boolean-value true) alone does find the literal",
+  "notes": "possible_fail_open: complete, 0 rows, no diagnostics, both variants. Side-worktree check at 440b535c60: `(where \"crates/nu-command/src/filesystem/umkdir.rs\" (declaration :name \"IS_RECURSIVE\"))` -> 0 rows, no diagnostics; `(where ... (literal :boolean-value true))` -> 4 boolean_literal rows in that file. So the `declaration` structural pattern does not match a Rust const item and reports the empty answer complete."
+ },
+ "nushell/nushell|rm-force-returns-not-found-error-instead-of-suppressing|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "Unanchored `(call :name \"switch\")` across the workspace: 100 rows (query limit) from 19 files in path order (crates/nu-cli/...), never reaching crates/nu-command/src/filesystem/rm.rs:50; also execution_budget_exhausted."
+ },
+ "1jehuang/jcode|login-completed-calls-blocking-on-auth-changed-on-tui-loop|0|2": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "Row #1 of 6 is the procedure_effect row for jcode.auth.AuthStatus.check (src/auth/mod.rs:54-159) but it states no effect: {\"derivation\":\"incomplete\",\"reason\":\"callee_unmodeled\",\"coverage\":\"open\",\"terminal\":true}. `(callable :name \"check\")` also matched 5 other procedures (scripts/test_memory.py, stdin_detect.rs, visual_debug.rs). Incomplete: effect_derivation_incomplete for many sites."
+ },
+ "1jehuang/jcode|login-completed-calls-blocking-on-auth-changed-on-tui-loop|1|2": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "Row #1 of 6 is the procedure_effect row for jcode.auth.AuthStatus.check (src/auth/mod.rs:54-159) but it states no effect: {\"derivation\":\"incomplete\",\"reason\":\"callee_unmodeled\",\"coverage\":\"open\",\"terminal\":true}. `(callable :name \"check\")` also matched 5 other procedures (scripts/test_memory.py, stdin_detect.rs, visual_debug.rs). Incomplete: effect_derivation_incomplete for many sites."
+ },
+ "1jehuang/jcode|rewind-does-not-truncate-provider-messages|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "0 rows (#15017 shape: call-input over Rust call-sites-from)."
+ },
+ "sinelaw/fresh|state-language-ignores-config-languages-breaks-yaml-comment|0|3": {
+  "decisive_row_present": true,
+  "decisive_row": "row #0 of 6: {\"result_type\":\"declaration\",\"path\":\"src/app/buffer_management.rs\",\"kind\":\"function\",\"fq_name\":\"fresh.app.Editor.open_file_no_focus\"}",
+  "notes": "Incomplete: 23 call_relation_analysis_failed (macro-invocation sites) plus semantic_results_omitted."
+ },
+ "sinelaw/fresh|composite-render-never-updates-pane-widths|0|1": {
+  "decisive_row_present": true,
+  "decisive_row": "row #0 of 1: {\"result_type\":\"field_write\",\"path\":\"src/view/composite_view.rs\",\"range\":{\"start_line\":58},\"completeness\":\"complete\",\"proof\":\"proven\",\"site\":{\"text\":\"pane_widths: vec![0; pane_count]\",\"value\":{\"kind\":\"unknown\",\"cause\":{\"kind\":\"not_constant\"}}}}",
+  "notes": "Incomplete: reference_analysis_failed and semantic gaps."
+ },
+ "sinelaw/fresh|lsp-cross-file-rename-steals-active-buffer-focus|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "field-write-value produced 0 rows: `field_write_value requires one precise static member target`; receiver analysis incomplete."
+ },
+ "sinelaw/fresh|block-selection-double-rendered-as-linear|0|2": {
+  "decisive_row_present": true,
+  "decisive_row": "row #3 of 6: {\"result_type\":\"field_write\",\"path\":\"src/cursor.rs\",\"range\":{\"start_line\":130},\"completeness\":\"complete\",\"proof\":\"proven\",\"site\":{\"text\":\"self.selection_mode = SelectionMode::Block\"}}",
+  "notes": "Value is text only (unknown/not_constant for the enum path). Incomplete: reference_analysis_failed and semantic gaps."
+ },
+ "rust-lang/rust-analyzer|rust-lang__rust-analyzer-034|0|1": {
+  "decisive_row_present": true,
+  "decisive_row": "rows #1-#3 of 4 at crates/hir-ty/src/infer.rs:1886-1900: {\"label\":\"id\",\"parameter_index\":1}, {\"label\":\"expected\",\"parameter_index\":2}, {\"label\":\"actual\",\"parameter_index\":3}",
+  "notes": "Complete, no diagnostics. signature_parameter counts `&mut self` as index 0 (call-input's parameter-index excludes the receiver), so the census's 'second/third type argument' maps to indexes 2/3 here."
+ },
+ "rust-lang/rust-analyzer|rust-lang__rust-analyzer-106|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "call-sites-from produced 0 rows: semantic_budget_exhausted (x2) and execution_budget_exhausted. --workspace-scaled-limits variant timed out at 1800 s."
+ },
+ "rust-lang/rust-analyzer|rust-lang__rust-analyzer-254|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "Complete, 0 rows, no diagnostics. Labelled query uses `(function :name \"lower_const\")` but lower_const is a method (`pub(crate) fn lower_const(&mut self, ...)` in an impl, lower.rs:284); `function` and `method` are distinct kinds (`callable` covers both), so the seed matches nothing and the empty answer is correct for the query as written. Labelling kind mismatch, not a Bifrost fail-open."
+ },
+ "rustfs/rustfs|rustfs-iam-cache-init-overwrites-error-with-ready|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "`(callable :name \"init\")` matches many procedures; 100 rows (query limit, pipeline_budget_exhausted) all entry-`dominates` rows of other procedures in path order (first: crates/ecstore/.../bucket_lifecycle_ops.rs), never IamCache::init (crates/iam/src/manager.rs)."
+ },
+ "rustfs/rustfs|rustfs-iam-cache-init-overwrites-error-with-ready|0|2": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "call-sites-from produced 0 rows: semantic_budget_exhausted (x2), execution_budget_exhausted; `(callable :name \"init\")` matches many procedures."
+ },
+ "rustfs/rustfs|rustfs-local-walk-dir-hides-children-under-marker|0|2": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "3 guard rows, all from crates/e2e_test/src/reliant/node_interact_test.rs (another walk_dir); semantic_budget_exhausted before local.rs's walk_dir; control-relations side produced nothing."
+ },
+ "rustfs/rustfs|rustfs-sse-multipart-decrypt-ignores-part-numbers|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "call-sites-to produced 0 rows (no panic here): 38 call_relation_analysis_failed (reverse inventory open), semantic_results_omitted, semantic_budget_exhausted."
+ },
+ "rustfs/rustfs|rustfs-sse-multipart-decrypt-ignores-part-numbers|1|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "call-sites-to produced 0 rows (no panic here): 38 call_relation_analysis_failed (reverse inventory open), semantic_results_omitted, semantic_budget_exhausted."
+ },
+ "rustfs/rustfs|rustfs-operation-helper-skips-s3-op-metrics|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "`(callable :name \"new\")` matches hundreds of constructors; procedure-of/control-relations produced 0 rows after semantic and execution budget exhaustion."
+ },
+ "rustfs/rustfs|rustfs-tier-delete-journal-rejects-empty-version-id|0|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "field-writes-of produced 0 rows: reference_analysis_failed, semantic_budget_exhausted (x2), semantic gaps."
+ },
+ "rustfs/rustfs|rustfs-erasure-set-healer-skips-old-versions-and-delete-markers|1|1": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "notes": "Complete, 0 rows, no diagnostics. Labelled query uses `(function :name \"list_objects_for_heal\")` but it is a trait method (`async fn list_objects_for_heal(&self, ...)` in an impl, storage.rs:445; trait decl at :111); `function` excludes methods (`callable` covers both), so the seed matches nothing. Labelling kind mismatch, not a Bifrost fail-open."
+ },
+ "web-infra-dev/rspack|rspack-persistent-cache-misses-added-dependencies|0|2": {
+  "decisive_row_present": true,
+  "decisive_row": "rows #2 and #3 of 8: {\"result_type\":\"expression_site\",\"path\":\"crates/rspack_core/src/compilation/make/graph_updater/repair/factorize.rs\",\"range\":{\"start_line\":209},\"input_kind\":\"receiver\",\"text\":\"artifact.affected_dependencies\"} and {\"path\":\".../repair/process_dependencies.rs\",\"range\":{\"start_line\":35,\"end_line\":37},\"input_kind\":\"receiver\",\"text\":\"context\\n        .artifact\\n        .affected_dependencies\"}",
+  "notes": "call-sites-to + call-input :receiver did not panic here. `(callable :name \"mark_as_add\")` matched several mark_as_add methods (affected_modules, incremental_info rows too). Incomplete: 111 call_relation_analysis_failed, 5 missing_structural_adapter, semantic_results_omitted."
+ },
+ "web-infra-dev/rspack|rspack-watcher-resets-mtime-baseline-on-rewatch|0|1": {
+  "decisive_row_present": true,
+  "decisive_row": "row #0 of 1: {\"result_type\":\"declaration\",\"path\":\"crates/rspack_watcher/src/lib.rs\",\"kind\":\"function\",\"fq_name\":\"rspack_watcher.FsWatcher.watch\"}",
+  "notes": "Incomplete only through missing_structural_adapter (5 non-Rust embedded files not searched)."
+ },
+ "kreuzberg-dev/kreuzberg|kreuzberg-pdf-extractor-ignores-configured-passwords|0|1": {
+  "decisive_row_present": true,
+  "decisive_row": "row #14 of 24: {\"result_type\":\"declaration\",\"path\":\"crates/kreuzberg/src/core/config.rs\",\"kind\":\"field\",\"fq_name\":\"kreuzberg.core.config.ExtractionConfig.pdf_options\"}",
+  "notes": "Partial: the row states the field pdf_options on ExtractionConfig but not its type Option<PdfConfig> or visibility (no declared_type field on declaration rows). Incomplete: cross_file_children.unattributed_impl. Index ready in 15 s because the intro commit has 91 Rust files (index-cost.jsonl measured the head, 1072)."
+ },
+ "1jehuang/jcode|openrouter-rebind-breaks-default-provider-compat-profile|0|2": {
+  "decisive_row_present": false,
+  "decisive_row": null,
+  "possible_fail_open": "Rust `const` item: (declaration :name \"DEFAULT_API_KEY_NAME\"/\"DEFAULT_ENV_FILE\") matches nothing for the `const ...: &str = \"...\";` items at openrouter.rs:59-60, with no diagnostic (same construct as the nushell IS_RECURSIVE row)",
+  "notes": "possible_fail_open: mapped query (labelled `(or ...)` root rejected: \"root pattern must constrain at least one of kind, name, or text\"; rewritten as the equivalent `union` of two documented pipelines). Complete, 0 rows, no diagnostics, both variants."
+ },
+ "j178/prek|prek-check-hooks-apply-falsely-fails-builtin-illegal-windows-names|0|1": {
+  "notes": "rerun with the index step first (ready in 6 s): field-writes-of still executing at 1800 s, so the timeout is query time."
+ },
+ "nushell/nushell|parser-source-filepath-drops-bareword-interpolation|0|0": {
+  "notes": "rerun with the index step first (ready in 6 s): call-input over call-sites-from of every `signature` method still executing at 1800 s."
+ },
+ "nushell/nushell|parser-extern-signature-rejects-reserved-var-names|0|1": {
+  "notes": "rerun with the index step first (ready in 6 s): call-sites-to of every `required` method still executing at 1800 s."
+ }
+}

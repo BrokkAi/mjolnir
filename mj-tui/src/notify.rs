@@ -189,9 +189,8 @@ impl DashboardState {
                 } else {
                     NotificationKind::Important
                 };
-                let review_activity = self
-                    .session_review(session_id)
-                    .and_then(|review| review.activity_label());
+                let review_activity =
+                    mj_client::review::combined_activity_label(self.session_reviews(session_id));
                 let facts = NotificationMessageFacts {
                     pending_request: detail
                         .and_then(|detail| detail.pending_elicitations.last())

@@ -3937,7 +3937,10 @@ pub const RUNTIME_AVAILABILITY_PROTOCOL: u32 = RUNTIME_HOST_CAPACITY_PROTOCOL + 
 pub const RUNTIME_SESSION_MATERIALIZED_PROTOCOL: u32 = RUNTIME_AVAILABILITY_PROTOCOL + 1;
 pub const RUNTIME_SESSION_VERDICTS_PROTOCOL: u32 = RUNTIME_SESSION_MATERIALIZED_PROTOCOL + 1;
 pub const RUNTIME_SHELL_INTERRUPT_PROTOCOL: u32 = RUNTIME_SESSION_VERDICTS_PROTOCOL + 1;
-pub const PROTOCOL_VERSION: u32 = RUNTIME_SHELL_INTERRUPT_PROTOCOL;
+/// A review view names its review and the repositories it covers, and a
+/// session can have several open. Older readers reject the new fields.
+pub const RUNTIME_REVIEW_IDENTITY_PROTOCOL: u32 = RUNTIME_SHELL_INTERRUPT_PROTOCOL + 1;
+pub const PROTOCOL_VERSION: u32 = RUNTIME_REVIEW_IDENTITY_PROTOCOL;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";

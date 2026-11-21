@@ -1013,7 +1013,7 @@ pub struct DashboardState {
     /// state is an overlay on the primary session lifecycle and is replaced
     /// as a whole whenever a runtime snapshot arrives, so removals clear
     /// stale row badges as well as closing the review pane.
-    pub(crate) session_reviews: Tracked<BTreeMap<String, RuntimeReviewView>>,
+    pub(crate) session_reviews: Tracked<BTreeMap<String, Vec<RuntimeReviewView>>>,
     pub(crate) project_sources: Tracked<BTreeMap<String, ProjectSourceIdentity>>,
     pub(crate) checkpoint_archive_sizes: BTreeMap<String, Option<u64>>,
     /// Stopped records loaded one at a time: the row picked in the resume

@@ -232,7 +232,7 @@ fn drawn_session_rows_in_range(
                     .as_deref()
                     .unwrap_or_else(|| session_name(session));
                 let detail = dashboard.session_details.get(&session.id);
-                let review = dashboard.session_review(&session.id);
+                let reviews = dashboard.session_reviews(&session.id);
                 let unreachable = dashboard.unreachable_sessions.contains(&session.id);
                 // An unreachable session on a full disk says why.
                 let disk_full =
@@ -249,7 +249,7 @@ fn drawn_session_rows_in_range(
                 // Review work is independent of the session's primary
                 // lifecycle. A review can keep animating while the session
                 // is stopped or unreachable, so do not gate it on either.
-                let busy = primary_busy || review.is_some_and(RuntimeReviewView::is_working);
+                let busy = primary_busy || mj_client::review::any_working(reviews);
                 let spinner = busy.then(|| {
                     mj_chat::spinner::compact_frame(dashboard.config.spinner, animation_ms)
                 });
@@ -352,7 +352,7 @@ fn drawn_session_rows_in_range(
                             session,
                             display_name,
                             detail,
-                            review,
+                            reviews,
                             unreachable,
                             disk_full,
                             attention,
@@ -377,7 +377,7 @@ fn drawn_session_rows_in_range(
                             session,
                             display_name,
                             detail,
-                            review,
+                            reviews,
                             unreachable,
                             disk_full,
                             attention,
@@ -550,7 +550,7 @@ pub(crate) fn expanded_session_lines(
     session: &SessionRecord,
     display_name: &str,
     detail: Option<&SessionDetail>,
-    review: Option<&RuntimeReviewView>,
+    reviews: &[RuntimeReviewView],
     unreachable: bool,
     disk_full: bool,
     attention: AttentionLevel,
@@ -586,7 +586,7 @@ pub(crate) fn expanded_session_lines(
         "  ",
         session,
         detail,
-        review,
+        reviews,
         unreachable,
         disk_full,
         attention,
@@ -695,7 +695,7 @@ pub(crate) fn session_activity_line(
     prefix: &str,
     session: &SessionRecord,
     detail: Option<&SessionDetail>,
-    review: Option<&RuntimeReviewView>,
+    reviews: &[RuntimeReviewView],
     unreachable: bool,
     disk_full: bool,
     attention: AttentionLevel,
@@ -746,7 +746,7 @@ pub(crate) fn session_activity_line(
         "Checking quota".to_owned()
     } else if facts.needs_input() && waiting_child.is_none() {
         "Question".to_owned()
-    } else if let Some(label) = review_status_label(review) {
+    } else if let Some(label) = review_status_label(reviews) {
         label.to_owned()
     } else if attention == AttentionLevel::Waiting {
         // Waiting with no question or review of its own: one of its Mjolnir
@@ -876,7 +876,7 @@ pub(crate) fn compact_session_lines(
     session: &SessionRecord,
     display_name: &str,
     detail: Option<&SessionDetail>,
-    review: Option<&RuntimeReviewView>,
+    reviews: &[RuntimeReviewView],
     unreachable: bool,
     disk_full: bool,
     attention: AttentionLevel,
@@ -913,7 +913,7 @@ pub(crate) fn compact_session_lines(
         "  ",
         session,
         detail,
-        review,
+        reviews,
         unreachable,
         disk_full,
         attention,
@@ -1012,7 +1012,7 @@ pub(crate) fn session_display_clock(
     dashboard: &DashboardState,
     session: &SessionRecord,
     detail: Option<&SessionDetail>,
-    review: Option<&RuntimeReviewView>,
+    reviews: &[RuntimeReviewView],
     unreachable: bool,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
@@ -1036,7 +1036,7 @@ pub(crate) fn session_display_clock(
     if session.last_error.is_some()
         || unreachable
         || dashboard.attention_level(&session.id).needs_person()
-        || review.is_some_and(|review| review.activity_label().is_some())
+        || mj_client::review::combined_activity_label(reviews).is_some()
         || !session.state.is_active()
     {
         return None;
@@ -2019,8 +2019,8 @@ pub fn fit_session_name(name: &str, room: usize) -> String {
 /// Maps the controller's review projection to the short overlay that fits in
 /// every session row. The controller owns the detailed wording and verdict;
 /// the TUI only compresses that authoritative view for the list.
-pub(crate) fn review_status_label(review: Option<&RuntimeReviewView>) -> Option<&'static str> {
-    review.and_then(RuntimeReviewView::activity_label)
+pub(crate) fn review_status_label(reviews: &[RuntimeReviewView]) -> Option<&'static str> {
+    mj_client::review::combined_activity_label(reviews)
 }
 
 /// The colour a session's summary rows carry.

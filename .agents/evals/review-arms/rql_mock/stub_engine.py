@@ -1,9 +1,19 @@
 """Deterministic smoke fixture. No repository or model access."""
 
 import hashlib
+from types import SimpleNamespace
+
+STUB_IDENTITY = {
+    "manifest_sha256": hashlib.sha256(b"rql_mock.stub_engine:manifest:v1").hexdigest(),
+    "engine_inputs_sha256": hashlib.sha256(b"rql_mock.stub_engine:inputs:v1").hexdigest(),
+}
 
 
-def answer(commit, query_text, *, expected_inputs=None):
+def load_engine():
+    return SimpleNamespace(identity=STUB_IDENTITY, answer=answer)
+
+
+def answer(commit, query_text):
     provenance = {"engine": "stub", "commit": commit}
     if query_text == "parse-error":
         return {"status": "parse_error", "message": "Stub parser rejected the query.",

@@ -2820,6 +2820,8 @@ fn golden_attention_navigation() {
     let mut urgent = dashboard_with_attention_mix();
     urgent.set_active_workspace(Some("default".into()));
     urgent.set_session_reviews([mj_client::review::RuntimeReviewView {
+        review_id: String::new(),
+        roots: Vec::new(),
         child_session_id: None,
         session_id: "asks".into(),
         questions: Vec::new(),

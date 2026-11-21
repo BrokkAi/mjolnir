@@ -1,0 +1,1 @@
+(call-input :parameter-index 0 (call-sites-to (enclosing-decl (function :name "git_cmd"))))

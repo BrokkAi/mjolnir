@@ -13,7 +13,7 @@ pub(super) struct ViewerPublication {
     config: Option<Config>,
     rows: crate::server::ViewerSessions,
     operations: BTreeMap<String, crate::server::ViewerOperation>,
-    reviews: BTreeMap<String, crate::review_host::RuntimeReviewView>,
+    reviews: BTreeMap<String, Vec<crate::review_host::RuntimeReviewView>>,
     runtime: RuntimeProjection,
     pub(super) dirty: BTreeSet<String>,
     project_dirty: BTreeSet<String>,

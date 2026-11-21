@@ -1604,19 +1604,24 @@ impl DashboardState {
         &mut self,
         reviews: impl IntoIterator<Item = mj_client::review::RuntimeReviewView>,
     ) {
-        let next: BTreeMap<_, _> = reviews
-            .into_iter()
-            .map(|review| (review.session_id.clone(), review))
-            .collect();
+        let mut next: BTreeMap<String, Vec<mj_client::review::RuntimeReviewView>> = BTreeMap::new();
+        for review in reviews {
+            next.entry(review.session_id.clone())
+                .or_default()
+                .push(review);
+        }
         *self.session_reviews = next;
     }
 
-    /// The authoritative review currently open for a session, if any.
-    pub(crate) fn session_review(
+    /// The authoritative reviews currently open for a session, in the order
+    /// the daemon published them.
+    pub(crate) fn session_reviews(
         &self,
         session_id: &str,
-    ) -> Option<&mj_client::review::RuntimeReviewView> {
-        self.session_reviews.get(session_id)
+    ) -> &[mj_client::review::RuntimeReviewView] {
+        self.session_reviews
+            .get(session_id)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Project the existing summary/projection task owners into hydration

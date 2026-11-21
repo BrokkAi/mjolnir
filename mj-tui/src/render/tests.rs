@@ -31,7 +31,7 @@ fn session_metadata_text(
         "",
         session,
         detail,
-        None,
+        &[],
         false,
         false,
         crate::AttentionLevel::Idle,

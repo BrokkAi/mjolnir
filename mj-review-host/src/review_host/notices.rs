@@ -83,7 +83,7 @@ impl HostState {
             .iter()
             .filter(|(key, _)| key.session_id == session_id)
         {
-            let mut view = slot.view(session_id);
+            let mut view = slot.view(session_id, &key.review_id);
             if let Some(group) = &slot.open.active_group {
                 for registration in &group.registrations {
                     if let Some(child) = &registration.child_session_id
@@ -112,6 +112,8 @@ impl HostState {
         let placeholder = |status: &str| RuntimeReviewView {
             child_session_id: None,
             session_id: session_id.into(),
+            review_id: String::new(),
+            roots: Vec::new(),
             questions: Vec::new(),
             phase: TurnReviewPhase::LaunchingReviewer,
             roles: Vec::new(),

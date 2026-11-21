@@ -10,9 +10,9 @@ import subprocess
 
 from .evidence import save_json, sync_directory
 from .grammar import MENU, parse
-from .prompt import CONTEXT_PROTOCOL, CONTEXT_RECALL, CONTEXT_SEED, PROMPT, REPAIR, semantics_only
-from .runner import (EFFORT, MODEL, RUN_ERRORS, SESSION_ID, IsolationFailure, LaunchHeld,
-                     QuotaTurnFailure, SealedRunner, TurnFailure)
+from .prompt import PROMPT, REPAIR, semantics_only
+from .runner import (EFFORT, MODEL, QUERY_SESSION_PROTOCOL, RUN_ERRORS, SESSION_ID, DestroyUncertain,
+                     IsolationFailure, LaunchHeld, QuotaTurnFailure, SealedRunner, TurnFailure)
 from .snapshot import OID, blob_reader, eligible_diffs, manifest_sources, prepared_snapshot
 from .validation import canonical, ordered_rows, validate
 
@@ -33,8 +33,11 @@ def read_frozen_inputs(manifest_path, raw):
     for key in DOCUMENT_KEYS:
         path = manifest_path.parent / paths[key]
         content = path.read_bytes()
-        if hashlib.sha256(content).hexdigest() != hashes[f"{key}_sha256"]:
-            raise ValueError(f"frozen engine input digest does not match: {key}")
+        expected = hashes[f"{key}_sha256"]
+        actual = hashlib.sha256(content).hexdigest()
+        if actual != expected:
+            raise ValueError(f"frozen engine input digest does not match for {key} at {path}. "
+                             f"Expected {expected}, got {actual}.")
         data[key] = content
     provider_version = manifest["model_versions"]["fable_provider_id"]
     if not re.fullmatch(r"claude-fable-[0-9]+(?:-[0-9]+)+", provider_version):
@@ -64,7 +67,7 @@ def cache_key(commit, query, inputs):
 def input_hash(catalogue, menu, model_version, served_steps, menu_sha256):
     return digest(catalogue, menu, semantics_only(menu, served_steps), menu_sha256,
                   canonical(served_steps), MODEL, model_version, EFFORT, PROMPT, REPAIR,
-                  CONTEXT_PROTOCOL, CONTEXT_SEED, CONTEXT_RECALL)
+                  QUERY_SESSION_PROTOCOL)
 
 
 def load(path):
@@ -98,6 +101,17 @@ def move_to_retired(directory):
     sync_directory(retired.parent)
     sync_directory(directory)
     return retired, record
+
+
+def finish_session(directory, runner, *, accept_answer=False):
+    retired, record = move_to_retired(directory)
+    try:
+        runner.retire(retired, record, require_clean_audit=accept_answer)
+    except RUN_ERRORS as error:
+        save_json(retired / "retirement-failure.json", {"session_id": record["session_id"], "reason": str(error)})
+        # A missing acknowledgement after capture and audit cannot invalidate the answer.
+        if accept_answer and not isinstance(error, DestroyUncertain):
+            raise
 
 
 def teardown(cache, runner):
@@ -140,36 +154,28 @@ class Engine:
                                                             served_steps, menu_sha256)}
 
     def session(self, commit, snapshot, record_path):
+        runner = self.runner()
+        if record_path.exists():
+            # An interrupted query or a session left by the old protocol is never reused.
+            finish_session(record_path.parent.parent, runner)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         identity = {"commit": commit, **snapshot}
-        runner = self.runner()
-        record = load(record_path) if record_path.exists() else None
-        if record is not None:
-            if any(record.get(key) != value for key, value in identity.items()):
-                raise RuntimeError(f"existing engine session belongs to a different snapshot: {record_path}")
-            if not record.get("session_id"):
-                raise RuntimeError(f"uncertain launch for {commit}; reconcile {record_path} before retrying")
-        else:
-            # An interrupted launch can leave a live engine even if mj never
-            # returned its ID. Refuse duplicate engines until it is reconciled.
-            save(record_path, identity)
-            try:
-                sid = runner.start(snapshot, commit)
-            except LaunchHeld:
-                record_path.unlink()
-                raise
-            record = {**identity, "session_id": sid, "instance": runner.instance,
-                      "model_version": self.model_version}
-            save(record_path, record)
-        if not record.get("prepared"):
-            runner.prepare(record["session_id"], snapshot, record_path.parent)
-            save(record_path, {**record, "prepared": True})
-        return runner, record["session_id"]
+        # An interrupted launch may leave an engine without a recorded ID.
+        # Keep the intent until it can be reconciled.
+        save_json(record_path, identity)
+        try:
+            sid = runner.start(snapshot, commit)
+        except LaunchHeld:
+            record_path.unlink()
+            raise
+        save_json(record_path, {**identity, "session_id": sid, "instance": runner.instance,
+                                "model_version": self.model_version})
+        return runner, sid
 
-    def answer(self, commit, query_text, *, fresh=False, expected_inputs=None):
+    def answer(self, commit, query_text, *, fresh=False):
         provenance = {"model": MODEL, "effort": EFFORT, "steps": [], "turns": [],
                       "validation_retries": 0, "session": None, "turn": None, "tokens": {},
-                      "fresh": fresh, "context_id": None, "context_probe": None}
+                      "fresh": fresh, "context_id": None}
 
         def response(status, rows=(), coverage=None, message=None):
             result = {"status": status, "rows": list(rows), "total": len(rows), "provenance": provenance,
@@ -178,8 +184,6 @@ class Engine:
                 result["message"] = message
             return result
 
-        if expected_inputs is not None and expected_inputs != self.identity:
-            return response("engine_error", message="RQL engine inputs differ from the frozen writer assignment.")
         try:
             if not isinstance(query_text, str):
                 raise ValueError("RQL query must be a string")
@@ -212,49 +216,46 @@ class Engine:
                         provenance["tokens"][counter] = previous + tokens
 
                 provenance["retired_sessions"] = []
-                for replacement in range(2):
+                for attempt in range(2):
                     runner, sid = self.session(commit, snapshot, active / "session.json")
                     provenance["session"] = sid
-                    probe = runner.context_probe(sid, active)
-                    provenance["context_probe"] = probe
-                    if probe["status"] != "passed":
-                        raise RuntimeError(probe["message"])
-                    errors = []
-                    while True:
-                        try:
+                    valid = False
+                    try:
+                        runner.prepare(sid, snapshot, active)
+                        errors = []
+                        while True:
                             output, record, errors = runner.turn(
                                 sid, query, self.catalogue, self.menu, errors, active)
-                        except IsolationFailure as error:
-                            add_turn(error.record)
-                            save_json(active / "void.json", {"session_id": sid, "reason": str(error)})
-                            retired, session_record = move_to_retired(directory)
-                            provenance["retired_sessions"].append({"session": sid, "context_probe": probe})
-                            runner.retire(retired, session_record)
-                            if replacement:
-                                raise
-                            break
-                        except TurnFailure as error:
-                            add_turn(error.record)
+                            add_turn(record)
+                            if not errors:
+                                rows, coverage, errors = validate(output, read_blob)
+                            evidence = active / "answers" / record["context_id"]
+                            save_json(evidence / "validation.json", {"errors": errors})
+                            if not errors:
+                                result = response("ok", ordered_rows(rows), coverage)
+                                save_json(evidence / "result.json", result)
+                                valid = True
+                                break
+                            if provenance["validation_retries"]:
+                                return response("engine_error", message="; ".join(errors))
+                            provenance["validation_retries"] += 1
+                    except IsolationFailure as error:
+                        add_turn(error.record)
+                        save_json(active / "void.json", {"session_id": sid, "reason": str(error)})
+                        provenance["retired_sessions"].append({"session": sid, "reason": str(error)})
+                        if attempt:
                             raise
-                        add_turn(record)
-                        if not errors:
-                            rows, coverage, errors = validate(output, read_blob)
-                        evidence = active / "answers" / record["context_id"]
-                        save_json(evidence / "validation.json", {"errors": errors})
-                        if not errors:
-                            result = response("ok", ordered_rows(rows), coverage)
-                            save_json(evidence / "result.json", result)
-                            if fresh:
-                                context = provenance["context_id"]
-                                if not context:
-                                    raise RuntimeError("fresh engine answer lacks a confirmed context id")
-                                entry = directory / "stability" / key / (context + ".json")
-                                entry.parent.mkdir(parents=True, exist_ok=True)
-                            save(entry, result)
-                            return result
-                        if provenance["validation_retries"]:
-                            return response("engine_error", message="; ".join(errors))
-                        provenance["validation_retries"] += 1
+                    except TurnFailure as error:
+                        add_turn(error.record)
+                        raise
+                    finally:
+                        finish_session(directory, runner, accept_answer=valid)
+                    if valid:
+                        if fresh:
+                            entry = directory / "stability" / key / (record["context_id"] + ".json")
+                            entry.parent.mkdir(parents=True, exist_ok=True)
+                        save(entry, result)
+                        return result
         except (LaunchHeld, QuotaTurnFailure) as error:
             return response("quota_hold", message=str(error))
         except (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
@@ -281,12 +282,6 @@ def load_engine(config_path=None, *, manifest_path=None):
     return engine
 
 
-def answer(commit, query_text, *, fresh=False, expected_inputs=None):
-    """Answer a writer query, or make a separate host-only stability re-ask."""
-    try:
-        engine = load_engine()
-    except (OSError, KeyError, ValueError, TypeError) as error:
-        return {"status": "engine_error", "rows": [], "total": 0, "provenance": {"fresh": fresh},
-                "coverage": {"complete": False, "open": []}, "message": f"cannot verify frozen engine inputs: {error}"}
-
-    return engine.answer(commit, query_text, fresh=fresh, expected_inputs=expected_inputs)
+def answer(commit, query, *, fresh=False):
+    """Answer on the host, optionally making a fresh stability re-ask."""
+    return load_engine().answer(commit, query, fresh=fresh)

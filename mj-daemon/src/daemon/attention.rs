@@ -324,8 +324,10 @@ fn current_condition_failure(runtime: &RuntimeProjection, id: &str) -> bool {
     })
 }
 
-fn failed_review(review: Option<&mj_client::review::RuntimeReviewView>) -> bool {
-    review.is_some_and(|review| {
+fn failed_review<'a>(
+    reviews: impl IntoIterator<Item = &'a mj_client::review::RuntimeReviewView>,
+) -> bool {
+    reviews.into_iter().any(|review| {
         matches!(
             review.phase,
             TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. })
@@ -352,7 +354,7 @@ fn dismissal(
                     .metadata
                     .reviews
                     .iter()
-                    .find(|review| review.session_id == id),
+                    .filter(|review| review.session_id == id),
             )
         {
             return None;
@@ -402,9 +404,28 @@ fn project_states(
     committed: Option<&CommittedState>,
 ) -> AttentionProjection {
     use SessionAttention::*;
+    // A session's reviews stand for it through the most notable one: a
+    // question, then work in progress, then the most severe settled state.
     let mut reviews = BTreeMap::new();
-    for review in &runtime.metadata.reviews {
-        reviews.entry(review.session_id.as_str()).or_insert(review);
+    for session_id in runtime
+        .metadata
+        .reviews
+        .iter()
+        .map(|review| review.session_id.as_str())
+        .collect::<BTreeSet<_>>()
+    {
+        let of_session = || {
+            runtime
+                .metadata
+                .reviews
+                .iter()
+                .filter(|review| review.session_id == session_id)
+        };
+        if let Some(review) =
+            mj_client::review::most_notable(of_session()).or_else(|| of_session().next())
+        {
+            reviews.insert(session_id, review);
+        }
     }
     let lifecycles: BTreeMap<_, _> = runtime
         .metadata
@@ -462,7 +483,9 @@ fn project_states(
                     .any(|request| !request.goes_to_parent()),
             )
         })
-        .chain(reviews.values().flat_map(|review| {
+        // Every review's questions count, whichever review stands for the
+        // session in its status.
+        .chain(runtime.metadata.reviews.iter().flat_map(|review| {
             review
                 .questions
                 .iter()
@@ -554,7 +577,13 @@ fn project_states(
                 })
             {
                 Unreachable
-            } else if failed_review(review) {
+            } else if failed_review(
+                runtime
+                    .metadata
+                    .reviews
+                    .iter()
+                    .filter(|review| review.session_id == id.as_str()),
+            ) {
                 Failed
             } else if questions.contains(id) {
                 NeedsInput
@@ -1100,6 +1129,8 @@ mod tests {
             .metadata
             .reviews
             .push(mj_client::review::RuntimeReviewView {
+                review_id: String::new(),
+                roots: Vec::new(),
                 session_id: "parent".into(),
                 child_session_id: None,
                 phase: TurnReviewPhase::Verdict(ReviewVerdict::Findings {
@@ -1388,6 +1419,8 @@ mod tests {
                     .metadata
                     .reviews
                     .push(mj_client::review::RuntimeReviewView {
+                        review_id: String::new(),
+                        roots: Vec::new(),
                         child_session_id: None,
                         session_id: "parent".into(),
                         phase: TurnReviewPhase::Verdict(ReviewVerdict::Clean),
@@ -2067,6 +2100,8 @@ mod tests {
             .metadata
             .reviews
             .push(mj_client::review::RuntimeReviewView {
+                review_id: String::new(),
+                roots: Vec::new(),
                 child_session_id: None,
                 session_id: "parent".into(),
                 phase: TurnReviewPhase::Verdict(ReviewVerdict::Clean),
@@ -2240,6 +2275,8 @@ mod tests {
             .metadata
             .reviews
             .push(mj_client::review::RuntimeReviewView {
+                review_id: String::new(),
+                roots: Vec::new(),
                 child_session_id: Some("child".into()),
                 session_id: "parent".into(),
                 phase: TurnReviewPhase::Running { roles: vec![] },
@@ -2275,6 +2312,8 @@ mod tests {
             .metadata
             .reviews
             .push(mj_client::review::RuntimeReviewView {
+                review_id: String::new(),
+                roots: Vec::new(),
                 child_session_id: None,
                 session_id: "parent".into(),
                 phase: TurnReviewPhase::Verdict(ReviewVerdict::Failed {

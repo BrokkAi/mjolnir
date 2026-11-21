@@ -88,10 +88,15 @@ def validate(output, read_blob):
             return None
         return path, start, end
 
-    def evidence(value, label, sites):
+    def include_cited(sites, cited):
+        if cited is not None:
+            path, start, end = cited
+            sites.setdefault(cited, {"path": path, "start_line": start, "end_line": end})
+
+    def evidence(value, label, cited_sites):
         if isinstance(value, list):
             for index, part in enumerate(value):
-                evidence(part, f"{label}[{index}]", sites)
+                evidence(part, f"{label}[{index}]", cited_sites)
         elif isinstance(value, str):
             if coverage["complete"] and re.search(
                 r"\b(?:open frontier|unresolved (?:dispatch|transition)|unsupported transformation)\b",
@@ -101,8 +106,7 @@ def validate(output, read_blob):
         elif isinstance(value, dict):
             if {"start_line", "end_line"} & value.keys():
                 cited = site(value, label)
-                if cited and sites is not None and cited not in sites:
-                    errors.append(f"{label}: span missing from the row's sites")
+                include_cited(cited_sites, cited)
                 return
             if "verbatim" in value:
                 if set(value) != {"site", "verbatim"}:
@@ -112,8 +116,7 @@ def validate(output, read_blob):
                 if not cited:
                     return
                 path, start, end = cited
-                if sites is not None and cited not in sites:
-                    errors.append(f"{label}: written span missing from the row's sites")
+                include_cited(cited_sites, cited)
                 if not isinstance(written, list) or len(written) != end - start + 1:
                     errors.append(f"{label}.verbatim: expected one byte slice per cited line")
                     return
@@ -141,13 +144,12 @@ def validate(output, read_blob):
                     errors.append(f"{label}.{key}: an open frontier contradicts coverage.complete")
                 if key == "site" and part is not None:
                     cited = site(part, f"{label}.site")
-                    if cited and sites is not None and cited not in sites:
-                        errors.append(f"{label}.site: span missing from the row's sites")
+                    include_cited(cited_sites, cited)
                     if any(isinstance(value.get(field), str)
                            for field in ("text", "snippet", "source_text", "written")):
                         errors.append(f"{label}: use verbatim byte slices for copied source text")
                 else:
-                    evidence(part, f"{label}.{key}", sites)
+                    evidence(part, f"{label}.{key}", cited_sites)
 
     rows = answer["rows"]
     for index, row in enumerate(rows):
@@ -166,12 +168,21 @@ def validate(output, read_blob):
             if missing:
                 errors.append(f"{label}.fields: missing {', '.join(sorted(missing))}")
             else:
+                primary = PRIMARY[kind]
+                anchor_label = f"{label}.fields." + ".".join(primary)
                 anchor = fields
-                for component in PRIMARY[kind]:
+                for component in primary:
                     anchor = anchor.get(component) if isinstance(anchor, dict) else None
-                if anchor != sites[0]:
-                    errors.append(f"{label}: the first site must be the semantic primary anchor")
-        evidence(fields, label + ".fields", set(locations))
+                if anchor is None:
+                    errors.append(f"{anchor_label}: expected the semantic primary site object")
+                elif anchor != sites[0]:
+                    errors.append(f"{label}.sites[0]: must equal {anchor_label}")
+        cited_sites = {}
+        evidence(fields, label + ".fields", cited_sites)
+        # R-loc discards fields, so include every exact citation in its site list.
+        # Preserve the supplied primary and the order of all supplied sites.
+        listed = set(locations)
+        sites.extend(cited_sites[location] for location in sorted(cited_sites.keys() - listed))
     if coverage["complete"] == bool(coverage["open"]):
         errors.append("coverage.complete must be true exactly when coverage.open is empty")
     for index, frontier in enumerate(coverage["open"]):

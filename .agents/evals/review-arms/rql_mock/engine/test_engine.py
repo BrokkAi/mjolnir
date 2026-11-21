@@ -19,10 +19,10 @@ from rql_mock import engine as live_engine
 from . import Engine, frozen_inputs, teardown
 from .__main__ import audit
 from .grammar import parse
-from .prompt import CONTEXT_RECALL, assert_blind, semantics_only, turn_prompt
-from .runner import CHECKOUT_CLEAN, CONTEXT_BOUNDARY, IsolationFailure, LaunchHeld, SealedRunner, usage_delta
+from .prompt import assert_blind, semantics_only, turn_prompt
+from .runner import CHECKOUT_CLEAN, IsolationFailure, LaunchHeld, SealedRunner, usage_delta
 from .snapshot import blob_reader, git_output, manifest_sources, parentless_snapshot
-from .validation import validate
+from .validation import canonical, validate
 
 
 CATALOGUE = (CENSUS / "rql-documented-steps.md").read_text(encoding="utf-8")
@@ -235,6 +235,46 @@ class FrozenInputTests(unittest.TestCase):
                     else:
                         self.assertEqual(body["rows"], ROWS)
 
+    def test_engine_load_failure_stores_details_on_the_host(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self.fixture(root)
+            raw = json.loads(manifest.read_text())
+            raw["page_rows"] = 50
+            manifest.write_text(json.dumps(raw))
+            config = root / "engine.json"
+            descriptor, log = root / "transport.json", root / "queries.jsonl"
+            descriptor.write_text(json.dumps({
+                "manifest": str(manifest), "engine": "rql_mock.engine:load_engine",
+                "sessions": {SESSION: {"diff": raw["diffs"][0]["key"], "intro": COMMIT, "arm": "R",
+                                       "log": str(log), "manifest_sha256": "0" * 64,
+                                       "engine_inputs_sha256": "1" * 64}},
+            }))
+            wrapper = Path(__file__).resolve().parents[1] / "serve-rql.sh"
+            env = {**os.environ, "SSH_ORIGINAL_COMMAND": SESSION, "REVIEW_ARMS_ENGINE_ROOT": str(root)}
+            catalogue = root / raw["input_paths"]["catalogue"]
+            diagnostic = log.with_name("engine-load-error.jsonl")
+            for failure in ("missing_config", "unreadable_input", "wrong_digest"):
+                with self.subTest(failure=failure):
+                    if failure != "missing_config":
+                        config.write_text(json.dumps({"manifest": str(manifest)}))
+                    if failure == "unreadable_input":
+                        catalogue.unlink()
+                    elif failure == "wrong_digest":
+                        catalogue.write_bytes(b"tampered")
+                    result = subprocess.run([wrapper, descriptor, SESSION], env=env, input="",
+                                            capture_output=True, text=True, timeout=15)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr.strip(), "serve-rql: invalid host transport configuration")
+                    record = json.loads(diagnostic.read_text().splitlines()[-1])
+                    self.assertEqual(record["session"], SESSION)
+                    self.assertIn("Traceback", record["traceback"])
+                    self.assertIn(str(config if failure == "missing_config" else catalogue), record["error"])
+                    if failure == "wrong_digest":
+                        self.assertIn(raw["inputs"]["catalogue_sha256"], record["error"])
+                        self.assertIn(hashlib.sha256(b"tampered").hexdigest(), record["error"])
+            self.assertEqual(diagnostic.stat().st_mode & 0o777, 0o600)
+
     # Hard-won: 49e16b8: a prompt change reused prior raw answers and fidelity measurements.
     def test_fidelity_checkpoints_follow_the_answer_cache_input_hash(self):
         with TemporaryDirectory() as directory:
@@ -272,6 +312,34 @@ class ValidationTests(unittest.TestCase):
                 operand["site"] = bad_span
                 operand["verbatim"][0]["text"] = text
                 self.assertIn(message, "\n".join(validate(payload(rows), SOURCE.get)[2]))
+
+    # Hard-won: b9ceb96: exact nested citations were rejected unless copied to the row's site list.
+    def test_row_sites_include_nested_citations_for_location_only_delivery(self):
+        rows = deepcopy(ROWS)
+        enclosing_span = {**span(line=1), "end_line": 3}
+        rows[0]["sites"] = [enclosing_span]
+        rows[0]["fields"]["nested"] = [{"context": {"site": span(line=3)}}]
+        rows[0]["fields"]["duplicate"] = deepcopy(rows[0]["fields"]["operand"])
+
+        result, _, errors = validate(payload(rows), SOURCE.get)
+        self.assertFalse(errors)
+        self.assertEqual(result[0]["sites"], [enclosing_span, span(), span(line=3)])
+
+        rows[0]["fields"]["operand"]["verbatim"][0]["text"] = "0016"
+        self.assertIn("not the exact source slice",
+                      "\n".join(validate(payload(rows), SOURCE.get)[2]))
+
+    def test_synthesized_citations_are_independent_of_field_key_order(self):
+        rows = deepcopy(ROWS)
+        fields = rows[0]["fields"]
+        fields.update(z=span(line=3), a=span(line=1), middle={**span(line=1), "end_line": 2})
+        reordered = [{**rows[0], "fields": dict(reversed(list(fields.items())))}]
+        first, _, errors = validate(payload(rows), SOURCE.get)
+        self.assertFalse(errors)
+        second, _, errors = validate(payload(reordered), SOURCE.get)
+        self.assertFalse(errors)
+        self.assertEqual(first[0]["sites"], [span(), span(line=1), fields["middle"], span(line=3)])
+        self.assertEqual(canonical(first), canonical(second))
 
     def test_open_coverage_and_false_complete(self):
         rows = deepcopy(ROWS)
@@ -329,13 +397,13 @@ class FakeRunner:
 
     def start(self, snapshot, commit):
         self.launches.append((snapshot, commit))
-        return "test-session"
+        return f"{len(self.launches):032x}"
 
     def prepare(self, sid, snapshot, directory):
         self.preparations.append((sid, snapshot))
 
-    def context_probe(self, sid, directory):
-        return {"status": "passed", "context_id": "probe-context"}
+    def retire(self, directory, record, *, require_clean_audit=False):
+        (directory / "destroy-receipt.json").write_text("{}")
 
     def turn(self, sid, query, catalogue, menu, errors, directory):
         self.turns.append((sid, query, errors))
@@ -410,19 +478,22 @@ class EngineTests(unittest.TestCase):
             changed = self.engine(runner, **change).answer(COMMIT, QUERY)
             self.assertEqual(changed["status"], "ok", changed)
             self.assertNotEqual(changed["provenance"]["inputs_sha256"], initial["provenance"]["inputs_sha256"])
-        self.assertEqual((len(runner.launches), len(runner.preparations), len(runner.turns)), (1, 1, 4))
+        self.assertEqual((len(runner.launches), len(runner.preparations), len(runner.turns)), (4, 4, 4))
 
     def test_stability_reasks_have_separate_contexts_and_never_change_writer_cache(self):
         runner = FakeRunner([payload(), payload([]), payload([])])
         engine = self.engine(runner)
         cached = engine.answer(COMMIT, QUERY)
-        fresh = [engine.answer(COMMIT, QUERY, fresh=True) for _ in range(2)]
+        self.addCleanup(setattr, live_engine, "load_engine", live_engine.load_engine)
+        live_engine.load_engine = lambda: engine
+        fresh = [live_engine.answer(COMMIT, QUERY, fresh=True) for _ in range(2)]
         self.assertTrue(all(answer["status"] == "ok" for answer in [cached, *fresh]))
         self.assertFalse(cached["provenance"]["fresh"])
         self.assertTrue(all(answer["provenance"]["fresh"] for answer in fresh))
         identifiers = {answer["provenance"]["context_id"] for answer in [cached, *fresh]}
         self.assertEqual(len(identifiers), 3)
-        self.assertEqual(len(runner.launches), 1)
+        self.assertEqual(len(runner.launches), 3)
+        self.assertEqual(len({answer["provenance"]["session"] for answer in [cached, *fresh]}), 3)
         self.assertEqual(engine.answer(COMMIT, QUERY), cached)
         paths = sorted((self.cache / COMMIT / "stability").glob("*/*.json"))
         self.assertEqual({path.stem for path in paths}, identifiers - {cached["provenance"]["context_id"]})
@@ -434,8 +505,10 @@ class EngineTests(unittest.TestCase):
                 super().start(snapshot, commit)
                 return SESSION if len(self.launches) == 1 else REPLACEMENT
 
-            def retire(self, directory, record):
-                self.retired = record["session_id"]
+            def retire(self, directory, record, *, require_clean_audit=False):
+                if record["session_id"] == SESSION:
+                    self.retired = SESSION
+                super().retire(directory, record, require_clean_audit=require_clean_audit)
 
             def turn(self, sid, query, catalogue, menu, errors, directory):
                 if sid == SESSION:
@@ -454,6 +527,44 @@ class EngineTests(unittest.TestCase):
         retired = self.cache / COMMIT / "retired" / SESSION
         self.assertEqual((retired / "violation.json").read_text(), "evidence")
         self.assertEqual(json.loads((retired / "session.json").read_text())["session_id"], SESSION)
+
+    def test_uncertain_destroy_is_quarantined_without_blocking_the_next_query(self):
+        class LostDestroy(FakeRunner):
+            def start(self, snapshot, commit):
+                super().start(snapshot, commit)
+                return SESSION if len(self.launches) == 1 else REPLACEMENT
+
+            def retire(self, directory, record, *, require_clean_audit=False):
+                if record["session_id"] == SESSION:
+                    self.capture = SealedRunner.__new__(SealedRunner)
+                    self.capture.config = {"instance": INSTANCE, "model_version": VERSION}
+                    self.capture.driver = CaptureDriver(directory, "destroy", clean=True)
+                    self.capture.retire(directory, record, require_clean_audit=require_clean_audit)
+                else:
+                    super().retire(directory, record, require_clean_audit=require_clean_audit)
+
+        runner = LostDestroy([payload(), payload()])
+        engine = Engine(self.cache, (CATALOGUE, MENU), lambda _: (SOURCE.get, {"orphan": COMMIT}),
+                        lambda: runner, VERSION)
+        first = engine.answer(COMMIT, QUERY)
+        self.assertEqual(first["status"], "ok", first)
+        sid = first["provenance"]["session"]
+        quarantined = self.cache / COMMIT / "retired" / sid
+        self.assertTrue((quarantined / "destroy-request.json").is_file())
+        self.assertFalse((quarantined / "destroy-receipt.json").exists())
+        failure = json.loads((quarantined / "retirement-failure.json").read_text())
+        self.assertEqual(failure["session_id"], sid)
+        self.assertIn("destroy was not confirmed", failure["reason"])
+        self.assertTrue((quarantined / "capture.json").is_file())
+        second = engine.answer(COMMIT, '(function :name "other")')
+        self.assertEqual(second["status"], "ok", second)
+        self.assertNotEqual(second["provenance"]["session"], sid)
+        self.assertEqual(engine.answer(COMMIT, QUERY), first)
+        self.assertEqual(len(runner.launches), 2)
+        count, failures = teardown(self.cache, runner.capture)
+        self.assertEqual(count, 0)
+        self.assertIn("is uncertain", failures[0])
+        self.assertEqual(len(runner.capture.driver.argv), 1)
 
     def test_retry_then_error_never_caches_unvalidated_rows(self):
         runner = FakeRunner(["{\"", payload([{"kind": "broken"}]), payload()])
@@ -478,6 +589,8 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result["rows"], [first, ROWS[0]])
         self.assertEqual(result["provenance"]["validation_retries"], 1)
         self.assertEqual(len(runner.turns), 2)
+        self.assertEqual(len(runner.launches), 1)
+        self.assertEqual(runner.turns[0][0], runner.turns[1][0])
 
     def test_parse_error_never_constructs_engine_session(self):
         runner = FakeRunner([])
@@ -491,24 +604,25 @@ class FakeAcpRunner(SealedRunner):
 
     instance = INSTANCE
 
-    def __init__(self, *, remember=False, acknowledge=True):
+    def __init__(self):
         self.driver = self
-        self.config = {"profile": "claude-test", "model_version": VERSION}
+        self.config = {"profile": "claude-test", "model_version": VERSION, "destination": "repo"}
         self.manifest = {"diffs": []}
         self.served_steps = ("contract-cases", "value-transfers", "guarded-paths")
-        self.remember = remember
-        self.acknowledge = acknowledge
         self.messages = []
-        self.boundaries = []
-        self.conversation = []
         self.turns = []
         self.artifact = None
+        self.launches = []
 
     def start(self, snapshot, commit):
-        return "test-session"
+        self.launches.append(snapshot)
+        return f"{len(self.launches):032x}"
 
     def prepare(self, sid, snapshot, directory):
         pass
+
+    def retire(self, directory, record, *, require_clean_audit=False):
+        (directory / "destroy-receipt.json").write_text("{}")
 
     def pilot_weekly_hold(self, profile, *, scope):
         assert (profile, scope) == ("claude-test", "fable")
@@ -519,21 +633,16 @@ class FakeAcpRunner(SealedRunner):
                 "config_options": [{"key": "model", "current": "fable"},
                                    {"key": "effort", "current": "high"}]}
 
-    def clean_checkout(self, sid):
-        self.artifact = None
+    def clean_checkout(self, sid, orphan="", *, clear=True):
         return f".rql-engine-{sid}"
 
     def audit_turn(self, sid, turn, directory):
         return True
 
-    @staticmethod
-    def save(path, value):
-        path.write_text(json.dumps(value), encoding="utf-8")
-
     def command(self, operation, *args, data=None):
         if operation == "put-file":
             session_flag, sid, path_flag, path, source = args
-            assert (session_flag, sid, path_flag, source) == ("--session", "test-session", "--path", "-"), args
+            assert (session_flag, path_flag, source) == ("--session", "--path", "-"), args
             assert path.startswith(f".rql-engine-{sid}/"), args
             self.artifact = data
             return b""
@@ -544,30 +653,14 @@ class FakeAcpRunner(SealedRunner):
         sid = args[args.index("--session") + 1]
         text = data.decode()
         self.messages.append((command, text))
-        if text == "/clear":
-            if self.acknowledge:
-                self.boundaries.append({"seq": len(self.messages), "stable_id": CONTEXT_BOUNDARY + command})
-                if not self.remember:
-                    self.conversation.clear()
-        else:
-            self.conversation.append(text)
         return json.dumps({"session_id": sid, "via": "turn", "turn_id": len(self.messages)}).encode()
 
     def mj(self, operation, *args, **kwargs):
-        if operation == "transcript":
-            cursor = int(args[args.index("--after-seq") + 1]) if "--after-seq" in args else 0
-            return {"latest_seq": len(self.messages), "next_after_seq": len(self.messages),
-                    "items": [item for item in self.boundaries if item["seq"] > cursor]}
         if operation == "wait":
             command, text = self.messages[-1]
             if refusal := getattr(self, "turn_refusal", None):
                 return {"turn_id": len(self.messages), **refusal}
-            if text == CONTEXT_RECALL:
-                response = json.dumps(self.conversation[-2] if len(self.conversation) > 1 else "")
-            elif "synthetic query" in text:
-                response = "ACK"
-            else:
-                response = "Answer written"
+            response = "Answer written"
             turn = len(self.messages)
             self.turns.append({"command_id": command, "accepted_ordinal": turn,
                                "usage": {"provider_details": {"model_usage": {VERSION: {}}}}})
@@ -581,7 +674,7 @@ class FakeAcpRunner(SealedRunner):
                                     for row in turns}}
 
 
-class ContextTests(unittest.TestCase):
+class SessionTests(unittest.TestCase):
     # Hard-won: dfb55808: the wait exit code hid the structured quota refusal.
     def test_nonzero_wait_with_provider_quota_outcome_is_a_quota_hold(self):
         runner = FakeAcpRunner()
@@ -613,47 +706,56 @@ class ContextTests(unittest.TestCase):
             self.assertEqual(answer["status"], "quota_hold")
             self.assertEqual(answer["provenance"]["turns"][-1]["stop_reason"], "QuotaLimit")
 
-    def test_probe_is_once_and_every_query_and_repair_waits_for_its_own_boundary(self):
-        runner = FakeAcpRunner()
-        with TemporaryDirectory() as directory:
-            path = Path(directory)
-            first_probe = runner.context_probe("test-session", path)
-            self.assertEqual(first_probe["status"], "passed")
-            before = list(runner.messages)
-            self.assertEqual(runner.context_probe("test-session", path), first_probe)
-            self.assertEqual(runner.messages, before)
-            contexts = []
-            for errors in ([], ["bad cited line"]):
-                _, record, _ = runner.turn("test-session", QUERY, CATALOGUE, MENU, errors, path)
-                contexts.append(record["context_id"])
-                self.assertEqual(runner.messages[-2], (record["context_id"], "/clear"))
-                self.assertIn("Query: " + json.dumps(QUERY), runner.messages[-1][1])
-                self.assertIsNone(runner.artifact)
-            self.assertEqual(len({first_probe["context_id"], *contexts}), 3)
-            self.assertIn("bad cited line", runner.messages[-1][1])
+    def test_checkout_mutation_voids_the_turn_before_validation_and_cache(self):
+        class CheckoutRunner(FakeAcpRunner):
+            def clean_checkout(self, sid, orphan="", *, clear=True):
+                scratch = super().clean_checkout(sid, orphan, clear=clear)
+                check = subprocess.run([sys.executable, "-c", CHECKOUT_CLEAN, scratch,
+                                        orphan, "clear" if clear else "check"],
+                                       cwd=checkout, capture_output=True, text=True)
+                if check.returncode:
+                    raise RuntimeError(check.stderr.strip())
+                return scratch
 
-    def test_recall_failure_stops_answering_and_is_persisted_in_provenance(self):
-        runner = FakeAcpRunner(remember=True)
+            def command(self, operation, *args, data=None):
+                if operation == "message" and len(self.messages) == 0:
+                    tracked.write_text("mutated source\n")
+                    (checkout / "unauthorized").write_text("new content\n")
+                return super().command(operation, *args, data=data)
+
+            def retire(self, directory, record, *, require_clean_audit=False):
+                super().retire(directory, record, require_clean_audit=require_clean_audit)
+                if (directory / "void.json").is_file():
+                    git_output(checkout, "checkout", "--", tracked.name)
+                    (checkout / "unauthorized").unlink()
+
         with TemporaryDirectory() as directory:
-            path = Path(directory)
-            engine = Engine(path, (CATALOGUE, MENU),
-                            lambda commit: (SOURCE.get, {"tree": "fake", "orphan": "root"}),
+            root = Path(directory)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            tracked = checkout / "source.rs"
+            tracked.write_bytes(SOURCE["source.rs"])
+            git_output(checkout, "init", "--template=")
+            git_output(checkout, "add", tracked.name)
+            git_output(checkout, "-c", "user.name=Test", "-c", "user.email=test@localhost",
+                       "-c", "commit.gpgsign=false", "commit", "-m", "source")
+            orphan = git_output(checkout, "rev-parse", "HEAD").decode().strip()
+            runner = CheckoutRunner()
+            cache = root / "cache"
+            engine = Engine(cache, (CATALOGUE, MENU), lambda _: (SOURCE.get, {"orphan": orphan}),
                             lambda: runner, VERSION)
-            result = engine.answer(COMMIT, QUERY)
-            self.assertEqual(result["status"], "engine_error")
-            self.assertIn("recalled prior query", result["message"])
-            probe = result["provenance"]["context_probe"]
-            self.assertEqual(probe["status"], "failed")
-            self.assertEqual(json.loads((path / COMMIT / "active" / "context-probe.json").read_text()), probe)
-            self.assertEqual(engine.answer(COMMIT, QUERY), result)
-            self.assertEqual(len(runner.messages), 3)
-
-    def test_clear_does_not_accept_a_missing_or_old_boundary(self):
-        runner = FakeAcpRunner(acknowledge=False)
-        runner.boundaries.append({"seq": 0, "stable_id": CONTEXT_BOUNDARY + "earlier-clear"})
-        with self.assertRaisesRegex(RuntimeError, "did not confirm /clear"):
-            runner.clear_context("test-session", timeout=0)
-        self.assertEqual([text for _, text in runner.messages], ["/clear"])
+            answer = engine.answer(COMMIT, QUERY)
+            self.assertEqual(answer["status"], "ok", answer)
+            self.assertEqual(len(runner.launches), 2)
+            self.assertEqual(len(runner.messages), 2)
+            first = answer["provenance"]["retired_sessions"][0]
+            rejected = cache / COMMIT / "retired" / first["session"]
+            self.assertTrue((rejected / "void.json").is_file())
+            self.assertIn("unexpected changes", first["reason"])
+            self.assertFalse(list(rejected.glob("answers/*/validation.json")))
+            self.assertNotEqual(answer["provenance"]["session"], first["session"])
+            self.assertEqual(engine.answer(COMMIT, QUERY), answer)
+            self.assertEqual(len(runner.launches), 2)
 
     def test_checkout_cleaner_drops_old_answer_without_erasing_source(self):
         with TemporaryDirectory() as directory:
@@ -667,12 +769,18 @@ class ContextTests(unittest.TestCase):
             scratch = path / ".fixture"
             scratch.mkdir()
             (scratch / "answer.json").write_text("previous turn")
-            command = [sys.executable, "-c", CHECKOUT_CLEAN, scratch.name]
+            command = [sys.executable, "-c", CHECKOUT_CLEAN, scratch.name, "", "clear"]
             subprocess.run(command, cwd=path, check=True, capture_output=True)
             self.assertFalse(scratch.exists())
-            bad = subprocess.run([*command[:-1], tracked.name], cwd=path, capture_output=True)
+            bad = subprocess.run([*command[:3], tracked.name, "", "clear"], cwd=path, capture_output=True)
             self.assertNotEqual(bad.returncode, 0)
             self.assertTrue(tracked.is_file())
+            check = [*command[:-1], "check"]
+            tracked.unlink()
+            self.assertNotEqual(subprocess.run(check, cwd=path, capture_output=True).returncode, 0)
+            git_output(path, "checkout", "--", tracked.name)
+            (path / "empty").mkdir()
+            self.assertNotEqual(subprocess.run(check, cwd=path, capture_output=True).returncode, 0)
 
     def test_writer_stdio_rejects_fresh_and_cannot_select_a_host_reask(self):
         with TemporaryDirectory() as directory:
@@ -682,14 +790,21 @@ class ContextTests(unittest.TestCase):
             manifest = temp / "manifest.json"
             manifest.write_text(json.dumps({"page_rows": 50, "diffs": [{"key": diff, "intro": COMMIT}]}))
             (temp / "transport_fixture.py").write_text("""
-def answer(commit, query, *, fresh=False, expected_inputs=None):
+from types import SimpleNamespace
+from rql_mock.stub_engine import STUB_IDENTITY
+
+def load_engine():
+    return SimpleNamespace(identity=STUB_IDENTITY, answer=answer)
+
+def answer(commit, query, *, fresh=False):
     return {"status": "ok", "rows": [], "total": 0,
             "coverage": {"complete": True, "open": []}, "provenance": {"fresh": fresh, "commit": commit}}
 """)
             config, log = temp / "transport.json", temp / "queries.jsonl"
+            from rql_mock.stub_engine import STUB_IDENTITY
             config.write_text(json.dumps({
-                "manifest": str(manifest), "engine": "transport_fixture:answer",
-                "sessions": {sid: {"diff": diff, "intro": COMMIT, "arm": "R", "log": str(log)}},
+                "manifest": str(manifest), "engine": "transport_fixture:load_engine",
+                "sessions": {sid: {"diff": diff, "intro": COMMIT, "arm": "R", "log": str(log), **STUB_IDENTITY}},
             }))
             def request(request_id, arguments):
                 return {"jsonrpc": "2.0", "id": request_id, "method": "tools/call",
@@ -765,7 +880,7 @@ class CaptureDriver:
                 program = "print('late answer')"
         else:
             acknowledgement = json.dumps({"session_id": SESSION, "accepted": True})
-            program = f"print({acknowledgement!r})"
+            program = "raise SystemExit(1)" if self.fail == "destroy" else f"print({acknowledgement!r})"
         return [sys.executable, "-c", program, *argv]
 
 
