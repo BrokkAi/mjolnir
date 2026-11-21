@@ -62,10 +62,6 @@ def validate(output, read_blob):
     return validate_answer(answer, read_blob)
 
 
-EXCLUSION_REASONS = {"kind-not-selected", "port-not-selected", "unreachable", "not-the-seed",
-                     "macro-not-call", "duplicate", "other"}
-
-
 def validate_answer(answer, read_blob):
     if (not isinstance(answer, dict) or set(answer) != {"rows", "coverage", "excluded"}
             or not isinstance(answer["rows"], list) or not isinstance(answer["excluded"], list)):
@@ -221,10 +217,10 @@ def validate_answer(answer, read_blob):
             report("exclusion-shape", label, "expected candidate_site, reason and detail")
             continue
         reason, detail = item["reason"], item["detail"]
-        if not isinstance(reason, str) or reason not in EXCLUSION_REASONS:
-            report("exclusion-reason", f"{label}.reason", "unknown exclusion reason")
-        if not isinstance(detail, str) or (reason == "other" and not detail.strip()):
-            report("exclusion-detail", f"{label}.detail", "expected text, nonempty for reason other")
+        if not isinstance(reason, str):
+            report("exclusion-reason", f"{label}.reason", "expected text")
+        if not isinstance(detail, str):
+            report("exclusion-detail", f"{label}.detail", "expected text")
         site(item["candidate_site"], f"{label}.candidate_site")
     return rows, coverage, errors
 

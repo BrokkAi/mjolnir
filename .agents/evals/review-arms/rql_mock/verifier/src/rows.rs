@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 use syn::ext::IdentExt;
 use syn::parse::Parser;
@@ -121,15 +123,19 @@ fn project(source: &Source, range: Bytes, anchor: Anchor) -> Bytes {
     }
 }
 
-pub fn account(
+#[derive(Clone, Copy)]
+enum RowCoverage {
+    Covered,
+    Ambiguous(&'static str),
+    Missing,
+}
+
+fn row_coverage(
     query: &Query,
     rows: &[Row<'_>],
-    answer: &Value,
     file: &Parsed,
     construct: &Construct,
-    candidate: &Candidate,
-    out: &mut Output,
-) {
+) -> RowCoverage {
     let source = &file.source;
     let owner = &file.syntax.procedures[construct.owner.expect("selected procedure")];
     let mut ambiguity = None;
@@ -152,7 +158,7 @@ pub fn account(
                         );
                     }
                 } else {
-                    return;
+                    return RowCoverage::Covered;
                 }
             } else if candidate_range.contains(anchor.range)
                 && row.can_cite_subport(query)
@@ -164,40 +170,125 @@ pub fn account(
         }
     }
 
-    for exclusion in answer["excluded"].as_array().into_iter().flatten() {
+    ambiguity.map_or(RowCoverage::Missing, RowCoverage::Ambiguous)
+}
+
+fn exclusions(answer: &Value) -> impl Iterator<Item = &Value> {
+    answer["excluded"].as_array().into_iter().flatten()
+}
+
+pub fn unchecked_seed_exclusions(answer: &Value, out: &mut Output) {
+    for (index, exclusion) in exclusions(answer).enumerate() {
+        if exclusion["reason"] == "not-the-seed" {
+            out.unchecked(
+                format!("excluded[{index}]"),
+                "seed filters require semantic resolution",
+            );
+        }
+    }
+}
+
+pub fn account<'a>(
+    query: &Query,
+    rows: &[Row<'_>],
+    answer: &Value,
+    selected: impl IntoIterator<Item = (&'a Parsed, &'a Construct)>,
+    out: &mut Output,
+) {
+    let checked: Vec<_> = selected
+        .into_iter()
+        .enumerate()
+        .map(|(index, (file, construct))| {
+            let procedure = &file.syntax.procedures[construct.owner.expect("selected procedure")];
+            let candidate = Candidate {
+                id: format!("c{}", index + 1),
+                kind: construct.kind.name(),
+                site: file.source.site(construct.span),
+                procedure: procedure.name.clone(),
+            };
+            (
+                file,
+                construct,
+                candidate,
+                row_coverage(query, rows, file, construct),
+            )
+        })
+        .collect();
+    // Resolve duplicate references against direct row coverage for the full
+    // answer, independent of enumeration order or other exclusions.
+    let covered: BTreeSet<_> = checked
+        .iter()
+        .filter_map(|(_, _, candidate, coverage)| {
+            matches!(coverage, RowCoverage::Covered).then_some(candidate.id.as_str())
+        })
+        .collect();
+    for (file, construct, candidate, coverage) in &checked {
+        account_candidate(answer, file, construct, candidate, *coverage, &covered, out);
+    }
+    out.candidates
+        .extend(checked.into_iter().map(|(_, _, candidate, _)| candidate));
+}
+
+fn account_candidate(
+    answer: &Value,
+    file: &Parsed,
+    construct: &Construct,
+    candidate: &Candidate,
+    coverage: RowCoverage,
+    covered: &BTreeSet<&str>,
+    out: &mut Output,
+) {
+    let mut false_exclusion = None;
+    let mut valid_exclusion = false;
+    for exclusion in exclusions(answer) {
         let Some((site, evidence)) = role_site(&exclusion["candidate_site"]) else {
             continue;
         };
-        if site != candidate.site {
+        if site != candidate.site
+            || !file
+                .source
+                .anchor(&site, evidence)
+                .is_some_and(|anchor| !anchor.exact || anchor.range == construct.span)
+        {
             continue;
         }
-        let exact_site = source
-            .anchor(&site, evidence)
-            .is_some_and(|anchor| !anchor.exact || anchor.range == construct.span);
-        let valid_reason = match exclusion["reason"].as_str() {
-            Some(
-                "kind-not-selected" | "port-not-selected" | "unreachable" | "not-the-seed"
-                | "macro-not-call" | "duplicate",
-            ) => true,
-            Some("other") => exclusion["detail"]
-                .as_str()
-                .is_some_and(|detail| !detail.trim().is_empty()),
-            _ => false,
-        };
-        if exact_site && valid_reason {
-            return;
+        let detail = exclusion["detail"].as_str();
+        match exclusion["reason"].as_str() {
+            Some("unreachable" | "macro-not-call") => valid_exclusion = true,
+            Some("other") if detail.is_some_and(|detail| !detail.trim().is_empty()) => {
+                valid_exclusion = true;
+            }
+            Some("duplicate") if detail.is_some_and(|id| covered.contains(id)) => {
+                valid_exclusion = true;
+            }
+            Some("duplicate") => {
+                false_exclusion = Some("duplicate detail must name a candidate covered by a row");
+            }
+            Some("not-the-seed") => {
+                false_exclusion = Some("candidate matches the syntactically resolved seed");
+            }
+            _ => {}
         }
     }
-    if let Some(why) = ambiguity {
+    let (code, message) = if let Some(message) = false_exclusion {
+        ("false-exclusion", message.to_owned())
+    } else if valid_exclusion || matches!(coverage, RowCoverage::Covered) {
+        return;
+    } else if let RowCoverage::Ambiguous(why) = coverage {
         out.unchecked(&candidate.id, why);
         return;
-    }
+    } else {
+        (
+            "unaccounted-candidate",
+            format!(
+                "{} candidate has no covering row or valid exclusion",
+                candidate.kind
+            ),
+        )
+    };
     out.errors.push(Finding {
-        code: "unaccounted-candidate",
-        message: format!(
-            "{} candidate has no covering row or valid exclusion",
-            candidate.kind
-        ),
+        code,
+        message,
         row: None,
         candidate: Some(candidate.id.clone()),
         site: candidate.site.clone(),

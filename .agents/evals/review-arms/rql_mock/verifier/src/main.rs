@@ -195,6 +195,7 @@ fn verify(input: Input) -> io::Result<Output> {
             "query",
             "seed, selector or enclosing RQL form needs semantic resolution",
         );
+        rows::unchecked_seed_exclusions(&input.answer, &mut out);
         return Ok(out);
     };
     let mut files = Vec::new();
@@ -233,26 +234,14 @@ fn verify(input: Input) -> io::Result<Output> {
                 );
             }
         }
-        for construct in file.candidates(&query, &seed_names) {
-            let procedure = &file.syntax.procedures[construct.owner.expect("selected procedure")];
-            let candidate = Candidate {
-                id: format!("c{}", out.candidates.len() + 1),
-                kind: construct.kind.name(),
-                site: source.site(construct.span),
-                procedure: procedure.name.clone(),
-            };
-            rows::account(
-                &query,
-                &rows,
-                &input.answer,
-                file,
-                construct,
-                &candidate,
-                &mut out,
-            );
-            out.candidates.push(candidate);
-        }
     }
+
+    let selected = files.iter().flat_map(|file| {
+        file.candidates(&query, &seed_names)
+            .into_iter()
+            .map(move |construct| (file, construct))
+    });
+    rows::account(&query, &rows, &input.answer, selected, &mut out);
 
     for row in &rows {
         let Some(site) = &row.site else {

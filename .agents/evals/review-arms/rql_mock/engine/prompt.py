@@ -52,10 +52,12 @@ or exact written operand evidence in fields.selected_port. For incoming
 guarded paths put the call-site anchor in fields.pivot. Otherwise, account for
 a candidate at the row's primary anchor. List each remaining candidate as
 {"candidate_site": {...}, "reason": "...", "detail": "..."} in excluded.
-Use the candidate's exact line span and one reason from kind-not-selected,
-port-not-selected, unreachable, not-the-seed, macro-not-call, duplicate or
-other. Use a nonempty explanation for other. Use an empty excluded list when
-there are no exclusions, including for documented steps.
+Use the candidate's exact line span and one reason from unreachable,
+not-the-seed, macro-not-call, duplicate or other. For duplicate, put the ID
+of its twin in detail and cover that twin with a row. For other, give a
+nonempty explanation in detail. Use not-the-seed only if seed filters require
+semantic resolution. Use an empty excluded list when there are no exclusions,
+including for documented steps.
 
 For each written operand, literal, field initializer, predicate, operator,
 message and command argument, represent its exact spelling as

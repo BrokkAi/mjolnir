@@ -76,17 +76,14 @@ fn accounting(query: &Query, text: &str, answer: Value) -> Output {
     let file = file(query, text);
     let rows = rows::answer_rows(&answer, query.step);
     let mut out = Output::new();
-    for construct in file.candidates(query, &fixture_seed_names(&file)) {
-        let candidate = Candidate {
-            id: format!("candidate-{}", construct.span.start),
-            kind: construct.kind.name(),
-            site: file.source.site(construct.span),
-            procedure: String::from("seed"),
-        };
-        rows::account(
-            query, &rows, &answer, &file, construct, &candidate, &mut out,
-        );
-    }
+    let selected = file.candidates(query, &fixture_seed_names(&file));
+    rows::account(
+        query,
+        &rows,
+        &answer,
+        selected.into_iter().map(|construct| (&file, construct)),
+        &mut out,
+    );
     out
 }
 
@@ -265,7 +262,7 @@ fn exact_role_span_covers_only_its_own_call_on_the_line() {
     let row = guarded(event, json!([]), json!([]), Value::Null);
     let out = accounting(&query, text, json!({"rows": [row]}));
     assert_eq!(codes(&out), ["unaccounted-candidate"]);
-    assert_eq!(out.errors[0].candidate.as_deref(), Some("candidate-24"));
+    assert_eq!(out.errors[0].candidate.as_deref(), Some("c2"));
 }
 
 #[test]
@@ -322,6 +319,95 @@ fn exclusions_require_a_valid_reason_and_nonempty_other_detail() {
             accepted,
             "{reason}"
         );
+    }
+}
+
+// Hard-won: 73f3134: exclusions passed with reasons false by construction
+#[test]
+fn removed_selection_reasons_cannot_exclude_every_candidate() {
+    let text = "fn seed() {\n    first();\n    second();\n}\n";
+    for (query, reason) in [
+        (
+            query("guarded-paths", &[":event", "\"call\""], procedure()),
+            "kind-not-selected",
+        ),
+        (
+            query("value-transfers", &[":port", "\"argument\""], procedure()),
+            "port-not-selected",
+        ),
+    ] {
+        let text = if reason == "port-not-selected" {
+            "fn seed() {\n    first(1);\n    second(2);\n}\n"
+        } else {
+            text
+        };
+        let answer = json!({"rows": [], "excluded": [
+            {"candidate_site": value_site(2, 2), "reason": reason, "detail": ""},
+            {"candidate_site": value_site(3, 3), "reason": reason, "detail": ""}
+        ]});
+        let out = accounting(&query, text, answer);
+        assert_eq!(
+            codes(&out),
+            ["unaccounted-candidate", "unaccounted-candidate"]
+        );
+    }
+}
+
+#[test]
+fn exact_seed_candidates_cannot_be_excluded_as_not_the_seed() {
+    let query = query("guarded-paths", &[":event", "\"call\""], procedure());
+    let event = json!({"kind": "call", "site": value_site(2, 2)});
+    let row = guarded(event, json!([]), json!([]), Value::Null);
+    for rows in [json!([]), json!([row])] {
+        let answer = json!({"rows": rows, "excluded": [
+            {"candidate_site": value_site(2, 2), "reason": "not-the-seed", "detail": ""}
+        ]});
+        let out = accounting(&query, "fn seed() {\n    action();\n}\n", answer);
+        assert_eq!(codes(&out), ["false-exclusion"]);
+    }
+}
+
+#[test]
+fn not_the_seed_exclusion_is_unchecked_for_unmodeled_filters() {
+    let input = Input {
+        root: "nonexistent".into(),
+        step: "guarded-paths".into(),
+        query: form(
+            "guarded-paths",
+            &[],
+            json!([
+                "procedure-of",
+                ["where", "\"src/*.rs\"", ["callable", ":name", "\"seed\""]]
+            ]),
+        ),
+        answer: json!({"rows": [], "excluded": [
+            {"candidate_site": value_site(2, 2), "reason": "not-the-seed", "detail": ""}
+        ]}),
+    };
+    let out = verify(input).unwrap();
+    assert!(out.errors.is_empty());
+    assert!(out.unchecked.iter().any(|item| item.what == "excluded[0]"));
+}
+
+#[test]
+fn duplicate_exclusions_require_a_row_covered_twin_regardless_of_order() {
+    let query = query("guarded-paths", &[":event", "\"call\""], procedure());
+    let event = json!({"kind": "call", "site": value_site(3, 3)});
+    let row = guarded(event, json!([]), json!([]), Value::Null);
+    let text = "fn seed() {\n    action();\n    action();\n    action();\n}\n";
+    for (twin, expected) in [
+        ("c2", vec![]),
+        ("c3", vec!["false-exclusion"]),
+        ("c4", vec!["false-exclusion"]),
+        ("c1", vec!["false-exclusion"]),
+        ("", vec!["false-exclusion"]),
+    ] {
+        let answer = json!({"rows": [row], "excluded": [
+            {"candidate_site": value_site(2, 2), "reason": "duplicate", "detail": twin},
+            {"candidate_site": value_site(4, 4), "reason": "duplicate", "detail": "c2"}
+        ]});
+        let out = accounting(&query, text, answer);
+        assert_eq!(codes(&out), expected, "claimed twin {twin}");
     }
 }
 
