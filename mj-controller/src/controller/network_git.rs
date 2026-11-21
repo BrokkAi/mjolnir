@@ -502,6 +502,36 @@ fn prepare_exact_checkout(
 }
 
 /// Resume uses archived network provenance, never the current host checkout.
+pub(super) fn manifest_has_history_cutoff_origin_delta(
+    manifest: &mj_checkpoint::archive::ArchiveManifest,
+) -> bool {
+    let mut saw_origin_delta = false;
+    for repository in &manifest.repositories {
+        if let Some(delta) = repository.metadata.origin_delta.as_deref() {
+            if !delta.history_cutoff {
+                return false;
+            }
+            saw_origin_delta = true;
+        }
+    }
+    saw_origin_delta
+}
+
+pub(super) fn checkpoint_has_history_cutoff_origin_delta(
+    session: &mj_core::state::SessionRecord,
+) -> Result<bool> {
+    let checkpoint = session
+        .checkpoint
+        .as_ref()
+        .context("session has no checkpoint")?;
+    let archive = mj_checkpoint::archive::verify_archive_streaming(&checkpoint.archive_path)?;
+    ensure!(
+        archive.archive_sha256 == checkpoint.sha256 && archive.manifest.session.id == session.id,
+        "persisted checkpoint verification failed"
+    );
+    Ok(manifest_has_history_cutoff_origin_delta(&archive.manifest))
+}
+
 pub(super) fn checkpoint_bundle(
     session: &mj_core::state::SessionRecord,
 ) -> Result<targets::ProjectBundleSpec> {

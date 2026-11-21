@@ -168,6 +168,8 @@ pub(in crate::controller) enum CheckpointExportPolicy {
     OriginDelta,
     /// Explicit suspend of a raw Git checkout.
     OriginDeltaRaw,
+    /// Explicit suspend of a history-cutoff session.
+    OriginDeltaCutoff,
     /// Fresh verified export with explicit consent to omit nested repositories.
     IgnoreNestedRepositories,
     /// Export session state and repository metadata; the lifecycle intent owns

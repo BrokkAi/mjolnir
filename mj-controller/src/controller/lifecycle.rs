@@ -130,6 +130,11 @@ impl Controller {
         };
         if origin_delta {
             Ok(CheckpointExportPolicy::OriginDelta)
+        } else if !self.state.is_subagent_session(session_id)
+            && checkout.project_directory().is_none()
+            && super::backend::session_history_cutoff(session)?.is_some()
+        {
+            Ok(CheckpointExportPolicy::OriginDeltaCutoff)
         } else if matches!(checkout, mj_core::state::Checkout::Attached { .. })
             && !session
                 .project
@@ -554,7 +559,13 @@ impl Controller {
         // Retained environments are not being published or retired. A profile
         // switch must not wait on the repository's network remote.
         let session_handoff = checkpoint_export_policy == CheckpointExportPolicy::SessionHandoff;
-        let publication = if session_handoff || checkpoint_export_policy == CheckpointExportPolicy::OriginDelta || disposition == SourceTargetDisposition::RetainForInPlaceSwap {
+        let publication = if session_handoff
+            || matches!(
+                checkpoint_export_policy,
+                CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
+            )
+            || disposition == SourceTargetDisposition::RetainForInPlaceSwap
+        {
             None
         } else {
             let checkout = self.state.checkout(session_id)?;
