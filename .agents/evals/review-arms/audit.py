@@ -2011,7 +2011,10 @@ def engine_hits(call, own_workspace, cwd, checkout):
         yield "needs-inspection", f"missing or invalid {name} input"
         return
     if name in {"Grep", "Glob"}:
-        for key in ("pattern", "glob") if "glob" in raw else ("pattern",):
+        # Glob's pattern names paths. Grep's pattern is a regex over file contents,
+        # and only its glob filter names paths.
+        keys = (("pattern",) if name == "Glob" else ()) + (("glob",) if "glob" in raw else ())
+        for key in keys:
             value = raw.get(key)
             if not isinstance(value, str) or posixpath.isabs(value) or ".." in value:
                 yield "needs-inspection", f"unverified {name} {key}: {value!r}"

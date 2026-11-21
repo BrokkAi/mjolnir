@@ -886,8 +886,6 @@ def test_engine_audit_requires_the_native_tool_name(tmp_path, name):
 @pytest.mark.parametrize("name,key,escape", [
     ("Glob", "pattern", "../../*.rs"),
     ("Glob", "pattern", "/etc/*"),
-    ("Grep", "pattern", "../secret"),
-    ("Grep", "pattern", "/etc/passwd"),
     ("Grep", "glob", "safe/../../*.rs"),
     ("Grep", "glob", "/etc/*"),
 ])
@@ -898,6 +896,14 @@ def test_engine_audit_inspects_search_pattern_escapes(tmp_path, name, key, escap
     assert not report["passed"]
     assert report["hits"] == [{"seq": 1, "kind": "needs-inspection", "where": "input",
                                "snippet": f"unverified {name} {key}: {escape!r}"}]
+
+
+# Hard-won: 3a68d9227: Grep's content regex was audited as a path, voiding searches for path-like text
+@pytest.mark.parametrize("pattern", ["/etc/passwd", "../", "include_str!\\(\"../"])
+def test_engine_audit_treats_grep_pattern_as_content(tmp_path, pattern):
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({"cwd": ENGINE_CWD}))
+    call = {"name": "Grep", "kind": "search", "rawInput": {"pattern": pattern, "path": ENGINE_CWD}}
+    assert audit_call(tmp_path, call, engine=True)["passed"]
 
 
 @pytest.mark.parametrize("name", ["Glob", "Grep"])
