@@ -470,6 +470,7 @@ mod tests {
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,
+            native_use_evidence: None,
             event_frontier: bodies.len() as u64 + 10,
             event_frontier_digest: "a".repeat(64),
             session: CanonicalSessionState {

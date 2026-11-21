@@ -3278,6 +3278,7 @@ fn legacy_linked_worktree_origin_delta_capture_and_restore_as_clone() {
             command_ledger: None,
             assessment_state: None,
             notification_stack: None,
+            native_use_evidence: None,
             event_frontier: 0,
             event_frontier_digest: "0".repeat(64),
             session: mj_core::archive::CanonicalSessionState {
