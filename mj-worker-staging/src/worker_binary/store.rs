@@ -469,7 +469,13 @@ trap 'rm -f -- "$temporary"' EXIT
 if [ "$5" = link ]; then
     if ! ln -- "$source" "$temporary" 2>/dev/null; then
         [ -f "$source" ] || exit 75
-        exit 76
+        # A concurrent publisher can create $source after the first ln fails.
+        # Retry once now that $source exists so we only report no hard links
+        # when ln fails against a present source.
+        if ! ln -- "$source" "$temporary" 2>/dev/null; then
+            [ -f "$source" ] || exit 75
+            exit 76
+        fi
     fi
 else
     if ! cp -- "$source" "$temporary"; then

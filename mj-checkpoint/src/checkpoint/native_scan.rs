@@ -315,60 +315,80 @@ pub(super) fn collect_kimi_registry_artifacts(
         .find_map(|artifact| kimi_source_workspace(&artifact.relative_path, session_id))
         .context("Kimi native session state artifact is missing")?;
     let workspaces_path = home.join("workspaces.json");
-    let metadata = fs::symlink_metadata(&workspaces_path)
-        .with_context(|| format!("read Kimi workspace registry {}", workspaces_path.display()))?;
-    ensure!(
-        !metadata.file_type().is_symlink() && metadata.is_file(),
-        "Kimi workspace registry is not a regular file"
-    );
-    let workspaces: Value = serde_json::from_slice(&fs::read(&workspaces_path)?)
-        .context("parse Kimi workspace registry")?;
-    let workspace = workspaces
-        .pointer(&format!("/workspaces/{source_workspace}"))
-        .cloned()
-        .with_context(|| format!("Kimi workspace {source_workspace:?} is missing from registry"))?;
-    let mut selected_workspaces = serde_json::Map::new();
-    selected_workspaces.insert(source_workspace, workspace);
-    output.push(NativeArtifact {
-        relative_path: PathBuf::from("workspaces.json"),
-        data: (serde_json::to_vec(&json!({
-            "version": workspaces.get("version").cloned().unwrap_or(Value::Null),
-            "deleted_workspace_ids": [],
-            "workspaces": selected_workspaces,
-        }))?)
-        .into(),
-        mode: file_mode(&metadata),
-    });
-
-    let index_path = home.join("session_index.jsonl");
-    let metadata = fs::symlink_metadata(&index_path)
-        .with_context(|| format!("read Kimi session index {}", index_path.display()))?;
-    ensure!(
-        !metadata.file_type().is_symlink() && metadata.is_file(),
-        "Kimi session index is not a regular file"
-    );
-    let mut selected = Vec::new();
-    for (line_number, line) in BufReader::new(File::open(&index_path)?).lines().enumerate() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    match fs::symlink_metadata(&workspaces_path) {
+        Ok(metadata) => {
+            ensure!(
+                !metadata.file_type().is_symlink() && metadata.is_file(),
+                "Kimi workspace registry is not a regular file"
+            );
+            let workspaces: Value = serde_json::from_slice(&fs::read(&workspaces_path)?)
+                .context("parse Kimi workspace registry")?;
+            let workspace = workspaces
+                .get("workspaces")
+                .and_then(|entries| entries.get(&source_workspace))
+                .cloned()
+                .with_context(|| {
+                    format!("Kimi workspace {source_workspace:?} is missing from registry")
+                })?;
+            let mut selected_workspaces = serde_json::Map::new();
+            selected_workspaces.insert(source_workspace, workspace);
+            output.push(NativeArtifact {
+                relative_path: PathBuf::from("workspaces.json"),
+                data: (serde_json::to_vec(&json!({
+                    "version": workspaces.get("version").cloned().unwrap_or(Value::Null),
+                    "deleted_workspace_ids": [],
+                    "workspaces": selected_workspaces,
+                }))?)
+                .into(),
+                mode: file_mode(&metadata),
+            });
         }
-        let entry: Value = serde_json::from_str(&line)
-            .with_context(|| format!("parse Kimi session index line {}", line_number + 1))?;
-        if entry.get("sessionId").and_then(Value::as_str) == Some(session_id) {
-            serde_json::to_writer(&mut selected, &entry)?;
-            selected.push(b'\n');
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("read Kimi workspace registry {}", workspaces_path.display())
+            });
         }
     }
-    ensure!(
-        !selected.is_empty(),
-        "Kimi session index does not contain native session {session_id:?}"
-    );
-    output.push(NativeArtifact {
-        relative_path: PathBuf::from("session_index.jsonl"),
-        data: (selected).into(),
-        mode: file_mode(&metadata),
-    });
+
+    let index_path = home.join("session_index.jsonl");
+    match fs::symlink_metadata(&index_path) {
+        Ok(metadata) => {
+            ensure!(
+                !metadata.file_type().is_symlink() && metadata.is_file(),
+                "Kimi session index is not a regular file"
+            );
+            let mut selected = Vec::new();
+            for (line_number, line) in BufReader::new(File::open(&index_path)?).lines().enumerate()
+            {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let entry: Value = serde_json::from_str(&line).with_context(|| {
+                    format!("parse Kimi session index line {}", line_number + 1)
+                })?;
+                if entry.get("sessionId").and_then(Value::as_str) == Some(session_id) {
+                    serde_json::to_writer(&mut selected, &entry)?;
+                    selected.push(b'\n');
+                }
+            }
+            ensure!(
+                !selected.is_empty(),
+                "Kimi session index does not contain native session {session_id:?}"
+            );
+            output.push(NativeArtifact {
+                relative_path: PathBuf::from("session_index.jsonl"),
+                data: (selected).into(),
+                mode: file_mode(&metadata),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read Kimi session index {}", index_path.display()));
+        }
+    }
     Ok(())
 }
 
