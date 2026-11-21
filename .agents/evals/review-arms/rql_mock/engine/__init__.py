@@ -54,6 +54,10 @@ def read_frozen_inputs(manifest_path, raw):
     return {**manifest, "served_steps": served, "eligible_diffs": eligible}, documents, provider_version
 
 
+class RepairStalled(Exception):
+    """A repair round did not shrink the previous round's errors."""
+
+
 def digest(*parts):
     h = hashlib.sha256()
     for part in parts:
@@ -293,7 +297,7 @@ class Engine:
                                 break
                             # The verifier first runs when normalization succeeds.
                             if not repair_progress(previous_errors.get(stage), normalized):
-                                return response("engine_error", message="; ".join(errors))
+                                raise RepairStalled("; ".join(errors))
                             previous_errors[stage] = normalized
                             provenance["validation_retries"] += 1
                     except IsolationFailure as error:
@@ -302,6 +306,14 @@ class Engine:
                         provenance["retired_sessions"].append({"session": sid, "reason": str(error)})
                         if attempt:
                             raise
+                    except RepairStalled as error:
+                        # A session that stops improving gets the same one fresh
+                        # session as a voided one: its context may hold the model
+                        # to its earlier mistakes.
+                        provenance["retired_sessions"].append(
+                            {"session": sid, "reason": f"repair stalled: {error}"})
+                        if attempt:
+                            return response("engine_error", message=str(error))
                     except TurnFailure as error:
                         add_turn(error.record)
                         raise

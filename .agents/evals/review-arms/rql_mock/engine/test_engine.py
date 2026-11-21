@@ -667,17 +667,20 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(runner.capture.driver.argv), 1)
 
     def test_retry_then_error_never_caches_unvalidated_rows(self):
-        runner = FakeRunner(["{\"", payload([{"kind": "broken"}]), payload()])
+        broken = payload([{"kind": "broken"}])
+        # Each session stalls: the repair swaps an invalid-JSON error for a row error.
+        runner = FakeRunner(["{\"", broken, "{\"", broken, payload()])
         result = self.engine(runner).answer(COMMIT, QUERY)
         self.assertEqual(result["status"], "engine_error")
         self.assertIn("expected a row kind and a fields object", result["message"])
         self.assertIn("invalid JSON", runner.turns[1][2][0])
-        self.assertEqual(result["provenance"]["validation_retries"], 1)
-        self.assertEqual(result["provenance"]["tokens"]["total_tokens"], 30)
+        self.assertEqual(len(runner.launches), 2)
+        self.assertEqual(result["provenance"]["validation_retries"], 2)
+        self.assertEqual(result["provenance"]["tokens"]["total_tokens"], 60)
         self.assertEqual(result["rows"], [])
         result = self.engine(runner).answer(COMMIT, QUERY)
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(len(runner.turns), 3)
+        self.assertEqual(len(runner.turns), 5)
 
     def test_retry_then_success_sorts_and_retains_open_coverage(self):
         first = {"kind": "structural_match", "primary_site": span(line=1), "fields": {}}
@@ -756,11 +759,29 @@ print(json.dumps(dict(version=1, candidates=[], errors=errors, unchecked=[])))
     def test_verifier_repair_stops_when_normalized_error_set_does_not_shrink(self):
         issue = {"code": "anchor-kind", "message": "first diagnostic", "row": 0,
                  "site": span(), "candidate": None}
-        answer, runner = self.verified_query(self.cache, [[issue], [{**issue, "message": "reworded diagnostic"}]])
+        reworded = {**issue, "message": "reworded diagnostic"}
+        answer, runner = self.verified_query(self.cache, [[issue], [reworded], [issue], [reworded]])
         self.assertEqual(answer["status"], "engine_error")
         self.assertIn("reworded diagnostic", answer["message"])
-        self.assertEqual(len(runner.turns), 2)
+        self.assertEqual(len(runner.turns), 4)
+        self.assertEqual(len(runner.launches), 2)
         self.assertFalse(list((self.cache / COMMIT).glob("*.json")))
+
+    # Hard-won: bd478e165: `store` swapped one verifier error for another and ended the gate with no fresh session
+    def test_stalled_repair_gets_one_fresh_session(self):
+        anchor = {"code": "anchor-kind", "message": "anchor diagnostic", "row": 0,
+                  "site": span(), "candidate": None}
+        unaccounted = {"code": "unaccounted-candidate", "message": "panic candidate has no covering row",
+                       "row": None, "site": span(), "candidate": "c2"}
+        answer, runner = self.verified_query(self.cache, [[anchor], [unaccounted], []])
+        self.assertEqual(answer["status"], "ok", answer)
+        self.assertEqual(len(runner.launches), 2)
+        self.assertNotEqual(runner.turns[1][0], runner.turns[2][0])
+        # The fresh session starts from the query, not from the stalled session's errors.
+        self.assertFalse(runner.turns[2][2])
+        retired = answer["provenance"]["retired_sessions"]
+        self.assertEqual(len(retired), 1)
+        self.assertTrue(retired[0]["reason"].startswith("repair stalled: "))
 
     def test_parse_error_never_constructs_engine_session(self):
         runner = FakeRunner([])
