@@ -537,6 +537,38 @@ pub enum AirTaskUpdate {
     },
 }
 
+/// One-shot acknowledgement fired by the worker event dispatcher after
+/// `RuntimeEvent::NativeGoalResumeSent` has been recorded on the relay in FIFO
+/// order behind all preceding observations.
+#[derive(Clone, Default)]
+pub struct NativeGoalResumeAck(
+    std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+);
+
+impl NativeGoalResumeAck {
+    pub fn new_pair() -> (Self, tokio::sync::oneshot::Receiver<()>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (Self(std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))), rx)
+    }
+
+    pub fn acknowledge(&self) {
+        if let Some(tx) = self
+            .0
+            .lock()
+            .expect("native goal resume ack lock poisoned")
+            .take()
+        {
+            let _ = tx.send(());
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeGoalResumeAck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeGoalResumeAck(..)")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
@@ -544,6 +576,14 @@ pub enum RuntimeEvent {
     #[serde(skip)]
     BridgeRetired {
         terminal_connection_id: String,
+    },
+    /// Ordered on the worker FIFO before `_session/goal` is sent, and
+    /// acknowledged only after the relay has recorded the reservation.
+    #[serde(skip)]
+    NativeGoalResumeSent {
+        resume_id: u64,
+        goal: Option<crate::goal::GoalSnapshot>,
+        applied: NativeGoalResumeAck,
     },
     NativeGoalResumeRejected {
         resume_id: u64,

@@ -1078,6 +1078,14 @@ pub(crate) fn record_runtime_event_with_facts(
         RuntimeEvent::NativeAgent { event } => {
             relay.record_observation(RelayObservation::NativeAgent { event })?;
         }
+        RuntimeEvent::NativeGoalResumeSent {
+            resume_id,
+            goal,
+            applied,
+        } => {
+            relay.native_goal_resume_sent(resume_id, goal);
+            applied.acknowledge();
+        }
         RuntimeEvent::NativeGoalResumeRejected { resume_id } => {
             relay.native_goal_resume_rejected(resume_id);
         }

@@ -2,23 +2,33 @@
 use super::*;
 use mj_core::goal::{GoalSnapshot, RECOVERY_ID};
 
-fn record_resume_sent(
+async fn record_resume_sent(
     owner: Option<&std::sync::Weak<crate::relay::RelayCell>>,
+    events: &mpsc::Sender<RuntimeEvent>,
     goal: Option<GoalSnapshot>,
 ) -> Result<Option<u64>> {
     if let Some(owner) = owner {
-        let relay = owner
+        owner
             .upgrade()
             .context("native resume relay owner disappeared")?;
         static NEXT_RESUME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let resume_id = NEXT_RESUME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Record the reservation directly on the relay under its own lock before
-        // sending `_session/goal`, so a quiescent adoption cut arriving over
-        // another connection cannot observe an unreserved gap.
-        relay
-            .lock()
-            .expect("relay state lock poisoned")
-            .native_goal_resume_sent(resume_id, goal);
+        let (applied, applied_rx) = mj_core::acp::NativeGoalResumeAck::new_pair();
+        // Send through the worker FIFO so every earlier queued observation
+        // applies first (cannot prematurely clear this reservation), then await
+        // the relay apply acknowledgement before dispatching `_session/goal`.
+        emit_runtime_event(
+            events,
+            RuntimeEvent::NativeGoalResumeSent {
+                resume_id,
+                goal,
+                applied,
+            },
+        )
+        .await?;
+        applied_rx
+            .await
+            .context("native resume relay event loop closed before recording reservation")?;
         return Ok(Some(resume_id));
     }
     Ok(None)
@@ -86,7 +96,7 @@ impl PendingControls {
                 // Explicit native resume may answer only when its turn finishes.
                 // Do not impose recovery's short acknowledgement timeout here.
                 let admission = if action == mj_core::goal::GoalControlAction::Resume {
-                    record_resume_sent(owner.as_ref(), resume_goal)
+                    record_resume_sent(owner.as_ref(), &events, resume_goal).await
                 } else {
                     Ok(None)
                 };
@@ -324,7 +334,7 @@ async fn control(
         mj_core::goal::GoalControlAction::Pause
     };
     let resume_id = if resume {
-        record_resume_sent(spec.terminal_owner.as_ref(), Some(goal.clone()))?
+        record_resume_sent(spec.terminal_owner.as_ref(), events, Some(goal.clone())).await?
     } else {
         None
     };
@@ -677,28 +687,33 @@ for line in sys.stdin:
             let task = mj_core::runtime::spawn(run(spec, rx, events));
             if track_cut {
                 let mut in_flight = BTreeMap::new();
-                let mut buffered_events = Vec::new();
-                // Reopen's automatic resume is not a relay command. Drain the
-                // bounded `events` channel so ACP startup cannot stall, but do
-                // NOT apply any events to `relay` yet: the relay must already
-                // hold the reservation as soon as `_session/goal` reaches the
-                // peer.
-                tokio::time::timeout(Duration::from_secs(10), async {
-                    while !root.path().join("resumes").exists() {
-                        tokio::select! {
-                            event = receive.recv() => {
-                                buffered_events.push(event.unwrap());
-                            }
-                            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                // Reopen's automatic resume is not a relay command. Apply every
+                // preceding runtime event in FIFO order until the reservation
+                // marker arrives, then prove `_session/goal` cannot be sent
+                // before the relay records and acknowledges that reservation.
+                let reservation = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let event = receive.recv().await.unwrap();
+                        if matches!(event, RuntimeEvent::NativeGoalResumeSent { .. }) {
+                            break event;
                         }
+                        crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event)
+                            .unwrap();
                     }
                 })
                 .await
                 .unwrap();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert!(
+                    !root.path().join("resumes").exists(),
+                    "_session/goal must not be sent before the FIFO reservation is recorded on the relay"
+                );
+                crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, reservation)
+                    .unwrap();
                 let mut cut = relay.lock().unwrap().reserve_live_baseline();
                 assert!(
                     cut.try_recv().is_err(),
-                    "quiescent adoption cut must be blocked before runtime events apply"
+                    "quiescent adoption cut must be blocked as soon as the reservation applies"
                 );
                 assert!(
                     relay
@@ -707,12 +722,20 @@ for line in sys.stdin:
                         .adoption_blockers()
                         .iter()
                         .any(|blocker| blocker.contains("goal resume")),
-                    "relay must already report the goal resume blocker when peer receives _session/goal"
+                    "relay must report the goal resume blocker before _session/goal reaches the peer"
                 );
-                for event in buffered_events {
-                    crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event)
-                        .unwrap();
-                }
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while !root.path().join("resumes").exists() {
+                        tokio::select! {
+                            event = receive.recv() => {
+                                crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event.unwrap()).unwrap();
+                            }
+                            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                        }
+                    }
+                })
+                .await
+                .unwrap();
                 if timed_out {
                     tokio::time::pause();
                     tokio::time::advance(Duration::from_secs(31)).await;
