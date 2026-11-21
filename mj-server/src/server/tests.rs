@@ -3199,6 +3199,60 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     assert!(validate_action(&action("raw", Some("/work/project".into())), &snapshot).is_ok());
 }
 
+// Hard-won: #1615: missing or invalid bundle_id on a container target names bundle_id instead of a bare invalid id
+#[test]
+fn container_target_missing_or_invalid_bundle_id_names_field() {
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let action = |bundle_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
+        oracle: None,
+        oracle_choice: None,
+        remember_launch_choices: true,
+        remember_container_size: true,
+        review: None,
+        no_project_memory: false,
+        no_github_events: false,
+        no_github_credentials: false,
+        notifications_ignored: false,
+        at: None,
+        branch: None,
+        base: None,
+        no_later_history: false,
+        subagents: None,
+        create_managed_worktree: None,
+        workspace_id: String::new(),
+        profile_id: "codex-1".into(),
+        bundle_id: bundle_id.into(),
+        target_id: "podman".into(),
+        resource_allocation: None,
+        title: Some("New work".into()),
+        project_directory,
+        additional_mounts: Vec::new(),
+        dirty_ack: Vec::new(),
+    };
+
+    let with_dir = validate_action(&action("", Some("/work/repo".into())), &snapshot).unwrap_err();
+    assert_eq!(with_dir.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        with_dir.message,
+        "container targets require bundle_id, not project_directory"
+    );
+
+    let without_dir = validate_action(&action("", None), &snapshot).unwrap_err();
+    assert_eq!(without_dir.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        without_dir.message,
+        "bundle_id is required for container targets"
+    );
+
+    let bad_id = validate_action(&action("bad id", None), &snapshot).unwrap_err();
+    assert_eq!(bad_id.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        bad_id.message,
+        "invalid bundle_id; use 1-64 ASCII letters, digits, '.', '-' or '_'"
+    );
+}
+
 // Hard-won: #1375: the HTTP pre-check refused cgroup ceilings and CPU overcommit.
 #[test]
 fn new_action_validates_allocation_kind_and_reported_container_limits() {

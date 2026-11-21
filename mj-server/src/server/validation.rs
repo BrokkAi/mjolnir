@@ -586,10 +586,10 @@ fn validate_action_against(
                 }
             }
             if !workspace_id.is_empty() {
-                validate_public_id(workspace_id)?;
+                validate_public_id_field("workspace_id", workspace_id)?;
             }
-            validate_public_id(profile_id)?;
-            validate_public_id(target_id)?;
+            validate_public_id_field("profile_id", profile_id)?;
+            validate_public_id_field("target_id", target_id)?;
             if let Some(title) = title {
                 validate_title(title)?;
             }
@@ -643,8 +643,15 @@ fn validate_action_against(
             }
             // Bare sessions open the selected directory; the browser has no
             // bundle selection to supply for that flow.
+            if !target.requires_project_directory && bundle_id.is_empty() {
+                return Err(ApiError::bad_request(if project_directory.is_some() {
+                    "container targets require bundle_id, not project_directory"
+                } else {
+                    "bundle_id is required for container targets"
+                }));
+            }
             if !target.requires_project_directory || !bundle_id.is_empty() {
-                validate_public_id(bundle_id)?;
+                validate_public_id_field("bundle_id", bundle_id)?;
                 require_bundle(snapshot, bundle_id)?;
             }
             if *create_managed_worktree == Some(true) && !target.requires_project_directory {
@@ -983,12 +990,18 @@ fn validate_action_against(
     Ok(())
 }
 
-pub(super) fn validate_public_id(id: &str) -> Result<(), ApiError> {
+pub(super) fn validate_public_id_field(field: &str, id: &str) -> Result<(), ApiError> {
     // The validator's own sentence quotes the id; this one states the rule
     // without echoing caller input back to a browser.
-    validate_id("request", id).map_err(|_| {
-        ApiError::bad_request("invalid id; use 1-64 ASCII letters, digits, '.', '-' or '_'")
+    validate_id(field, id).map_err(|_| {
+        ApiError::bad_request(format!(
+            "invalid {field}; use 1-64 ASCII letters, digits, '.', '-' or '_'"
+        ))
     })
+}
+
+pub(super) fn validate_public_id(id: &str) -> Result<(), ApiError> {
+    validate_public_id_field("id", id)
 }
 
 pub(super) fn validate_title(title: &str) -> Result<(), ApiError> {
