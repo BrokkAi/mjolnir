@@ -209,15 +209,7 @@ pub async fn prepare(
         scope,
         snapshot.operational.relay_protocol_version.unwrap_or(0),
     )?;
-    let state = {
-        let _stage = stages.enter(session_id, "loading the review state");
-        let session = session_id.to_owned();
-        let environment = environment.clone();
-        mj_core::runtime::spawn_blocking(move || environment.load_state(&session))
-            .await
-            .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
-            .map_err(StartRefusal)?
-    };
+    let protocol = snapshot.operational.relay_protocol_version.unwrap_or(0);
     // The capture and the reviewer choice share one bound on waiting for
     // background work.
     let deadline = tokio::time::Instant::now() + BACKGROUND_WORK_WAIT;
@@ -264,7 +256,7 @@ pub async fn prepare(
     if mj_review::delta::trees_unchanged(&captured) {
         return Ok(Prepared {
             seed: seed_from_session(&snapshot.materialized),
-            state,
+            protocol,
             // No reviewer process starts for a turn with nothing to review.
             reviewers: vec![ReviewerIdentity::default()],
             brief_writer: None,
@@ -319,7 +311,7 @@ pub async fn prepare(
     };
     Ok(Prepared {
         seed: seed_from_session(&snapshot.materialized),
-        state,
+        protocol,
         reviewers: reviewer.clone(),
         brief_writer,
         brief_skipped,

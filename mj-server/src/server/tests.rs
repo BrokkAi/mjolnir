@@ -3356,6 +3356,8 @@ fn a_running_review_projects_to_the_phone() {
     use mj_core::review::driver::{RoleState, RoleStatus, TurnReviewPhase};
 
     let review = RuntimeReviewView {
+        review_id: String::new(),
+        roots: Vec::new(),
         child_session_id: None,
         session_id: "session-1".into(),
         questions: Vec::new(),
@@ -4972,12 +4974,8 @@ if (movePathContains({{repository:'repo',path:'.agents/build'}}, {{repository:'o
 #[test]
 fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_stops() {
     let source = format!(
-        "{}\n{}\n{}",
+        "{}\n{}",
         viewer_source("function subagentChoiceApplies(", "function targetIsBare("),
-        viewer_source(
-            "function workingChildCount(",
-            "function sessionInWorkspace("
-        ),
         viewer_source(
             "function moveSubagentChange(",
             "function moveQueueItemText("
@@ -4987,7 +4985,7 @@ fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_sto
 let newDraft = null;
 const snapshot = { subagents_configured: true, profiles: [{ id: "codex", harness_kind: "codex" }, { id: "kimi", harness_kind: "kimi" }, { id: "dsh", harness_kind: "dsh" }] };
 const sessions = {
-  parent: { id: "parent", subagent_session_ids: ["parked", "running", "gone"] },
+  parent: { id: "parent", verdict: { unfinished_children: 1 } },
   parked: { id: "parked", lifecycle: "live", chat_phase: "idle" },
   running: { id: "running", lifecycle: "live", chat_phase: "running" },
   gone: { id: "gone", lifecycle: "suspended" },

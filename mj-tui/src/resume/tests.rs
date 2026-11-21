@@ -677,6 +677,7 @@ fn a_session_its_harness_has_not_named_is_listed_by_its_created_title() {
         state_with(vec![stopped, running]),
         BTreeMap::new(),
     );
+    publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut dashboard, 1, Vec::new());
 
     assert_eq!(titles(&rows(&dashboard)), ["sibling via fake"]);
@@ -1008,6 +1009,7 @@ fn enter_on_a_focused_mjolnir_row_begins_its_resume() {
         state_with(vec![stopped_session()]),
         BTreeMap::new(),
     );
+    publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut dashboard, 1, Vec::new());
     let mut hit = wiki_row("wiki-1", false);
     hit.hel_session_id = Some("session-1".into());
@@ -1053,6 +1055,7 @@ fn dashboard_with_live_sessions_in_two_workspaces() -> DashboardState {
         sessions.push(session);
     }
     let mut dashboard = DashboardState::new(config(), state_with(sessions), BTreeMap::new());
+    publish_fixture_verdicts(&mut dashboard);
     dashboard.set_workspace_names(BTreeMap::from([
         ("default".into(), "Default".into()),
         ("other".into(), "Other".into()),
@@ -1099,6 +1102,7 @@ fn golden_resume_dialog_table() {
         state_with(vec![local, remote]),
         BTreeMap::new(),
     );
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(
         &mut dashboard,
         1,
@@ -1125,6 +1129,7 @@ fn golden_resume_dialog_table() {
     retired_config.targets.clear();
     let mut dashboard =
         DashboardState::new(retired_config, state_with(vec![session]), BTreeMap::new());
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut dashboard, 1, Vec::new());
     switch_to_hel(&mut dashboard);
     append_resume_golden(
@@ -1182,6 +1187,7 @@ fn golden_resume_dialog_table() {
         ]),
         BTreeMap::new(),
     );
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(
         &mut dashboard,
         1,
@@ -1213,6 +1219,7 @@ fn golden_resume_dialog_table() {
         state_with(vec![archived, current]),
         BTreeMap::new(),
     );
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut dashboard, 1, Vec::new());
     switch_to_hel(&mut dashboard);
     append_resume_golden(
@@ -1226,6 +1233,7 @@ fn golden_resume_dialog_table() {
     let mut natively_archived = native("native-codex", "Archived in Codex", 1);
     natively_archived.natively_archived = true;
     let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(
         &mut dashboard,
         1,
@@ -1259,6 +1267,7 @@ fn golden_resume_dialog_table() {
         state_with(vec![stopped_session()]),
         BTreeMap::new(),
     );
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut dashboard, 1, Vec::new());
     switch_to_hel(&mut dashboard);
     let action = dashboard.handle_key(key(KeyCode::Char('d')));
@@ -1303,6 +1312,7 @@ fn golden_resume_dialog_table() {
         );
     }
     let mut dashboard = DashboardState::new(archive_config, state, BTreeMap::new());
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
     switch_to_archive(&mut dashboard);
     apply_ready_rows(&mut dashboard, wiki_rows);
@@ -1319,6 +1329,7 @@ fn golden_resume_dialog_table() {
         state_with(vec![stopped_session()]),
         BTreeMap::new(),
     );
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(
         &mut dashboard,
         1,
@@ -1347,6 +1358,7 @@ fn golden_resume_dialog_table() {
             NEWER_THAN_THE_CHECKPOINT,
         )])]
     };
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut dashboard, 1, profiles());
     switch_to_hel(&mut dashboard);
     append_resume_golden(
@@ -1361,6 +1373,7 @@ fn golden_resume_dialog_table() {
     append_golden_value(&mut output, "mode after selecting Hel row", "Resume wizard");
     append_resume_golden(&mut output, "resume wizard", 120, 34, &mut dashboard);
 
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut dashboard, 2, profiles());
     switch_to_import(&mut dashboard);
     append_resume_golden(
@@ -1381,6 +1394,7 @@ fn golden_resume_dialog_table() {
     );
 
     let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut dashboard, 1, Vec::new());
     append_resume_golden(
         &mut output,
@@ -1416,6 +1430,7 @@ fn golden_resume_dialog_table() {
     append_resume_golden(&mut output, "Live search result", 120, 40, &mut dashboard);
 
     let mut progress = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     open_resume_dialog(&mut progress, 900, Vec::new());
     progress.apply_wiki_sync(true, 900, Ok(sync_progress_status()));
     append_resume_golden(
@@ -2835,14 +2850,26 @@ fn the_mjolnir_tab_lists_the_daemons_answer_and_resumes_a_session_the_feed_lacks
     );
     let mut other = stopped_session();
     other.id = "other".into();
-    dashboard.apply_resume_record("other", Ok(Some(other)));
+    let resume_fixture = |record| mj_client::daemon::SessionRecordWithVerdict {
+        record,
+        verdict: mj_client::runtime_feed::SessionVerdict {
+            resume: mj_client::runtime_feed::SessionOffer::Ready,
+            ..Default::default()
+        },
+    };
+    dashboard.apply_resume_record("other", Ok(Some(resume_fixture(other))));
     assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
-    dashboard.apply_resume_record("session-1", Ok(Some(stopped_session())));
+    dashboard.apply_resume_record("session-1", Ok(Some(resume_fixture(stopped_session()))));
     let Mode::Resume(wizard) = &dashboard.mode else {
         panic!("expected the resume wizard");
     };
     assert_eq!(wizard.session_id, "session-1");
     assert!(dashboard.state.sessions.is_empty());
+
+    dashboard.cancel_modal();
+    dashboard.set_session_verdicts(Default::default());
+    dashboard.begin_resume_for("session-1");
+    assert!(matches!(dashboard.mode, Mode::Resume(_)));
 }
 
 #[test]

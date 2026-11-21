@@ -13,11 +13,10 @@ use mj_core::config::{
 use mj_core::remote_git::Shorthand;
 use mj_core::state::SessionState;
 
-#[test]
-fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() {
+fn phone_move_action(session_id: &str) -> ControllerAction {
     let move_request = serde_json::from_value(serde_json::json!({
         "preparation": {
-            "selection": {"session_id": "move-web-session"},
+            "selection": {"session_id": session_id},
             "source_profile_id": "codex", "source_target_template_id": "podman",
             "cross_harness": false, "active": false, "queued_commands": [],
             "fingerprint": "prepared", "operation_id": "move-operation"
@@ -25,6 +24,13 @@ fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() 
         "queue": null, "acknowledge_interruption": true
     }))
     .unwrap();
+    ControllerAction::Move {
+        request: Box::new(move_request),
+    }
+}
+
+#[test]
+fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() {
     for action in [
         ControllerAction::Suspend {
             session_id: "suspend-web-session".into(),
@@ -34,9 +40,7 @@ fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() 
             session_id: "restart-web-session".into(),
             acknowledge_container_recreation: false,
         },
-        ControllerAction::Move {
-            request: Box::new(move_request),
-        },
+        phone_move_action("move-web-session"),
         ControllerAction::Resume {
             session_id: "resume-web-session".into(),
             workspace_id: "workspace".into(),
@@ -358,9 +362,8 @@ fn bare_preflight_config() -> Config {
     config
 }
 
-#[test]
-fn move_recovery_projection_exposes_safe_retry_settings_only() {
-    let operation = mj_core::state::MoveOperation {
+fn move_recovery_fixture() -> mj_core::state::MoveOperation {
+    mj_core::state::MoveOperation {
         quota_stop_reason: None,
         quota_continuation: None,
         prepared_destination: None,
@@ -416,7 +419,12 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
         created_at: "now".into(),
         updated_at: "now".into(),
         error: Some("private path and token".into()),
-    };
+    }
+}
+
+#[test]
+fn move_recovery_projection_exposes_safe_retry_settings_only() {
+    let operation = move_recovery_fixture();
     let recovery = ViewerMoveRecovery::from_operation(&operation).unwrap();
     assert_eq!(recovery.phase, "cancelled");
     assert_eq!(recovery.source_profile_id, "source-profile");
@@ -2258,7 +2266,12 @@ fn force_close_is_admitted_like_close() {
     // A session already busy with a stuck close is exactly when a force
     // close has to get through.
     assert_eq!(
-        admit_phone_action(&force_close, &mut active),
+        admit_phone_action(
+            &force_close,
+            &mut active,
+            &BTreeMap::new(),
+            &BTreeMap::new()
+        ),
         Ok(Some("session-1".into()))
     );
     assert_eq!(
@@ -2271,6 +2284,8 @@ fn force_close_is_admitted_like_close() {
 #[test]
 fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do() {
     let mut active = std::collections::BTreeSet::new();
+    let sessions = BTreeMap::new();
+    let cancellations = BTreeMap::new();
     for index in 1..=8 {
         let session_id = format!("session-{index}");
         let action = ControllerAction::Prompt {
@@ -2280,12 +2295,12 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
             command_id: None,
         };
         assert_eq!(
-            admit_phone_action(&action, &mut active),
+            admit_phone_action(&action, &mut active, &sessions, &cancellations),
             Ok(Some(session_id))
         );
     }
     assert_eq!(
-        admit_phone_action(&prompt_action(), &mut active),
+        admit_phone_action(&prompt_action(), &mut active, &sessions, &cancellations),
         Err(ActionOutcome::SessionBusy)
     );
     let close = ControllerAction::Suspend {
@@ -2293,11 +2308,41 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
         acknowledge_unpublished_work: false,
     };
     assert_eq!(
-        admit_phone_action(&close, &mut active),
+        admit_phone_action(&close, &mut active, &sessions, &cancellations),
         Ok(Some("session-1".into()))
     );
     assert_eq!(
-        admit_phone_action(&prompt_action(), &mut active),
+        admit_phone_action(&prompt_action(), &mut active, &sessions, &cancellations),
+        Err(ActionOutcome::SessionBusy)
+    );
+}
+
+// Hard-won: f1947384e: overlapping Interrupt All requests could cancel a queued successor.
+#[test]
+fn interrupt_all_can_overlap_a_move_but_not_another_interrupt_all() {
+    let session_id = "session-1".to_owned();
+    let move_action = phone_move_action(&session_id);
+    let interrupt = ControllerAction::InterruptAll {
+        session_id: session_id.clone(),
+    };
+    let mut active = std::collections::BTreeSet::from([session_id.clone()]);
+    let mut sessions = BTreeMap::from([(1, session_id.clone())]);
+    let mut cancellations = BTreeMap::from([(1, PhoneActionControl::for_action(&move_action))]);
+    assert_eq!(
+        admit_phone_action(&interrupt, &mut active, &sessions, &cancellations),
+        Ok(Some(session_id.clone()))
+    );
+
+    sessions.insert(2, session_id);
+    cancellations.insert(2, PhoneActionControl::for_action(&interrupt));
+    assert_eq!(
+        admit_phone_action(&interrupt, &mut active, &sessions, &cancellations),
+        Err(ActionOutcome::SessionBusy)
+    );
+    sessions.remove(&1);
+    cancellations.remove(&1);
+    assert_eq!(
+        admit_phone_action(&interrupt, &mut active, &sessions, &cancellations),
         Err(ActionOutcome::SessionBusy)
     );
 }
@@ -2567,6 +2612,31 @@ fn materialized_at(ordinal: u64) -> MaterializedSession {
     materialized
 }
 
+// Hard-won: 44ee87bd8: the first browser capture never projected tails already present.
+#[tokio::test]
+async fn first_browser_capture_projects_existing_transcript_tails() {
+    let previous = mj_core::snapshot_map::SnapshotMap::<String, MaterializedSession>::new();
+    let mut capture = mj_core::snapshot_map::SnapshotMap::new();
+    capture.insert("session-1".into(), materialized_at(1));
+    let first_capture_changes = previous
+        .changes(&capture)
+        .filter_map(|(id, tail)| tail.map(|tail| (id.clone(), tail.clone())))
+        .collect::<Vec<_>>();
+    assert_eq!(first_capture_changes.len(), 1);
+
+    let (results, mut completed) = tokio::sync::mpsc::channel(1);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut dispatcher = ConversationProjectionDispatcher::new(results, shutdown);
+    for (_, tail) in first_capture_changes {
+        dispatcher.enqueue(tail);
+    }
+    let projected = tokio::time::timeout(Duration::from_secs(1), completed.recv())
+        .await
+        .expect("initial tail was not projected without a later capture")
+        .expect("projection result channel closed");
+    assert_eq!(projected.key.ordinal, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn browser_projection_enqueue_does_not_wait_for_a_blocking_permit() {
     let (results, mut completed) = tokio::sync::mpsc::channel(1);
@@ -2775,7 +2845,9 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
     };
     let reviews = BTreeMap::from([(
         "parent".to_owned(),
-        RuntimeReviewView {
+        vec![RuntimeReviewView {
+            review_id: String::new(),
+            roots: Vec::new(),
             child_session_id: None,
             session_id: "parent".into(),
             questions: vec![mj_client::review::ReviewerQuestion {
@@ -2786,7 +2858,7 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
             roles: Vec::new(),
             status: "the reviewer is reading the change…".into(),
             verdict: None,
-        },
+        }],
     )]);
     let sources = PhoneProjectSources::default();
     let snapshot = viewer_snapshot(
@@ -2839,6 +2911,10 @@ fn publish_fixture(
     controller: &Controller,
     runtime: &mj_client::runtime_feed::RuntimeProjection,
 ) -> ViewerSnapshot {
+    let mut capture = runtime.clone();
+    capture.metadata.config = controller.config.clone().into();
+    crate::daemon::verdicts::project(&mut capture, &Default::default());
+    let runtime = &capture;
     let mut native_agents = BTreeMap::new();
     let mut move_recoveries = BTreeMap::new();
     publisher.observe_runtime(runtime, &mut native_agents, &mut move_recoveries);
@@ -3030,4 +3106,76 @@ fn metadata_only_workspace_and_storage_changes_refresh_existing_rows() {
             .values()
             .all(|row| row.storage_problem.is_some())
     );
+}
+
+#[test]
+fn session_verdicts_reconcile_lifecycle_move_and_workspace_offers() {
+    use mj_client::runtime_feed::{RuntimeProjection, SessionOffer};
+    let mut controller = controller_with_profiles(&["codex"]);
+    let mut checkpoint = phone_session("checkpoint", 0);
+    checkpoint.state = SessionState::Checkpointing;
+    let mut failed = phone_session("failed", 0);
+    failed.state = SessionState::Destroying;
+    failed.last_error = Some("destroy failed".into());
+    let mut moving = phone_session("moving", 0);
+    moving.state = SessionState::Running;
+    let mut failed_launch = phone_session("retry-launch", 0);
+    failed_launch.state = SessionState::StartupCleanup;
+    failed_launch.last_error = Some("launch cleanup failed".into());
+    for record in [checkpoint, failed, moving, failed_launch] {
+        controller.state.sessions.insert(record.id.clone(), record);
+    }
+    let mut held = move_recovery_fixture();
+    held.selection.session_id = "moving".into();
+    held.phase = mj_core::state::MovePhase::Failed;
+    held.queue_admission_started = true;
+    let mut runtime = RuntimeProjection {
+        records: controller.state.sessions.clone(),
+        moves: [("moving".to_owned(), held)].into_iter().collect(),
+        ..Default::default()
+    };
+    let mut live = mj_core::relay::RelaySnapshot::new("moving".into()).operational_state();
+    live.harness_turn = Some(mj_core::relay::HarnessTurn { started_at_ms: 10 });
+    let mut view =
+        mj_client::daemon::RuntimeSessionView::from_managed("moving".into(), Default::default());
+    view.operational = Some(live.into());
+    runtime.sessions.insert("moving".into(), view);
+    runtime.metadata.workspaces = ["default", "other"]
+        .into_iter()
+        .map(|id| mj_core::workspace::WorkspaceRecord {
+            id: id.into(),
+            name: id.into(),
+            created_at: String::new(),
+            last_opened_at: String::new(),
+            session_count: 0,
+        })
+        .collect();
+    runtime
+        .metadata
+        .failed_launch_retries
+        .insert("retry-launch".into());
+    let snapshot = publish_fixture(&mut Default::default(), &controller, &runtime);
+    assert!(snapshot.sessions.0["retry-launch"].verdict.resume.offered());
+    let failed = &snapshot.sessions.0["failed"];
+    assert!(failed.verdict.live_dashboard);
+    assert!(failed.verdict.transition.is_none());
+    assert!(failed.verdict.transition_failure.is_some());
+    assert!(failed.verdict.stop.offered());
+    assert!(failed.capabilities.suspend);
+    assert!(!failed.transitioning);
+    let moving = &snapshot.sessions.0["moving"];
+    assert_eq!(moving.verdict.move_session, SessionOffer::MoveQueueHeld);
+    assert!(moving.verdict.active_work);
+    assert!(!moving.capabilities.interrupt_turn);
+    assert!(!moving.capabilities.interrupt_all);
+    assert!(!moving.capabilities.move_session);
+    assert!(!moving.capabilities.change_workspace);
+    let checkpoint = &snapshot.sessions.0["checkpoint"];
+    assert!(checkpoint.verdict.transition.is_none());
+    assert!(checkpoint.verdict.change_workspace.offered());
+    assert!(checkpoint.capabilities.change_workspace);
+    assert_eq!(checkpoint.verdict.stop, SessionOffer::OperationInProgress);
+    assert!(!checkpoint.capabilities.suspend);
+    assert!(!checkpoint.capabilities.restart);
+    assert!(!checkpoint.capabilities.move_session);
 }

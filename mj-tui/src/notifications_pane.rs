@@ -1004,8 +1004,7 @@ impl DashboardState {
                 .as_ref()
                 .map(|form| form.message.clone())
                 .or_else(|| {
-                    self.session_review(destination)
-                        .and_then(|review| review.activity_label())
+                    mj_client::review::combined_activity_label(self.session_reviews(destination))
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| notification_message_placeholder(card.badge).to_owned());

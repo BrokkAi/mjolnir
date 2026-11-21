@@ -10,9 +10,11 @@ use super::*;
 /// One reviewing role's report, as the review host settled it.
 ///
 /// The host passes the exact text it accepted, so a later handback from the
-/// same child cannot become this review's output.
+/// same child cannot become this review's output. It names the review, so a
+/// report cannot land on another open review that has a role of the same name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedReport {
+    pub review_id: String,
     pub role: String,
     pub text: String,
 }
@@ -66,7 +68,10 @@ pub fn active_review_groups() -> Result<Vec<(String, TurnReviewState)>> {
 pub(super) fn active_review_groups_in(path: &Path) -> Result<Vec<(String, TurnReviewState)>> {
     let connection = open_reader(path)?;
     let mut statement = connection.prepare(
-        "SELECT session_id FROM turn_review_state WHERE active_group IS NOT NULL ORDER BY session_id",
+        "SELECT session_id FROM turn_review_state
+             WHERE EXISTS(SELECT 1 FROM json_each(open_reviews)
+                          WHERE json_extract(value, '$.group') IS NOT NULL)
+             ORDER BY session_id",
     )?;
     let ids = statement
         .query_map([], |row| row.get::<_, String>(0))?
@@ -78,29 +83,46 @@ pub(super) fn active_review_groups_in(path: &Path) -> Result<Vec<(String, TurnRe
 
 pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<TurnReviewState> {
     let connection = open_reader(path)?;
-    let row = connection.query_row(
-        "SELECT active, push_findings, active_group, declined_findings FROM turn_review_state WHERE session_id = ?1", [session_id],
-        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?))
-    ).optional()?;
-    let Some((active, push_findings, active_group, declined_findings)) = row else {
+    let row = connection
+        .query_row(
+            "SELECT open_reviews, push_findings, declined_findings FROM turn_review_state WHERE session_id = ?1",
+            [session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((open_reviews, push_findings, declined_findings)) = row else {
         return Ok(TurnReviewState::default());
     };
     Ok(TurnReviewState {
-        active,
+        open_reviews: serde_json::from_str(&open_reviews).context("parse stored open reviews")?,
         push_findings: push_findings
-            .map(|v| serde_json::from_str(&v))
+            .map(|value| serde_json::from_str(&value))
             .transpose()
-            .context("parse stored push findings")?,
-        active_group: active_group
-            .map(|v| serde_json::from_str(&v))
-            .transpose()
-            .context("parse stored active review group")?,
+            .context("parse stored push findings")?
+            .unwrap_or_default(),
         declined_findings: declined_findings
             .map(|v| serde_json::from_str(&v))
             .transpose()
             .context("parse stored declined findings")?
             .unwrap_or_default(),
     })
+}
+
+/// The stored `open_reviews` list for `state`: the reviews the row still has
+/// something to say about.
+fn stored_open_reviews(state: &TurnReviewState) -> Result<String> {
+    let open: Vec<_> = state
+        .open_reviews
+        .iter()
+        .filter(|review| review.is_stored())
+        .collect();
+    Ok(serde_json::to_string(&open)?)
 }
 
 /// Records review state and atomically queues newly settled findings while
@@ -127,18 +149,26 @@ pub fn save_reviewer_outcome(
     })
 }
 
-/// Clears the active review and records its per-role output in the same
-/// transaction. The resolution is explicit because a cancelled review's stored
-/// group can still carry the verdict it was about to deliver.
+/// Clears the review `review_id` from the row and records its per-role output
+/// in the same transaction. The resolution is explicit because a cancelled
+/// review's stored group can still carry the verdict it was about to deliver.
 pub fn close_turn_review_state(
     session_id: &str,
+    review_id: &str,
     state: &TurnReviewState,
     resolution: FinishedReviewResolution,
 ) -> Result<()> {
     let session_id = session_id.to_owned();
+    let review_id = review_id.to_owned();
     let state = state.clone();
     submit_database_write("close_turn_review_state", move |_| {
-        close_turn_review_state_in(&database_path(), &session_id, &state, resolution)
+        close_turn_review_state_in(
+            &database_path(),
+            &session_id,
+            &review_id,
+            &state,
+            resolution,
+        )
     })
 }
 
@@ -157,56 +187,44 @@ pub(super) fn save_reviewer_outcome_in(
     state: &TurnReviewState,
     reports: Vec<AcceptedReport>,
 ) -> Result<()> {
-    save_turn_review_state_in_with(
-        path,
-        session_id,
-        state,
-        None,
-        &reports.into_iter().map(Into::into).collect::<Vec<_>>(),
-    )
+    save_turn_review_state_in_with(path, session_id, state, None, &reports)
 }
 
 pub(super) fn close_turn_review_state_in(
     path: &Path,
     session_id: &str,
+    review_id: &str,
     state: &TurnReviewState,
     resolution: FinishedReviewResolution,
 ) -> Result<()> {
-    save_turn_review_state_in_with(path, session_id, state, Some(resolution), &[])
+    save_turn_review_state_in_with(path, session_id, state, Some((review_id, resolution)), &[])
 }
 
-/// A role's report paired with the role it belongs to, as the store writes it.
-type StoredReport = (String, String);
-
-impl From<AcceptedReport> for StoredReport {
-    fn from(report: AcceptedReport) -> Self {
-        (report.role, report.text)
-    }
-}
+/// The review a save closes and how it ended.
+type ReviewClose<'a> = (&'a str, FinishedReviewResolution);
 
 fn save_turn_review_state_in_with(
     path: &Path,
     session_id: &str,
     state: &TurnReviewState,
-    close: Option<FinishedReviewResolution>,
-    reports: &[StoredReport],
+    close: Option<ReviewClose<'_>>,
+    reports: &[AcceptedReport],
 ) -> Result<()> {
     let mut connection = open(path)?;
     let transaction = connection.transaction()?;
-    let previous = previous_active_group(&transaction, session_id)?;
-    let events = if let Some(current) = state.active_group.as_ref() {
-        partial_review_events(session_id, previous.as_ref(), current)
-    } else {
-        Vec::new()
-    };
-    record_review_reports(
-        &transaction,
-        session_id,
-        previous.as_ref(),
-        state,
-        close,
-        reports,
-    )?;
+    let previous = previous_active_groups(&transaction, session_id)?;
+    let events: Vec<_> = state
+        .open_reviews
+        .iter()
+        .filter_map(|review| review.active_group.as_ref())
+        .flat_map(|current| {
+            let previous = previous
+                .iter()
+                .find(|group| group.driver.review_id == current.driver.review_id);
+            partial_review_events(session_id, previous, current)
+        })
+        .collect();
+    record_review_reports(&transaction, session_id, &previous, state, close, reports)?;
     save_turn_review_state_with(&transaction, session_id, state)?;
     let mut queued = false;
     if !events.is_empty() {
@@ -234,61 +252,76 @@ fn save_turn_review_state_in_with(
     Ok(())
 }
 
-fn previous_active_group(
+fn previous_active_groups(
     connection: &Connection,
     session_id: &str,
-) -> Result<Option<ActiveReviewGroup>> {
+) -> Result<Vec<ActiveReviewGroup>> {
     let previous: Option<String> = connection
         .query_row(
-            "SELECT active_group FROM turn_review_state WHERE session_id=?1",
+            "SELECT open_reviews FROM turn_review_state WHERE session_id=?1",
             [session_id],
             |row| row.get(0),
         )
-        .optional()?
-        .flatten();
-    previous
-        .map(|json| serde_json::from_str(&json))
-        .transpose()
-        .context("parse previous active review group")
+        .optional()?;
+    let Some(previous) = previous else {
+        return Ok(Vec::new());
+    };
+    Ok(serde_json::from_str::<Vec<OpenReview>>(&previous)
+        .context("parse previous open reviews")?
+        .into_iter()
+        .filter_map(|review| review.active_group)
+        .collect())
 }
 
 /// Keeps the durable per-role report in step with review state.
 ///
-/// `reports` carries the text the host settled this save's roles from. The
-/// store writes exactly that and nothing else: it never reads the reviewer
-/// child's mutable handback row, whose latest entry can belong to another
-/// command and would pair unrelated text with a settled verdict.
+/// `reports` carries the text the host settled each role from, with the review
+/// it belongs to. The store writes exactly that and nothing else: it never
+/// reads the reviewer child's mutable handback row, whose latest entry can
+/// belong to another command and would pair unrelated text with a settled
+/// verdict.
 fn record_review_reports(
     connection: &Connection,
     session_id: &str,
-    previous: Option<&ActiveReviewGroup>,
+    previous: &[ActiveReviewGroup],
     state: &TurnReviewState,
-    close: Option<FinishedReviewResolution>,
-    reports: &[StoredReport],
+    close: Option<ReviewClose<'_>>,
+    reports: &[AcceptedReport],
 ) -> Result<()> {
-    let current = state.active_group.as_ref();
-    let same = match (previous, current) {
-        (Some(previous), Some(current)) => previous.driver.review_id == current.driver.review_id,
-        _ => false,
-    };
-    // A stored group is finished when the saved state clears it or replaces it
-    // with another review. A close decision describes the review the saved
-    // state carries: the cleared one when there is none, otherwise the current
-    // one. A review a successor displaced has only its own driver to answer.
-    if let Some(previous) = previous.filter(|_| !same) {
+    let current: Vec<&ActiveReviewGroup> = state
+        .open_reviews
+        .iter()
+        .filter_map(|review| review.active_group.as_ref())
+        .collect();
+    // A stored group is finished when the saved state no longer lists it. A
+    // close decision describes the review it names; a group that left without
+    // being named, such as one a restart abandoned, has only its own driver to
+    // answer.
+    for previous in previous.iter().filter(|previous| {
+        !current
+            .iter()
+            .any(|group| group.driver.review_id == previous.driver.review_id)
+    }) {
         sync_review_report(connection, session_id, previous, &[])?;
-        let resolution = match current {
-            None => previous_resolution(previous, close),
-            Some(_) => inferred_resolution(previous),
-        };
-        finalize_review_report(connection, session_id, previous, resolution)?;
+        finalize_review_report(
+            connection,
+            session_id,
+            previous,
+            previous_resolution(previous, close),
+        )?;
     }
-    if let Some(current) = current {
-        sync_review_report(connection, session_id, current, reports)?;
+    for group in current {
+        let reports: Vec<_> = reports
+            .iter()
+            .filter(|report| report.review_id == group.driver.review_id)
+            .collect();
+        sync_review_report(connection, session_id, group, &reports)?;
         // The close decision, not the presence of an earlier row, decides that
         // this review is finished: a first save may already be it.
-        if let Some(resolution) = close {
-            finalize_review_report(connection, session_id, current, resolution)?;
+        if let Some((review_id, resolution)) = close
+            && review_id == group.driver.review_id
+        {
+            finalize_review_report(connection, session_id, group, resolution)?;
         }
     }
     Ok(())
@@ -301,9 +334,12 @@ fn record_review_reports(
 /// path produces, reads the driver's own outcome.
 fn previous_resolution(
     previous: &ActiveReviewGroup,
-    close: Option<FinishedReviewResolution>,
+    close: Option<ReviewClose<'_>>,
 ) -> FinishedReviewResolution {
-    close.unwrap_or_else(|| inferred_resolution(previous))
+    match close {
+        Some((review_id, resolution)) if review_id == previous.driver.review_id => resolution,
+        _ => inferred_resolution(previous),
+    }
 }
 
 /// A review whose state is cleared without an explicit close still has a
@@ -331,7 +367,7 @@ fn sync_review_report(
     connection: &Connection,
     session_id: &str,
     group: &ActiveReviewGroup,
-    reports: &[StoredReport],
+    reports: &[&AcceptedReport],
 ) -> Result<()> {
     let now = mj_core::clock::epoch_millis();
     for (ordinal, slot) in group.driver.roles.iter().enumerate() {
@@ -351,8 +387,8 @@ fn sync_review_report(
         let effort = reviewer.and_then(|reviewer| reviewer.main.effort.as_deref());
         let handback = reports
             .iter()
-            .find(|(role, _)| role == &slot.role)
-            .map(|(_, text)| text.as_str());
+            .find(|report| report.role == slot.role)
+            .map(|report| report.text.as_str());
         let verdict = slot
             .outcome
             .as_ref()
@@ -550,18 +586,17 @@ fn save_turn_review_state_with(
 ) -> Result<()> {
     connection.execute(
         "INSERT INTO turn_review_state(
-             session_id, baselines, reviewed_through_ordinal, active,
-             pending_forward, child_session_id, push_findings, active_group, pending_followup, forward_attempts,
+             session_id, baselines, reviewed_through_ordinal, open_reviews,
+             pending_forward, child_session_id, push_findings, pending_followup, forward_attempts,
              declined_findings
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(session_id) DO UPDATE SET
              baselines = excluded.baselines,
              reviewed_through_ordinal = excluded.reviewed_through_ordinal,
-             active = excluded.active,
+             open_reviews = excluded.open_reviews,
              pending_forward = excluded.pending_forward,
              child_session_id = excluded.child_session_id,
              push_findings = excluded.push_findings,
-             active_group = excluded.active_group,
              pending_followup = 0,
              forward_attempts = excluded.forward_attempts,
              declined_findings = excluded.declined_findings",
@@ -569,18 +604,11 @@ fn save_turn_review_state_with(
             session_id,
             "{}",
             0,
-            state.active,
+            stored_open_reviews(state)?,
             Option::<String>::None,
             Option::<String>::None,
-            state
-                .push_findings
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?,
-            state
-                .active_group
-                .as_ref()
-                .map(serde_json::to_string)
+            (!state.push_findings.is_empty())
+                .then(|| serde_json::to_string(&state.push_findings))
                 .transpose()?,
             0,
             0,
@@ -607,8 +635,9 @@ pub(super) fn clear_interrupted_turn_reviews_in(path: &Path) -> Result<Vec<Strin
     let interrupted = {
         let mut statement = connection.prepare(
             "SELECT session_id FROM turn_review_state
-                 WHERE active_group IS NULL
-                   AND (active IS NOT NULL OR pending_forward IS NOT NULL)",
+                 WHERE pending_forward IS NOT NULL
+                    OR EXISTS(SELECT 1 FROM json_each(open_reviews)
+                              WHERE json_extract(value, '$.group') IS NULL)",
         )?;
         let mut rows = statement.query([])?;
         let mut interrupted = Vec::new();
@@ -618,8 +647,11 @@ pub(super) fn clear_interrupted_turn_reviews_in(path: &Path) -> Result<Vec<Strin
         interrupted
     };
     connection.execute(
-        "UPDATE turn_review_state SET active = NULL
-         WHERE active IS NOT NULL AND active_group IS NULL",
+        "UPDATE turn_review_state
+             SET open_reviews = (SELECT json_group_array(json(value)) FROM json_each(open_reviews)
+                                 WHERE json_extract(value, '$.group') IS NOT NULL)
+             WHERE EXISTS(SELECT 1 FROM json_each(open_reviews)
+                          WHERE json_extract(value, '$.group') IS NULL)",
         [],
     )?;
     Ok(interrupted)

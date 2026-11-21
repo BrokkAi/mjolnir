@@ -148,24 +148,13 @@ impl CollectedOperation {
         }
         // A clone need not have an identity configured, and a fixed one keeps
         // the wrapper the same for the same operation.
-        let identity = [
-            ("GIT_AUTHOR_NAME", "Mjolnir"),
-            ("GIT_AUTHOR_EMAIL", "mjolnir@localhost"),
-            ("GIT_AUTHOR_DATE", "@0 +0000"),
-            ("GIT_COMMITTER_NAME", "Mjolnir"),
-            ("GIT_COMMITTER_EMAIL", "mjolnir@localhost"),
-            ("GIT_COMMITTER_DATE", "@0 +0000"),
-        ];
         let wrapper = git_success(
             runner,
             repository,
             GitCommand {
                 arguments,
                 stdin: Vec::new(),
-                env: identity
-                    .into_iter()
-                    .map(|(name, value)| (OsString::from(name), OsString::from(value)))
-                    .collect(),
+                env: synthetic_git_commit_identity(),
             },
             "record the Git operation's commits",
         )?;

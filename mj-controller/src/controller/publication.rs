@@ -14,6 +14,20 @@ use crate::targets::{CancellableProcessExecutor, CommandExecutor};
 
 use super::worktree::{managed_git_command, managed_network_git_command};
 
+/// The assessors below read the legacy capture fields, which an OriginDelta
+/// archive leaves empty. Judging one by them could call unpushed edits or
+/// stashes published and let archival delete their only copy.
+fn require_legacy_capture(manifest: &ArchiveManifest) -> Result<()> {
+    ensure!(
+        manifest
+            .repositories
+            .iter()
+            .all(|repository| repository.metadata.origin_delta.is_none()),
+        "new-format publication assessment is not implemented yet"
+    );
+    Ok(())
+}
+
 /// A failed remote check is evidence of uncertainty, never permission to age
 /// away the only checkpoint. The checkpoint itself has already been verified.
 #[cfg(any(test, feature = "test-support"))]
@@ -90,6 +104,7 @@ fn assess_network_checkpoint_inner(
 ) -> Result<()> {
     let manifest = mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path)
         .context("read verified network checkpoint")?;
+    require_legacy_capture(&manifest)?;
     ensure!(
         !manifest.repositories.is_empty(),
         "checkpoint contains no repository"
@@ -291,6 +306,7 @@ fn refresh_stopped_clone_publication_inner(
         "recovery archive digest changed"
     );
     let manifest = verified.manifest;
+    require_legacy_capture(&manifest)?;
     let [repository] = manifest.repositories.as_slice() else {
         anyhow::bail!("clone checkpoint does not contain exactly one repository");
     };
@@ -394,6 +410,7 @@ fn assess_clone_checkpoint_inner(
     );
     let manifest = mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path)
         .context("read verified checkpoint manifest")?;
+    require_legacy_capture(&manifest)?;
     let repository = manifest
         .repositories
         .first()
@@ -657,6 +674,81 @@ mod tests {
     };
     use mj_core::state::{ManagedCheckoutKind, ManagedWorktreeTarget};
     use std::process::Command;
+
+    // Hard-won: plan review of d8b2a19: legacy publication reader judged OriginDelta archives by empty legacy fields
+    #[test]
+    fn stopped_origin_delta_with_staged_changes_stays_unknown_at_a_published_head() {
+        use mj_checkpoint::archive::collect_git_metadata_snapshot;
+        use mj_checkpoint::snapshot::{
+            CaptureConsent, CheckoutOwnership, OperationConsent, UntrackedConsent,
+            capture_workspace_snapshot,
+        };
+
+        let source = committed_repository();
+        let remote = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let origin = remote.path().to_str().unwrap();
+        test_git(source.path(), &["clone", "--bare", ".", origin]);
+        test_git(source.path(), &["remote", "add", "origin", origin]);
+        let base = test_git(source.path(), &["rev-parse", "HEAD"]);
+        let advertised = test_git(source.path(), &["ls-remote", "origin", "refs/heads/*"]);
+        assert!(advertised.lines().any(|line| line.starts_with(&base)));
+        let id = "0123456789abcdef0123456789abcdef";
+        let checkout = ManagedWorktree {
+            kind: ManagedCheckoutKind::Clone,
+            source_project_directory: source.path().to_path_buf(),
+            source_repository: source.path().to_path_buf(),
+            worktree_root: source.path().join(".mj/clones").join(id),
+            branch: "master".into(),
+            target: ManagedWorktreeTarget::Local,
+            base_commit: Some(base),
+        };
+        let mut repository = collect_git_metadata_snapshot(
+            &SystemGit,
+            source.path(),
+            &GitCollectionSpec {
+                id: "project".into(),
+                relative_destination: "project".into(),
+                history: GitHistoryMode::NoBundle,
+                origin_override: None,
+            },
+        )
+        .unwrap();
+        std::fs::write(source.path().join("nested/file.txt"), "staged draft\n").unwrap();
+        test_git(source.path(), &["add", "nested/file.txt"]);
+        let snapshot = capture_workspace_snapshot(
+            &SystemGit,
+            source.path(),
+            &CheckoutOwnership::Managed,
+            &archive_dir.path().join("origin-delta.pack"),
+            &CaptureConsent {
+                untracked: UntrackedConsent::None,
+                operations: OperationConsent::None,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(snapshot.working_state.is_some());
+        repository.metadata.base_commit.clear();
+        repository.metadata.saved_refs.clear();
+        repository.metadata.origin_delta = Some(Box::new(snapshot.metadata));
+        repository.origin_delta_pack = snapshot.pack;
+        let input = checkpoint_archive_input(id, 0, vec![repository], Vec::new());
+        let checkpoint = write_checkpoint_archive_input(archive_dir.path(), id, &input);
+        let mut session = raw_session_on("localhost", checkout.worktree_root.to_str().unwrap());
+        session.managed_worktree = Some(Box::new(checkout.clone()));
+        session.checkpoint = Some(Box::new(checkpoint.clone()));
+        let refreshed =
+            refresh_stopped_clone_publication_for_worktree(&session, &checkout).unwrap();
+        let assessed = assess_clone_checkpoint_for_worktree(&checkout, &checkpoint);
+        for result in [refreshed, assessed] {
+            assert_eq!(result.state, PublicationState::Unknown);
+            assert_eq!(
+                result.reason.as_deref(),
+                Some("new-format publication assessment is not implemented yet")
+            );
+        }
+    }
 
     #[test]
     #[cfg_attr(

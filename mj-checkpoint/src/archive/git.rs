@@ -47,7 +47,12 @@ impl GitCommandRunner for SystemGit {
         for (name, value) in &command.env {
             process.env(name, value);
         }
-        if let Some(default) = mj_core::local_git::local_git_ssh_command() {
+        if !command
+            .env
+            .iter()
+            .any(|(name, _)| name == "GIT_SSH_COMMAND")
+            && let Some(default) = mj_core::local_git::local_git_ssh_command()
+        {
             process.env("GIT_SSH_COMMAND", default);
         }
         let output = mj_core::subprocess::run_with_input(&mut process, &command.stdin)
@@ -58,6 +63,29 @@ impl GitCommandRunner for SystemGit {
             stderr: output.stderr,
         })
     }
+}
+
+/// Stable identity for internal commits and reflogs; never written to user config.
+pub(crate) fn synthetic_git_identity() -> Vec<(OsString, OsString)> {
+    [
+        ("GIT_AUTHOR_NAME", "Mjolnir"),
+        ("GIT_AUTHOR_EMAIL", "mjolnir@localhost"),
+        ("GIT_COMMITTER_NAME", "Mjolnir"),
+        ("GIT_COMMITTER_EMAIL", "mjolnir@localhost"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.into(), value.into()))
+    .collect()
+}
+/// Commit objects use a fixed date for stable IDs; reflogs must use current
+/// time because Git does not list epoch-zero stash reflog entries.
+pub(crate) fn synthetic_git_commit_identity() -> Vec<(OsString, OsString)> {
+    let mut identity = synthetic_git_identity();
+    identity.extend([
+        ("GIT_AUTHOR_DATE".into(), "@0 +0000".into()),
+        ("GIT_COMMITTER_DATE".into(), "@0 +0000".into()),
+    ]);
+    identity
 }
 
 /// How much committed history a snapshot has to carry. Committed work that is
@@ -239,7 +267,9 @@ pub fn collect_git_metadata_snapshot(
     // needed to finalize the independently transferred destination checkout.
     let managed_base = remote_workspace_base(runner, repository)?;
     Ok(RepositorySnapshot {
+        origin_delta_pack: None,
         metadata: RepositoryMetadata {
+            origin_delta: None,
             // Every capture here is metadata only, whether or not it carries
             // refs: restore must never check out its commit into a checkout
             // other sessions or the user may be working in.
@@ -287,7 +317,9 @@ pub fn collect_plain_directory_snapshot(spec: &GitCollectionSpec) -> Result<Repo
         "a plain project directory has no origin to override"
     );
     Ok(RepositorySnapshot {
+        origin_delta_pack: None,
         metadata: RepositoryMetadata {
+            origin_delta: None,
             review_refs_metadata_only: false,
             review_baseline_ref: None,
             saved_refs: BTreeMap::new(),
@@ -314,13 +346,16 @@ pub fn collect_plain_directory_snapshot(spec: &GitCollectionSpec) -> Result<Repo
 }
 
 /// A Git checkout, found from a directory somewhere inside it.
-struct CheckoutLocation {
-    top_level: PathBuf,
+pub(crate) struct CheckoutLocation {
+    pub(crate) top_level: PathBuf,
     /// The directory's path below `top_level`; `None` at the top level.
-    subdirectory: Option<PathBuf>,
+    pub(crate) subdirectory: Option<PathBuf>,
 }
 
-fn locate_checkout(runner: &dyn GitCommandRunner, directory: &Path) -> Result<CheckoutLocation> {
+pub(crate) fn locate_checkout(
+    runner: &dyn GitCommandRunner,
+    directory: &Path,
+) -> Result<CheckoutLocation> {
     let output = git_bytes(
         runner,
         directory,
@@ -608,23 +643,34 @@ pub fn migrate_review_ref(
 
 /// The worktree's own Git directory and the repository's common one, which
 /// are the same directory in the main worktree.
-fn git_directories(runner: &dyn GitCommandRunner, repository: &Path) -> Result<(PathBuf, PathBuf)> {
-    let output = git_text(
+/// Resolve Git's path output without requiring --path-format (Git 2.31).
+pub(crate) fn absolute_git_path(repository: &Path, bytes: &[u8]) -> Result<PathBuf> {
+    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let path = mj_core::path_input::from_git_bytes(bytes)?;
+    Ok(std::path::absolute(repository.join(path))?)
+}
+pub(crate) fn git_directories(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let git_dir = git_bytes(
         runner,
         repository,
-        [
-            "rev-parse",
-            "--path-format=absolute",
-            "--absolute-git-dir",
-            "--git-common-dir",
-        ],
-    )
-    .context("locate the Git directories")?;
-    let mut lines = output.lines();
-    let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
-        bail!("git rev-parse named no common directory: {output}");
-    };
-    Ok((PathBuf::from(git_dir), PathBuf::from(common_dir)))
+        ["rev-parse", "--absolute-git-dir"],
+        &[],
+        "locate Git directory",
+    )?;
+    let common = git_bytes(
+        runner,
+        repository,
+        ["rev-parse", "--git-common-dir"],
+        &[],
+        "locate common Git directory",
+    )?;
+    Ok((
+        absolute_git_path(repository, &git_dir)?,
+        absolute_git_path(repository, &common)?,
+    ))
 }
 
 fn same_directory(left: &Path, right: &Path) -> Result<bool> {
@@ -1972,7 +2018,9 @@ fn collect_git_contents(
     let untracked_tar = untracked_tar?;
 
     Ok(RepositorySnapshot {
+        origin_delta_pack: None,
         metadata: RepositoryMetadata {
+            origin_delta: None,
             review_baseline_ref: None,
             review_refs_metadata_only: false,
             saved_refs: Default::default(),
@@ -2001,11 +2049,11 @@ fn collect_git_contents(
 /// A linked worktree of the captured repository that lives inside the
 /// captured checkout.
 #[derive(Clone)]
-struct LinkedWorktreeDirectory {
+pub(crate) struct LinkedWorktreeDirectory {
     /// The directory below the checkout's top level.
-    relative: PathBuf,
+    pub(crate) relative: PathBuf,
     /// The directory, with symbolic links resolved.
-    directory: PathBuf,
+    pub(crate) directory: PathBuf,
 }
 
 /// A linked worktree whose state has been read and whose commits are held by
@@ -2018,6 +2066,128 @@ struct PreparedWorktree {
     operation: Option<operation::CollectedOperation>,
 }
 
+/// Decode Git C-quoted paths, including octal-escaped native bytes.
+pub(crate) fn unquote_git_path(path: &[u8]) -> Result<PathBuf> {
+    let Some(quoted) = path.strip_prefix(b"\"") else {
+        return mj_core::path_input::from_git_bytes(path);
+    };
+    let mut quoted = quoted
+        .strip_suffix(b"\"")
+        .context("unterminated quoted worktree path")?;
+    let mut decoded = Vec::new();
+    while let Some((&byte, rest)) = quoted.split_first() {
+        quoted = rest;
+        if byte != b'\\' {
+            decoded.push(byte);
+            continue;
+        }
+        let (&escape, rest) = quoted
+            .split_first()
+            .context("incomplete worktree path escape")?;
+        quoted = rest;
+        decoded.push(match escape {
+            b'a' => 7,
+            b'b' => 8,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 11,
+            b'f' => 12,
+            b'r' => b'\r',
+            b'\\' | b'"' => escape,
+            b'0'..=b'7' => {
+                ensure!(
+                    quoted.len() >= 2 && quoted[..2].iter().all(|byte| matches!(byte, b'0'..=b'7')),
+                    "invalid octal worktree path escape"
+                );
+                let value = u16::from(escape - b'0') * 64
+                    + u16::from(quoted[0] - b'0') * 8
+                    + u16::from(quoted[1] - b'0');
+                quoted = &quoted[2..];
+                u8::try_from(value).context("worktree path octal escape exceeds one byte")?
+            }
+            _ => anyhow::bail!("invalid worktree path escape"),
+        });
+    }
+    mj_core::path_input::from_git_bytes(&decoded)
+}
+
+/// Read registered checkout paths without pruning them. Old-Git path checks
+/// apply only inside the requested checkout.
+pub(crate) fn registered_worktree_paths(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<Vec<PathBuf>> {
+    let top_level = fs::canonicalize(repository)
+        .with_context(|| format!("resolve {}", repository.display()))?;
+    let mut listed = run_git(
+        runner,
+        repository,
+        ["worktree", "list", "--porcelain", "-z"],
+        &[],
+    )?;
+    let delimiter = if listed.status == 129 {
+        // Older target Git rejects -z. Its line format cannot represent a
+        // newline path, so inspect registration paths before interpreting it.
+        ensure!(
+            !top_level.as_os_str().as_encoded_bytes().contains(&b'\n'),
+            "Git cannot list newline worktree paths; upgrade Git to 2.36 or newer"
+        );
+        let (_, common_directory) = git_directories(runner, repository)?;
+        match fs::read_dir(common_directory.join("worktrees")) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    if entry.file_type()?.is_dir() {
+                        let path = match fs::read(entry.path().join("gitdir")) {
+                            Ok(path) => path,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                            Err(error) => {
+                                return Err(error).context("read legacy worktree registration");
+                            }
+                        };
+                        let path = path.strip_suffix(b"\n").unwrap_or(&path);
+                        let registered = mj_core::path_input::from_git_bytes(path)?;
+                        let checkout = registered
+                            .parent()
+                            .context("worktree registration has no checkout")?;
+                        if !checkout.starts_with(repository) && !checkout.starts_with(&top_level) {
+                            continue;
+                        }
+                        ensure!(
+                            !path.contains(&b'\n'),
+                            "Git cannot list newline worktree paths; upgrade Git to 2.36 or newer"
+                        );
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect legacy worktree registrations"),
+        }
+        listed = run_git(runner, repository, ["worktree", "list", "--porcelain"], &[])?;
+        b'\n'
+    } else {
+        0
+    };
+    ensure!(
+        listed.status == 0,
+        "{}",
+        git_failure("list linked worktrees", &listed)
+    );
+    let mut paths = Vec::new();
+    for line in listed.stdout.split(|byte| *byte == delimiter) {
+        let Some(path) = line.strip_prefix(b"worktree ") else {
+            continue;
+        };
+        let path = if delimiter == b'\n' {
+            unquote_git_path(path)?
+        } else {
+            mj_core::path_input::from_git_bytes(path)?
+        };
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
 /// The linked worktrees of `repository`'s checkout that live inside it, at any
 /// depth, parents before children.
 ///
@@ -2026,28 +2196,15 @@ struct PreparedWorktree {
 /// A registered worktree outside the checkout, or whose directory is gone,
 /// holds nothing this checkout's session owns and is left out; this never
 /// prunes a registration.
-fn discover_linked_worktrees(
+pub(crate) fn discover_linked_worktrees(
     runner: &dyn GitCommandRunner,
     repository: &Path,
 ) -> Result<Vec<LinkedWorktreeDirectory>> {
     let top_level = fs::canonicalize(repository)
         .with_context(|| format!("resolve {}", repository.display()))?;
     let (_, common_directory) = git_directories(runner, repository)?;
-    // Git 2.31 has no `worktree list -z`; a path with a newline in it cannot
-    // be listed there, and is left out like any other unlistable directory.
-    let listed = git_bytes(
-        runner,
-        repository,
-        ["worktree", "list", "--porcelain"],
-        &[],
-        "list linked worktrees",
-    )?;
     let mut found = Vec::new();
-    for line in listed.split(|byte| *byte == b'\n') {
-        let Some(path) = line.strip_prefix(b"worktree ") else {
-            continue;
-        };
-        let path = mj_core::path_input::from_git_bytes(path)?;
+    for path in registered_worktree_paths(runner, repository)? {
         // `worktree list` names the user's worktrees anywhere on disk. Only a
         // path that can lie inside the checkout may fail the capture, so
         // decide that lexically, against the top level as given and resolved.
@@ -3077,7 +3234,7 @@ fn checkout_advice(snapshot: &RepositorySnapshot) -> String {
     }
 }
 
-fn run_git<const N: usize>(
+pub(crate) fn run_git<const N: usize>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     arguments: [&str; N],
@@ -3104,7 +3261,7 @@ fn git_success(
     Ok(output.stdout)
 }
 
-fn git_bytes<const N: usize>(
+pub(crate) fn git_bytes<const N: usize>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     arguments: [&str; N],
@@ -3134,7 +3291,33 @@ fn git_bytes_owned(
     Ok(output.stdout)
 }
 
-fn git_text<const N: usize>(
+/// Index flags that can hide tracked edits from Git's stash machinery.
+pub fn hidden_tracked_paths(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+) -> Result<Vec<PathBuf>> {
+    let listed = git_bytes(
+        runner,
+        checkout,
+        ["ls-files", "-v", "-z"],
+        &[],
+        "inspect hidden tracked files",
+    )?;
+    listed
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .filter(|entry| entry[0] == b'S' || entry[0].is_ascii_lowercase())
+        .map(|entry| {
+            ensure!(
+                entry.get(1) == Some(&b' '),
+                "malformed Git index flag entry"
+            );
+            mj_core::path_input::from_git_bytes(&entry[2..])
+        })
+        .collect()
+}
+
+pub(crate) fn git_text<const N: usize>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     arguments: [&str; N],
@@ -3155,7 +3338,7 @@ fn trim_output(output: &[u8], action: &str) -> Result<String> {
         .to_string())
 }
 
-fn git_failure(action: &str, output: &GitOutput) -> anyhow::Error {
+pub(crate) fn git_failure(action: &str, output: &GitOutput) -> anyhow::Error {
     let stderr = String::from_utf8_lossy(&output.stderr);
     anyhow!(
         "{action} failed with status {}: {}",

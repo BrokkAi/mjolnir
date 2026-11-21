@@ -1159,6 +1159,13 @@ impl ManagedCheckoutKind {
 }
 
 impl ManagedWorktree {
+    #[must_use]
+    pub fn uses_origin_delta_suspend(&self) -> bool {
+        cfg!(any(target_os = "linux", target_os = "macos"))
+            && self.kind == ManagedCheckoutKind::Clone
+            && matches!(self.target, ManagedWorktreeTarget::Local)
+    }
+
     fn validate(&self, session_id: &str, project_directory: Option<&Path>) -> Result<()> {
         for (label, path) in [
             ("source project directory", &self.source_project_directory),

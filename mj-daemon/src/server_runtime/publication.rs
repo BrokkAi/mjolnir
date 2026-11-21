@@ -13,7 +13,7 @@ pub(super) struct ViewerPublication {
     config: Option<Config>,
     rows: crate::server::ViewerSessions,
     operations: BTreeMap<String, crate::server::ViewerOperation>,
-    reviews: BTreeMap<String, crate::review_host::RuntimeReviewView>,
+    reviews: BTreeMap<String, Vec<crate::review_host::RuntimeReviewView>>,
     runtime: RuntimeProjection,
     pub(super) dirty: BTreeSet<String>,
     project_dirty: BTreeSet<String>,
@@ -61,6 +61,12 @@ impl ViewerPublication {
                 .failed_launch_retries
                 .symmetric_difference(&next.metadata.failed_launch_retries)
                 .cloned(),
+        );
+        self.dirty.extend(
+            self.runtime
+                .verdicts
+                .changes(&next.verdicts)
+                .map(|(id, _)| id.clone()),
         );
         for (id, _) in self.runtime.sessions.changes(&next.sessions) {
             self.dirty.insert(id.clone());
@@ -247,7 +253,7 @@ impl ViewerPublication {
                 children: &self.children,
                 failed_launch_retries: Some(&self.runtime.metadata.failed_launch_retries),
             },
-            &self.runtime.metadata,
+            &self.runtime,
         );
         for id in &self.dirty {
             match snapshot.sessions.0.get(id) {

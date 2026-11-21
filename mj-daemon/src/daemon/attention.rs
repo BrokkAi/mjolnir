@@ -64,6 +64,12 @@ pub(super) fn update(
                     .changes(&next.native_agents)
                     .map(|(id, _)| id.clone()),
             )
+            .chain(
+                previous
+                    .moves
+                    .changes(&next.moves)
+                    .map(|(id, _)| id.clone()),
+            )
             .collect()
     };
     if ids.is_empty() {
@@ -249,7 +255,7 @@ fn unread_frontier(runtime: &RuntimeProjection, id: &str) -> Option<u64> {
 
 /// The request owner is the worker. Pre-64 workers retain the latest-turn rule;
 /// remove that compatibility branch when relay protocols below 64 are retired.
-fn semantic_question(
+pub(super) fn semantic_question(
     runtime: &RuntimeProjection,
     id: &str,
 ) -> Option<mj_core::assessment::InferredQuestion> {
@@ -284,6 +290,24 @@ fn semantic_question(
     }
 }
 
+/// Workers before open-request projection can dismiss only their current
+/// inferred assessment. Older workers may be unable to dismiss prose at all.
+pub(super) fn supports_question_dismissal(
+    live: &mj_core::relay::RelayOperationalState,
+    question: &mj_core::assessment::InferredQuestion,
+) -> bool {
+    live.relay_protocol_version.is_some_and(|version| {
+        version >= mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL
+            || version >= mj_core::relay::RELAY_DISMISS_QUESTION_PROTOCOL
+                && live
+                    .assessment
+                    .as_ref()
+                    .and_then(|assessment| assessment.inferred_question())
+                    .as_ref()
+                    == Some(question)
+    })
+}
+
 fn current_condition_failure(runtime: &RuntimeProjection, id: &str) -> bool {
     runtime.records.get(id).is_some_and(|record| {
         record
@@ -300,8 +324,10 @@ fn current_condition_failure(runtime: &RuntimeProjection, id: &str) -> bool {
     })
 }
 
-fn failed_review(review: Option<&mj_client::review::RuntimeReviewView>) -> bool {
-    review.is_some_and(|review| {
+fn failed_review<'a>(
+    reviews: impl IntoIterator<Item = &'a mj_client::review::RuntimeReviewView>,
+) -> bool {
+    reviews.into_iter().any(|review| {
         matches!(
             review.phase,
             TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. })
@@ -328,7 +354,7 @@ fn dismissal(
                     .metadata
                     .reviews
                     .iter()
-                    .find(|review| review.session_id == id),
+                    .filter(|review| review.session_id == id),
             )
         {
             return None;
@@ -340,11 +366,7 @@ fn dismissal(
         SessionAttention::Important => Some(NotificationDismissal::ReadThrough(
             live.assessment.as_deref()?.completed_ordinal,
         )),
-        SessionAttention::NeedsInput
-            if live.relay_protocol_version.is_some_and(|version| {
-                version >= mj_core::relay::RELAY_DISMISS_QUESTION_PROTOCOL
-            }) =>
-        {
+        SessionAttention::NeedsInput => {
             let tail = runtime.transcripts.get(id)?;
             if !tail.header.pending_elicitations.is_empty()
                 || runtime.metadata.reviews.iter().any(|review| {
@@ -354,20 +376,8 @@ fn dismissal(
                 return None;
             }
             let question = semantic_question(runtime, id)?;
-            // Pre-64 workers can dismiss only the current inferred assessment.
-            if live
-                .relay_protocol_version
-                .is_some_and(|version| version < mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL)
-                && live
-                    .assessment
-                    .as_ref()
-                    .and_then(|assessment| assessment.inferred_question())
-                    .as_ref()
-                    != Some(&question)
-            {
-                return None;
-            }
-            Some(NotificationDismissal::Question(question))
+            supports_question_dismissal(live, &question)
+                .then_some(NotificationDismissal::Question(question))
         }
         _ => None,
     }
@@ -394,15 +404,34 @@ fn project_states(
     committed: Option<&CommittedState>,
 ) -> AttentionProjection {
     use SessionAttention::*;
+    // A session's reviews stand for it through the most notable one: a
+    // question, then work in progress, then the most severe settled state.
     let mut reviews = BTreeMap::new();
-    for review in &runtime.metadata.reviews {
-        reviews.entry(review.session_id.as_str()).or_insert(review);
+    for session_id in runtime
+        .metadata
+        .reviews
+        .iter()
+        .map(|review| review.session_id.as_str())
+        .collect::<BTreeSet<_>>()
+    {
+        let of_session = || {
+            runtime
+                .metadata
+                .reviews
+                .iter()
+                .filter(|review| review.session_id == session_id)
+        };
+        if let Some(review) =
+            mj_client::review::most_notable(of_session()).or_else(|| of_session().next())
+        {
+            reviews.insert(session_id, review);
+        }
     }
-    let lifecycles: BTreeSet<_> = runtime
+    let lifecycles: BTreeMap<_, _> = runtime
         .metadata
         .lifecycles
         .iter()
-        .map(|operation| operation.session_id.as_str())
+        .map(|operation| (operation.session_id.as_str(), operation.kind))
         .collect();
     let mut questions = BTreeSet::new();
     let mut native_forms = BTreeMap::new();
@@ -454,7 +483,9 @@ fn project_states(
                     .any(|request| !request.goes_to_parent()),
             )
         })
-        .chain(reviews.values().flat_map(|review| {
+        // Every review's questions count, whichever review stands for the
+        // session in its status.
+        .chain(runtime.metadata.reviews.iter().flat_map(|review| {
             review
                 .questions
                 .iter()
@@ -504,8 +535,12 @@ fn project_states(
             let view = runtime.sessions.get(id);
             let live = view.and_then(|view| view.operational.as_deref());
             let review = reviews.get(id.as_str()).copied();
-            let transitioning =
-                record.state.transition_kind().is_some() || lifecycles.contains(id.as_str());
+            let transitioning = super::verdicts::transition_kind(
+                record,
+                lifecycles.get(id.as_str()).copied(),
+                runtime.moves.get(id),
+            )
+            .is_some();
             let failure = mj_core::attention::FailureIdentity::of(record);
             let dismissed = failure
                 .as_ref()
@@ -542,7 +577,13 @@ fn project_states(
                 })
             {
                 Unreachable
-            } else if failed_review(review) {
+            } else if failed_review(
+                runtime
+                    .metadata
+                    .reviews
+                    .iter()
+                    .filter(|review| review.session_id == id.as_str()),
+            ) {
                 Failed
             } else if questions.contains(id) {
                 NeedsInput
@@ -1088,6 +1129,8 @@ mod tests {
             .metadata
             .reviews
             .push(mj_client::review::RuntimeReviewView {
+                review_id: String::new(),
+                roots: Vec::new(),
                 session_id: "parent".into(),
                 child_session_id: None,
                 phase: TurnReviewPhase::Verdict(ReviewVerdict::Findings {
@@ -1376,6 +1419,8 @@ mod tests {
                     .metadata
                     .reviews
                     .push(mj_client::review::RuntimeReviewView {
+                        review_id: String::new(),
+                        roots: Vec::new(),
                         child_session_id: None,
                         session_id: "parent".into(),
                         phase: TurnReviewPhase::Verdict(ReviewVerdict::Clean),
@@ -2055,6 +2100,8 @@ mod tests {
             .metadata
             .reviews
             .push(mj_client::review::RuntimeReviewView {
+                review_id: String::new(),
+                roots: Vec::new(),
                 child_session_id: None,
                 session_id: "parent".into(),
                 phase: TurnReviewPhase::Verdict(ReviewVerdict::Clean),
@@ -2228,6 +2275,8 @@ mod tests {
             .metadata
             .reviews
             .push(mj_client::review::RuntimeReviewView {
+                review_id: String::new(),
+                roots: Vec::new(),
                 child_session_id: Some("child".into()),
                 session_id: "parent".into(),
                 phase: TurnReviewPhase::Running { roles: vec![] },
@@ -2263,6 +2312,8 @@ mod tests {
             .metadata
             .reviews
             .push(mj_client::review::RuntimeReviewView {
+                review_id: String::new(),
+                roots: Vec::new(),
                 child_session_id: None,
                 session_id: "parent".into(),
                 phase: TurnReviewPhase::Verdict(ReviewVerdict::Failed {

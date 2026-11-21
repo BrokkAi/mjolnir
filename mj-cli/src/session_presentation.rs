@@ -158,7 +158,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
 
-    use super::{apply_session_activity, apply_worker_activity};
+    use super::apply_session_activity;
 
     fn dashboard() -> DashboardState {
         let (config, state) = dashboard_parts();
@@ -436,6 +436,18 @@ mod tests {
     #[test]
     fn activity_projection_captures_current_step_and_connectivity() {
         let mut dashboard = dashboard();
+        dashboard.set_session_verdicts(
+            [(
+                "session-1".into(),
+                mj_client::runtime_feed::SessionVerdict {
+                    live_dashboard: true,
+                    needs_person: true,
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
         let mut view = managed_view(
             operational(RelayExecutionState::Running, Some(1_700_000_000_000)),
             false,
@@ -467,11 +479,10 @@ mod tests {
         assert!(!text.contains("Unreachable"));
     }
 
-    /// I2-7: the composer footer read `Subagents · 0/3` for a child's whole
-    /// turn, because the working count was refreshed only with records.
-    // Hard-won: 6b8110e29c: Launch finding I2-7 left the parent footer at 0/M through a child turn; this checks a child worker report refreshes the displayed count.
+    /// The runtime feed can update the count without publishing changed records.
+    // Hard-won: 6b8110e29c: the parent footer stayed at 0/M through a child turn.
     #[tokio::test]
-    async fn a_child_worker_report_updates_the_parent_footer_working_count() {
+    async fn a_runtime_verdict_updates_the_parent_footer_working_count() {
         let (config, mut state) = dashboard_parts();
         let mut dashboard = DashboardState::new(config, state.clone(), BTreeMap::new());
         let mut child = state.sessions["session-1"].clone();
@@ -513,11 +524,19 @@ mod tests {
         crate::dashboard::refresh_subagent_counts(&mut chats, &dashboard);
         assert_eq!(chats["session-1"].subagent_working_count(), 0);
 
-        let running = managed_view(
-            operational(RelayExecutionState::Running, Some(1_700_000_000_000)),
-            true,
+        dashboard.set_session_verdicts(
+            [(
+                "session-1".into(),
+                mj_client::runtime_feed::SessionVerdict {
+                    live_dashboard: true,
+                    working_children: 1,
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
         );
-        apply_worker_activity(&mut dashboard, &mut chats, "child-1", &running);
+        crate::dashboard::refresh_subagent_counts(&mut chats, &dashboard);
 
         assert_eq!(chats["session-1"].subagent_working_count(), 1);
     }

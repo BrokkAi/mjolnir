@@ -866,7 +866,7 @@ impl ChatState {
                             } else {
                                 self.set_notice(review_status_line(
                                     &review,
-                                    self.turn_review.is_some(),
+                                    self.has_turn_review(),
                                 ));
                             }
                             ChatAction::None

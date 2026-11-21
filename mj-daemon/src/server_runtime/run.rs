@@ -111,12 +111,7 @@ pub(crate) async fn run_server(
             move_recoveries: &move_recoveries,
             capacity: &viewer_capacity(&initial.metadata),
             launch_failures: &launch_failures,
-            reviews: &initial
-                .metadata
-                .reviews
-                .iter()
-                .map(|review| (review.session_id.clone(), review.clone()))
-                .collect(),
+            reviews: &viewer_reviews(&initial.metadata.reviews),
         },
         revision,
     );
@@ -295,10 +290,9 @@ pub(crate) async fn run_server(
         // The transcript tails the browser's conversations are projected
         // from: the same daemon-owned tails the terminal feed serves, so one
         // owner decides what changed in every client's transcript.
-        let mut cache_transcripts = mj_core::snapshot_map::SnapshotMap::<
-            String,
-            mj_client::runtime_feed::SessionTail,
-        >::new();
+        let mut cache_transcripts: Option<
+            mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionTail>,
+        > = None;
         macro_rules! publish_snapshot {
             ($control:lifetime, $revision:expr) => {
                 let runtime = match daemon_runtime.runtime_publication() {
@@ -313,14 +307,18 @@ pub(crate) async fn run_server(
                     }
                 }
                 cache_records = runtime.records.clone();
-                for (id, tail) in cache_transcripts.changes(&runtime.transcripts) {
+                let transcript_changes = cache_transcripts
+                    .as_ref()
+                    .map(|previous| previous.changes(&runtime.transcripts).collect::<Vec<_>>())
+                    .unwrap_or_else(|| runtime.transcripts.iter().map(|(id, tail)| (id, Some(tail))).collect());
+                for (id, tail) in transcript_changes {
                     if let Some(tail) = tail
                         && runtime.records.get(id).is_some_and(|record| record.state.is_active())
                     {
                         conversation_projections.enqueue(tail.materialized());
                     }
                 }
-                cache_transcripts = runtime.transcripts.clone();
+                cache_transcripts = Some(runtime.transcripts.clone());
                 if conversations_changed { conversation_tx.send_replace(conversations.clone()); }
                 publication.observe_runtime(&runtime, &mut native_agents, &mut move_recoveries);
                 install_captured_records(&mut controller, &runtime);
@@ -351,9 +349,7 @@ pub(crate) async fn run_server(
                         move_recoveries: &move_recoveries,
                         capacity: &viewer_capacity(&runtime.metadata),
                         launch_failures: &launch_failures,
-                        reviews: &runtime.metadata.reviews.iter()
-                            .map(|review| (review.session_id.clone(), review.clone()))
-                            .collect(),
+                        reviews: &viewer_reviews(&runtime.metadata.reviews),
                     },
                     $revision,
                 );
@@ -363,8 +359,16 @@ pub(crate) async fn run_server(
                 }
             };
         }
+        let mut publish_startup_capture = true;
         'control: loop {
             project_sources.synchronize(&controller);
+            // Project tails from the startup capture before the phone task can
+            // wait on an unrelated runtime or quota update.
+            if publish_startup_capture {
+                publish_startup_capture = false;
+                revision = daemon_runtime.allocate_revision();
+                publish_snapshot!('control, revision);
+            }
             tokio::select! {
                 _ = termination.cancelled() => break,
                 request = background_task_stop_rx.recv(), if background_task_stop_open => {
@@ -1095,6 +1099,8 @@ pub(crate) async fn run_server(
                     let session_id = match admit_phone_action(
                         &request.action,
                         &mut active_actions,
+                        &action_sessions,
+                        &action_cancellations,
                     ) {
                         Ok(session_id) => session_id,
                         Err(refusal) => {

@@ -578,7 +578,7 @@ pub struct ChatState {
     /// request is answered or withdrawn.
     pending_elicitations: Vec<ElicitationRequest>,
     /// The daemon-owned review projected into prompt status and actions.
-    turn_review: Option<Box<TurnReview>>,
+    turn_reviews: Vec<TurnReview>,
     // None becomes authoritative only after the host supplies its first projection.
     review_projection_known: bool,
     /// What `[review]` says, mirrored from the config the TUI already drains,
@@ -776,7 +776,7 @@ impl ChatState {
             claimed_agent_terminals: BTreeMap::new(),
             elicitation: None,
             pending_elicitations: Vec::new(),
-            turn_review: None,
+            turn_reviews: Vec::new(),
             review_projection_known: false,
             review_config: mj_core::config::ReviewConfig::default(),
             session_review: None,
@@ -1299,7 +1299,7 @@ impl ChatState {
         if !draft.reviewer {
             return false;
         }
-        self.turn_review().is_some_and(|review| {
+        self.turn_reviews().iter().any(|review| {
             review
                 .pending_elicitations()
                 .into_iter()

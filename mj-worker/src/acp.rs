@@ -603,7 +603,8 @@ async fn run_bridge(
             .context("stage Antigravity permission grants task failed")??;
     }
     let spec = &spec;
-    let mut child = Command::new(&spec.command)
+    let mut command = Command::new(&spec.command);
+    command
         .args(&spec.args)
         .env_clear()
         .envs(&spec.environment)
@@ -611,8 +612,8 @@ async fn run_bridge(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+    let mut child = mj_core::subprocess::spawn_async_child(&mut command)
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound && !spec.cwd.is_dir() {
                 anyhow::anyhow!(

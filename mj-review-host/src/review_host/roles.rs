@@ -1,11 +1,11 @@
 use super::*;
 
 impl HostState {
-    pub fn run_one(&mut self, session_id: &str, request: ReviewRequest) {
+    pub fn run_one(&mut self, key: &ReviewKey, request: ReviewRequest) {
         match request {
             ReviewRequest::CaptureDelta => {
                 self.review_step(
-                    session_id,
+                    key,
                     ReviewerAction::CaptureDelta { repositories: None },
                     |outcome| {
                         ReviewStep::Delta(match outcome {
@@ -19,29 +19,32 @@ impl HostState {
                 role,
                 command_id: _,
                 prompt,
-            } => self.register_reviewer_child(session_id, role, prompt),
+            } => self.register_reviewer_child(key, role, prompt),
             ReviewRequest::StartBriefWriter {
                 command_id: _,
                 prompt,
             } => self.register_reviewer_child(
-                session_id,
+                key,
                 mj_core::review::driver::BRIEF_WRITER_ROLE.to_owned(),
                 prompt,
             ),
             ReviewRequest::CloseBriefWriter => {
-                self.close_reviewer_role(session_id, mj_core::review::driver::BRIEF_WRITER_ROLE);
+                self.close_reviewer_role(key, mj_core::review::driver::BRIEF_WRITER_ROLE);
             }
             ReviewRequest::NoteBriefSkipped { reason } => {
-                self.record_notice(session_id, super::persist::brief_skipped_notice(&reason));
+                self.record_notice(
+                    &key.session_id,
+                    super::persist::brief_skipped_notice(&reason),
+                );
             }
             ReviewRequest::CloseReviewer { role } => {
-                self.close_reviewer_role(session_id, &role);
+                self.close_reviewer_role(key, &role);
             }
             ReviewRequest::Close => {
-                if self.closing.contains(session_id) {
+                if self.closing.contains(key) {
                     return;
                 }
-                if let Some(slot) = self.reviews.get_mut(session_id) {
+                if let Some(slot) = self.reviews.get_mut(key) {
                     let outcome = if matches!(
                         slot.driver.phase(),
                         TurnReviewPhase::Resolved(Resolution::Cancelled)
@@ -66,18 +69,19 @@ impl HostState {
                         },
                     };
                     answer(slot.start_reply.take(), outcome);
-                    slot.state.active = None;
-                    slot.state.active_group = None;
-                    let state = slot.state.clone();
-                    self.closing.insert(session_id.to_owned());
+                    slot.open.active = None;
+                    slot.open.active_group = None;
+                    self.closing.insert(key.clone());
                     if let Err(error) = self.persist(
-                        session_id.to_owned(),
-                        state,
-                        Some(PersistenceCompletion::Close(resolution)),
+                        &key.session_id,
+                        Some(PersistenceCompletion::Close {
+                            review_id: key.review_id.clone(),
+                            resolution,
+                        }),
                     ) {
-                        tracing::warn!(session_id, %error, "could not queue review close persistence");
-                        self.closing.remove(session_id);
-                        self.reviews.remove(session_id);
+                        tracing::warn!(session_id = %key.session_id, %error, "could not queue review close persistence");
+                        self.closing.remove(key);
+                        self.drop_slot(key);
                     }
                 }
             }

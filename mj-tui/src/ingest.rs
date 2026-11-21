@@ -1006,17 +1006,6 @@ impl DashboardState {
             .map(|operation| operation.kind)
     }
 
-    /// Whether the daemon has a ready Move destination whose queue admission
-    /// is incomplete. The destination must be retried in place before normal
-    /// session mutations can safely be accepted.
-    pub fn move_queue_admission_incomplete(&self, session_id: &str) -> bool {
-        self.move_operations
-            .get(session_id)
-            .is_some_and(|operation| {
-                operation.queue_admission_started && !operation.queue_admission_finished
-            })
-    }
-
     /// Whether the daemon still owns an active Move intent for this session.
     /// Surfaces use this to keep the transition row while intermediate durable
     /// records (Stopped/Provisioning/Running) catch up.
@@ -1615,19 +1604,24 @@ impl DashboardState {
         &mut self,
         reviews: impl IntoIterator<Item = mj_client::review::RuntimeReviewView>,
     ) {
-        let next: BTreeMap<_, _> = reviews
-            .into_iter()
-            .map(|review| (review.session_id.clone(), review))
-            .collect();
+        let mut next: BTreeMap<String, Vec<mj_client::review::RuntimeReviewView>> = BTreeMap::new();
+        for review in reviews {
+            next.entry(review.session_id.clone())
+                .or_default()
+                .push(review);
+        }
         *self.session_reviews = next;
     }
 
-    /// The authoritative review currently open for a session, if any.
-    pub(crate) fn session_review(
+    /// The authoritative reviews currently open for a session, in the order
+    /// the daemon published them.
+    pub(crate) fn session_reviews(
         &self,
         session_id: &str,
-    ) -> Option<&mj_client::review::RuntimeReviewView> {
-        self.session_reviews.get(session_id)
+    ) -> &[mj_client::review::RuntimeReviewView] {
+        self.session_reviews
+            .get(session_id)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Project the existing summary/projection task owners into hydration

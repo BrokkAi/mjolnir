@@ -165,6 +165,8 @@ fn notice_replacement_does_not_overwrite_a_newer_notice() {
 fn runtime_review_projection_restores_and_removes_session_activity() {
     let mut dashboard = dashboard_with_session(stopped_session());
     let review = mj_client::review::RuntimeReviewView {
+        review_id: String::new(),
+        roots: Vec::new(),
         child_session_id: None,
         session_id: "session-1".into(),
         questions: Vec::new(),
@@ -174,13 +176,33 @@ fn runtime_review_projection_restores_and_removes_session_activity() {
         verdict: None,
     };
 
-    dashboard.set_session_reviews([review]);
-    assert!(dashboard.session_review("session-1").is_some());
+    dashboard.set_session_reviews([review.clone()]);
+    assert!(!dashboard.session_reviews("session-1").is_empty());
+
+    // A session keeps every review it has open: a settled one does not hide
+    // the one still working, and the row shows the working one.
+    let settled = mj_client::review::RuntimeReviewView {
+        review_id: "review-a".into(),
+        roots: vec!["/workspace/a".into()],
+        phase: mj_core::review::driver::TurnReviewPhase::Verdict(
+            mj_core::review::verdict::ReviewVerdict::Findings {
+                synthesis: "[P2] weak test".into(),
+                evidence: Default::default(),
+            },
+        ),
+        ..review.clone()
+    };
+    dashboard.set_session_reviews([settled, review]);
+    assert_eq!(dashboard.session_reviews("session-1").len(), 2);
+    assert_eq!(
+        crate::render::sessions::review_status_label(dashboard.session_reviews("session-1")),
+        Some("Reviewing")
+    );
 
     // Runtime snapshots are complete projections: an empty replacement
     // closes the badge rather than leaving the previous review stuck.
     dashboard.set_session_reviews(Vec::new());
-    assert!(dashboard.session_review("session-1").is_none());
+    assert!(dashboard.session_reviews("session-1").is_empty());
 }
 
 /// The dashboard and every other view (chat, background workers) share

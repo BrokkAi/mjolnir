@@ -724,6 +724,7 @@ dependencies = [
  "chrono",
  "flate2",
  "libc",
+ "percent-encoding",
  "rayon",
  "rusqlite",
  "serde",

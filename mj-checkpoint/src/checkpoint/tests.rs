@@ -1140,7 +1140,9 @@ fn muse_import_normalizes_selected_tree_to_worker_storage() {
 fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
     const NATIVE: &str = "01a00c3a-553f-71e0-95ab-aa04396d3ad7";
     let repositories = vec![crate::archive::RepositoryManifest {
+        origin_delta_pack_path: None,
         metadata: crate::archive::RepositoryMetadata {
+            origin_delta: None,
             review_baseline_ref: None,
             review_refs_metadata_only: false,
             saved_refs: Default::default(),
@@ -1456,7 +1458,9 @@ fn claude_project_slug_matches_captured_local_rollout_fixtures() {
 #[test]
 fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
     let repositories = vec![crate::archive::RepositoryManifest {
+        origin_delta_pack_path: None,
         metadata: crate::archive::RepositoryMetadata {
+            origin_delta: None,
             review_baseline_ref: None,
             review_refs_metadata_only: false,
             saved_refs: Default::default(),
@@ -1505,7 +1509,9 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
 #[test]
 fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
     let repositories = vec![crate::archive::RepositoryManifest {
+        origin_delta_pack_path: None,
         metadata: crate::archive::RepositoryMetadata {
+            origin_delta: None,
             review_baseline_ref: None,
             review_refs_metadata_only: false,
             saved_refs: Default::default(),
@@ -2145,6 +2151,7 @@ fn codex_root_archive_throughput() {
         .repositories
         .iter()
         .map(|repository| RepositorySnapshot {
+            origin_delta_pack: None,
             metadata: repository.metadata.clone(),
             committed_bundle: Vec::new(),
             staged_patch: Vec::new(),
@@ -4340,7 +4347,7 @@ fn incompatible_schema_is_rejected_before_restore_mutates_target() {
     for schema_version in [
         1,
         crate::archive::ARCHIVE_SCHEMA_VERSION + 1,
-        crate::archive::ARCHIVE_SCHEMA_VERSION_MAILBOX + 1,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA + 1,
     ] {
         let incompatible = temp
             .path()

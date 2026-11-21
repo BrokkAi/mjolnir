@@ -99,9 +99,7 @@ impl DashboardState {
             } else if let Some(session) = startup {
                 let session_id = session.id.clone();
                 if session.state == mj_core::state::SessionState::Stopped {
-                    // The runtime feed carries only live sessions; the resume
-                    // wizard reads this one from the on-demand store.
-                    self.remember_stopped_record(session);
+                    // The host fetched the stopped record and its verdict on demand.
                     self.begin_resume_for(&session_id)
                 } else {
                     self.select_active_session(&session_id);

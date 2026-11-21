@@ -5,7 +5,7 @@ use mj_core::review::driver::TurnReviewPhase;
 #[derive(Debug)]
 pub(super) struct TurnReview {
     pub(super) view: RuntimeReviewView,
-    failure: Option<String>,
+    pub(super) failure: Option<String>,
 }
 
 impl TurnReview {
@@ -59,21 +59,84 @@ pub enum TurnReviewIntent {
 }
 
 impl super::ChatState {
-    pub(super) fn turn_review(&self) -> Option<&TurnReview> {
-        self.turn_review.as_deref()
+    /// The session's open reviews, in the order the daemon published them.
+    pub(super) fn turn_reviews(&self) -> &[TurnReview] {
+        &self.turn_reviews
     }
-    pub(super) fn turn_review_mut(&mut self) -> Option<&mut TurnReview> {
-        self.turn_review.as_deref_mut()
+
+    /// The reviews' own views, for the aggregations that read only them.
+    pub(super) fn review_views(&self) -> impl Iterator<Item = &RuntimeReviewView> {
+        self.turn_reviews.iter().map(|review| &review.view)
     }
-    pub(super) fn set_turn_review(&mut self, view: Option<RuntimeReviewView>) {
-        self.review_projection_known = true;
-        match (view, self.turn_review.as_mut()) {
-            (Some(view), Some(open)) => {
-                open.update(view);
-            }
-            (Some(view), None) => self.turn_review = Some(Box::new(TurnReview::new(view))),
-            (None, _) => self.turn_review = None,
+
+    pub(super) fn has_turn_review(&self) -> bool {
+        !self.turn_reviews.is_empty()
+    }
+
+    /// The one line the footer shows for the reviews: the status of a single
+    /// review, or each review's status after its repositories when there are
+    /// several.
+    pub(super) fn turn_review_status(&self) -> Option<String> {
+        match self.turn_reviews.as_slice() {
+            [] => None,
+            [only] => Some(only.status()),
+            // One row has room for each review's repository and state, not for
+            // each review's full status.
+            several => Some(
+                several
+                    .iter()
+                    .map(|review| {
+                        let state = review
+                            .failure
+                            .clone()
+                            .or_else(|| review.view.activity_label().map(str::to_owned))
+                            .unwrap_or_else(|| "Reviewing".to_owned());
+                        let roots = review.view.roots_label();
+                        if roots.is_empty() {
+                            state
+                        } else {
+                            format!("{roots}: {state}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            ),
         }
+    }
+
+    /// Reports a refusal on the review it is about when exactly one is open;
+    /// with several, a refusal cannot be tied to one of them, so it is a
+    /// notice.
+    pub(super) fn report_turn_review_failure(&mut self, message: String) {
+        match self.turn_reviews.as_mut_slice() {
+            [only] => {
+                only.report_failure(message);
+            }
+            _ => self.set_notice(message),
+        }
+    }
+
+    /// Replaces the open reviews with the daemon's latest projection. A review
+    /// that stays open keeps the failure it reported.
+    pub(super) fn set_turn_reviews(&mut self, views: Vec<RuntimeReviewView>) {
+        self.review_projection_known = true;
+        let mut previous = std::mem::take(&mut self.turn_reviews);
+        self.turn_reviews = views
+            .into_iter()
+            .map(|view| {
+                match previous
+                    .iter()
+                    .position(|open| open.view.review_id == view.review_id)
+                {
+                    Some(index) => {
+                        let mut open = previous.swap_remove(index);
+                        open.update(view);
+                        open
+                    }
+                    None => TurnReview::new(view),
+                }
+            })
+            .collect();
     }
 }
 

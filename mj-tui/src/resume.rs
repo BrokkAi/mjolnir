@@ -1178,15 +1178,14 @@ impl DashboardState {
         } else {
             history_rows
         };
-        self.resume_rows = rows;
-        self.resume_hit_counts = hits;
-        self.resume_rows.retain(|row| {
-            row.session_id().is_none_or(|id| {
-                self.session_operations
-                    .get(id)
-                    .is_none_or(|operation| operation.kind.transition_kind().is_none())
+        self.resume_rows = rows
+            .into_iter()
+            .filter(|row| {
+                row.session_id()
+                    .is_none_or(|id| self.transition_kind(id).is_none())
             })
-        });
+            .collect();
+        self.resume_hit_counts = hits;
         for row in &mut self.resume_rows {
             // Recovery is the settled record's offer; Enter on a running session
             // goes to it, so a mark inviting a recovery here would not act.
@@ -1258,7 +1257,7 @@ impl DashboardState {
                     || self
                         .session_reviews
                         .get(&session.id)
-                        .is_some_and(|review| review.is_working())
+                        .is_some_and(|reviews| mj_client::review::any_working(reviews.iter()))
             })
     }
 
@@ -1315,10 +1314,11 @@ impl DashboardState {
     /// stopped one loaded on demand for the resume dialog, `mj go`, or an
     /// import. The feed carries only live sessions.
     pub fn session_record(&self, session_id: &str) -> Option<&SessionRecord> {
-        self.state
-            .sessions
-            .get(session_id)
-            .or_else(|| self.stopped_records.get(session_id))
+        self.state.sessions.get(session_id).or_else(|| {
+            self.stopped_records
+                .get(session_id)
+                .map(|cached| &cached.record)
+        })
     }
 
     /// Replace what new-session defaults are chosen from.
@@ -1362,8 +1362,12 @@ impl DashboardState {
 
     /// Keep one stopped record that something loaded on demand: the session
     /// `mj go` starts in, or a session just imported.
-    pub fn remember_stopped_record(&mut self, record: SessionRecord) {
-        self.stopped_records.insert(record.id.clone(), record);
+    pub fn remember_stopped_record(
+        &mut self,
+        session: mj_client::daemon::SessionRecordWithVerdict,
+    ) {
+        self.stopped_records
+            .insert(session.record.id.clone(), session);
     }
 
     /// Open the resume wizard on a record fetched for the row picked in the
@@ -1372,7 +1376,7 @@ impl DashboardState {
     pub fn apply_resume_record(
         &mut self,
         session_id: &str,
-        record: Result<Option<SessionRecord>, String>,
+        record: Result<Option<mj_client::daemon::SessionRecordWithVerdict>, String>,
     ) -> DashboardAction {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return DashboardAction::None;

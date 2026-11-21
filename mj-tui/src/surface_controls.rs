@@ -703,6 +703,7 @@ mod tests {
         second.id = "another-session".into();
         second.session_title_override = Some("Menu target B".into());
         dashboard.state.sessions.insert(second.id.clone(), second);
+        crate::test_support::publish_fixture_verdicts(&mut dashboard);
         dashboard.conversation_area = Some(Rect::new(0, 0, 120, 40));
         let pinned = dashboard.browse_pane();
         dashboard.set_pane_session(pinned, Some("session-1"));
@@ -906,6 +907,7 @@ mod tests {
         ] {
             dashboard.state.sessions.insert(session.id.clone(), session);
         }
+        crate::test_support::publish_fixture_verdicts(&mut dashboard);
         dashboard.select_active_session("c-name");
         dashboard.focus_sessions();
         let ids = |dashboard: &DashboardState| {
@@ -1106,6 +1108,7 @@ mod tests {
         let mut second = running_session();
         second.id = "another-session".into();
         navigation.state.sessions.insert(second.id.clone(), second);
+        crate::test_support::publish_fixture_verdicts(&mut navigation);
         navigation.focus_sessions();
         navigation.set_selection_for(Focus::Sessions, 0);
         append_state(
@@ -1544,6 +1547,7 @@ mod tests {
             .state
             .sessions
             .insert(branch_session.id.clone(), branch_session);
+        crate::test_support::publish_fixture_verdicts(&mut branch);
         branch.focus_sessions();
         branch.handle_key(key(KeyCode::Char('/')));
         for character in "OCTOPUS".chars() {

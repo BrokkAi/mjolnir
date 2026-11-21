@@ -1136,6 +1136,13 @@ pub async fn run_session_actor(
                                 .send(Err("session is reserved for a lifecycle operation".into()));
                             continue;
                         }
+                        if background_task_id.starts_with("native-agent:")
+                            && super::move_ownership::move_owns_session(&target.session_id)
+                        {
+                            let _ = reply
+                                .send(Err("session is moving; retry after Move finishes".into()));
+                            continue;
+                        }
                         let result = async {
                             sync_actor_connection(&updates.session_gate, &target, &mut connection)
                                 .await?;
@@ -1724,6 +1731,9 @@ pub async fn drive_reviewer(
                 changed,
             }
         }
+        ReviewerAction::ResolveRepositories { paths } => ReviewerOutcome::Repositories {
+            roots: client.resolve_repositories(role, paths).await?,
+        },
     })
 }
 

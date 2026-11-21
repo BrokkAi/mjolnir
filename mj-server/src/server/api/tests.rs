@@ -7679,31 +7679,34 @@ async fn finished_review_api_returns_reviewer_output_after_the_child_is_gone() {
     let command = driver.snapshot().roles[0].command_id.clone();
     driver.role_turn_completed(&command, &child.id, "The parser drops queued input.");
     let state = mj_core::storage::TurnReviewState {
-        active: Some("api-review".into()),
-        active_group: Some(mj_core::storage::ActiveReviewGroup {
-            driver: driver.snapshot(),
-            reviewers: vec![mj_core::review::settings::ResolvedReviewSettings {
-                profile: "codex".into(),
-                main: mj_core::review::settings::ReviewModelSettings {
-                    model: Some("gpt-6-terra".into()),
-                    effort: Some("xhigh".into()),
-                    fast_mode: false,
-                },
-                autoconfigured: false,
-            }],
-            registrations: vec![mj_core::storage::ReviewerRegistration {
-                role: "reviewer-1".into(),
-                request_key: "review-key".into(),
-                child_session_id: Some(child.id.clone()),
-            }],
-            brief_writer: None,
-        }),
+        open_reviews: vec![mj_core::storage::OpenReview {
+            active: Some("api-review".into()),
+            active_group: Some(mj_core::storage::ActiveReviewGroup {
+                driver: driver.snapshot(),
+                reviewers: vec![mj_core::review::settings::ResolvedReviewSettings {
+                    profile: "codex".into(),
+                    main: mj_core::review::settings::ReviewModelSettings {
+                        model: Some("gpt-6-terra".into()),
+                        effort: Some("xhigh".into()),
+                        fast_mode: false,
+                    },
+                    autoconfigured: false,
+                }],
+                registrations: vec![mj_core::storage::ReviewerRegistration {
+                    role: "reviewer-1".into(),
+                    request_key: "review-key".into(),
+                    child_session_id: Some(child.id.clone()),
+                }],
+                brief_writer: None,
+            }),
+        }],
         ..Default::default()
     };
     mj_controller::database::save_reviewer_outcome(
         &parent.id,
         &state,
         vec![mj_controller::database::AcceptedReport {
+            review_id: "api-review".into(),
             role: "reviewer-1".into(),
             text: "The parser drops queued input.".into(),
         }],
@@ -7711,9 +7714,9 @@ async fn finished_review_api_returns_reviewer_output_after_the_child_is_gone() {
     .unwrap();
     mj_controller::database::close_turn_review_state(
         &parent.id,
+        "api-review",
         &mj_core::storage::TurnReviewState {
-            active: None,
-            active_group: None,
+            open_reviews: Vec::new(),
             ..state
         },
         mj_core::storage::FinishedReviewResolution::Completed,

@@ -142,10 +142,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     /// Interrupt all finished sending. Each failure names the session or
     /// native sub-agent view it was for.
-    InterruptAllFinished {
-        targets: mj_tui::InterruptAllTargets,
-        failures: Vec<(String, String)>,
-    },
+    InterruptAllFinished(Result<mj_client::daemon::InterruptAllResult>),
     ReviewRefused {
         session_id: String,
         message: String,
@@ -274,7 +271,8 @@ pub(crate) enum DashboardIoUpdate {
     /// The record of the row picked in the resume dialog.
     ResumeRecord {
         session_id: String,
-        result: Box<std::result::Result<Option<SessionRecord>, String>>,
+        result:
+            Box<std::result::Result<Option<mj_client::daemon::SessionRecordWithVerdict>, String>>,
     },
     /// One SessionWiki search result. The request id is the dialog's; an
     /// answer for an older one is dropped there.
@@ -510,6 +508,7 @@ pub(crate) enum RemotePreflightOutcome {
 }
 
 pub(crate) struct ImportedDashboardSessionApply {
+    verdict: mj_client::runtime_feed::SessionVerdict,
     harness: &'static str,
     native_session_id: String,
     session: SessionRecord,
@@ -820,9 +819,10 @@ impl DashboardContext {
                 self.dashboard
                     .native_agent_stop_finished(&owner, &child, result);
             }
-            DashboardIoUpdate::InterruptAllFinished { targets, failures } => {
-                self.dashboard.interrupt_all_finished(&targets, failures);
-            }
+            DashboardIoUpdate::InterruptAllFinished(result) => match result {
+                Ok(result) => self.dashboard.interrupt_all_finished(result.requested, result.failures),
+                Err(error) => self.dashboard.set_notice(format!("Could not interrupt all: {error:#}")),
+            },
             DashboardIoUpdate::ReviewRefused {
                 session_id,
                 message,
@@ -1521,8 +1521,10 @@ impl DashboardContext {
                     let session_id = applied.session.id.clone();
                     // The import's own answer carries the stopped record the
                     // resume wizard opens on.
-                    self.dashboard
-                        .remember_stopped_record(applied.session.clone());
+                    self.dashboard.remember_stopped_record(mj_client::daemon::SessionRecordWithVerdict {
+                        record: applied.session.clone(),
+                        verdict: applied.verdict,
+                    });
                     self.resolve_project_sources();
                     self.dashboard.set_notice(format!(
                         "Imported {} session {}.",
@@ -2259,6 +2261,7 @@ mod tests {
         let session = lifecycle_session("imported", "workspace", SessionState::Stopped);
         let completion = DashboardIoUpdate::ImportedSessionApplied {
             result: Box::new(Ok(ImportedDashboardSessionApply {
+                verdict: Default::default(),
                 harness: "codex",
                 native_session_id: "native".into(),
                 session: session.clone(),

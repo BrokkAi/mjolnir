@@ -156,6 +156,22 @@ impl DashboardState {
         let Some(session) = self.session_record(session_id).cloned() else {
             return DashboardAction::None;
         };
+        use mj_client::runtime_feed::SessionOffer;
+        let offer = self.verdict(session_id).resume;
+        if !offer.offered() {
+            let message = match offer {
+                SessionOffer::Active => "This session is active; press Enter to open it.",
+                SessionOffer::MoveQueueHeld | SessionOffer::MoveEnvironmentRetained => {
+                    "Retry Move to recover this session."
+                }
+                SessionOffer::Transitioning | SessionOffer::OperationInProgress => {
+                    "This session already has an operation in progress."
+                }
+                _ => "This session has no verified recovery copy to resume.",
+            };
+            self.notices.set(message);
+            return DashboardAction::None;
+        }
         if self.failed_launch_retries.contains(session_id) {
             return DashboardAction::ResumeSession {
                 session_id: session.id,
@@ -166,19 +182,6 @@ impl DashboardState {
                 resource_allocation: session.resource_allocation,
                 discard_queue: false,
             };
-        }
-        let session = &session;
-        if session.state.is_active() && session.state != SessionState::Error {
-            self.notices
-                .set("This session is active; press Enter to open it.");
-            return DashboardAction::None;
-        }
-        if session.checkpoint.is_none()
-            && !(session.state == SessionState::Error && session.target.is_some())
-        {
-            self.notices
-                .set("This session has no verified recovery copy to resume.");
-            return DashboardAction::None;
         }
         self.want_availability_check();
         if self.compatible_profiles(&session.id).is_empty()
@@ -310,16 +313,6 @@ impl DashboardState {
         let Some(session) = self.selected_session().cloned() else {
             return DashboardAction::None;
         };
-        if !session.state.is_active() {
-            self.notices
-                .set("Move is available for active sessions only.");
-            return DashboardAction::None;
-        }
-        if self.session_operation_kind(&session.id).is_some() {
-            self.notices
-                .set("This session already has an operation in progress.");
-            return DashboardAction::None;
-        }
         self.want_availability_check();
         if self.compatible_profiles(&session.id).is_empty()
             || self.offered_target_indices().is_empty()

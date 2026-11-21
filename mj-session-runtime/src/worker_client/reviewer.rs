@@ -95,6 +95,28 @@ impl RelayClient {
         }
     }
 
+    /// Name the repository roots `paths` select, with no capture and no ref
+    /// written.
+    pub async fn resolve_repositories(
+        &mut self,
+        role: Option<&str>,
+        paths: Vec<std::path::PathBuf>,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        let request =
+            self.reviewer_request(role, ReviewerRequest::ResolveRepositories { paths })?;
+        anyhow::ensure!(
+            request.supported_at(self.protocol_version),
+            "the session's worker cannot resolve repositories; restart the session"
+        );
+        match self
+            .call_with_timeout(request, REVIEW_CAPTURE_TIMEOUT)
+            .await?
+        {
+            RelayResponsePayload::ReviewRepositories { roots } => Ok(roots),
+            _ => bail!("relay returned an unexpected repository resolution response"),
+        }
+    }
+
     /// Wraps a reviewer action, refusing it on a worker too old to know what a
     /// reviewer is rather than sending a method it would reject as unknown.
     pub fn reviewer_request(

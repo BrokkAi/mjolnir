@@ -1128,19 +1128,10 @@ function sessionMessageMs(session) {
   return epochMs(session.last_message_at_ms) ?? sessionActivityMs(session);
 }
 
-function isTransitioningSession(session) {
-  if (!session) return false;
-  if (session.transitioning === true) return true;
-  // A snapshot from just before the shared boolean was deployed still has
-  // enough information to protect its transcript: every operation except a
-  // normal checkpoint owns the conversation until completion.
-  return Boolean(session.operation && session.operation.kind !== 'checkpoint');
-}
-
 /// A failed Move has a status view even after its transcript worker stops.
 function canViewConversation(session) {
   return Boolean(session && (session.capabilities?.open
-    || isTransitioningSession(session) || session.move_recovery?.failure_notice));
+    || session?.verdict?.transition || session.move_recovery?.failure_notice));
 }
 
 function isMoveFailureStatus(session) {
@@ -1157,18 +1148,13 @@ function isLoadingConversationSession(session) {
     session
     && session.id === currentSession
     && !session.capabilities?.open
-    && !isTransitioningSession(session)
+    && !session?.verdict?.transition
     && session.operation?.kind !== 'checkpoint'
     && session.lifecycle === 'live'
     && session.attention !== 'failed'
     && (conversationMode === 'loading' || conversationMode?.startsWith('transition:')
       || conversationMode?.startsWith('move-failure:')),
   );
-}
-
-function isDashboardSession(session) {
-  return ['live', 'starting', 'suspending'].includes(session.lifecycle)
-    || isTransitioningSession(session);
 }
 
 function publishedNotificationDismissal(session) {
@@ -1340,7 +1326,8 @@ function inboxEntries() {
     if (stack) return !notificationDismissed(row);
     // Older daemons omit notification_card. New daemons publish null for
     // sessions with no card, while failures still come from attention.
-    return (!Object.hasOwn(row, 'notification_card') || inboxSessionFailed(row))
+    return row.verdict?.needs_person
+      && (!Object.hasOwn(row, 'notification_card') || inboxSessionFailed(row))
       && !isSubagentSession(row) && hasNotification(row);
   });
   const band = row => {
@@ -2377,7 +2364,7 @@ function sessionMenuActions(session) {
   const can = session.capabilities || {};
   const actions = [];
   if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
-  if (session.lifecycle === 'live' && !isTransitioningSession(session)) actions.push(['Changed files…', 'secondary', 'changed-files']);
+  if (session.lifecycle === 'live' && !session?.verdict?.transition) actions.push(['Changed files…', 'secondary', 'changed-files']);
   if (can.dismiss_notification) actions.push(['Dismiss notification', 'secondary', 'dismiss-notification']);
   actions.push([session.notifications_ignored ? 'Stop ignoring' : 'Ignore', 'secondary', 'set-session-notifications-ignored']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
@@ -2592,7 +2579,7 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   // A sub-agent whose turn ended: idle, with its processes stopped until its
   // parent sends it more input.
   if (session.state === 'parked') return 'Parked';
-  if (session.attention === 'failed' && isTransitioningSession(session)) return 'Needs recovery';
+  if (session.attention === 'failed' && session?.verdict?.transition) return 'Needs recovery';
   if (['starting', 'suspending', 'failed'].includes(session.lifecycle)) {
     return sessionLifecycleLabel(session);
   }
@@ -2661,7 +2648,7 @@ function updateSessionClocks() {
     card._activity.textContent = sessionActivityLabel(card._session);
   }
   const selected = sessionById(currentSession);
-  if (isTransitioningSession(selected)) {
+  if (selected?.verdict?.transition) {
     conversationTransitionStage.textContent = sessionActivityLabel(selected);
   }
 }
@@ -4489,11 +4476,11 @@ function isResumeSession(session) {
 /// written from, so the card never offers an action that guidance rules out.
 function resumeMoveRecovery(session) {
   const recovery = session?.move_recovery;
-  const active = ['live', 'starting', 'suspending'].includes(session?.lifecycle);
+  const active = session?.verdict?.resume === 'active';
   const queuePinned = Boolean(recovery?.queue_admission_started && !recovery.queue_admission_finished);
   const settled = ['failed', 'cancelled'].includes(recovery?.phase);
   const retry = Boolean(recovery?.checkpoint_retained && settled);
-  const resume = session?.capabilities?.resume === true && !queuePinned && !active;
+  const resume = session?.capabilities?.resume === true;
   let status = '';
   if (recovery) {
     status = recovery.phase === 'cancelled' ? 'Move cancelled.'
@@ -5334,15 +5321,15 @@ function updateResumeCard(card, session, rebuild = false) {
     body.append(moveRow);
   }
   const noRecovery = !recovery?.checkpoint_retained && ['lost', 'destroyed-with-data-loss'].includes(session.state);
-  const canResume = move.resume && !noRecovery;
+  const canResume = move.resume;
   // `capabilities.open` only says the conversation can be read; a failed or
   // stopped session has one too. Only the lifecycle says it is active.
-  const stale = move.active || isTransitioningSession(session);
+  const stale = move.active || session?.verdict?.transition;
   card._invalid = false;
   if (stale) {
     body.append(el('p', 'dim', 'This session is active now and cannot be resumed.'));
     const open = button(session.capabilities?.open ? 'Open session' : 'View session status', 'secondary');
-    open.onclick = () => navigate(session.capabilities?.open || isTransitioningSession(session)
+    open.onclick = () => navigate(session.capabilities?.open || session?.verdict?.transition
       ? { name: 'conversation', sessionId: session.id }
       : { name: 'dashboard', workspaceId: session.workspace_id });
     body.append(open);
@@ -5520,7 +5507,7 @@ function moveSubagentChange(draft) {
 /// Working children the prepared Move stops; an in-place Move that keeps
 /// them reports none.
 function moveStoppedChildren(session, preparation) {
-  return preparation?.stops_subagents ? workingChildCount(session) : 0;
+  return preparation?.stops_subagents ? (session?.verdict?.unfinished_children ?? 0) : 0;
 }
 
 function moveQueueItemText(item) {
@@ -6434,7 +6421,7 @@ class ViewerRuntimeState {
 }
 
 const viewerState = new ViewerRuntimeState(
-  session => !isSubagentSession(session) && isDashboardSession(session),
+  session => !isSubagentSession(session) && session.verdict?.live_dashboard,
   session => !isSubagentSession(session) && isResumeSession(session),
   resumeActivityMs,
 );
@@ -6486,15 +6473,6 @@ function detailFailure(container, error, retry) {
   const again = button('Retry');
   again.onclick = retry;
   container.replaceChildren(message, again);
-}
-
-/// Children still at their task, which a suspend or a Move stops and loses.
-/// An idle child has handed back and is stopped without a word.
-function workingChildCount(session) {
-  return (session?.subagent_session_ids || [])
-    .map(id => sessionById(id))
-    .filter(child => child && child.lifecycle === 'live' && child.chat_phase === 'running')
-    .length;
 }
 
 function sessionInWorkspace(id, workspace) {
@@ -6566,7 +6544,7 @@ function startEvents(since = viewerState.cursor) {
       }
       if (!currentSession) return;
       const session = sessionById(currentSession);
-      if (session?.capabilities?.open && !isTransitioningSession(session)) {
+      if (session?.capabilities?.open && !session?.verdict?.transition) {
         loadConversation(true);
       }
     } catch (error) {
@@ -8131,7 +8109,7 @@ function syncSendButtonDisabled() {
   const canPrompt = Boolean(
     session
     && session.capabilities?.prompt !== false
-    && !isTransitioningSession(session)
+    && !session?.verdict?.transition
     && !isLoadingConversationSession(session),
   );
   sendButton.disabled = !canPrompt
@@ -9275,7 +9253,7 @@ function clearConversationContents() {
 /// previous mode. This is independent of navigation: a late response from a
 /// still-valid session is just as stale once its operation owns the session.
 function syncConversationMode(session) {
-  const transition = isTransitioningSession(session);
+  const transition = session?.verdict?.transition;
   const loading = !transition && isLoadingConversationSession(session);
   const operationId = session?.operation?.id || session?.state || session?.lifecycle || '';
   const statusOnly = isMoveFailureStatus(session);
@@ -9311,7 +9289,7 @@ function renderConversationTransition(session) {
       }
     }
   }
-  const transition = isTransitioningSession(session);
+  const transition = session?.verdict?.transition;
   const loading = !transition && isLoadingConversationSession(session);
   const statusOnly = isMoveFailureStatus(session);
   const unavailable = transition || loading || statusOnly;
@@ -9366,7 +9344,7 @@ async function persistVisibleConversationRead() {
     || route.name !== 'conversation'
     || route.sessionId !== sessionId || !sessionId) return;
   const session = sessionById(sessionId);
-  if (!session?.capabilities?.open || isTransitioningSession(session)) return;
+  if (!session?.capabilities?.open || session?.verdict?.transition) return;
   const latest = feed.lastElementChild;
   if (!latest) return;
   const viewport = feedScroll.getBoundingClientRect();
@@ -9405,7 +9383,7 @@ async function persistVisibleConversationRead() {
 async function loadConversation(delta = false) {
   if (!currentSession) return;
   const current = sessionById(currentSession);
-  if (!current?.capabilities?.open || isTransitioningSession(current)) {
+  if (!current?.capabilities?.open || current?.verdict?.transition) {
     if (canViewConversation(current) || isLoadingConversationSession(current)) {
       renderConversationTransition(current);
     }
@@ -9440,7 +9418,7 @@ async function loadConversation(delta = false) {
     if (
       generation !== conversationGeneration
       || !latest?.capabilities?.open
-      || isTransitioningSession(latest)
+      || latest?.verdict?.transition
     ) return;
     renderEntries(result.entries, !delta || result.reset);
     if (!delta) scrollToQuestionTarget(latest);
@@ -9454,7 +9432,7 @@ async function loadConversation(delta = false) {
     if (
       generation !== conversationGeneration
       || !latest?.capabilities?.open
-      || isTransitioningSession(latest)
+      || latest?.verdict?.transition
     ) return;
     if (err.message === 'unauthorized') {
       showLogin();
@@ -9525,7 +9503,7 @@ async function openConversation(id) {
   renderConversationHeader(session);
   clearPromptImages();
   restoreDraft(id, conversationGeneration);
-  if (!isTransitioningSession(session)) await loadConversation(false);
+  if (!session?.verdict?.transition) await loadConversation(false);
 }
 
 /// The header, the turn control and the composer, all from what the daemon
@@ -9785,14 +9763,22 @@ function bindTurnControlButton(target, binding) {
 }
 
 function renderTurnControl(session) {
+  const held = session.verdict?.move_queue_held;
   const control = turnControlState(session);
+  const published = session.turn_controls;
+  cancelTurnButton.classList.toggle(
+    'hidden',
+    held || session.verdict?.transition || isLoadingConversationSession(session)
+      || (published ? !(published.primary || published.interrupt || control.pending || control.uncertain)
+        : !session.capabilities?.interrupt_turn),
+  );
   cancelTurnButton.textContent = control.label;
   cancelTurnButton.disabled = control.pending || control.uncertain || control.unavailable || pendingTurnControls.has(session.id);
   cancelTurnButton.title = control.message || control.label;
   bindTurnControlButton(cancelTurnButton, { sessionId: session.id, command: control.command, legacy: !session.turn_controls });
   const actions = document.querySelector('#turn-actions');
   const interrupt = document.querySelector('#interrupt-turn');
-  actions.hidden = !control.interrupt || control.command?.type === 'cancel_turn_for';
+  actions.hidden = held || !control.interrupt || control.command?.type === 'cancel_turn_for';
   interrupt.disabled = pendingTurnControls.has(session.id);
   bindTurnControlButton(interrupt, { sessionId: session.id, command: control.interrupt });
   let panel = document.querySelector('#turn-control-status');
@@ -9801,7 +9787,7 @@ function renderTurnControl(session) {
     panel.setAttribute('role', 'status'); document.querySelector('.conversation-header').after(panel);
   }
   panel.replaceChildren();
-  if (control.message && !control.pending && !control.uncertain) panel.append(el('p', 'turn-control-explanation', control.message));
+  if (!held && control.message && !control.pending && !control.uncertain) panel.append(el('p', 'turn-control-explanation', control.message));
   const signature = `${session.steering?.command_id}:${session.steering?.status}:${session.active_prompt_id || ''}`;
   const localError = failedTurnControls.get(session.id);
   if (!(control.uncertain || control.failed || localError) || dismissedTurnControls.get(session.id) === signature) return;
@@ -9810,6 +9796,7 @@ function renderTurnControl(session) {
   const keep = button('Keep queued');
   keep.onclick = () => { dismissedTurnControls.set(session.id, signature); panel.replaceChildren(); };
   panel.append(keep);
+  if (held) return;
   if (control.interrupt && session.active_prompt_id && (localError ? localError.activePromptId === session.active_prompt_id : session.steering?.active_prompt_id === session.active_prompt_id)) {
     const cancel = button('Interrupt');
     cancel.title = 'Interrupt this turn; queued input stays ordered.';
@@ -9833,8 +9820,7 @@ function renderConversationHeader(session) {
   renderModelSelect(session);
   const children = childSessionIds(session, 'worker');
   const native = session?.native_subagents || [];
-  const working = children.filter(id => sessionById(id)?.chat_phase === 'running').length
-    + new Set(native.filter(a => a.state === 'running').map(a => a.stable_id || a.session_id)).size;
+  const working = session?.verdict?.working_children ?? 0;
   const total = children.length + native.length;
   // A child's approval is not shown in this conversation, so say it is waiting.
   const waiting = Boolean(childFormHolder(session));
@@ -9875,14 +9861,6 @@ function renderConversationHeader(session) {
   state.textContent = sessionLifecycleLabel(session);
   state.className = `pill state-${session.lifecycle}`;
   renderConversationTransition(session);
-  cancelTurnButton.classList.toggle(
-    'hidden',
-    isTransitioningSession(session)
-      || isLoadingConversationSession(session)
-      || (session.turn_controls ? !(session.turn_controls.primary || session.turn_controls.interrupt
-        || ['pending', 'unconfirmed'].includes(session.turn_controls.status)) : !session.capabilities?.interrupt_turn),
-  );
-
   renderTurnControl(session);
   const running = session.chat_phase === 'running';
   const queued = (session.queued_prompts || []).length;
@@ -10316,18 +10294,25 @@ async function runSessionAction(dataset, errorNode, extra) {
     }
   }
   if (dataset.action === 'interrupt-all') {
-    if (!confirm('Interrupt all turns?\n\nInterrupt the running turns of this session and its sub-agents.')) return false;
+    const verdict = sessionById(dataset.id)?.verdict;
+    const parent = verdict?.interrupt_member === true;
+    const children = (verdict?.interrupt_count ?? 0) - Number(parent);
+    const targets = [
+      ...(parent ? ['this session'] : []),
+      ...(children > 0 ? [children === 1 ? '1 sub-agent' : `${children} sub-agents`] : []),
+    ];
+    if (!targets.length || !confirm(`Interrupt all turns?\n\nInterrupt ${targets.join(' and ')}.`)) return false;
   }
   if (dataset.action === 'suspend') {
     const session = sessionById(dataset.id);
     // A suspend stops the sub-agents without a checkpoint. Only the ones
     // still at their task lose anything; an idle one has handed back.
-    const workingChildren = workingChildCount(session);
+    const unfinishedChildren = session.verdict?.unfinished_children ?? 0;
     const question = 'Suspend session?\n\nSave a recovery copy and release the environment. You can resume this session later.'
       + '\n\nAny unpublished or unverified Git work will be kept in the recovery copy until you resume.'
       + (session?.chat_phase === 'running' ? '\n\nThe current turn will be interrupted.' : '')
-      + (workingChildren === 1 ? '\n\n1 sub-agent has not handed back; suspending stops it.' : '')
-      + (workingChildren > 1 ? `\n\n${workingChildren} sub-agents have not handed back; suspending stops them.` : '');
+      + (unfinishedChildren === 1 ? '\n\n1 sub-agent has not handed back; suspending stops it.' : '')
+      + (unfinishedChildren > 1 ? `\n\n${unfinishedChildren} sub-agents have not handed back; suspending stops them.` : '');
     if (!confirm(question)) return false;
   }
   if (dataset.action === 'destroy') {
@@ -10893,7 +10878,7 @@ function reconnect() {
   cursor = 0;
   presentationKey = null;
   const session = sessionById(currentSession);
-  if (session?.capabilities?.open && !isTransitioningSession(session)) loadConversation(false);
+  if (session?.capabilities?.open && !session?.verdict?.transition) loadConversation(false);
 }
 
 window.addEventListener('online', reconnect);

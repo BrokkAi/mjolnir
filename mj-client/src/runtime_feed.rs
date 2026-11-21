@@ -44,6 +44,57 @@ impl RuntimeBootstrap {
     }
 }
 
+/// Session facts and action offers from the daemon's capture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionVerdict {
+    pub transition: Option<mj_core::state::SessionTransitionKind>,
+    pub transition_failure: Option<mj_core::state::SessionTransitionKind>,
+    pub live_dashboard: bool,
+    pub needs_person: bool,
+    pub move_queue_held: bool,
+    pub idle: bool,
+    pub working: bool,
+    pub active_work: bool,
+    pub unfinished: bool,
+    pub interrupt: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub interrupt_shell: bool,
+    pub interrupt_member: bool,
+    pub interrupt_all: bool,
+    pub interrupt_count: usize,
+    pub stop: SessionOffer,
+    pub restart: SessionOffer,
+    pub move_session: SessionOffer,
+    pub change_workspace: SessionOffer,
+    pub container_settings: SessionOffer,
+    pub resume: SessionOffer,
+    pub working_children: usize,
+    pub unfinished_children: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOffer {
+    #[default]
+    Hidden,
+    Ready,
+    MoveQueueHeld,
+    Transitioning,
+    TransitionFailed,
+    OperationInProgress,
+    NoRecoveryCopy,
+    NoOtherWorkspace,
+    Active,
+    MoveEnvironmentRetained,
+}
+
+impl SessionOffer {
+    pub const fn offered(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeProjection {
     #[serde(default)]
@@ -53,6 +104,8 @@ pub struct RuntimeProjection {
     pub records: SnapshotMap<String, SessionRecord>,
     pub subagents: SnapshotMap<String, SubagentMetadata>,
     pub sessions: SnapshotMap<String, RuntimeSessionView>,
+    #[serde(default)]
+    pub verdicts: SnapshotMap<String, SessionVerdict>,
     pub moves: SnapshotMap<String, MoveOperation>,
     pub native_agents: SnapshotMap<String, NativeAgentSummary>,
     #[serde(default)]
@@ -181,6 +234,13 @@ impl ScopedProjection {
         result.sessions = full
             .sessions
             .filtered(|id, view| result.records.contains_key(id) && !view.materialized_only);
+        result.verdicts = full.verdicts.filtered(|id, _| {
+            kept.contains_key(id)
+                || full
+                    .native_agents
+                    .get(id)
+                    .is_some_and(|v| kept.contains_key(&v.agent.owner_session_id))
+        });
         result.moves = full.moves.filtered(|id, _| result.records.contains_key(id));
         result.session_cpu = full
             .session_cpu
@@ -296,6 +356,29 @@ impl ScopedProjection {
             result
                 .native_agents
                 .copy_entry(&after.native_agents, id, keep);
+        }
+        for id in before
+            .verdicts
+            .changes(&after.verdicts)
+            .map(|(id, _)| id)
+            .chain(&moved)
+            .chain(
+                owned
+                    .iter()
+                    .flat_map(|prefix| after.verdicts.keys_with_prefix(prefix)),
+            )
+            .chain(
+                owned
+                    .iter()
+                    .flat_map(|prefix| before.verdicts.keys_with_prefix(prefix)),
+            )
+        {
+            let keep = records.contains_key(id)
+                || after
+                    .native_agents
+                    .get(id)
+                    .is_some_and(|v| records.contains_key(&v.agent.owner_session_id));
+            result.verdicts.copy_entry(&after.verdicts, id, keep);
         }
         Self {
             projection: result,
@@ -934,6 +1017,8 @@ pub struct RuntimeDelta {
     pub records: KeyChanges<SessionRecord>,
     pub subagents: KeyChanges<SubagentMetadata>,
     pub sessions: KeyChanges<RuntimeSessionView>,
+    #[serde(default)]
+    pub verdicts: KeyChanges<SessionVerdict>,
     pub moves: KeyChanges<MoveOperation>,
     pub native_agents: KeyChanges<NativeAgentSummary>,
     #[serde(default)]
@@ -964,6 +1049,7 @@ impl RuntimeDelta {
             records: changes(&before.records, &after.records),
             subagents: changes(&before.subagents, &after.subagents),
             sessions: changes(&before.sessions, &after.sessions),
+            verdicts: changes(&before.verdicts, &after.verdicts),
             moves: changes(&before.moves, &after.moves),
             native_agents: changes(&before.native_agents, &after.native_agents),
             session_cpu: changes(&before.session_cpu, &after.session_cpu),
@@ -990,6 +1076,7 @@ impl RuntimeDelta {
             && self.records.is_empty()
             && self.subagents.is_empty()
             && self.sessions.is_empty()
+            && self.verdicts.is_empty()
             && self.moves.is_empty()
             && self.native_agents.is_empty()
             && self.session_cpu.is_empty()
@@ -1004,6 +1091,7 @@ impl RuntimeDelta {
         apply_keys(&mut projection.records, self.records);
         apply_keys(&mut projection.subagents, self.subagents);
         apply_keys(&mut projection.sessions, self.sessions);
+        apply_keys(&mut projection.verdicts, self.verdicts);
         apply_keys(&mut projection.moves, self.moves);
         apply_keys(&mut projection.native_agents, self.native_agents);
         apply_keys(&mut projection.session_cpu, self.session_cpu);

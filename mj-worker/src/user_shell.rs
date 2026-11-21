@@ -171,8 +171,7 @@ fn spawn_user_shell(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    let mut child = command
-        .spawn()
+    let mut child = mj_core::subprocess::spawn_async_child(&mut command)
         .with_context(|| format!("start shell {}", shell.display()))?;
     let group = mj_core::subprocess::ProcessGroupGuard::new(child.id());
     let stdout = child

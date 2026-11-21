@@ -1772,9 +1772,7 @@ pub(crate) fn render_resume_wizard(
                         .as_ref()
                         .is_some_and(|preparation| preparation.stops_subagents)
                 {
-                    dashboard
-                        .subagents_not_handed_back(&wizard.session_id)
-                        .len()
+                    dashboard.verdict(&wizard.session_id).unfinished_children
                 } else {
                     0
                 },

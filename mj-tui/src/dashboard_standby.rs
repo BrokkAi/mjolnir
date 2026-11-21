@@ -59,25 +59,55 @@ impl DashboardState {
             && self.transition_failure_kind(session_id).is_none()
     }
 
-    /// The operation that owns a session's conversation, if any. A local or
-    /// daemon operation wins over the durable record; the state fallback keeps
-    /// a recovering provisioning/closing/destroying record hidden until its
-    /// authoritative lifecycle completion arrives.
+    pub fn set_session_verdicts(
+        &mut self,
+        verdicts: SnapshotMap<String, mj_client::runtime_feed::SessionVerdict>,
+    ) {
+        if *self.session_verdicts != verdicts {
+            *self.session_verdicts = verdicts;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_session_verdict(
+        &mut self,
+        session_id: &str,
+        verdict: mj_client::runtime_feed::SessionVerdict,
+    ) {
+        if self.session_verdicts.get(session_id) != Some(&verdict) {
+            self.session_verdicts.insert(session_id.to_owned(), verdict);
+        }
+    }
+
+    pub(crate) fn verdict(&self, session_id: &str) -> mj_client::runtime_feed::SessionVerdict {
+        self.session_verdicts
+            .get(session_id)
+            .copied()
+            .or_else(|| {
+                self.stopped_records
+                    .get(session_id)
+                    .map(|cached| cached.verdict)
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn pending_local_session_operation(
+        &self,
+        session_id: &str,
+    ) -> Option<SessionOperationKind> {
+        self.session_operations
+            .get(session_id)
+            .filter(|operation| operation.operation_id.is_none())
+            .map(|operation| operation.kind)
+    }
+
+    /// A terminal request may be awaiting acknowledgement. Its local progress
+    /// presentation fills the gap until the daemon publishes operation ownership.
     pub fn transition_kind(&self, session_id: &str) -> Option<SessionTransitionKind> {
-        if let Some(operation) = self.session_operations.get(session_id) {
-            // An explicit non-transition operation (Connecting/Importing) is
-            // still authoritative: it must not fall through to a stale
-            // Provisioning record and hide the conversation.
-            return operation.kind.transition_kind();
-        }
-        let session = self.state.sessions.get(session_id)?;
-        // A failed close/destroy remains durable for recovery, but it is no
-        // longer an in-flight transition. Keep its error and recovery controls
-        // visible instead of showing a spinner.
-        if session.last_error.is_some() {
-            return None;
-        }
-        session.state.transition_kind()
+        self.verdict(session_id).transition.or_else(|| {
+            self.pending_local_session_operation(session_id)
+                .and_then(SessionOperationKind::transition_kind)
+        })
     }
 
     /// A durable transition record that failed before it could return to an
@@ -156,20 +186,7 @@ impl DashboardState {
     }
 
     pub fn transition_failure_kind(&self, session_id: &str) -> Option<SessionTransitionKind> {
-        if self.session_operations.contains_key(session_id) {
-            return None;
-        }
-        let session = self.state.sessions.get(session_id)?;
-        if session.last_error.is_some()
-            && matches!(
-                session.state,
-                SessionState::Closing | SessionState::Destroying
-            )
-        {
-            session.state.transition_kind()
-        } else {
-            None
-        }
+        self.verdict(session_id).transition_failure
     }
 
     /// Lifecycle transitions which retain an editable prompt.

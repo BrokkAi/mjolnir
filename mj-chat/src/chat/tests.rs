@@ -51,7 +51,9 @@ fn idle_background_work_and_working_review_keep_animation_independent() {
     chat.phase = WorkerPhase::Closed;
     assert!(!chat.needs_animation());
 
-    chat.set_turn_review(Some(RuntimeReviewView {
+    chat.set_turn_reviews(vec![RuntimeReviewView {
+        review_id: String::new(),
+        roots: Vec::new(),
         child_session_id: None,
         session_id: "session-1".into(),
         questions: Vec::new(),
@@ -59,7 +61,7 @@ fn idle_background_work_and_working_review_keep_animation_independent() {
         roles: Vec::new(),
         status: "capturing the turn".into(),
         verdict: None,
-    }));
+    }]);
     assert!(chat.needs_animation());
 }
 

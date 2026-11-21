@@ -1922,6 +1922,11 @@ mod tests {
         let project = |dashboard: &mut DashboardState,
                        materialized: &mj_core::state::MaterializedSession,
                        assessment: &mj_core::assessment::TurnAssessment| {
+            let mut verdict = dashboard.verdict(&materialized.session_id);
+            verdict.unfinished = assessment.inferred_question().is_some();
+            verdict.interrupt_all = verdict.unfinished;
+            verdict.interrupt_count = usize::from(verdict.unfinished);
+            dashboard.set_session_verdict(&materialized.session_id, verdict);
             dashboard.set_notification_dismissals(
                 assessment
                     .inferred_question()

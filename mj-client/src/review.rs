@@ -10,6 +10,14 @@ pub struct RuntimeReviewView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_session_id: Option<String>,
     pub session_id: String,
+    /// Which of the session's reviews this is. Empty for a review still being
+    /// prepared, which has no identity yet.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub review_id: String,
+    /// The repository roots the review covers. Empty until its capture is
+    /// known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<String>,
     pub phase: TurnReviewPhase,
     pub roles: Vec<RoleStatus>,
     /// What the review is doing, in one line.
@@ -101,6 +109,58 @@ impl RuntimeReviewView {
             }),
             _ => Some("Reviewing"),
         }
+    }
+}
+
+/// The review that stands for a session's others: one with a question first,
+/// because it waits for a person; then one that is working; otherwise the
+/// most severe settled state.
+#[must_use]
+pub fn most_notable<'a>(
+    reviews: impl IntoIterator<Item = &'a RuntimeReviewView>,
+) -> Option<&'a RuntimeReviewView> {
+    let rank = |label: &str| match label {
+        "Question" => 0,
+        "Reviewing" => 1,
+        "Review failed" => 2,
+        "Findings" => 3,
+        _ => 4,
+    };
+    reviews
+        .into_iter()
+        .filter_map(|review| Some((rank(review.activity_label()?), review)))
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, review)| review)
+}
+
+/// The one label a session shows for all of its reviews.
+#[must_use]
+pub fn combined_activity_label<'a>(
+    reviews: impl IntoIterator<Item = &'a RuntimeReviewView>,
+) -> Option<&'static str> {
+    most_notable(reviews).and_then(RuntimeReviewView::activity_label)
+}
+
+/// Whether any of the reviews is making progress.
+#[must_use]
+pub fn any_working<'a>(reviews: impl IntoIterator<Item = &'a RuntimeReviewView>) -> bool {
+    reviews.into_iter().any(RuntimeReviewView::is_working)
+}
+
+impl RuntimeReviewView {
+    /// The review's repositories as one short line, for a surface that shows
+    /// several reviews: the last path component of each root.
+    #[must_use]
+    pub fn roots_label(&self) -> String {
+        self.roots
+            .iter()
+            .map(|root| {
+                std::path::Path::new(root)
+                    .file_name()
+                    .map_or_else(|| root.clone(), |name| name.to_string_lossy().into_owned())
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 

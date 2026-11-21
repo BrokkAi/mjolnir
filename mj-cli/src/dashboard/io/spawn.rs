@@ -1284,30 +1284,29 @@ pub(crate) fn spawn_imported_session_apply(
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) {
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         "saving imported session",
         updates,
-        move || {
-            // Move the staging guard too: disjoint captures otherwise drop it before upload.
+        SAVE_ACK_TIMEOUT,
+        async move {
             let _archive_directory = imported._archive_directory;
-            let session = imported
-                .controller
-                .state
-                .sessions
-                .remove(&imported.session_id)
-                .context("import worker did not return its new session")?;
+            let mut client = daemon::connect_or_start().await?;
+            let published = client
+                .session_record_with_verdict(imported.session_id)
+                .await?
+                .context("imported session disappeared")?;
             let bundle = imported
                 .controller
                 .config
                 .bundles
-                .get(&session.bundle_id)
-                .cloned()
+                .remove(&published.record.bundle_id)
                 .context("import worker did not return its session bundle")?;
             Ok(ImportedDashboardSessionApply {
                 harness: imported.harness,
                 native_session_id: pending.native_session_id,
-                session,
+                session: published.record,
+                verdict: published.verdict,
                 bundle,
             })
         },
@@ -1348,7 +1347,7 @@ pub(crate) fn spawn_resume_record(
         async move {
             daemon::connect_or_start()
                 .await?
-                .session_record(requested)
+                .session_record_with_verdict(requested)
                 .await
         },
         move |result| DashboardIoUpdate::ResumeRecord {

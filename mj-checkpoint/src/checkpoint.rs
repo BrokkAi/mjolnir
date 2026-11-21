@@ -81,6 +81,7 @@ impl NativeCheckpointState for NoNativeCheckpointState {
 
 /// Version of the controller-to-exporter checkpoint specification contract.
 pub const CHECKPOINT_EXPORT_PROTOCOL_VERSION: u32 = 2;
+pub const CHECKPOINT_ORIGIN_DELTA_EXPORT_PROTOCOL_VERSION: u32 = 3;
 /// Version of the two-phase capture/pack contract used by ordinary checkpoints.
 pub const CHECKPOINT_STAGING_PROTOCOL_VERSION: u32 = 2;
 
@@ -101,6 +102,8 @@ pub enum CheckpointRepositoryCapture {
     SessionDelta,
     /// Save all clone-owned refs and stashes beyond the source launch commit.
     ManagedClone { base_commit: String },
+    /// A quiesced independent managed clone relative to origin.
+    OriginDelta,
     /// Bundle the repository relative to an explicit commit.
     DeltaFrom { base_commit: String },
     /// Bundle a managed network workspace relative to its immutable launch
@@ -209,6 +212,19 @@ pub struct CapturedCheckpoint {
     pub native_bytes: u64,
     pub repository_bytes: u64,
     pub reused_native: bool,
+}
+
+impl CheckpointRepositoryCapture {
+    pub fn export_protocol_version(repositories: &[CheckpointRepositorySpec]) -> u32 {
+        if repositories
+            .iter()
+            .any(|repository| repository.capture == Self::OriginDelta)
+        {
+            CHECKPOINT_ORIGIN_DELTA_EXPORT_PROTOCOL_VERSION
+        } else {
+            CHECKPOINT_EXPORT_PROTOCOL_VERSION
+        }
+    }
 }
 
 impl CheckpointExportSpec {

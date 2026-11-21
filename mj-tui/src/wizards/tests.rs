@@ -2275,11 +2275,7 @@ fn move_review_counts_only_working_subagents() {
     let review_with = |working: bool, stops_subagents: bool| {
         let (mut dashboard, _) = dashboard_with_one_subagent();
         if working {
-            dashboard
-                .session_details
-                .get_mut("child-session")
-                .unwrap()
-                .current_turn_started_at = Some(1);
+            crate::test_support::set_working(&mut dashboard, "child-session");
         }
         let request_id = open_move_review(&mut dashboard);
         let mut preparation = move_preparation();
@@ -3536,6 +3532,7 @@ fn resume_keeps_the_sessions_size_instead_of_the_hosts_latest_size() {
     );
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
 
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     dashboard.begin_resume_for("session-1");
     ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::Resume(wizard) = &dashboard.mode else {
@@ -3561,6 +3558,7 @@ fn resume_keeps_a_legacy_allocation_below_the_new_session_minimum() {
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
 
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     dashboard.begin_resume_for("session-1");
     ready_key(&mut dashboard, key(KeyCode::Enter));
 

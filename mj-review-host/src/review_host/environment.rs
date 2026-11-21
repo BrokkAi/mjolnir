@@ -81,11 +81,13 @@ pub trait ReviewEnvironment: Send + Sync {
         self.save_state(session_id, state)
     }
 
-    /// Clears an active review and records its per-role output in one durable
-    /// write. The default keeps a test environment that has no store.
+    /// Writes `state`, which no longer lists the review `review_id`, and
+    /// records that review's per-role output, in one durable write. The
+    /// default keeps a test environment that has no store.
     fn close_review(
         &self,
         session_id: &str,
+        _review_id: &str,
         state: &TurnReviewState,
         _resolution: mj_store::database::FinishedReviewResolution,
     ) -> Result<(), String> {

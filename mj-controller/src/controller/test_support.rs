@@ -109,7 +109,9 @@ pub(super) fn write_network_checkpoint_archive(
         session_id,
         event_frontier,
         vec![RepositorySnapshot {
+            origin_delta_pack: None,
             metadata: RepositoryMetadata {
+                origin_delta: None,
                 review_baseline_ref: None,
                 review_refs_metadata_only: false,
                 saved_refs: Default::default(),

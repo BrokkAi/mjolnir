@@ -187,7 +187,13 @@ pub const RELAY_LIVE_BASELINE_PROTOCOL: u32 = 74;
 pub const RELAY_CHECKPOINT_MAILBOX_PROTOCOL: u32 = 75;
 /// 76 names the tool call in permission forms, which older readers reject.
 pub const RELAY_PERMISSION_TOOL_CALL_PROTOCOL: u32 = 76;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_PERMISSION_TOOL_CALL_PROTOCOL;
+/// 77 adds `ResolveRepositories`, which names the repository roots a path
+/// selects without capturing anything. A session's worker at this version or
+/// newer also takes part in concurrent reviews: the review host lets a session
+/// open several reviews of disjoint repositories only when it can resolve a
+/// path to a root with no side effect.
+pub const RELAY_CONCURRENT_REVIEW_PROTOCOL: u32 = 77;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CONCURRENT_REVIEW_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

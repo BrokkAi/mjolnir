@@ -28,6 +28,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use mj_core::config::ReviewConfig;
 use mj_core::state::MaterializedSession;
+use mj_core::storage::{OpenReview, PushFindingsRecord};
 use mj_session_runtime::session_manager::{
     ManagedSessionHandle, ManagedSessionView, ReviewerAction, ReviewerOutcome,
     SessionManagerControl, new_command_id,
@@ -66,8 +67,11 @@ use events::*;
 mod begin;
 mod dispatch;
 mod notices;
+mod operations;
 #[cfg(test)]
 pub use mj_store::database::partial_review_events;
+pub use operations::OperationLink;
+use operations::*;
 mod override_push;
 mod persist;
 mod resolve;
@@ -75,6 +79,8 @@ mod roles;
 mod set_base;
 mod slots;
 use slots::*;
+mod state;
+use state::*;
 mod recovery;
 mod reviewer;
 mod reviewer_child;

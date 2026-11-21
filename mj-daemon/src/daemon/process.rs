@@ -497,8 +497,11 @@ pub(super) async fn run_daemon_runtime(
         // A child's durable close is resumed by every daemon. Its worker
         // connection may be unavailable for minutes and must not hold startup
         // admission after the daemon begins serving.
-        let upgrade_work =
-            (!controller.state.subagents.contains_key(&session_id)).then(|| startup_work.clone());
+        // An accepted origin-delta suspend waits on its worker, which owns the
+        // durable stop request; the next daemon resumes that wait.
+        let upgrade_work = (!controller.state.subagents.contains_key(&session_id)
+            && !controller.suspend_wait_is_worker_owned(&session_id))
+        .then(|| startup_work.clone());
         let interrupted_close_task = mj_core::runtime::spawn(async move {
             let _upgrade_work = upgrade_work;
             let result = tokio::select! {

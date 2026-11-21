@@ -810,6 +810,19 @@ fn dragging_over_a_failed_session_copies_its_error() {
             session.state = state;
             session.last_error = Some(ERROR.into());
         });
+        dashboard.set_session_verdicts(
+            [(
+                "session-1".into(),
+                mj_client::runtime_feed::SessionVerdict {
+                    live_dashboard: state.is_active(),
+                    transition_failure: state.transition_kind(),
+                    needs_person: true,
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
         dashboard.select_active_session("session-1");
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
         let mut selection = SelectionState::new();

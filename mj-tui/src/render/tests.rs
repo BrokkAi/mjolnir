@@ -31,7 +31,7 @@ fn session_metadata_text(
         "",
         session,
         detail,
-        None,
+        &[],
         false,
         false,
         crate::AttentionLevel::Idle,
@@ -1163,6 +1163,7 @@ fn minimized_sessions_dashboard(projects: usize, per_project: usize) -> Dashboar
         },
         BTreeMap::new(),
     );
+    crate::test_support::publish_fixture_verdicts(&mut dashboard);
     // One turn of the dial reaches the minimized list.
     minimize_all_panes(&mut dashboard);
     dashboard
@@ -1223,6 +1224,7 @@ fn a_starting_session_keeps_one_preview_across_incomplete_state_publications() {
     let mut publication = dashboard.state.clone();
     publication.sessions.insert(id.clone(), ready);
     dashboard.set_state(publication);
+    publish_fixture_verdicts(&mut dashboard);
     assert_eq!(drawn_session_rows(&dashboard, 60)[0].content_height(), 1);
     dashboard.finish_session_operation(&id);
     assert!(drawn_session_rows(&dashboard, 60)[0].content_height() > 1);
@@ -4617,6 +4619,7 @@ fn golden_operator_away_dialog() {
                 },
             );
         }
+        crate::test_support::publish_fixture_verdicts(&mut dashboard);
         dashboard.set_operator_presence(mj_core::state::OperatorPresence {
             away: true,
             revision: 1,

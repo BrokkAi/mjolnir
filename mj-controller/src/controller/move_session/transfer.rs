@@ -88,6 +88,7 @@ fn record_move_handoff_bases(
     super::super::resume::conversion_checkpoint(
         &handoff.archive_path,
         mj_checkpoint::archive::RepositorySnapshot {
+            origin_delta_pack: None,
             metadata,
             committed_bundle: Vec::new(),
             staged_patch: Vec::new(),

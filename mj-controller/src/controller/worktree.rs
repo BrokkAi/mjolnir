@@ -1391,7 +1391,7 @@ enum ExecutorGitLocation<'a> {
 }
 
 impl<'a, E> ExecutorGit<'a, E> {
-    fn local(executor: &'a E) -> Self {
+    pub(super) fn local(executor: &'a E) -> Self {
         Self {
             executor,
             location: ExecutorGitLocation::Local,
@@ -1417,8 +1417,9 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
         command: &mj_checkpoint::archive::GitCommand,
     ) -> Result<mj_checkpoint::archive::GitOutput> {
         ensure!(
-            command.stdin.is_empty() && command.env.is_empty(),
-            "an executor Git command takes no standard input or extra environment"
+            matches!(self.location, ExecutorGitLocation::Local)
+                || (command.stdin.is_empty() && command.env.is_empty()),
+            "a target Git command takes no standard input or extra environment"
         );
         let mut environment: Vec<_> = mj_checkpoint::archive::NON_INTERACTIVE_GIT_ENV
             .into_iter()
@@ -1455,10 +1456,24 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
         );
         let command = match self.location {
             ExecutorGitLocation::Local => {
-                let mut command =
-                    CommandSpec::new("git", args.into_iter().skip(1)).purpose("inspect submodules");
-                command.env.extend(environment);
-                command
+                let mut spec = CommandSpec::new("git", args.into_iter().skip(1))
+                    .purpose("inspect local Git checkout");
+                spec.env.extend(environment);
+                for (name, value) in &command.env {
+                    spec.env.insert(
+                        name.to_str()
+                            .context("Git environment name is not UTF-8")?
+                            .to_owned(),
+                        value
+                            .to_str()
+                            .context("Git environment value is not UTF-8")?
+                            .to_owned(),
+                    );
+                }
+                if !command.stdin.is_empty() {
+                    spec = spec.with_sensitive_stdin(command.stdin.clone());
+                }
+                spec
             }
             ExecutorGitLocation::Session {
                 backend: backend @ crate::targets::TargetLocator::LocalBare { .. },
@@ -2102,6 +2117,14 @@ pub(super) fn create_managed_worktree(
 }
 
 fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorktree) -> Result<()> {
+    create_managed_clone_with_snapshot(executor, checkout, None).map(drop)
+}
+
+fn create_managed_clone_with_snapshot(
+    executor: &impl CommandExecutor,
+    checkout: &ManagedWorktree,
+    snapshot: Option<&mj_checkpoint::snapshot::WorkspaceSnapshot>,
+) -> Result<Vec<String>> {
     let parent = checkout
         .worktree_root
         .parent()
@@ -2123,7 +2146,8 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
         )
         .purpose("create managed clone parent"),
     )?;
-    let create = (|| -> Result<()> {
+    let mut published = false;
+    let create = (|| -> Result<Vec<String>> {
         execute_checked(
             executor,
             managed_target_command(
@@ -2233,6 +2257,20 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
                 ),
             )?;
         }
+        let notices = if let Some(snapshot) = snapshot {
+            let mut notices = snapshot.notices.clone();
+            // Restore runs Git fetches; keep them off the async workers.
+            notices.extend(mj_core::runtime::off_async_worker(|| {
+                mj_checkpoint::snapshot::restore_workspace_snapshot(
+                    &mj_checkpoint::archive::SystemGit,
+                    snapshot,
+                    &staging,
+                )
+            })?);
+            notices
+        } else {
+            Vec::new()
+        };
         execute_checked(
             executor,
             managed_target_command(
@@ -2247,16 +2285,29 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
             )
             .purpose("publish managed clone checkout"),
         )?;
-        Ok(())
+        published = true;
+        if let Some(snapshot) = snapshot {
+            mj_checkpoint::snapshot::repair_workspace_snapshot(
+                &mj_checkpoint::archive::SystemGit,
+                snapshot,
+                &checkout.worktree_root,
+            )?;
+        }
+        Ok(notices)
     })();
-    if create.is_err() && path_exists_on_managed_target(executor, &checkout.target, &staging)? {
+    let cleanup = if published {
+        &checkout.worktree_root
+    } else {
+        &staging
+    };
+    if create.is_err() && path_exists_on_managed_target(executor, &checkout.target, cleanup)? {
         execute_checked(
             executor,
             managed_target_command(
                 SshTrafficClass::Control,
                 &checkout.target,
                 "rm",
-                ["-rf", "--", &staging.to_string_lossy()],
+                ["-rf", "--", &cleanup.to_string_lossy()],
             )
             .purpose("remove failed managed clone staging directory"),
         )?;
@@ -2445,6 +2496,56 @@ fn clone_local_preference(key: &str) -> bool {
 /// Recreate a retired checkout from the session branch. Returns whether this
 /// call created it, so a failed resume can put the session back into its
 /// stopped, checkout-free state.
+pub(super) fn restore_managed_clone_origin_delta(
+    executor: &impl CommandExecutor,
+    worktree: &ManagedWorktree,
+    archive: &Path,
+    manifest: &mj_checkpoint::archive::ArchiveManifest,
+) -> Result<Vec<String>> {
+    use mj_checkpoint::archive::CheckpointPayloadReader;
+    use mj_checkpoint::snapshot::WorkspaceSnapshot;
+
+    ensure!(
+        worktree.kind == ManagedCheckoutKind::Clone
+            && matches!(&worktree.target, ManagedWorktreeTarget::Local),
+        "origin delta resume requires a local independent managed clone"
+    );
+    let [repository] = manifest.repositories.as_slice() else {
+        bail!("origin delta resume requires exactly one repository");
+    };
+    let metadata = repository
+        .metadata
+        .origin_delta
+        .as_deref()
+        .context("origin delta metadata is missing")?
+        .clone();
+    let pack = repository
+        .origin_delta_pack_path
+        .as_ref()
+        .map(|path| -> Result<_> {
+            let descriptor = manifest
+                .payloads
+                .iter()
+                .find(|payload| &payload.path == path)
+                .context("origin delta pack descriptor is missing")?;
+            let mut pack = tempfile::NamedTempFile::new()?;
+            CheckpointPayloadReader::open(archive)?.copy_payload(descriptor, pack.as_file_mut())?;
+            Ok(pack)
+        })
+        .transpose()?;
+    let snapshot = WorkspaceSnapshot {
+        metadata,
+        pack: pack.as_ref().map(|pack| pack.path().to_owned()),
+    };
+    ensure_managed_worktree_excluded(
+        executor,
+        &worktree.target,
+        &worktree.source_repository,
+        worktree.kind,
+    )?;
+    create_managed_clone_with_snapshot(executor, worktree, Some(&snapshot))
+}
+
 pub(super) fn restore_managed_worktree(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,

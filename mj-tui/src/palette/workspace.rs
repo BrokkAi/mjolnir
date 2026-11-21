@@ -261,6 +261,7 @@ mod tests {
             ("other".to_owned(), "Other".to_owned()),
             ("third".to_owned(), "Third".to_owned()),
         ]));
+        crate::test_support::publish_fixture_verdicts(&mut dashboard);
         dashboard.focus_sessions();
         dashboard
     }
@@ -412,6 +413,7 @@ mod tests {
                 .map(|id| (id.clone(), format!("Workspace {id}")))
                 .collect(),
         );
+        crate::test_support::publish_fixture_verdicts(&mut dashboard);
         dashboard.focus_sessions();
         dashboard.dispatch_command(CommandId::ChangeWorkspace);
         let lines = drawn(&mut dashboard, 120, 40);

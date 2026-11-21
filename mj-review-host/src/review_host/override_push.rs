@@ -1,5 +1,4 @@
 use super::*;
-use futures::FutureExt;
 
 /// Most findings one `override_review` call may decline.
 const MAX_OVERRIDES: usize = 32;
@@ -43,6 +42,7 @@ impl HostState {
     pub fn override_push(
         &mut self,
         session_id: String,
+        path: Option<String>,
         overrides: Vec<ReviewOverride>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     ) {
@@ -57,136 +57,44 @@ impl HostState {
         let Ok(overrides) = overrides else {
             return;
         };
-        self.spawn_operation(
-            session_id,
-            reply,
-            "override",
-            |control, persistence, _events, owner| {
-                run_override(control, persistence, owner, overrides)
-            },
-        );
-    }
-
-    /// Why a push-review state change cannot start now, with how to proceed.
-    pub fn push_operation_refusal(&self, session_id: &str) -> Option<&'static str> {
-        if !(self.config)(session_id).is_push() {
-            Some("this session's review trigger is not push; this tool only works for push review")
-        } else if mj_session_runtime::session_manager::move_ownership::move_owns_session(session_id)
-        {
-            Some("session is moving; try again after the move finishes")
-        } else if self.reviews.contains_key(session_id) || self.preparing.contains_key(session_id) {
-            Some("a review is open; wait for its verdict or cancel it, then try again")
-        } else {
-            None
-        }
-    }
-
-    /// Runs one push-review operation that changes recorded review state in a
-    /// task, holding the session's `preparing` slot until it finishes.
-    pub fn spawn_operation<F>(
-        &mut self,
-        session_id: String,
-        reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
-        name: &'static str,
-        run: impl FnOnce(
-            SessionManagerControl,
-            mpsc::UnboundedSender<PersistenceRequest>,
-            mpsc::UnboundedSender<HostEvent>,
-            String,
-        ) -> F,
-    ) where
-        F: std::future::Future<Output = Result<serde_json::Value, StartRefusal>> + Send + 'static,
-    {
-        let control = self.control.clone();
-        let persistence = self
-            .persistence
-            .as_ref()
-            .expect("review persistence is live")
-            .clone();
-        let events = self.events.clone();
-        let owner = session_id.clone();
-        let operation = run(control, persistence, events.clone(), owner.clone());
-        let environment = self.environment.clone();
-        let (completed, result) = oneshot::channel();
-        let task = mj_core::runtime::spawn(async move {
-            let held = {
-                let owner = owner.clone();
-                async move {
-                    // Each of these operations sends reviewer work to the
-                    // worker. A recovery copy already running is waited for,
-                    // and the next one stays out until the operation ends.
-                    let deadline =
-                        tokio::time::Instant::now() + super::reviewer::BACKGROUND_WORK_WAIT;
-                    let _background =
-                        super::reviewer::hold_background_work(&environment, &owner, deadline)
-                            .await?;
-                    operation.await
-                }
-            };
-            let result = std::panic::AssertUnwindSafe(held)
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| {
-                    tracing::error!(session_id = %owner, "push review {name} task panicked");
-                    Err(StartRefusal(format!("push review {name} task panicked")))
-                });
-            let _ = completed.send(result);
-            let _ = events.send(HostEvent::OverrideFinished { session_id: owner });
+        self.spawn_operation(session_id, reply, "override", |control, link, owner| {
+            run_override(control, link, owner, path, overrides)
         });
-        self.preparing.insert(
-            session_id.clone(),
-            PreparingOperation::Override {
-                task,
-                result,
-                reply,
-            },
-        );
-        self.publish(&session_id);
-    }
-
-    pub fn override_finished(&mut self, session_id: &str) {
-        if let Some(PreparingOperation::Override {
-            mut result, reply, ..
-        }) = self.preparing.remove(session_id)
-        {
-            let response = result
-                .try_recv()
-                .unwrap_or_else(|_| Err(StartRefusal("push review override task stopped".into())));
-            let _ = reply.send(response);
-            self.publish(session_id);
-        }
     }
 }
 
 async fn run_override(
     control: SessionManagerControl,
-    persistence: mpsc::UnboundedSender<PersistenceRequest>,
+    link: OperationLink,
     session_id: String,
+    path: Option<String>,
     overrides: Vec<ReviewOverride>,
 ) -> Result<serde_json::Value, StartRefusal> {
-    let (mut state, findings, deltas, protocol) = async {
-        let (reply, loaded) = oneshot::channel();
-        persistence
-            .send(PersistenceRequest::Load {
-                session_id: session_id.clone(),
-                reply,
-            })
-            .map_err(|_| StartRefusal("review persistence stopped".into()))?;
-        let state = loaded
-            .await
-            .map_err(|_| StartRefusal("review persistence stopped".into()))?
-            .map_err(StartRefusal)?;
-        let findings = state.push_findings.clone().ok_or_else(|| {
-            StartRefusal("no findings verdict is pending; call request_review".into())
-        })?;
-        let protocol = control
-            .session(session_id.clone())
-            .await
-            .map_err(|error| StartRefusal(format!("{error:#}")))?
-            .view()
-            .snapshot
-            .and_then(|snapshot| snapshot.operational.relay_protocol_version)
-            .unwrap_or(0);
+    let protocol = session_protocol(&control, &session_id).await?;
+    // An explicit path is resolved to its root before the host selects the
+    // verdict; without one the host selects the only outstanding verdict.
+    let roots = match path {
+        Some(path) if concurrent_reviews(protocol) => {
+            Some(resolve_roots(&control, &session_id, vec![std::path::PathBuf::from(path)]).await?)
+        }
+        Some(_) => {
+            return Err(StartRefusal(
+                "this session's worker is older than override_review's path argument; restart the session, or call override_review without a path".into(),
+            ));
+        }
+        None => None,
+    };
+    let OperationAnswer::Reserved {
+        findings: Some(findings),
+    } = link
+        .ask(OperationRequest::ReserveOverride { protocol, roots })
+        .await?
+    else {
+        return Err(StartRefusal(
+            "the review host did not select a findings verdict".into(),
+        ));
+    };
+    let deltas = async {
         let repositories = (protocol >= mj_core::relay::RELAY_WORKTREE_REVIEW_PROTOCOL)
             .then(|| findings.trees.keys().cloned().collect());
         let outcome = resolve::push_action(
@@ -219,7 +127,7 @@ async fn run_override(
                 "HEAD changed since the last verdict; call request_review".into(),
             ));
         }
-        Ok((state, findings, deltas, protocol))
+        Ok(deltas)
     }
     .await?;
 
@@ -270,24 +178,8 @@ async fn run_override(
 
     // Keep pending findings until the worker ref is recorded. A retry can
     // safely repeat either write after a crash.
-    state.decline_findings(overrides, findings.trees.keys().cloned().collect());
-    let (reply, saved) = oneshot::channel();
-    persistence
-        .send(PersistenceRequest::SaveAcknowledged {
-            operation: "push review override state",
-            session_id: session_id.clone(),
-            state: Box::new(state.clone()),
-            reply,
-        })
-        .map_err(|_| {
-            StartRefusal("review persistence stopped before recording the overridden tree".into())
-        })?;
-    saved
-        .await
-        .map_err(|_| {
-            StartRefusal("review persistence stopped before recording the overridden tree".into())
-        })?
-        .map_err(StartRefusal)?;
+    link.ask_saved(OperationRequest::DeclineFindings { overrides })
+        .await?;
 
     // A worker that predates overridden records can only write the reviewed
     // ref, which also moves the base of the next review.
@@ -304,24 +196,7 @@ async fn run_override(
     )
     .await
     .map_err(|error| StartRefusal(format!("{error:#}")))?;
-    state.push_findings = None;
-    let (reply, saved) = oneshot::channel();
-    persistence
-        .send(PersistenceRequest::SaveAcknowledged {
-            operation: "push review override state",
-            session_id,
-            state: Box::new(state),
-            reply,
-        })
-        .map_err(|_| {
-            StartRefusal("review persistence stopped after recording the reviewed tree".into())
-        })?;
-    saved
-        .await
-        .map_err(|_| {
-            StartRefusal("review persistence stopped after recording the reviewed tree".into())
-        })?
-        .map_err(StartRefusal)?;
+    link.ask_saved(OperationRequest::FinishOverride).await?;
     let repositories: Vec<_> = findings.trees.iter().map(|(root, (tree, head_commit))| serde_json::json!({ "repository": root, "tree": tree, "head_commit": head_commit })).collect();
     Ok(serde_json::json!({
         "accepted": true,
