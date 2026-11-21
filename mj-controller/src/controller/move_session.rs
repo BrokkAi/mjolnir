@@ -9,6 +9,7 @@ mod tests;
 #[doc(hidden)]
 pub mod test_fixtures;
 mod transfer;
+pub mod transport;
 mod viewer_recovery;
 pub use viewer_recovery::ViewerMoveRecovery;
 

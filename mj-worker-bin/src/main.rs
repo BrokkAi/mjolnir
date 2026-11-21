@@ -42,11 +42,71 @@ struct WorkerArgs {
     command: WorkerCommand,
 }
 
+#[derive(Debug, Args)]
+struct AuthorizedKeysArgs {
+    #[command(subcommand)]
+    command: AuthorizedKeysCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthorizedKeysCommand {
+    /// Install a restricted temporary Move key under an exclusive flock.
+    Install {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        public_key: String,
+    },
+    /// Remove a temporary Move key by its operation ID.
+    Remove {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        operation_id: String,
+    },
+    /// Remove stale `mj-move-*` keys not listed in `--keep-operation`.
+    Reconcile {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long = "keep-operation")]
+        keep_operations: Vec<String>,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum WorkerCommand {
     /// Move-only inventory and disk-backed workspace transfer utilities.
     #[command(hide = true)]
     MoveWorkspace,
+    /// Locked `~/.ssh/authorized_keys` editor for direct Move transfers.
+    #[command(hide = true)]
+    AuthorizedKeys(AuthorizedKeysArgs),
+    /// Write a framed Move stream (archive + optional `.mj/keep/` tar) to stdout.
+    #[command(hide = true)]
+    ExportMoveStream {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        keep_dir: Option<PathBuf>,
+        #[arg(long = "skip")]
+        skip: Vec<PathBuf>,
+    },
+    /// Receive and verify a framed Move stream from stdin.
+    #[command(hide = true)]
+    ReceiveMoveStream {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        expected_sha256: String,
+        #[arg(long)]
+        keep_dir: Option<PathBuf>,
+    },
     /// Print `alive`, `starting` or `dead` for the worker that owns a root,
     /// decided by the lock on its `worker.lock`.
     #[command(hide = true)]
@@ -661,6 +721,62 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         WorkerCommand::MoveWorkspace => {
             let command = serde_json::from_reader(std::io::stdin().lock())?;
             println!("{}", mj_worker::move_workspace::execute(command)?);
+            Ok(())
+        }
+        WorkerCommand::AuthorizedKeys(args) => match args.command {
+            AuthorizedKeysCommand::Install {
+                path,
+                operation_id,
+                from,
+                command,
+                public_key,
+            } => mj_worker::authorized_keys::install_key(
+                &path,
+                &operation_id,
+                &from,
+                &command,
+                &public_key,
+            ),
+            AuthorizedKeysCommand::Remove { path, operation_id } => {
+                mj_worker::authorized_keys::remove_key(&path, &operation_id).map(|_| ())
+            }
+            AuthorizedKeysCommand::Reconcile {
+                path,
+                keep_operations,
+            } => {
+                let keep = keep_operations.into_iter().collect();
+                let removed = mj_worker::authorized_keys::reconcile_keys(&path, &keep)?;
+                println!("{removed}");
+                Ok(())
+            }
+        },
+        WorkerCommand::ExportMoveStream {
+            archive,
+            keep_dir,
+            skip,
+        } => {
+            let mut stdout = std::io::stdout().lock();
+            mj_checkpoint::move_stream::write_move_stream(
+                &mut stdout,
+                &archive,
+                keep_dir.as_deref(),
+                &skip,
+            )?;
+            Ok(())
+        }
+        WorkerCommand::ReceiveMoveStream {
+            archive,
+            expected_sha256,
+            keep_dir,
+        } => {
+            let mut stdin = std::io::stdin().lock();
+            let receipt = mj_checkpoint::move_stream::receive_move_stream(
+                &mut stdin,
+                &archive,
+                &expected_sha256,
+                keep_dir.as_deref(),
+            )?;
+            println!("{}", serde_json::to_string(&receipt)?);
             Ok(())
         }
         WorkerCommand::Liveness { root } => {

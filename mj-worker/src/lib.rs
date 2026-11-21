@@ -12,6 +12,7 @@ pub mod worker_stop;
 pub mod relay;
 
 pub mod acp;
+pub mod authorized_keys;
 pub mod exit_record;
 pub mod terminal;
 
