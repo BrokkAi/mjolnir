@@ -553,12 +553,15 @@ impl InterruptTargetKey {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum InterruptAdmissionState {
-    InFlight {
-        key: InterruptTargetKey,
-        result: tokio::sync::watch::Receiver<Option<std::result::Result<(), String>>>,
-    },
-    Accepted(InterruptTargetKey),
+pub(super) struct InterruptAdmissionEntry {
+    key: InterruptTargetKey,
+    state: InterruptAdmissionState,
+}
+
+#[derive(Debug, Clone)]
+enum InterruptAdmissionState {
+    InFlight(tokio::sync::watch::Receiver<Option<std::result::Result<(), String>>>),
+    Accepted,
 }
 
 enum InterruptAdmission<'a> {
@@ -568,7 +571,7 @@ enum InterruptAdmission<'a> {
 }
 
 struct InterruptAdmissionGuard<'a> {
-    admissions: &'a Mutex<BTreeMap<String, InterruptAdmissionState>>,
+    admissions: &'a Mutex<BTreeMap<String, Vec<InterruptAdmissionEntry>>>,
     session_id: String,
     key: InterruptTargetKey,
     result_tx: tokio::sync::watch::Sender<Option<std::result::Result<(), String>>>,
@@ -583,17 +586,22 @@ impl InterruptAdmissionGuard<'_> {
                 .admissions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if matches!(
-                guard.get(&self.session_id),
-                Some(InterruptAdmissionState::InFlight { key: current, .. }) if current == &self.key
-            ) {
+            if let Some(entries) = guard.get_mut(&self.session_id) {
                 if result.is_ok() {
-                    guard.insert(
-                        self.session_id.clone(),
-                        InterruptAdmissionState::Accepted(self.key.clone()),
-                    );
+                    if let Some(entry) = entries.iter_mut().find(|entry| {
+                        entry.key == self.key
+                            && matches!(entry.state, InterruptAdmissionState::InFlight(_))
+                    }) {
+                        entry.state = InterruptAdmissionState::Accepted;
+                    }
                 } else {
-                    guard.remove(&self.session_id);
+                    entries.retain(|entry| {
+                        !(entry.key == self.key
+                            && matches!(entry.state, InterruptAdmissionState::InFlight(_)))
+                    });
+                    if entries.is_empty() {
+                        guard.remove(&self.session_id);
+                    }
                 }
             }
         }
@@ -616,11 +624,14 @@ impl Drop for InterruptAdmissionGuard<'_> {
                 .admissions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if matches!(
-                guard.get(&self.session_id),
-                Some(InterruptAdmissionState::InFlight { key: current, .. }) if current == &self.key
-            ) {
-                guard.remove(&self.session_id);
+            if let Some(entries) = guard.get_mut(&self.session_id) {
+                entries.retain(|entry| {
+                    !(entry.key == self.key
+                        && matches!(entry.state, InterruptAdmissionState::InFlight(_)))
+                });
+                if entries.is_empty() {
+                    guard.remove(&self.session_id);
+                }
             }
         }
         let _ = self
@@ -640,30 +651,27 @@ impl RuntimeState {
             .interrupt_admissions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.retain(|session_id, state| {
-            matches!(state, InterruptAdmissionState::InFlight { .. })
-                || runtime.records.contains_key(session_id)
+        guard.retain(|session_id, entries| {
+            entries.retain(|entry| {
+                matches!(entry.state, InterruptAdmissionState::InFlight(_))
+                    || runtime.records.contains_key(session_id)
+            });
+            !entries.is_empty()
         });
-        match guard.get(id) {
-            Some(InterruptAdmissionState::InFlight {
-                key: existing,
-                result,
-            }) if existing == &key => {
-                return InterruptAdmission::WaitInFlight(result.clone());
-            }
-            Some(InterruptAdmissionState::Accepted(existing)) if existing == &key => {
-                return InterruptAdmission::AlreadyAccepted;
-            }
-            _ => {}
+        let entries = guard.entry(id.to_owned()).or_default();
+        if let Some(existing) = entries.iter().find(|entry| entry.key == key) {
+            return match &existing.state {
+                InterruptAdmissionState::InFlight(result) => {
+                    InterruptAdmission::WaitInFlight(result.clone())
+                }
+                InterruptAdmissionState::Accepted => InterruptAdmission::AlreadyAccepted,
+            };
         }
         let (result_tx, result_rx) = tokio::sync::watch::channel(None);
-        guard.insert(
-            id.to_owned(),
-            InterruptAdmissionState::InFlight {
-                key: key.clone(),
-                result: result_rx,
-            },
-        );
+        entries.push(InterruptAdmissionEntry {
+            key: key.clone(),
+            state: InterruptAdmissionState::InFlight(result_rx),
+        });
         InterruptAdmission::Leader(Box::new(InterruptAdmissionGuard {
             admissions: &self.interrupt_admissions,
             session_id: id.to_owned(),
@@ -1439,5 +1447,52 @@ mod tests {
         assert!(retry_result.unwrap().failures.is_empty());
         assert_eq!(retry_commands.len(), 1);
         assert_eq!(retry_commands[0].2, cancel_p1);
+
+        // A delayed interrupt captured for an earlier turn (p1) must not evict
+        // a newer turn's (p2) admission and let p2 be cancelled twice.
+        let stale_p1_capture = capture.clone();
+        let before = capture.clone();
+        let cancel_p2 = RelayCommand::CancelTurnFor {
+            active_prompt_id: "p2".into(),
+        };
+        let child_live = capture
+            .sessions
+            .get_mut("child")
+            .unwrap()
+            .operational
+            .as_mut()
+            .unwrap();
+        child_live.active_prompt = Some(mj_core::relay::ActiveRelayPrompt {
+            command_id: "p2".into(),
+            created_at_ms: 2,
+            started_at_ms: 2,
+        });
+        child_live.turn_controls = Some(mj_core::relay::TurnControls {
+            status: mj_core::relay::TurnControlStatus::Ready,
+            primary: None,
+            interrupt: Some(cancel_p2.clone()),
+            message: None,
+        });
+        project(&mut capture, &before);
+        let (p2_first, p2_first_commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "parent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        assert!(p2_first.unwrap().failures.is_empty());
+        assert_eq!(p2_first_commands.len(), 1);
+        // Delayed p1 snapshot is already admitted and must not disturb p2.
+        let (delayed_p1, delayed_commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&stale_p1_capture, "grandparent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        assert!(delayed_p1.unwrap().failures.is_empty());
+        assert!(delayed_commands.is_empty());
+        // Second p2 call remains deduplicated.
+        let (p2_second, p2_second_commands) = tokio::join!(
+            runtime.interrupt_all_in_capture(&capture, "grandparent"),
+            manager.answer_submissions(Vec::new()),
+        );
+        assert!(p2_second.unwrap().failures.is_empty());
+        assert!(p2_second_commands.is_empty());
     }
 }

@@ -355,11 +355,38 @@ impl RuntimeState {
                     .await?;
                     // Keep the lifecycle visible until the actor observes
                     // the replacement. The outbox already owns the retry.
+                    let mut store_commits = state.committed.clone();
+                    let mut revisions = state.revisions();
                     let observed = tokio::select! {
                         biased;
                         _ = mj_controller::recovery_gate::wait_until_cancelled(&cancelled) => {
                             Err(anyhow::anyhow!("sub-agent quota switch was cancelled"))
                         }
+                        result = async {
+                            loop {
+                                let child = session_id.clone();
+                                let still_running = blocking(move || {
+                                    mj_controller::database::load_session_record(&child)
+                                })
+                                .await?
+                                .is_some_and(|record| record.state == SessionState::Running);
+                                if !still_running {
+                                    bail!("replacement child left Running before synchronizing");
+                                }
+                                match store_commits.as_mut() {
+                                    Some(commits) => {
+                                        if commits.changed().await.is_err() {
+                                            bail!("daemon store stopped");
+                                        }
+                                    }
+                                    None => {
+                                        if revisions.changed().await.is_err() {
+                                            bail!("daemon runtime stopped");
+                                        }
+                                    }
+                                }
+                            }
+                        } => result,
                         result = async {
                             state
                                 .session_manager

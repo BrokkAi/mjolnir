@@ -102,6 +102,24 @@ pub fn spawn_session_manager_observed(
                             }
                         }
                         ManagerCommand::WaitForSession { session_id, reply } => {
+                            if targets_rx.has_changed().unwrap_or(false) {
+                                let prev_desired = std::mem::replace(
+                                    &mut desired_targets,
+                                    target_map(&targets_rx.borrow_and_update()),
+                                );
+                                reconcile_actors(
+                                    &desired_targets,
+                                    &mut actors,
+                                    &mut tasks,
+                                    &updates_tx,
+                                );
+                                notify_session_waiters(
+                                    &mut waiters,
+                                    &actors,
+                                    &desired_targets,
+                                    Some(&prev_desired),
+                                );
+                            }
                             if let Some(handle) =
                                 active_actor_handle(&session_id, &actors, &desired_targets)
                             {

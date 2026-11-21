@@ -297,8 +297,9 @@ pub struct RuntimeState {
     /// Orders worker admission against Move source sealing, independently per session.
     startup_delivery_gates: Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     /// Per-target cancel admission: deduplicates concurrent and stale-projection
-    /// interrupts targeting the same observed worker turn.
-    interrupt_admissions: Mutex<BTreeMap<String, verdicts::InterruptAdmissionState>>,
+    /// interrupts targeting the same observed worker turn without letting
+    /// delayed snapshots overwrite newer turns.
+    interrupt_admissions: Mutex<BTreeMap<String, Vec<verdicts::InterruptAdmissionEntry>>>,
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<auto_afk::Inactivity>,
     inactivity_changed: tokio::sync::Notify,

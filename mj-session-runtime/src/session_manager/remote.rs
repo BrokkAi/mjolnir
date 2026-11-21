@@ -379,6 +379,58 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                             let _ = reply.send(handle);
                         }
                         ManagerCommand::WaitForSession { session_id, reply } => {
+                            if targets_rx.has_changed().unwrap_or(false) {
+                                let prev_desired = std::mem::replace(
+                                    &mut desired,
+                                    target_map(&targets_rx.borrow_and_update()),
+                                );
+                                for removed_id in prev_desired.keys() {
+                                    if !desired.contains_key(removed_id)
+                                        && let Some(pending) = waiters.remove(removed_id)
+                                    {
+                                        for waiter in pending {
+                                            let _ = waiter.send(Err(anyhow::anyhow!(
+                                                "session {removed_id} was removed before its actor became ready"
+                                            )));
+                                        }
+                                    }
+                                }
+                                actors.retain(|actor_id, actor| {
+                                    if desired.contains_key(actor_id) {
+                                        true
+                                    } else {
+                                        actor.abort.abort();
+                                        false
+                                    }
+                                });
+                                latest.retain(|actor_id, _| desired.contains_key(actor_id));
+                                for desired_id in desired.keys() {
+                                    if !actors.contains_key(desired_id)
+                                        && let Some(view) = latest.get(desired_id).cloned()
+                                    {
+                                        spawn_remote_actor(
+                                            desired_id.clone(),
+                                            view,
+                                            &requests_tx,
+                                            &mut actors,
+                                            &updates_tx,
+                                        );
+                                    }
+                                    if let Some(actor) = actors.get(desired_id)
+                                        && let Some(pending) = waiters.remove(desired_id)
+                                    {
+                                        let handle = ManagedSessionHandle {
+                                            session_id: desired_id.clone(),
+                                            commands: actor.commands.clone(),
+                                            releases: actor.releases.clone(),
+                                            view: actor.view.clone(),
+                                        };
+                                        for waiter in pending {
+                                            let _ = waiter.send(Ok(handle.clone()));
+                                        }
+                                    }
+                                }
+                            }
                             if desired.contains_key(&session_id)
                                 && let Some(actor) = actors.get(&session_id)
                             {
