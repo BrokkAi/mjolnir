@@ -375,6 +375,22 @@ impl<'a> CaptureGit<'a> {
 }
 impl GitCommandRunner for CaptureGit<'_> {
     fn run(&self, repository: &Path, command: &GitCommand) -> Result<crate::archive::GitOutput> {
+        let command = self.prepare_command(repository, command)?;
+        self.inner.run(repository, &command)
+    }
+
+    fn run_to_file(
+        &self,
+        repository: &Path,
+        command: &GitCommand,
+        output: fs::File,
+    ) -> Result<crate::archive::GitOutput> {
+        let command = self.prepare_command(repository, command)?;
+        self.inner.run_to_file(repository, &command, output)
+    }
+}
+impl CaptureGit<'_> {
+    fn prepare_command(&self, repository: &Path, command: &GitCommand) -> Result<GitCommand> {
         let mut command = command.clone();
         let mut arguments = vec![
             "-c".into(),
@@ -390,7 +406,7 @@ impl GitCommandRunner for CaptureGit<'_> {
         command.env.push(("GIT_NO_LAZY_FETCH".into(), "0".into()));
         // Inspection must not refresh or lock a user's real index.
         command.env.push(("GIT_OPTIONAL_LOCKS".into(), "0".into()));
-        self.inner.run(repository, &command)
+        Ok(command)
     }
 }
 // Preserve a user-selected identity or proxy before the runner supplies its
@@ -1231,11 +1247,6 @@ fn relative_submodule_url(base: &str, relative: &str, checkout: &Path) -> Result
     Ok(format!("{base}{separator}{suffix}"))
 }
 
-fn append_pack_extension(base: &Path, hash: &str, extension: &str) -> PathBuf {
-    let mut path = base.as_os_str().to_owned();
-    path.push(format!("-{hash}.{extension}"));
-    path.into()
-}
 fn untracked_covered(consent: &UntrackedConsent, item: &UntrackedItem) -> bool {
     match consent {
         UntrackedConsent::None => false,
@@ -1909,15 +1920,18 @@ fn write_snapshot_pack(
         revisions.push('\n');
     }
     let base = std::path::absolute(base)?;
-    if let Some(parent) = base.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    // Git owns its scratch files until it exits; the directory then removes
-    // incomplete packs on every failure before any final artifact is published.
-    let scratch = tempfile::tempdir_in(base.parent().context("pack has no parent")?)?;
-    let scratch_base = scratch.path().join("objects");
+    let parent = base.parent().context("pack has no parent")?;
+    fs::create_dir_all(parent)?;
+    // Every in-flight capture owns a distinct temp file in the destination
+    // directory, removed on drop if packing fails or produces an empty pack.
+    // Streaming via `--stdout` avoids Git creating a temp pack in the
+    // repository's object store and renaming it across filesystems (#1635).
+    let mut published = tempfile::Builder::new()
+        .prefix(base.file_name().context("pack base has no filename")?)
+        .suffix(".pack")
+        .tempfile_in(parent)?;
     // A snapshot has one pack artifact; ignore repository-configured splitting.
-    let output = runner.run(
+    let output = runner.run_to_file(
         checkout,
         &GitCommand {
             arguments: vec![
@@ -1925,43 +1939,34 @@ fn write_snapshot_pack(
                 "pack.packSizeLimit=0".into(),
                 "pack-objects".into(),
                 "--revs".into(),
-                scratch_base.as_os_str().to_owned(),
+                "--stdout".into(),
+                "--quiet".into(),
             ],
             stdin: revisions.into_bytes(),
             ..Default::default()
         },
+        published.as_file().try_clone()?,
     )?;
     ensure!(
         output.status == 0,
         "{}",
         git_failure("pack snapshot objects", &output)
     );
-    let hash = String::from_utf8(output.stdout)?.trim().to_owned();
     ensure!(
-        (hash.len() == 40 || hash.len() == 64) && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "Git returned an invalid pack hash"
+        published.as_file().metadata()?.len() >= 32,
+        "Git returned an invalid snapshot pack"
     );
-    let path = append_pack_extension(&scratch_base, &hash, "pack");
     let mut header = [0_u8; 12];
-    fs::File::open(&path)?.read_exact(&mut header)?;
+    published.as_file_mut().seek(SeekFrom::Start(0))?;
+    published.as_file_mut().read_exact(&mut header)?;
     ensure!(
         header.starts_with(b"PACK"),
         "Git returned an invalid snapshot pack"
     );
     if header[8..12] == [0, 0, 0, 0] {
-        fs::remove_file(path)?;
         Ok(None)
     } else {
-        // Every in-flight capture owns a distinct path, even for identical
-        // bytes and the same caller-provided base. No other capture can borrow
-        // an artifact whose owner may still roll it back.
-        let published = tempfile::Builder::new()
-            .prefix(base.file_name().context("pack base has no filename")?)
-            .suffix(".pack")
-            .tempfile_in(base.parent().context("pack has no parent")?)?
-            .into_temp_path();
-        fs::rename(path, &published)?;
-        Ok(Some(published))
+        Ok(Some(published.into_temp_path()))
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4224,19 +4229,30 @@ mod tests {
     use crate::archive::SystemGit;
 
     struct FileGit;
+    fn prepare_file_git(command: &GitCommand) -> GitCommand {
+        let mut command = command.clone();
+        command
+            .arguments
+            .splice(0..0, ["-c".into(), "protocol.file.allow=always".into()]);
+        command.env.extend([
+            ("GIT_AUTHOR_NAME".into(), "Snapshot Test".into()),
+            ("GIT_AUTHOR_EMAIL".into(), "snapshot@example.test".into()),
+            ("GIT_COMMITTER_NAME".into(), "Snapshot Test".into()),
+            ("GIT_COMMITTER_EMAIL".into(), "snapshot@example.test".into()),
+        ]);
+        command
+    }
     impl GitCommandRunner for FileGit {
         fn run(&self, path: &Path, command: &GitCommand) -> Result<crate::archive::GitOutput> {
-            let mut command = command.clone();
-            command
-                .arguments
-                .splice(0..0, ["-c".into(), "protocol.file.allow=always".into()]);
-            command.env.extend([
-                ("GIT_AUTHOR_NAME".into(), "Snapshot Test".into()),
-                ("GIT_AUTHOR_EMAIL".into(), "snapshot@example.test".into()),
-                ("GIT_COMMITTER_NAME".into(), "Snapshot Test".into()),
-                ("GIT_COMMITTER_EMAIL".into(), "snapshot@example.test".into()),
-            ]);
-            SystemGit.run(path, &command)
+            SystemGit.run(path, &prepare_file_git(command))
+        }
+        fn run_to_file(
+            &self,
+            path: &Path,
+            command: &GitCommand,
+            output: fs::File,
+        ) -> Result<crate::archive::GitOutput> {
+            SystemGit.run_to_file(path, &prepare_file_git(command), output)
         }
     }
     fn git(path: &Path, args: &[&str]) -> String {
@@ -4911,12 +4927,8 @@ mod tests {
     struct HostGit {
         global: PathBuf,
     }
-    impl GitCommandRunner for HostGit {
-        fn run(
-            &self,
-            repository: &Path,
-            command: &GitCommand,
-        ) -> Result<crate::archive::GitOutput> {
+    impl HostGit {
+        fn prepare_command(&self, command: &GitCommand) -> GitCommand {
             let mut command = command.clone();
             command.env.extend([
                 (
@@ -4929,7 +4941,24 @@ mod tests {
                 ),
                 ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ]);
-            SystemGit.run(repository, &command)
+            command
+        }
+    }
+    impl GitCommandRunner for HostGit {
+        fn run(
+            &self,
+            repository: &Path,
+            command: &GitCommand,
+        ) -> Result<crate::archive::GitOutput> {
+            SystemGit.run(repository, &self.prepare_command(command))
+        }
+        fn run_to_file(
+            &self,
+            repository: &Path,
+            command: &GitCommand,
+            output: fs::File,
+        ) -> Result<crate::archive::GitOutput> {
+            SystemGit.run_to_file(repository, &self.prepare_command(command), output)
         }
     }
     fn host_git(path: &Path, name: &str) -> HostGit {
@@ -5299,6 +5328,124 @@ mod tests {
         assert_eq!(
             git(&restored, &["rev-parse", "HEAD^{tree}"]),
             git(&root.checkout, &["rev-parse", "HEAD^{tree}"])
+        );
+        git(&restored, &["fsck", "--full"]);
+    }
+
+    // Hard-won: #1635: snapshot packing failed with EXDEV when repository and capture directory were on different filesystems.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn snapshot_and_estimate_pack_across_different_filesystems() {
+        use std::os::unix::fs::MetadataExt;
+
+        let system_temp = std::env::temp_dir();
+        let system_dev = fs::metadata(&system_temp).unwrap().dev();
+        let other = ["/dev/shm", "/var/tmp"]
+            .into_iter()
+            .find_map(|candidate| {
+                let metadata = fs::metadata(candidate).ok()?;
+                if !metadata.is_dir() || metadata.dev() == system_dev {
+                    return None;
+                }
+                tempfile::Builder::new()
+                    .prefix("mj-snapshot-exdev-")
+                    .tempdir_in(candidate)
+                    .ok()
+            })
+            .expect("a writable filesystem distinct from the system temp directory");
+        assert_ne!(fs::metadata(other.path()).unwrap().dev(), system_dev);
+
+        let origin = other.path().join("origin.git");
+        let checkout = other.path().join("checkout");
+        git(
+            other.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                origin.to_str().unwrap(),
+            ],
+        );
+        git(
+            other.path(),
+            &[
+                "clone",
+                origin.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        fs::write(checkout.join("file"), "origin\n").unwrap();
+        git(&checkout, &["add", "file"]);
+        git(&checkout, &["commit", "-m", "base"]);
+        git(&checkout, &["push", "origin", "main"]);
+        let capture_dir = tempfile::tempdir_in(&system_temp).unwrap();
+        assert_ne!(
+            fs::metadata(other.path()).unwrap().dev(),
+            fs::metadata(capture_dir.path()).unwrap().dev()
+        );
+        let pack_base = capture_dir.path().join("snapshot");
+        let clean = capture_workspace_snapshot(
+            &FileGit,
+            &checkout,
+            &CheckoutOwnership::Managed,
+            &pack_base,
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(clean.pack.is_none());
+        assert!(!fs::read_dir(capture_dir.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "pack")
+        }));
+        assert_eq!(
+            estimate_delta(&FileGit, &checkout, &CheckoutOwnership::Managed, None)
+                .unwrap()
+                .total_bytes,
+            Some(0)
+        );
+
+        fs::write(checkout.join("committed"), "committed change\n").unwrap();
+        git(&checkout, &["add", "committed"]);
+        git(&checkout, &["commit", "-m", "committed change"]);
+        fs::write(checkout.join("file"), "working change\n").unwrap();
+        let estimate =
+            estimate_delta(&FileGit, &checkout, &CheckoutOwnership::Managed, None).unwrap();
+        let snapshot = capture_workspace_snapshot(
+            &FileGit,
+            &checkout,
+            &CheckoutOwnership::Managed,
+            &pack_base,
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap();
+        let pack = snapshot.pack.as_ref().unwrap();
+        let pack_len = fs::metadata(pack).unwrap().len();
+        assert_eq!(estimate.total_bytes, Some(pack_len));
+
+        let root = Repo {
+            temp: other,
+            origin,
+            checkout,
+        };
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(
+            git(&restored, &["rev-parse", "HEAD^{tree}"]),
+            git(&root.checkout, &["rev-parse", "HEAD^{tree}"])
+        );
+        assert_eq!(
+            fs::read(restored.join("file")).unwrap(),
+            b"working change\n"
         );
         git(&restored, &["fsck", "--full"]);
     }
