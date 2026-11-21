@@ -1,0 +1,115 @@
+=== Single reviewer vs Gemini/medium (confirmed, all severities) ===
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  Gemini/medium                total   32.00
+  Gemini/high                  total   80.00
+  Terra/high                   total  100.17
+  Terra/xhigh                  total  183.50
+  Sol/medium                   total   50.00
+  Sol/high                     total   84.33
+  Sol/xhigh                    total  131.00
+  Kimi/high                    total   72.00
+  Ember/xhigh                  total   33.00
+  Greptile/base                total  124.00
+  Greptile/plus                total  190.00
+  Gemini/high - Gemini/medium: +48.00 (95% +32.00 to +65.00); diffs better 32, worse 1, tied 37
+  Terra/high - Gemini/medium: +68.17 (95% +52.33 to +84.58); diffs better 54, worse 3, tied 13
+  Terra/xhigh - Gemini/medium: +151.50 (95% +124.00 to +180.50); diffs better 60, worse 0, tied 10
+  Sol/medium - Gemini/medium: +18.00 (95% +7.00 to +29.00); diffs better 27, worse 8, tied 35
+  Sol/high - Gemini/medium: +52.33 (95% +36.33 to +68.33); diffs better 44, worse 7, tied 19
+  Sol/xhigh - Gemini/medium: +99.00 (95% +74.50 to +125.00); diffs better 49, worse 6, tied 15
+  Kimi/high - Gemini/medium: +40.00 (95% +21.00 to +59.00); diffs better 31, worse 5, tied 34
+  Ember/xhigh - Gemini/medium: +1.00 (95% -11.00 to +13.00); diffs better 11, worse 13, tied 46
+  Greptile/base - Gemini/medium: +92.00 (95% +71.00 to +114.00); diffs better 53, worse 2, tied 15
+  Greptile/plus - Gemini/medium: +158.00 (95% +129.00 to +188.00); diffs better 60, worse 1, tied 9
+
+=== Single reviewer vs Gemini/medium (confirmed, high+medium) ===
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  Gemini/medium                total   27.00
+  Gemini/high                  total   72.00
+  Terra/high                   total   86.92
+  Terra/xhigh                  total  153.00
+  Sol/medium                   total   46.50
+  Sol/high                     total   79.00
+  Sol/xhigh                    total  119.50
+  Kimi/high                    total   60.00
+  Ember/xhigh                  total   26.00
+  Greptile/base                total   98.00
+  Greptile/plus                total  142.00
+  Gemini/high - Gemini/medium: +45.00 (95% +31.00 to +60.00); diffs better 32, worse 1, tied 37
+  Terra/high - Gemini/medium: +59.92 (95% +45.50 to +75.17); diffs better 52, worse 2, tied 16
+  Terra/xhigh - Gemini/medium: +126.00 (95% +101.00 to +153.00); diffs better 55, worse 0, tied 15
+  Sol/medium - Gemini/medium: +19.50 (95% +9.00 to +30.00); diffs better 27, worse 8, tied 35
+  Sol/high - Gemini/medium: +52.00 (95% +36.33 to +68.00); diffs better 42, worse 7, tied 21
+  Sol/xhigh - Gemini/medium: +92.50 (95% +69.00 to +117.00); diffs better 48, worse 5, tied 17
+  Kimi/high - Gemini/medium: +33.00 (95% +17.00 to +49.00); diffs better 28, worse 5, tied 37
+  Ember/xhigh - Gemini/medium: -1.00 (95% -10.00 to +8.00); diffs better 9, worse 11, tied 50
+  Greptile/base - Gemini/medium: +71.00 (95% +54.00 to +89.00); diffs better 44, worse 1, tied 25
+  Greptile/plus - Gemini/medium: +115.00 (95% +90.00 to +140.00); diffs better 50, worse 1, tied 19
+
+=== Third reviewer on 2x Terra/xhigh (confirmed, all severities) ===
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  Terra/xhigh+Terra/xhigh      total  225.00
+  Terra/xhigh+Terra/xhigh+Gemini/medium total  232.00
+  Terra/xhigh+Terra/xhigh+Gemini/high total  247.00
+  Terra/xhigh+Terra/xhigh+Terra/high total  232.25
+  Terra/xhigh+Terra/xhigh+Sol/medium total  228.50
+  Terra/xhigh+Terra/xhigh+Sol/high total  235.00
+  Terra/xhigh+Terra/xhigh+Sol/xhigh total  256.50
+  Terra/xhigh+Terra/xhigh+Kimi/high total  242.00
+  Terra/xhigh+Terra/xhigh+Ember/xhigh total  233.00
+  Terra/xhigh+Terra/xhigh+Greptile/base total  258.00
+  Terra/xhigh+Terra/xhigh+Greptile/plus total  293.00
+  Terra/xhigh+Terra/xhigh+Gemini/medium - Terra/xhigh+Terra/xhigh: +7.00 (95% +3.00 to +12.00); diffs better 7, worse 0, tied 63
+  Terra/xhigh+Terra/xhigh+Gemini/high - Terra/xhigh+Terra/xhigh: +22.00 (95% +12.00 to +33.00); diffs better 16, worse 0, tied 54
+  Terra/xhigh+Terra/xhigh+Terra/high - Terra/xhigh+Terra/xhigh: +7.25 (95% +3.75 to +11.25); diffs better 15, worse 0, tied 55
+  Terra/xhigh+Terra/xhigh+Sol/medium - Terra/xhigh+Terra/xhigh: +3.50 (95% +0.50 to +7.50); diffs better 4, worse 0, tied 66
+  Terra/xhigh+Terra/xhigh+Sol/high - Terra/xhigh+Terra/xhigh: +10.00 (95% +5.67 to +15.00); diffs better 18, worse 0, tied 52
+  Terra/xhigh+Terra/xhigh+Sol/xhigh - Terra/xhigh+Terra/xhigh: +31.50 (95% +20.00 to +44.00); diffs better 27, worse 0, tied 43
+  Terra/xhigh+Terra/xhigh+Kimi/high - Terra/xhigh+Terra/xhigh: +17.00 (95% +8.00 to +27.00); diffs better 13, worse 0, tied 57
+  Terra/xhigh+Terra/xhigh+Ember/xhigh - Terra/xhigh+Terra/xhigh: +8.00 (95% +3.00 to +14.00); diffs better 7, worse 0, tied 63
+  Terra/xhigh+Terra/xhigh+Greptile/base - Terra/xhigh+Terra/xhigh: +33.00 (95% +21.00 to +47.00); diffs better 26, worse 0, tied 44
+  Terra/xhigh+Terra/xhigh+Greptile/plus - Terra/xhigh+Terra/xhigh: +68.00 (95% +50.00 to +88.00); diffs better 41, worse 0, tied 29
+
+=== Third reviewer on 2x Terra/xhigh (confirmed, high+medium) ===
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  Terra/xhigh+Terra/xhigh      total  182.00
+  Terra/xhigh+Terra/xhigh+Gemini/medium total  186.00
+  Terra/xhigh+Terra/xhigh+Gemini/high total  199.00
+  Terra/xhigh+Terra/xhigh+Terra/high total  186.58
+  Terra/xhigh+Terra/xhigh+Sol/medium total  185.50
+  Terra/xhigh+Terra/xhigh+Sol/high total  191.33
+  Terra/xhigh+Terra/xhigh+Sol/xhigh total  209.00
+  Terra/xhigh+Terra/xhigh+Kimi/high total  191.00
+  Terra/xhigh+Terra/xhigh+Ember/xhigh total  184.00
+  Terra/xhigh+Terra/xhigh+Greptile/base total  198.00
+  Terra/xhigh+Terra/xhigh+Greptile/plus total  216.00
+  Terra/xhigh+Terra/xhigh+Gemini/medium - Terra/xhigh+Terra/xhigh: +4.00 (95% +1.00 to +8.00); diffs better 4, worse 0, tied 66
+  Terra/xhigh+Terra/xhigh+Gemini/high - Terra/xhigh+Terra/xhigh: +17.00 (95% +9.00 to +26.00); diffs better 13, worse 0, tied 57
+  Terra/xhigh+Terra/xhigh+Terra/high - Terra/xhigh+Terra/xhigh: +4.58 (95% +1.92 to +7.75); diffs better 10, worse 0, tied 60
+  Terra/xhigh+Terra/xhigh+Sol/medium - Terra/xhigh+Terra/xhigh: +3.50 (95% +0.50 to +7.50); diffs better 4, worse 0, tied 66
+  Terra/xhigh+Terra/xhigh+Sol/high - Terra/xhigh+Terra/xhigh: +9.33 (95% +5.00 to +14.33); diffs better 16, worse 0, tied 54
+  Terra/xhigh+Terra/xhigh+Sol/xhigh - Terra/xhigh+Terra/xhigh: +27.00 (95% +16.50 to +38.50); diffs better 25, worse 0, tied 45
+  Terra/xhigh+Terra/xhigh+Kimi/high - Terra/xhigh+Terra/xhigh: +9.00 (95% +4.00 to +15.00); diffs better 9, worse 0, tied 61
+  Terra/xhigh+Terra/xhigh+Ember/xhigh - Terra/xhigh+Terra/xhigh: +2.00 (95% +0.00 to +5.00); diffs better 2, worse 0, tied 68
+  Terra/xhigh+Terra/xhigh+Greptile/base - Terra/xhigh+Terra/xhigh: +16.00 (95% +8.00 to +26.00); diffs better 13, worse 0, tied 57
+  Terra/xhigh+Terra/xhigh+Greptile/plus - Terra/xhigh+Terra/xhigh: +34.00 (95% +22.00 to +47.00); diffs better 24, worse 0, tied 46
+
+=== 2x Terra/xhigh + Gemini/medium vs + Terra/high, + Sol/high, + Gemini/high (all severities) ===
+diffs 70; verdicts ['confirmed']; severities ['high', 'low', 'medium']
+  Terra/xhigh+Terra/xhigh+Gemini/medium total  232.00
+  Terra/xhigh+Terra/xhigh+Terra/high total  232.25
+  Terra/xhigh+Terra/xhigh+Sol/high total  235.00
+  Terra/xhigh+Terra/xhigh+Gemini/high total  247.00
+  Terra/xhigh+Terra/xhigh+Terra/high - Terra/xhigh+Terra/xhigh+Gemini/medium: +0.25 (95% -5.75 to +6.00); diffs better 12, worse 7, tied 51
+  Terra/xhigh+Terra/xhigh+Sol/high - Terra/xhigh+Terra/xhigh+Gemini/medium: +3.00 (95% -3.67 to +9.67); diffs better 16, worse 6, tied 48
+  Terra/xhigh+Terra/xhigh+Gemini/high - Terra/xhigh+Terra/xhigh+Gemini/medium: +15.00 (95% +7.00 to +24.00); diffs better 13, worse 1, tied 56
+
+=== 2x Terra/xhigh + Gemini/medium vs + Terra/high, + Sol/high, + Gemini/high (high+medium) ===
+diffs 70; verdicts ['confirmed']; severities ['high', 'medium']
+  Terra/xhigh+Terra/xhigh+Gemini/medium total  186.00
+  Terra/xhigh+Terra/xhigh+Terra/high total  186.58
+  Terra/xhigh+Terra/xhigh+Sol/high total  191.33
+  Terra/xhigh+Terra/xhigh+Gemini/high total  199.00
+  Terra/xhigh+Terra/xhigh+Terra/high - Terra/xhigh+Terra/xhigh+Gemini/medium: +0.58 (95% -4.42 to +5.33); diffs better 9, worse 4, tied 57
+  Terra/xhigh+Terra/xhigh+Sol/high - Terra/xhigh+Terra/xhigh+Gemini/medium: +5.33 (95% -0.33 to +11.33); diffs better 15, worse 3, tied 52
+  Terra/xhigh+Terra/xhigh+Gemini/high - Terra/xhigh+Terra/xhigh+Gemini/medium: +13.00 (95% +6.00 to +21.00); diffs better 11, worse 0, tied 59
