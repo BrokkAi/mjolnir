@@ -1394,6 +1394,7 @@ impl CommandExecutor for ProcessExecutor {
                     command,
                     &mut *input,
                     &|| false,
+                    None,
                     gate,
                     None,
                 )
@@ -1457,6 +1458,7 @@ fn stream_command_with_stdin(
     command: &CommandSpec,
     input: &mut (dyn Read + Send),
     is_cancelled: &(dyn Fn() -> bool + Sync),
+    abort_stdin: Option<&(dyn Fn() + Sync)>,
     gate: Option<&Arc<StartGate>>,
     observer: Option<CommandOutputObserver>,
 ) -> Result<CommandOutput> {
@@ -1569,9 +1571,13 @@ fn stream_command_with_stdin(
                     Err(error) => {
                         input_failed_writer.store(true, Ordering::Release);
                         let (lock, cvar) = &*child_done_writer;
-                        let mut done = lock.lock().unwrap();
+                        let mut done = lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         while !*done {
-                            done = cvar.wait(done).unwrap();
+                            done = cvar
+                                .wait(done)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                         }
                         return Err(error).context("read command input");
                     }
@@ -1589,14 +1595,21 @@ fn stream_command_with_stdin(
         struct ChildDoneGuard<'a>(&'a (std::sync::Mutex<bool>, std::sync::Condvar));
         impl Drop for ChildDoneGuard<'_> {
             fn drop(&mut self) {
-                let mut done = self.0.0.lock().unwrap();
+                let mut done = self
+                    .0
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *done = true;
                 self.0.1.notify_all();
             }
         }
         let child_done_guard = ChildDoneGuard(&child_done);
         let mark_child_done = || {
-            let mut done = child_done.0.lock().unwrap();
+            let mut done = child_done
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *done = true;
             child_done.1.notify_all();
         };
@@ -1613,6 +1626,9 @@ fn stream_command_with_stdin(
             if is_cancelled() {
                 terminate_cancellable_child(&mut child, false);
                 mark_child_done();
+                if let Some(abort) = abort_stdin {
+                    abort();
+                }
                 end_reply();
                 if let Err(error) = input_writer.join() {
                     tracing::warn!(
@@ -1622,7 +1638,7 @@ fn stream_command_with_stdin(
                 }
                 bail!("operation cancelled while {}", command.purpose);
             }
-            if input_failed.load(Ordering::Acquire) {
+            if status.is_none() && input_failed.load(Ordering::Acquire) {
                 terminate_cancellable_child(&mut child, false);
                 mark_child_done();
                 end_reply();
@@ -1644,6 +1660,9 @@ fn stream_command_with_stdin(
                 Err(error) => {
                     terminate_cancellable_child(&mut child, false);
                     mark_child_done();
+                    if let Some(abort) = abort_stdin {
+                        abort();
+                    }
                     end_reply();
                     if let Err(join_error) = input_writer.join() {
                         tracing::warn!(
@@ -1668,6 +1687,15 @@ fn stream_command_with_stdin(
                     group_killed = true;
                     if let Some(group) = &group {
                         group.kill();
+                    }
+                    // Unblock an input reader once stdin streaming has actually
+                    // started; a refused SSH attempt before the start marker
+                    // must leave `input` untouched for retry.
+                    if gate
+                        .is_none_or(|gate| gate.phase() == crate::targets::ssh::StartPhase::Started)
+                        && let Some(abort) = abort_stdin
+                    {
+                        abort();
                     }
                 }
                 if drained && input_writer.is_finished() {
@@ -1794,6 +1822,28 @@ impl CancellableProcessExecutor {
         input: &mut (dyn Read + Send),
         observer: Option<CommandOutputObserver>,
     ) -> Result<CommandOutput> {
+        self.execute_with_stdin_inner(command, input, None, observer)
+    }
+
+    /// Feed input from a blocking source that can be woken via `abort_stdin`
+    /// when cancellation starts or the child exits after stdin streaming has
+    /// started.
+    pub fn execute_with_abortable_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+        abort_stdin: &(dyn Fn() + Sync),
+    ) -> Result<CommandOutput> {
+        self.execute_with_stdin_inner(command, input, Some(abort_stdin), None)
+    }
+
+    fn execute_with_stdin_inner(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+        abort_stdin: Option<&(dyn Fn() + Sync)>,
+        observer: Option<CommandOutputObserver>,
+    ) -> Result<CommandOutput> {
         self.describe_cancellation(
             command,
             crate::runtime::off_async_worker(|| {
@@ -1813,6 +1863,7 @@ impl CancellableProcessExecutor {
                             command,
                             &mut *input,
                             &|| self.is_cancelled(),
+                            abort_stdin,
                             gate,
                             observer.clone(),
                         )
@@ -2270,6 +2321,7 @@ impl CancellableProcessExecutor {
                 command,
                 &mut input,
                 &|| self.is_cancelled(),
+                None,
                 gate,
                 None,
             );
@@ -4767,7 +4819,8 @@ exit 0
         set_ssh_connection_sharing_for_test(None);
     }
 
-    // Hard-won: #1613: a mid-stream stdin read error must kill the child before closing stdin so a length-less writer never publishes a truncated file on EOF.
+    /// A mid-stream stdin read error must kill the child before closing stdin so
+    /// a length-less writer never publishes a truncated file on EOF.
     #[cfg(unix)]
     #[test]
     fn streamed_stdin_read_error_terminates_child_before_eof() {
@@ -4804,5 +4857,79 @@ exit 0
             !published.exists(),
             "child must be killed before seeing EOF on stdin read error"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abortable_stdin_unblocks_on_early_child_exit_and_cancellation() {
+        struct BlockingReader {
+            aborted: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+            entered: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        }
+        impl Read for BlockingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                {
+                    let mut started = self.entered.0.lock().unwrap();
+                    *started = true;
+                    self.entered.1.notify_all();
+                }
+                let mut aborted = self.aborted.0.lock().unwrap();
+                while !*aborted {
+                    aborted = self.aborted.1.wait(aborted).unwrap();
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "stdin aborted",
+                ))
+            }
+        }
+
+        // 1. Child exits non-zero before reading stdin while reader blocks.
+        let aborted = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let entered = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let mut reader = BlockingReader {
+            aborted: aborted.clone(),
+            entered,
+        };
+        let abort_fn = || {
+            let mut flag = aborted.0.lock().unwrap();
+            *flag = true;
+            aborted.1.notify_all();
+        };
+        let command = CommandSpec::new("sh", ["-c", "echo already-exists >&2; exit 7"]);
+        let executor = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)));
+        let output = executor
+            .execute_with_abortable_stdin(&command, &mut reader, &abort_fn)
+            .expect("non-zero child exit returns CommandOutput without hanging");
+        assert_eq!(output.status, 7);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("already-exists"));
+
+        // 2. Cancellation fires while child is waiting on stdin and reader blocks.
+        let aborted = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let entered = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let entered_cancel = entered.clone();
+        let cancel_trigger = cancelled.clone();
+        let canceller = std::thread::spawn(move || {
+            let mut started = entered_cancel.0.lock().unwrap();
+            while !*started {
+                started = entered_cancel.1.wait(started).unwrap();
+            }
+            cancel_trigger.store(true, Ordering::Release);
+        });
+        let mut reader = BlockingReader {
+            aborted: aborted.clone(),
+            entered,
+        };
+        let abort_fn = || {
+            let mut flag = aborted.0.lock().unwrap();
+            *flag = true;
+            aborted.1.notify_all();
+        };
+        let command = CommandSpec::new("sh", ["-c", "cat >/dev/null"]);
+        let executor = CancellableProcessExecutor::new(cancelled);
+        let result = executor.execute_with_abortable_stdin(&command, &mut reader, &abort_fn);
+        canceller.join().unwrap();
+        assert!(result.is_err(), "cancellation must return error promptly");
     }
 }

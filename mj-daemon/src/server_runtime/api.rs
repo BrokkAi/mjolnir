@@ -24,7 +24,7 @@ use mj_controller::quota::ProfileQuota;
 
 use crate::server::api::{
     BundleExport, ExportError, PushedBranch, StartFollowup, StartStatus, SubagentBackend,
-    TranscriptPage, TurnSpan, TurnState, TurnSummary,
+    TranscriptPage, TurnSpan, TurnState, TurnSummary, UploadBody,
 };
 use mj_checkpoint::archive::{FetchMode, FetchedPath};
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
@@ -3755,7 +3755,7 @@ async fn write_workspace_file(
     exports: Arc<dyn ExportRuntime>,
     session_id: String,
     path: PathBuf,
-    reader: Box<dyn std::io::Read + Send>,
+    body: UploadBody,
     expected_len: Option<u64>,
     overwrite: bool,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -3789,7 +3789,9 @@ async fn write_workspace_file(
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
+    let (reader, upload_abort) = body.into_parts();
     let worker_cancelled = cancelled.clone();
+    let worker_abort = upload_abort.clone();
     let mut transfer = mj_core::runtime::spawn_blocking(move || {
         let binary = format!(
             "{}/hel",
@@ -3823,7 +3825,7 @@ async fn write_workspace_file(
             bytes: 0,
         };
         let output = CancellableProcessExecutor::new(worker_cancelled)
-            .execute_with_stdin(&command, &mut counting)?;
+            .execute_with_abortable_stdin(&command, &mut counting, worker_abort.as_ref())?;
         Ok::<_, anyhow::Error>((output, counting.bytes))
     });
     let (output, bytes_written) = loop {
@@ -3832,6 +3834,7 @@ async fn write_workspace_file(
             () = tokio::time::sleep(Duration::from_millis(250)) => {
                 if let Err(error) = tokio::time::timeout(Duration::from_secs(10), lease.verify()).await.context("checking file write barrier timed out").and_then(|r| r) {
                     cancelled.store(true, Ordering::Release);
+                    upload_abort();
                     // Do not release ownership while a subprocess can still write.
                     match transfer.await {
                         Ok(Ok(_)) => {},
@@ -4638,7 +4641,7 @@ impl SubagentBackend for ApiBackend {
         &self,
         session_id: String,
         path: PathBuf,
-        reader: Box<dyn std::io::Read + Send>,
+        body: UploadBody,
         expected_len: Option<u64>,
         overwrite: bool,
     ) -> BoxFuture<'_, Result<u64, ExportError>> {
@@ -4662,7 +4665,7 @@ impl SubagentBackend for ApiBackend {
                 exports,
                 session_id,
                 path,
-                reader,
+                body,
                 expected_len,
                 overwrite,
                 cancelled,

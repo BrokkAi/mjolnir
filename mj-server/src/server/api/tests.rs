@@ -1387,6 +1387,7 @@ struct FakeBackend {
     file_paths: Mutex<Vec<(PathBuf, mj_checkpoint::archive::FetchMode)>>,
     file_writes: Mutex<Vec<(PathBuf, Vec<u8>, bool)>>,
     file_write_root: Option<PathBuf>,
+    abort_upload_after_read_starts: bool,
     events: Mutex<Vec<mj_controller::database::ApiEvent>>,
     /// What the live session actor reports, when this fake has one. The
     /// controller snapshot deliberately disagrees with it in the tests that
@@ -1757,12 +1758,36 @@ impl SubagentBackend for FakeBackend {
         &self,
         _session_id: String,
         path: PathBuf,
-        mut reader: Box<dyn std::io::Read + Send>,
+        body: UploadBody,
         expected_len: Option<u64>,
         overwrite: bool,
     ) -> BoxFuture<'_, Result<u64, ExportError>> {
         let root = self.file_write_root.clone();
+        let abort_after_read = self.abort_upload_after_read_starts;
         Box::pin(async move {
+            let (mut reader, abort) = body.into_parts();
+            if abort_after_read {
+                let first_read_done = Arc::new(tokio::sync::Notify::new());
+                let notify = first_read_done.clone();
+                let transfer = mj_core::runtime::spawn_blocking(move || {
+                    let mut buf = [0u8; 64];
+                    let first = reader.read(&mut buf)?;
+                    assert!(first > 0, "expected initial chunk before blocking");
+                    notify.notify_one();
+                    // Blocks in UploadChannelReader::read until `abort()` fires.
+                    reader.read(&mut buf)
+                });
+                first_read_done.notified().await;
+                abort();
+                let outcome = transfer
+                    .await
+                    .map_err(|error| ExportError::Failed(error.into()))?;
+                let err = outcome.expect_err("abort must unblock reader with an error");
+                assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+                return Err(ExportError::Failed(anyhow::anyhow!(
+                    "simulated workspace barrier failure"
+                )));
+            }
             if let Some(root) = root {
                 return mj_core::runtime::spawn_blocking(move || {
                     mj_checkpoint::archive::write_session_file_from_reader(
@@ -5910,6 +5935,71 @@ async fn streaming_file_upload_handles_200_mib_bounded_rss_and_truncation_safety
             b"replaced"
         );
     }
+}
+
+#[tokio::test]
+async fn paused_streaming_upload_unblocks_on_early_reject_and_abort() {
+    use futures::StreamExt as _;
+
+    // 1. Paused body + early rejection (existing destination without overwrite)
+    //    must answer 409 immediately instead of waiting for more body bytes.
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("exists.bin"), b"keep").unwrap();
+    let backend = Arc::new(FakeBackend {
+        file_write_root: Some(workspace.path().to_path_buf()),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshots, _bundles) = api_app(backend, |s| {
+        s.sessions[0].is_idle = true;
+    });
+    let paused_stream = futures::stream::pending::<Result<axum::body::Bytes, std::io::Error>>();
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        app.oneshot(
+            bearer(Request::put(
+                "/api/v1/sessions/session-1/files?path=exists.bin",
+            ))
+            .body(Body::from_stream(paused_stream))
+            .unwrap(),
+        ),
+    )
+    .await
+    .expect("early reject must not wait for paused upload body")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        std::fs::read(workspace.path().join("exists.bin")).unwrap(),
+        b"keep"
+    );
+
+    // 2. Client sends one chunk then pauses while the backend's workspace
+    //    barrier fails and aborts the upload body; the blocked reader thread
+    //    must wake immediately instead of wedging `transfer.await`.
+    let backend = Arc::new(FakeBackend {
+        abort_upload_after_read_starts: true,
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshots, _bundles) = api_app(backend, |s| {
+        s.sessions[0].is_idle = true;
+    });
+    let stalled_after_first = futures::stream::once(async {
+        Ok::<axum::body::Bytes, std::io::Error>(axum::body::Bytes::from_static(b"partial"))
+    })
+    .chain(futures::stream::pending());
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        app.oneshot(
+            bearer(Request::put(
+                "/api/v1/sessions/session-1/files?path=stalled.bin",
+            ))
+            .body(Body::from_stream(stalled_after_first))
+            .unwrap(),
+        ),
+    )
+    .await
+    .expect("aborted upload must unblock paused reader and finish promptly")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]
