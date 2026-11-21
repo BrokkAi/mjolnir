@@ -31,6 +31,7 @@ impl ReviewEvidence {
         turn_context: &mj_transcript::turn_context::TurnContext,
         tool_call_id: &str,
         action: &serde_json::Value,
+        project_instructions: Option<String>,
     ) -> Self {
         let authorization = turn_context.authorization_context();
         let person = authorization
@@ -52,6 +53,7 @@ impl ReviewEvidence {
                 tool_call_id: tool_call_id.to_owned(),
                 user_instructions,
                 user_instructions_omitted,
+                project_instructions,
                 transcript: turn_context.render_transcript(GUARDIAN_TRANSCRIPT_BYTES),
                 action: action.clone(),
             },

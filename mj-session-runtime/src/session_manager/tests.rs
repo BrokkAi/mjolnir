@@ -1620,6 +1620,7 @@ async fn guardian_actor_delivers_fallback_for_a_request_added_after_attachment()
             action: serde_json::json!({"input": {"command": "cargo test"}}),
             user_instructions: vec!["Run the tests.".into()],
             user_instructions_omitted: false,
+            project_instructions: None,
             transcript: String::new(),
         })
         .unwrap(),
