@@ -10477,3 +10477,74 @@ async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
     assert_eq!(observed(second.unwrap()).0, ordinal);
     assert_eq!(started.elapsed(), mj_core::relay::RELAY_CHANGE_WAIT_BOUND);
 }
+
+#[test]
+fn antigravity_connected_with_hook_publishes_steering_and_enables_automatic_steering() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    {
+        let mut locked = relay.lock().unwrap();
+        locked.set_turn_verdict_harness(mj_core::config::HarnessKind::Antigravity);
+        locked.set_steering_delivery_mode(mj_core::config::HarnessKind::Antigravity, true);
+    }
+    let mut in_flight = BTreeMap::new();
+    unix::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::Connected {
+            agent_name: Some("antigravity".into()),
+            agent_version: Some("1.5.11".into()),
+            protocol_version: Some(ProtocolVersion::V1),
+            capabilities: Some(Box::new(AgentCapabilities::default())),
+            agent_info: Some(Implementation::new("antigravity", "1.5.11")),
+            steering_supported: Some(false),
+        },
+    )
+    .unwrap();
+
+    let mut locked = relay.lock().unwrap();
+    assert_eq!(locked.operational_state().steering_supported, Some(true));
+    // Verify automatic steering is enabled by starting a turn and queueing a follow-up prompt.
+    locked.set_acp_ready(true);
+    locked
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "agy-conv-connected".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let submit = |relay: &mut DurableRelay, id: &str, text: &str| {
+        let resp = relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: id.into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: mj_core::relay::RelayRequest::Submit {
+                command_id: id.into(),
+                command: mj_core::relay::RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::Text(TextContent::new(text))],
+                },
+            },
+        });
+        assert!(
+            matches!(resp.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+            "{resp:?}"
+        );
+    };
+    submit(&mut locked, "agy-connected-first", "first");
+    let claimed = locked.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    submit(&mut locked, "agy-connected-steer", "steer me");
+    assert!(locked.claim_pending_commands(true).unwrap().is_empty());
+    let drained = locked.drain_mailbox("PostToolBatch", None).unwrap();
+    assert!(matches!(
+        drained,
+        mj_core::relay::RelayResponsePayload::MailboxDrained {
+            lease_id: Some(_),
+            text: Some(ref t),
+            count: 1,
+            ..
+        } if t.contains("steer me")
+    ));
+}

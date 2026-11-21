@@ -995,4 +995,111 @@ mod tests {
         assert_eq!(report.cost_usd_ticks, Err(UnknownCost));
         Ok(())
     }
+
+    // Store integration: Antigravity uncached-input turns and Grok Build
+    // `*-build` model breakdowns both price in the session usage report.
+    #[test]
+    fn usage_report_prices_antigravity_and_grok_build_turns() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage-report.sqlite");
+        let now = 86_400_000;
+        let mut state = State::default();
+        for (id, profile) in [("neon-root", "gemini"), ("grok-child", "grok")] {
+            let mut session = super::super::tests::session(id, "project");
+            session.last_profile = profile.into();
+            session.state = SessionState::Running;
+            state.sessions.insert(id.into(), session);
+        }
+        save_state_to(&path, &state)?;
+        let connection = open(&path)?;
+        connection.execute(
+            "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name,kind)
+             VALUES ('grok-child','neon-root','grok-worker','worker')",
+            [],
+        )?;
+        let insert = |session: &str,
+                      seq: u64,
+                      model: &str,
+                      usage: serde_json::Value|
+         -> Result<()> {
+            let command = format!("command-{seq}");
+            let body = serde_json::json!({"command_id":command,"completed_ordinal":seq,"completed_at_ms":now,
+                "outcome":{"kind":"completed","stop_reason":"EndTurn"},"usage":usage});
+            let turn: MaterializedTurnOutcome = serde_json::from_value(body)?;
+            connection.execute("INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body) VALUES (?1,?2,?3,?4)", params![session, command, seq, serialize_turn_outcome(&turn)?])?;
+            let configuration = serde_json::from_value(serde_json::json!({"model":model}))?;
+            super::super::usage::record_turn_selection(
+                &connection,
+                session,
+                &command,
+                &configuration,
+            )?;
+            Ok(())
+        };
+        // Antigravity reports uncached input; caches are separate tallies.
+        insert(
+            "neon-root",
+            1,
+            "gemini-4-neon",
+            serde_json::json!({"scope":"turn","total_tokens":2_100_000,"input_tokens":1_000_000,
+                "output_tokens":100_000,"thought_tokens":50_000,"cached_read_tokens":1_000_000,
+                "cached_write_tokens":0}),
+        )?;
+        // Grok Build reports `grok-4.7-build` in model_usage when `grok-4.7` is selected,
+        // and includes cached reads in input_tokens.
+        for (seq, selected, reported) in [
+            (2, "grok-4.7", "grok-4.7-build"),
+            (3, "grok-4.7-build-fast", "grok-4.7-build-fast"),
+        ] {
+            let model_row = serde_json::json!({"scope":"turn","total_tokens":2_100_000,
+                "input_tokens":2_000_000,"output_tokens":100_000,"thought_tokens":50_000,
+                "cached_read_tokens":1_000_000,"cached_write_tokens":0});
+            insert(
+                "grok-child",
+                seq,
+                selected,
+                serde_json::json!({"scope":"turn","total_tokens":2_100_000,"input_tokens":2_000_000,
+                    "output_tokens":100_000,"thought_tokens":50_000,"cached_read_tokens":1_000_000,
+                    "cached_write_tokens":0,"provider_details":{"model_usage":{reported:model_row}}}),
+            )?;
+        }
+        drop(connection);
+
+        let report = load_from(&path, &SessionUsageQuery::default(), now)?;
+        let [root] = &report.sessions[..] else {
+            panic!("expected one root session: {:?}", report.sessions);
+        };
+        assert_eq!(root.session_id, "neon-root");
+        let models = root
+            .models
+            .iter()
+            .map(|model| (model.model.as_deref().unwrap(), model.cost_usd_ticks))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            models,
+            [
+                ("grok-4.7-build-fast", Ok(62_000_000_000)), // $4 + $1.20 + $1.00
+                ("gemini-4-neon", Ok(46_500_000_000)),       // $3 + $1.50 + $0.15
+                ("grok-4.7-build", Ok(31_000_000_000)),      // $2 + $0.60 + $0.50
+            ]
+        );
+        assert_eq!(root.cost_usd_ticks, Ok(139_500_000_000));
+        assert_eq!(report.cost_usd_ticks, Ok(139_500_000_000));
+
+        let primary = report
+            .agent_usage
+            .iter()
+            .find(|group| group.role == UsageAgentRole::Primary)
+            .expect("primary group");
+        assert_eq!(primary.cost_usd_ticks, Ok(46_500_000_000));
+        assert_eq!(primary.models[0].model.as_deref(), Some("gemini-4-neon"));
+
+        let subagent = report
+            .agent_usage
+            .iter()
+            .find(|group| group.role == UsageAgentRole::Subagent)
+            .expect("subagent group");
+        assert_eq!(subagent.cost_usd_ticks, Ok(93_000_000_000));
+        Ok(())
+    }
 }

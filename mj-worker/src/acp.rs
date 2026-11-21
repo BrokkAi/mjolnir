@@ -38,6 +38,7 @@ pub use verdict_client::VerdictSource;
 use crate::relay::NativeSessionHistory;
 use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;
+mod antigravity_usage;
 mod claude_usage;
 mod goal;
 mod grok_usage;

@@ -781,6 +781,17 @@ print(json.dumps(dict(version=1, candidates=[], errors=errors, unchecked=[])))
         self.assertEqual(len(runner.launches), 2)
         self.assertFalse(list((self.cache / COMMIT).glob("*.json")))
 
+    # Hard-won: 9e70058ed: a repair that cut 51 verifier errors to 36 different ones was stopped as a stall
+    def test_repair_continues_while_the_error_count_falls(self):
+        unaccounted = [{"code": "unaccounted-candidate", "message": f"candidate {i}", "row": None,
+                        "site": span(line=i + 1), "candidate": f"c{i}"} for i in range(3)]
+        depth = [{"code": "depth-exceeded", "message": f"row {i}", "row": i, "site": span(), "candidate": None}
+                 for i in range(2)]
+        answer, runner = self.verified_query(self.cache, [unaccounted, depth, []])
+        self.assertEqual(answer["status"], "ok", answer)
+        self.assertEqual(len(runner.launches), 1)
+        self.assertEqual(len(runner.turns), 3)
+
     # Hard-won: bd478e165: `store` swapped one verifier error for another and ended the gate with no fresh session
     def test_stalled_repair_gets_one_fresh_session(self):
         anchor = {"code": "anchor-kind", "message": "anchor diagnostic", "row": 0,
