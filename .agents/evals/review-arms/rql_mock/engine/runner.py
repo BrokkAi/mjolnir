@@ -518,6 +518,10 @@ class EngineRunner(SealedRunner):
             if not isinstance(row, dict) or row.keys() != {"profile", "engine_profile"}:
                 raise ValueError("each engine login requires profile and engine_profile")
             owner, alias = row["profile"], row["engine_profile"]
+            # The owner sessions' login is never allotted to the pilot, whatever the
+            # configuration says (coordinator ruling, 2026-11-21).
+            if "claude" in (owner, alias):
+                raise ValueError("the claude login is reserved for owner sessions and never serves the engine")
             if (not isinstance(owner, str) or not owner or not isinstance(alias, str) or not alias
                     or owner == alias or owner in profiles or alias in profiles):
                 raise ValueError("each engine login and alias must use a distinct profile")

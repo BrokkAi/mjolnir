@@ -305,3 +305,11 @@ def test_quota_and_auth_retry_stay_with_each_session_while_logins_rotate(engine_
         assert json.loads(first_alias.read_bytes())["claudeAiOauth"] == stages[SID]
     assert quota_calls == ["claude5", "claude4", "claude4", "claude5"]
     assert len(acps[SID].messages) == 1
+
+
+# Hard-won: 1adb52f9b: list-based admission could choose the reserved claude login
+@pytest.mark.parametrize("row", [{"profile": "claude", "engine_profile": "claude-engine"},
+                                 {"profile": "claude5", "engine_profile": "claude"}])
+def test_configured_logins_refuse_the_reserved_claude_login(row):
+    with pytest.raises(ValueError, match="reserved for owner sessions"):
+        EngineRunner.configured_logins({"logins": [{"profile": "claude4", "engine_profile": "claude4-engine"}, row]})
