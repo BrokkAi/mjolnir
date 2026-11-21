@@ -69,6 +69,12 @@ pub struct GrantedMoveKey {
     pub private_key_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_hosts_path: Option<PathBuf>,
+    /// Remote `authorized_keys` file where the ephemeral public key was installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorized_keys_path: Option<PathBuf>,
+    /// Host-side worker binary path used to run `worker authorized-keys remove`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_bin: Option<String>,
 }
 
 /// Durable ownership record for a shared EC2 security-group ingress grant used by a Move.
@@ -401,11 +407,29 @@ impl LegacyMovePhase {
     }
 }
 
-/// Pre-148 `MoveOperation` shape decoded only during startup recovery so an
-/// upgraded daemon can roll back source-owned legacy moves or finish forward
-/// destination-owned legacy moves.
+/// Pre-149 `MoveSelection` fields preserved when converting a retryable legacy
+/// Move across an upgrade (ignores removed legacy fields such as `workspace`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LegacyMoveSelection {
+    pub session_id: String,
+    pub profile_id: Option<String>,
+    pub target_template_id: Option<String>,
+    pub additional_mounts: Option<Vec<AdditionalMount>>,
+    pub resource_allocation: Option<SessionResourceAllocation>,
+    pub clear_resource_allocation: bool,
+    pub subagents: Option<crate::subagent::SubagentPolicy>,
+    pub oracle: Option<bool>,
+    pub oracle_choice: Option<crate::config::SubagentChoice>,
+}
+
+/// Pre-149 `MoveOperation` shape decoded only during startup recovery so an
+/// upgraded daemon can roll back source-owned legacy moves, finish forward
+/// destination-owned legacy moves, or preserve retryable failed/cancelled moves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LegacyMoveOperation {
+    #[serde(default)]
+    pub selection: Option<LegacyMoveSelection>,
     #[serde(default)]
     pub quota_stop_reason: Option<String>,
     #[serde(default)]
@@ -454,6 +478,117 @@ pub struct LegacyMoveOperation {
     pub updated_at: String,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+impl LegacyMoveOperation {
+    /// Every checkpoint archive this legacy Move still references for retry or recovery.
+    pub fn retained_archives(&self) -> Vec<&CheckpointMetadata> {
+        if self.is_resolved() {
+            return Vec::new();
+        }
+        let mut archives = Vec::new();
+        if let Some(handoff) = self.handoff.as_ref() {
+            archives.push(handoff);
+        }
+        if let Some(checkpoint) = self.checkpoint.as_ref()
+            && !archives
+                .iter()
+                .any(|existing| existing.archive_path == checkpoint.archive_path)
+        {
+            archives.push(checkpoint);
+        }
+        archives
+    }
+
+    /// Whether this legacy Move has no remaining work, retryable archive, or
+    /// prepared destination and can safely be deleted on upgrade.
+    pub fn is_resolved(&self) -> bool {
+        match self.phase {
+            LegacyMovePhase::Completed => true,
+            LegacyMovePhase::Failed | LegacyMovePhase::Cancelled => {
+                !self.queue_admission_started
+                    && self.handoff.is_none()
+                    && self.checkpoint.is_none()
+                    && self.prepared_destination.is_none()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether startup recovery must actively roll back or finish forward this legacy Move.
+    pub fn needs_recovery(&self) -> bool {
+        self.phase.is_active()
+            || (self.queue_admission_started && !self.queue_admission_finished)
+    }
+
+    /// Convert a retryable inactive (`Failed` / `Cancelled`) legacy Move into a
+    /// current `MoveOperation` so retry state and archive retention survive upgrade.
+    pub fn into_retryable_move_operation(&self, session_id: &str) -> MoveOperation {
+        let sel = self.selection.as_ref();
+        MoveOperation {
+            quota_stop_reason: self.quota_stop_reason.clone(),
+            quota_continuation: self.quota_continuation,
+            prepared_destination: self.prepared_destination.clone(),
+            accepted_preparation: None,
+            acknowledge_interruption: self.acknowledge_interruption,
+            transfer_route: None,
+            consent: Default::default(),
+            skip_keep_paths: Vec::new(),
+            granted_keys: Vec::new(),
+            granted_ec2_rules: Vec::new(),
+            in_place_expected_store_id: None,
+            in_place_continuation_command_id: None,
+            in_place_held_command_ids: Vec::new(),
+            in_place_harness_restarted: false,
+            deferred_environment_changes: Vec::new(),
+            source_snapshot: None,
+            source_checkpoint_only: self.source_checkpoint_only,
+            in_place: self.in_place,
+            operation_id: self.operation_id.clone(),
+            selection: MoveSelection {
+                consent: Default::default(),
+                skip_keep_paths: Vec::new(),
+                clear_resource_allocation: sel.is_some_and(|s| s.clear_resource_allocation),
+                session_id: sel
+                    .map(|s| s.session_id.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(session_id)
+                    .to_owned(),
+                profile_id: sel.and_then(|s| s.profile_id.clone()),
+                target_template_id: sel.and_then(|s| s.target_template_id.clone()),
+                additional_mounts: sel.and_then(|s| s.additional_mounts.clone()),
+                resource_allocation: sel.and_then(|s| s.resource_allocation.clone()),
+                subagents: sel.and_then(|s| s.subagents.clone()),
+                oracle: sel.and_then(|s| s.oracle),
+                oracle_choice: sel.and_then(|s| s.oracle_choice.clone()),
+            },
+            source_profile_id: self.source_profile_id.clone(),
+            source_target_template_id: self.source_target_template_id.clone(),
+            source_target: self.source_target.clone(),
+            source_native_session_id: self.source_native_session_id.clone(),
+            inherited_resource_allocation: self.inherited_resource_allocation.clone(),
+            inherited_additional_mounts: self.inherited_additional_mounts.clone(),
+            source_additional_mounts: self.source_additional_mounts.clone(),
+            source_resource_allocation: self.source_resource_allocation.clone(),
+            destination_target: self.destination_target.clone(),
+            destination_native_session_id: self.destination_native_session_id.clone(),
+            destination_store_id: self.destination_store_id.clone(),
+            configuration_fingerprint: self.configuration_fingerprint.clone(),
+            checkpoint: self.handoff.clone().or_else(|| self.checkpoint.clone()),
+            recovery_session: self.recovery_session.clone(),
+            queue: self.queue,
+            phase: match self.phase {
+                LegacyMovePhase::Cancelled => MovePhase::Cancelled,
+                _ => MovePhase::Failed,
+            },
+            queue_admission_started: self.queue_admission_started,
+            queue_admission_finished: self.queue_admission_finished,
+            cancellation_requested: self.cancellation_requested,
+            created_at: self.created_at.clone(),
+            updated_at: self.updated_at.clone(),
+            error: self.error.clone(),
+        }
+    }
 }
 
 /// Result of decoding a stored `MoveOperation` JSON row.

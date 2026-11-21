@@ -1238,6 +1238,139 @@ fn stage_mode_0600_file(
     Ok(())
 }
 
+/// Best-effort revocation of ephemeral Move SSH credentials recorded in
+/// `MoveOperation::granted_keys` after an interrupted or recovered Move.
+///
+/// For each key whose recorded `host` matches one of `candidate_targets` (an
+/// SSH/EC2 host), runs both `worker authorized-keys remove --operation-id` and
+/// `rm -f -- <private_key_path> <known_hosts_path>` on that host via the
+/// daemon's control connection. Keys without a matching remote locator fall
+/// back to local file removal.
+///
+/// Returns the subset of keys whose remote cleanup failed so callers can retain
+/// them for retry if a host was unreachable.
+pub(crate) fn cleanup_interrupted_move_credentials(
+    operation_id: &str,
+    granted_keys: &[mj_core::state::GrantedMoveKey],
+    candidate_targets: &[&TargetLocator],
+    executor: &(impl CommandExecutor + Sync),
+) -> Vec<mj_core::state::GrantedMoveKey> {
+    let mut remaining = Vec::new();
+    for key in granted_keys {
+        let matched_host = candidate_targets
+            .iter()
+            .copied()
+            .find(|locator| target_ssh_host(locator).as_deref() == Some(key.host.as_str()))
+            .map(host_shell_locator);
+        let Some(host) = matched_host else {
+            super::recovery::cleanup_local_move_key_files(std::slice::from_ref(key));
+            continue;
+        };
+        let mut ok = true;
+        if let (Some(worker_bin), Some(auth_keys_path)) =
+            (key.worker_bin.as_deref(), key.authorized_keys_path.as_deref())
+        {
+            let remove_spec = targets::locator_command(
+                SshTrafficClass::Control,
+                &host,
+                vec![
+                    worker_bin.to_owned(),
+                    "worker".into(),
+                    "authorized-keys".into(),
+                    "remove".into(),
+                    "--path".into(),
+                    auth_keys_path.to_string_lossy().into_owned(),
+                    "--operation-id".into(),
+                    operation_id.to_owned(),
+                ],
+            )
+            .purpose("remove temporary Move authorized_keys entry");
+            match executor.execute_cleanup(&remove_spec) {
+                Ok(out) if out.status == 0 => {}
+                Ok(out) => {
+                    ok = false;
+                    tracing::warn!(
+                        operation_id,
+                        host = %key.host,
+                        status = out.status,
+                        stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                        "failed to revoke temporary Move authorized_keys entry during recovery"
+                    );
+                }
+                Err(err) => {
+                    ok = false;
+                    tracing::warn!(
+                        operation_id,
+                        host = %key.host,
+                        error = %err,
+                        "failed to revoke temporary Move authorized_keys entry during recovery"
+                    );
+                }
+            }
+        }
+        let mut stage_files = Vec::new();
+        if let Some(path) = &key.private_key_path {
+            stage_files.push(path.to_string_lossy().into_owned());
+        }
+        if let Some(path) = &key.known_hosts_path {
+            stage_files.push(path.to_string_lossy().into_owned());
+        }
+        if !stage_files.is_empty() {
+            let mut argv = vec!["rm".into(), "-f".into(), "--".into()];
+            argv.extend(stage_files);
+            let rm_spec = targets::locator_command(SshTrafficClass::Control, &host, argv)
+                .purpose("remove temporary Move SSH key and known_hosts");
+            match executor.execute_cleanup(&rm_spec) {
+                Ok(out) if out.status == 0 => {}
+                Ok(out) => {
+                    ok = false;
+                    tracing::warn!(
+                        operation_id,
+                        host = %key.host,
+                        status = out.status,
+                        stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                        "failed to remove temporary Move SSH files during recovery"
+                    );
+                }
+                Err(err) => {
+                    ok = false;
+                    tracing::warn!(
+                        operation_id,
+                        host = %key.host,
+                        error = %err,
+                        "failed to remove temporary Move SSH files during recovery"
+                    );
+                }
+            }
+        }
+        if !ok {
+            remaining.push(key.clone());
+        }
+    }
+    remaining
+}
+
+fn target_ssh_host(locator: &TargetLocator) -> Option<String> {
+    let ssh = match locator {
+        TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::AwsEc2 { ssh, .. }
+        | TargetLocator::SshPodman { ssh, .. }
+        | TargetLocator::SshDocker { ssh, .. }
+        | TargetLocator::SshAppleContainer { ssh, .. }
+        | TargetLocator::SshNitro { ssh, .. } => ssh,
+        TargetLocator::LocalBare { .. }
+        | TargetLocator::LocalPodman { .. }
+        | TargetLocator::LocalDocker { .. }
+        | TargetLocator::AppleContainer { .. } => return None,
+    };
+    Some(
+        ssh.destination
+            .rsplit_once('@')
+            .map_or(ssh.destination.as_str(), |(_, host)| host)
+            .to_owned(),
+    )
+}
+
 /// Convert any target locator into a host-level locator for running host-local
 /// commands (outside containers).
 fn host_shell_locator(locator: &TargetLocator) -> TargetLocator {
@@ -2290,5 +2423,115 @@ fi
         let purposes = executor.recorded_purposes.lock().unwrap().clone();
         assert!(purposes.iter().any(|p| p == "remove temporary Move authorized_keys entry"));
         assert!(purposes.iter().any(|p| p == "remove temporary Move SSH key and known_hosts"));
+    }
+
+    #[test]
+    fn cleanup_interrupted_move_credentials_revokes_remote_authorized_keys_and_stage_files() {
+        #[derive(Default)]
+        struct RecordingCleanupExecutor {
+            commands: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+        }
+        impl CommandExecutor for RecordingCleanupExecutor {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                false
+            }
+            fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.execute(command)
+            }
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> Result<CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands
+                    .lock()
+                    .unwrap()
+                    .push((command.purpose.clone(), command.args.clone()));
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+            fn execute_with_stdin(
+                &self,
+                command: &CommandSpec,
+                _input: &mut (dyn std::io::Read + Send),
+            ) -> Result<CommandOutput> {
+                self.execute(command)
+            }
+        }
+        let src = TargetLocator::SshBare {
+            ssh: mj_core::targets::SshTarget {
+                destination: "user@src.example.com".into(),
+                ssh_args: vec![],
+            },
+            workspace: "/w".into(),
+            worker_id: None,
+        };
+        let dst = TargetLocator::SshBare {
+            ssh: mj_core::targets::SshTarget {
+                destination: "user@dst.example.com".into(),
+                ssh_args: vec![],
+            },
+            workspace: "/w".into(),
+            worker_id: None,
+        };
+        let keys = vec![
+            mj_core::state::GrantedMoveKey {
+                host: "src.example.com".into(),
+                comment: "mj-move-op-crash".into(),
+                private_key_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.key")),
+                known_hosts_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.known_hosts")),
+                authorized_keys_path: Some(PathBuf::from("/home/u/.ssh/authorized_keys")),
+                worker_bin: Some("/home/u/.local/share/mjolnir/workers/s1/hel".into()),
+            },
+            mj_core::state::GrantedMoveKey {
+                host: "dst.example.com".into(),
+                comment: "mj-move-op-crash".into(),
+                private_key_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.pull.key")),
+                known_hosts_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.pull.known_hosts")),
+                authorized_keys_path: Some(PathBuf::from("/home/u/.ssh/authorized_keys")),
+                worker_bin: Some("/home/u/.local/share/mjolnir/workers/s1/hel".into()),
+            },
+        ];
+        let executor = RecordingCleanupExecutor::default();
+        let remaining = cleanup_interrupted_move_credentials(
+            "op-crash",
+            &keys,
+            &[&src, &dst],
+            &executor,
+        );
+        assert!(remaining.is_empty(), "all remote credentials should be revoked");
+        let commands = executor.commands.lock().unwrap();
+        assert_eq!(commands.len(), 4, "expected 2 authorized-keys remove + 2 rm -f: {commands:?}");
+        assert!(commands.iter().any(|(p, args)| {
+            p == "remove temporary Move authorized_keys entry"
+                && args.iter().any(|a| a.contains("src.example.com"))
+                && args.iter().any(|a| a.contains("authorized-keys"))
+                && args.iter().any(|a| a.contains("op-crash"))
+        }));
+        assert!(commands.iter().any(|(p, args)| {
+            p == "remove temporary Move authorized_keys entry"
+                && args.iter().any(|a| a.contains("dst.example.com"))
+                && args.iter().any(|a| a.contains("authorized-keys"))
+                && args.iter().any(|a| a.contains("op-crash"))
+        }));
+        assert!(commands.iter().any(|(p, args)| {
+            p == "remove temporary Move SSH key and known_hosts"
+                && args.iter().any(|a| a.contains("src.example.com"))
+                && args.iter().any(|a| a.contains("mj-move-op-crash.key"))
+        }));
+        assert!(commands.iter().any(|(p, args)| {
+            p == "remove temporary Move SSH key and known_hosts"
+                && args.iter().any(|a| a.contains("dst.example.com"))
+                && args.iter().any(|a| a.contains("mj-move-op-crash.pull.key"))
+        }));
     }
 }

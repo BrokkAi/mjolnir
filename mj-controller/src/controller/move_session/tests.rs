@@ -46,6 +46,7 @@ fn legacy_resuming_destination_running_crash_window_finishes_forward() {
     let dest_target = sample_target("dest");
     let session = sample_session_record(SessionState::Running, dest_target.clone());
     let legacy = LegacyMoveOperation {
+        selection: None,
         quota_stop_reason: None,
         quota_continuation: None,
         prepared_destination: None,
@@ -246,6 +247,7 @@ fn recover_legacy_move_operation_probes_dead_source_and_handles_stopped_checkpoi
     crate::database::save_session(&dead_session).unwrap();
 
     let dead_legacy = LegacyMoveOperation {
+        selection: None,
         quota_stop_reason: None,
         quota_continuation: None,
         prepared_destination: None,
@@ -328,6 +330,7 @@ fn recover_legacy_move_operation_probes_dead_source_and_handles_stopped_checkpoi
         .sessions
         .insert("sess-stopped".into(), stopped_session.clone());
     let stopped_legacy = LegacyMoveOperation {
+        selection: None,
         quota_stop_reason: None,
         quota_continuation: None,
         prepared_destination: None,

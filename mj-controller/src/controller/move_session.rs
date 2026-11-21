@@ -2136,6 +2136,53 @@ impl Controller {
         Ok(outcome)
     }
 
+    /// Revoke any ephemeral direct-transfer SSH credentials (`authorized_keys`
+    /// entries and staged private-key/`known_hosts` files) still recorded on
+    /// `operation.granted_keys`, and persist the updated key list when entries
+    /// are cleared.
+    pub fn cleanup_move_granted_keys(
+        &self,
+        operation: &mut MoveOperation,
+        executor: &(impl CommandExecutor + Sync),
+    ) {
+        if operation.granted_keys.is_empty() {
+            return;
+        }
+        let id = &operation.selection.session_id;
+        let session_target = self.state.sessions.get(id).and_then(|s| s.target.as_deref());
+        let mut candidates: Vec<&mj_core::state::TargetLocator> = Vec::new();
+        if let Some(target) = operation.source_target.as_ref() {
+            candidates.push(target);
+        }
+        if let Some(target) = operation.destination_target.as_ref() {
+            candidates.push(target);
+        }
+        if let Some(target) = session_target {
+            candidates.push(target);
+        }
+        let backend_targets: Vec<mj_core::targets::TargetLocator> = candidates
+            .into_iter()
+            .filter_map(|locator| {
+                self.state
+                    .sessions
+                    .get(id)
+                    .and_then(|session| super::backend_locator(locator, session, &self.config).ok())
+            })
+            .collect();
+        let refs: Vec<&mj_core::targets::TargetLocator> = backend_targets.iter().collect();
+        let remaining = transport::cleanup_interrupted_move_credentials(
+            &operation.operation_id,
+            &operation.granted_keys,
+            &refs,
+            executor,
+        );
+        if remaining.len() != operation.granted_keys.len() {
+            operation.granted_keys = remaining;
+            operation.updated_at = now();
+            let _ = crate::database::save_move_operation(operation);
+        }
+    }
+
     pub async fn recover_move_managed_controlled(
         &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
@@ -2286,6 +2333,7 @@ impl Controller {
                 MovePhase::DestinationOwns
                 | MovePhase::SourceRetired
                 | MovePhase::QueueAdmitted => {
+                    self.cleanup_move_granted_keys(&mut operation, executor);
                     ensure!(!operation.cancellation_requested, "Move was cancelled; ready destination retained");
                     self.retire_move_source_if_needed(&mut operation, executor)?;
                     restore_move_queue_hold(&operation);
@@ -2294,6 +2342,7 @@ impl Controller {
                 MovePhase::Restoring | MovePhase::DestinationStarting
                     if session.state == SessionState::Running =>
                 {
+                    self.cleanup_move_granted_keys(&mut operation, executor);
                     ensure!(Some(&session.last_profile) == operation.selection.profile_id.as_ref()
                         && Some(&session.target_template_id) == operation.selection.target_template_id.as_ref(),
                         "ready destination does not match the move intent");
@@ -2308,7 +2357,7 @@ impl Controller {
                     self.admit_move_queue(&mut operation, executor).await
                 }
                 MovePhase::Transferring | MovePhase::Restoring | MovePhase::DestinationStarting => {
-                    recovery::cleanup_local_move_key_files(&operation.granted_keys);
+                    self.cleanup_move_granted_keys(&mut operation, executor);
                     let previous = operation.recovery_session.clone().context("move lacks its stopped recovery identity; retain resources for inspection")?;
                     if operation.in_place && !operation.cancellation_requested {
                         return self.retry_interrupted_in_place_move(admission, &mut operation, &previous, executor, manager).await;
@@ -2763,15 +2812,16 @@ impl Controller {
                         return Err(err);
                     }
                 };
-                if operation.in_place_held_command_ids.is_empty() && !held_ids.is_empty() {
-                    operation.in_place_held_command_ids = held_ids;
-                    operation.updated_at = now();
-                    crate::database::save_move_operation(operation)?;
-                }
                 // Any failure or cancellation after the dispatch hold is taken
-                // MUST best-effort release the hold so the worker is never
-                // stranded.
+                // (including persisting `in_place_held_command_ids`) MUST
+                // best-effort release the hold and reopen subagent admission
+                // so the worker is never stranded.
                 let post_hold: Result<()> = async {
+                    if operation.in_place_held_command_ids.is_empty() && !held_ids.is_empty() {
+                        operation.in_place_held_command_ids = held_ids;
+                        operation.updated_at = now();
+                        crate::database::save_move_operation(operation)?;
+                    }
                     ensure!(
                         !executor.cancellation_requested(),
                         "in-place Move cancelled after holding dispatch"
@@ -2800,8 +2850,13 @@ impl Controller {
                             .get(&id)
                             .context("move session missing")?
                             .clone();
+                        let source_harness_kind = self
+                            .config
+                            .named_profile(&operation.source_profile_id)
+                            .map(|profile| profile.kind)
+                            .unwrap_or(previous_session.harness_kind);
                         let native_continuity = self.config.native_continuity(
-                            previous_session.harness_kind,
+                            source_harness_kind,
                             &operation.source_profile_id,
                             &dest_profile_id,
                         )?;
@@ -2890,12 +2945,17 @@ impl Controller {
                             return Err(err);
                         }
                         crate::database::save_resumed_session(&self.state.sessions[&id], None)?;
-                        operation.in_place_harness_restarted = true;
-                        operation.updated_at = now();
-                        crate::database::save_move_operation(operation)?;
+                        // Install cross-harness handoff context BEFORE marking
+                        // `in_place_harness_restarted = true`: if context
+                        // installation fails or crashes, retry sees
+                        // `AlreadyRestarted` from the worker and completes the
+                        // context installation cleanly.
                         if let Some(handoff) = utility_handoff {
                             conn.client.install_prompt_context(handoff).await?;
                         }
+                        operation.in_place_harness_restarted = true;
+                        operation.updated_at = now();
+                        crate::database::save_move_operation(operation)?;
                     }
                     match operation.queue {
                         ResumeQueueDisposition::Discard => {
@@ -3686,6 +3746,8 @@ pub(super) fn transfer_move_snapshot_to_destination(
                     peer.source_stage_dir
                         .join(format!("mj-move-{}.known_hosts", peer.operation_id)),
                 ),
+                authorized_keys_path: Some(peer.source_authorized_keys.clone()),
+                worker_bin: Some(peer.source_worker_bin.clone()),
             },
             mj_core::state::GrantedMoveKey {
                 host: peer.destination_address.clone(),
@@ -3698,6 +3760,8 @@ pub(super) fn transfer_move_snapshot_to_destination(
                     peer.destination_stage_dir
                         .join(format!("mj-move-{}.pull.known_hosts", peer.operation_id)),
                 ),
+                authorized_keys_path: Some(peer.destination_authorized_keys.clone()),
+                worker_bin: Some(peer.destination_worker_bin.clone()),
             },
         ];
         operation.updated_at = now();
@@ -3728,7 +3792,17 @@ pub(super) fn transfer_move_snapshot_to_destination(
         direct_peer.as_ref(),
         ec2_manager.as_ref(),
     );
-    recovery::cleanup_local_move_key_files(&operation.granted_keys);
+    if !operation.granted_keys.is_empty() {
+        let remaining = transport::cleanup_interrupted_move_credentials(
+            &operation.operation_id,
+            &operation.granted_keys,
+            &[source, destination],
+            executor,
+        );
+        operation.granted_keys = remaining;
+        operation.updated_at = now();
+        let _ = crate::database::save_move_operation(operation);
+    }
     let receipt = result?;
     operation.transfer_route = Some(receipt.route);
     operation.updated_at = now();

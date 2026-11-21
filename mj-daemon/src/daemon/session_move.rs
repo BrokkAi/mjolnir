@@ -456,7 +456,7 @@ impl RuntimeState {
 
     pub(super) async fn recover_moves(
         self: &Arc<Self>,
-        operations: Vec<MoveOperation>,
+        mut operations: Vec<MoveOperation>,
         close_operations: &BTreeSet<String>,
     ) -> Result<MoveRecoveryOwners> {
         let mut owned = BTreeSet::new();
@@ -471,27 +471,52 @@ impl RuntimeState {
         mj_controller::controller::move_session::recovery::spawn_ec2_grant_reconcile_background(
             active_op_ids,
         );
-        // Clean up local ephemeral Move key files for any already-resolved moves.
-        for operation in &operations {
+        // Revoke any ephemeral Move credentials left on already-resolved moves.
+        let cleanup_executor = mj_core::targets::ProcessExecutor;
+        for operation in &mut operations {
             if operation.is_resolved() && !operation.granted_keys.is_empty() {
-                mj_controller::controller::move_session::recovery::cleanup_local_move_key_files(
-                    &operation.granted_keys,
-                );
+                if let Ok(controller) = mj_controller::controller::Controller::load() {
+                    controller.cleanup_move_granted_keys(operation, &cleanup_executor);
+                } else {
+                    mj_controller::controller::move_session::recovery::cleanup_local_move_key_files(
+                        &operation.granted_keys,
+                    );
+                }
             }
         }
-        // Recover any pre-148 LegacyMoveOperation rows across an upgrade,
-        // running rollback or finish-forward BEFORE deleting the legacy row.
+        // Recover any pre-149 LegacyMoveOperation rows across an upgrade:
+        // - Active or unfinished-queue moves run rollback or finish-forward
+        //   BEFORE deleting the legacy row.
+        // - Retryable inactive (Failed/Cancelled) moves retaining a handoff,
+        //   checkpoint, or prepared destination are converted to current
+        //   MoveOperation rows so retryability and archive retention survive.
+        // - Fully resolved legacy moves are deleted.
         if let Ok(legacy_ops) = mj_controller::database::load_legacy_move_operations() {
-            let executor = mj_core::targets::ProcessExecutor;
             for (session_id, legacy_op) in legacy_ops {
-                if !legacy_op.phase.is_active() {
+                if legacy_op.is_resolved() {
                     let _ = mj_controller::database::delete_move_operation(&session_id);
+                    continue;
+                }
+                if !legacy_op.needs_recovery() {
+                    let converted = legacy_op.into_retryable_move_operation(&session_id);
+                    if let Err(error) = mj_controller::database::save_move_operation(&converted) {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            operation_id = %legacy_op.operation_id,
+                            error = %error,
+                            "could not migrate retryable legacy Move row; preserving legacy row"
+                        );
+                    }
                     continue;
                 }
                 let recovered = match mj_controller::controller::Controller::load() {
                     Ok(mut controller) => {
                         controller
-                            .recover_legacy_move_operation(&session_id, &legacy_op, &executor)
+                            .recover_legacy_move_operation(
+                                &session_id,
+                                &legacy_op,
+                                &cleanup_executor,
+                            )
                             .await
                     }
                     Err(error) => Err(error),

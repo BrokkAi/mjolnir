@@ -210,6 +210,7 @@ mod tests {
 
     fn sample_legacy_op(phase: LegacyMovePhase, queue_started: bool) -> LegacyMoveOperation {
         LegacyMoveOperation {
+            selection: None,
             quota_stop_reason: None,
             quota_continuation: None,
             prepared_destination: None,

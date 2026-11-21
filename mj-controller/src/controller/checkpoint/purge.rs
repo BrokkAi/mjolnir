@@ -62,8 +62,12 @@ pub fn purge_session_untracked_archive(
     ensure_admission(admission, session_id)?;
     let state = crate::database::load_state()?;
     let operations = crate::database::load_move_operations()?;
+    let legacy_operations: Vec<_> = crate::database::load_legacy_move_operations()?
+        .into_iter()
+        .map(|(_, op)| op)
+        .collect();
     let restarts = crate::database::load_session_restarts()?;
-    let recovery = recovery_referenced_archive_names(&operations, &restarts);
+    let recovery = recovery_referenced_archive_names(&operations, &legacy_operations, &restarts);
     purge_loaded(admission, session_id, dry_run, &state, &recovery)
 }
 
@@ -82,8 +86,12 @@ pub fn purge_sessions_untracked_archives(
     }
     let state = crate::database::load_state()?;
     let operations = crate::database::load_move_operations()?;
+    let legacy_operations: Vec<_> = crate::database::load_legacy_move_operations()?
+        .into_iter()
+        .map(|(_, op)| op)
+        .collect();
     let restarts = crate::database::load_session_restarts()?;
-    let recovery = recovery_referenced_archive_names(&operations, &restarts);
+    let recovery = recovery_referenced_archive_names(&operations, &legacy_operations, &restarts);
     let mut report = PurgeUntrackedReport {
         sessions: Vec::with_capacity(sessions.len()),
         total_bytes_reclaimed: 0,
