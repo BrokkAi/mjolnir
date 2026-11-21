@@ -1,4 +1,6 @@
 use super::*;
+use crate::daemon::browser::{ConversationPreview, ResolvedProjectSource};
+use mj_core::snapshot_map::SnapshotMap;
 
 /// The live, per-session projections the phone snapshot layers on top of the
 /// controller's durable state. They arrive from relay snapshots rather than
@@ -6,11 +8,10 @@ use super::*;
 pub(super) struct PhoneSessionViews<'a> {
     pub(super) native_agents:
         &'a std::collections::BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>,
-    pub(super) conversations:
-        &'a mj_core::snapshot_map::SnapshotMap<String, crate::server::BrowserTranscript>,
+    pub(super) conversations: &'a SnapshotMap<String, ConversationPreview>,
     pub(super) sessions:
         &'a mj_core::snapshot_map::SnapshotMap<String, mj_client::daemon::RuntimeSessionView>,
-    pub(super) project_sources: &'a PhoneProjectSources,
+    pub(super) project_sources: &'a SnapshotMap<String, ResolvedProjectSource>,
     /// Lifecycle operations running now, keyed by session.
     pub(super) operations: &'a std::collections::BTreeMap<String, crate::server::ViewerOperation>,
     /// Durable Move records, projected without diagnostics or checkpoint paths.
@@ -42,11 +43,8 @@ pub(super) fn viewer_reviews(
 /// Project the capacity service's readings and refresh status for the phone.
 pub(super) fn viewer_capacity(
     metadata: &mj_client::runtime_feed::RuntimeMetadata,
+    now: u64,
 ) -> Vec<crate::server::ViewerTargetCapacity> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
     metadata
         .host_capacities
         .iter()
@@ -439,7 +437,7 @@ pub(super) fn viewer_snapshot(
         workspaces,
         quotas,
         views,
-        revision,
+        (revision, now_seconds()),
         ViewerRecordSelection {
             ids: &controller.state.sessions.keys().cloned().collect(),
             children: &children,
@@ -461,7 +459,7 @@ pub(super) fn viewer_snapshot_selected(
     workspaces: &[mj_core::workspace::WorkspaceRecord],
     quotas: &std::collections::BTreeMap<String, ProfileQuota>,
     views: &PhoneSessionViews<'_>,
-    revision: u64,
+    (revision, now): (u64, u64),
     selection: ViewerRecordSelection<'_>,
     capture: &mj_client::runtime_feed::RuntimeProjection,
 ) -> ViewerSnapshot {
@@ -544,10 +542,7 @@ pub(super) fn viewer_snapshot_selected(
             last_opened_at: workspace.last_opened_at.clone(),
         })
         .collect();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    snapshot.generated_at = now.to_string();
     for profile in &mut snapshot.profiles {
         let Some(quota) = quotas.get(&profile.id) else {
             continue;
@@ -631,9 +626,10 @@ pub(super) fn viewer_snapshot_selected(
             Box::new(recovery.with_public_failure(session.launch_error.as_deref()))
         });
         if let Some(record) = controller.state.sessions.get(&session.id)
-            && let Some(source) = project_sources.source(record, controller)
+            && let Some(source) =
+                project_sources.get(&controller.state.project_identity_session(record).id)
         {
-            session.set_project_source(source);
+            session.set_project_source(&source.source);
         }
         let view = sessions.get(&session.id);
         let live = view.and_then(|view| view.operational.as_deref());
@@ -836,8 +832,24 @@ pub(super) fn viewer_snapshot_selected(
             let activity_details =
                 activity.details(turn_started_at_ms, state.current_step_started_at_ms);
             session.activity_details = Some(viewer_activity_details(&activity_details));
+            // Keep the legacy label tied to worker observations. Current
+            // viewers use the timestamps above to render their own clocks.
+            let observed_at = [
+                activity_details.last_activity_at_ms,
+                activity_details.step_started_at_ms,
+                activity_details.turn_started_at_ms,
+                activity_details.background_started_at_ms,
+                activity_details.idle_since_ms,
+                session.last_activity_at_ms,
+            ]
+            .into_iter()
+            .flatten()
+            .filter_map(|ms| u64::try_from(ms).ok())
+            .max()
+            .unwrap_or_default()
+                / 1_000;
             session.activity = mj_client::usage_format::format_activity_columns(
-                now,
+                observed_at,
                 turn_started_at,
                 state
                     .current_step_started_at_ms
@@ -867,39 +879,11 @@ pub(super) fn viewer_snapshot_selected(
         session.capabilities.read_history =
             controller.state.is_stopped_subagent(&session.id) && !session.transitioning;
         session.available_commands = phone_commands(session, live);
-        if let Some(transcript) = conversations.get(&session.id) {
+        if let Some(preview) = conversations.get(&session.id) {
             session.conversation_available = true;
-            // The card's last-message clock moves only on top-level
-            // conversation entries, never on tool calls or status lines. It
-            // is computed even while transitioning, unlike the preview below.
-            session.last_message_at_ms = transcript
-                .entries
-                .iter()
-                .filter(|entry| matches!(entry.role, "user" | "agent"))
-                .filter_map(|entry| entry.recorded_at_ms)
-                .max();
+            session.last_message_at_ms = preview.last_message_at_ms;
             if !session.transitioning {
-                let mut lines = transcript
-                    .entries
-                    .iter()
-                    .flat_map(|entry| {
-                        entry
-                            .lines
-                            .iter()
-                            .enumerate()
-                            .filter_map(move |(index, line)| {
-                                let line = line.trim();
-                                (!line.is_empty()).then(|| {
-                                    if index == 0 {
-                                        format!("{}: {line}", entry.label)
-                                    } else {
-                                        line.to_owned()
-                                    }
-                                })
-                            })
-                    })
-                    .collect::<Vec<_>>();
-                session.preview = lines.split_off(lines.len().saturating_sub(4));
+                session.preview.clone_from(&preview.lines);
             }
         }
         // `conversation_available` is only known after the transcript loop
@@ -961,6 +945,11 @@ pub(super) fn viewer_activity_details(
         last_activity_at_ms: details.last_activity_at_ms,
         label: details.label.clone(),
     }
+}
+
+#[cfg(test)]
+pub(super) fn now_seconds() -> u64 {
+    u64::try_from(mj_core::clock::epoch_millis()).unwrap_or_default() / 1_000
 }
 
 #[cfg(test)]

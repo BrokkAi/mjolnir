@@ -4,7 +4,7 @@ use tower_http::compression::{CompressionLayer, CompressionLevel};
 #[derive(Clone)]
 pub(super) struct ServerState {
     pub(super) snapshot_rx: watch::Receiver<ViewerSnapshot>,
-    pub(super) viewer_history: viewer_feed::ViewerHistoryHandle,
+    pub(super) browser: BrowserSource,
     pub(super) conversation_rx:
         watch::Receiver<mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>>,
     pub(super) action_tx: mpsc::Sender<ControllerRequest>,
@@ -99,7 +99,7 @@ pub(super) fn code_lockout(lockouts: u32) -> Duration {
 pub(super) fn router(options: ServerOptions) -> Router {
     let state = ServerState {
         snapshot_rx: options.snapshot_rx,
-        viewer_history: options.viewer_history,
+        browser: options.browser,
         conversation_rx: options.conversation_rx,
         action_tx: options.action_tx,
         bundle_tx: options.bundle_tx,

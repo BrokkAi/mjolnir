@@ -299,6 +299,27 @@ fn app_with_bundle_and_action_receivers(
     (router(options), bundle_rx, action_rx)
 }
 
+pub(super) fn test_browser_source(snapshot_rx: watch::Receiver<ViewerSnapshot>) -> BrowserSource {
+    let (revisions, rx) = watch::channel(0);
+    BrowserSource {
+        revisions: rx,
+        views: Arc::new(move |_| {
+            let _keep_open = &revisions;
+            let current = Arc::new(snapshot_rx.borrow().clone());
+            Ok(BrowserViews {
+                cursor: mj_client::runtime_feed::RuntimeCursor {
+                    alert_sequence: 0,
+                    incarnation: "test".into(),
+                    sequence: current.revision,
+                    subagent_parents: Default::default(),
+                },
+                current,
+                base: None,
+            })
+        }),
+    }
+}
+
 // Keep this test factory's arguments aligned with `ServerRequests`; each
 // channel is asserted independently by the HTTP behavior tests below.
 #[allow(clippy::too_many_arguments)]
@@ -312,6 +333,7 @@ fn test_options(
     move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     client_state_tx: mpsc::Sender<ClientStateRequest>,
 ) -> ServerOptions {
+    let browser = test_browser_source(snapshot_rx.clone());
     ServerOptions::new(
         "127.0.0.1:0".parse().unwrap(),
         snapshot_rx,
@@ -324,6 +346,7 @@ fn test_options(
             move_preparation_tx,
             client_state_tx,
         },
+        browser,
     )
     .unwrap()
 }

@@ -2,7 +2,7 @@ use super::*;
 
 /// Inputs that can change a session's source without changing its ID.
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct ProjectSourceKey {
+pub(crate) struct ProjectSourceKey {
     pub(super) directory: Option<PathBuf>,
     pub(super) worktree: Option<mj_core::state::ManagedWorktree>,
     pub(super) target: Option<mj_core::config::TargetTemplate>,
@@ -10,7 +10,19 @@ pub(super) struct ProjectSourceKey {
 }
 
 impl ProjectSourceKey {
-    pub(super) fn of(
+    pub(crate) fn matches(&self, id: &str, controller: &Controller) -> bool {
+        let state = &controller.state;
+        let Some(session) = state.sessions.get(id) else {
+            return false;
+        };
+        state.project_identity_session(session).id == id
+            && state.checkout(id).is_ok_and(|checkout| {
+                checkout.project_directory().is_some()
+                    && *self == Self::of(session, &checkout, &controller.config)
+            })
+    }
+
+    pub(crate) fn of(
         session: &SessionRecord,
         checkout: &mj_core::state::Checkout<'_>,
         config: &Config,
@@ -30,6 +42,7 @@ impl ProjectSourceKey {
 
 pub(super) struct ProjectSourceEntry {
     pub(super) key: ProjectSourceKey,
+    #[cfg(test)]
     pub(super) source: Option<ProjectSourceIdentity>,
     pub(super) retry_at: Option<Instant>,
     /// The error the last attempt failed with, so a retry that fails the same
@@ -161,6 +174,7 @@ impl PhoneProjectSources {
                 session.id.clone(),
                 ProjectSourceEntry {
                     key: key.clone(),
+                    #[cfg(test)]
                     source: None,
                     retry_at: None,
                     last_error,
@@ -193,17 +207,28 @@ impl PhoneProjectSources {
         }
     }
 
-    pub(super) fn complete(&mut self, resolved: ProjectSourceResolved) {
-        let Some(entry) = self.entries.get_mut(&resolved.session_id) else {
-            return;
-        };
+    pub(super) fn complete(
+        &mut self,
+        resolved: ProjectSourceResolved,
+    ) -> Option<(String, crate::daemon::browser::ResolvedProjectSource)> {
+        let entry = self.entries.get_mut(&resolved.session_id)?;
         if entry.key != resolved.key || !Arc::ptr_eq(&entry.cancelled, &resolved.cancelled) {
-            return;
+            return None;
         }
         match resolved.result {
             Ok(source) => {
-                entry.source = Some(source);
+                #[cfg(test)]
+                {
+                    entry.source = Some(source.clone());
+                }
                 entry.last_error = None;
+                Some((
+                    resolved.session_id,
+                    crate::daemon::browser::ResolvedProjectSource {
+                        key: resolved.key,
+                        source,
+                    },
+                ))
             }
             Err(error) => {
                 if entry.last_error.as_ref() == Some(&error) {
@@ -223,6 +248,7 @@ impl PhoneProjectSources {
                     entry.retry_at = Some(deadline);
                     self.retries.insert((deadline, resolved.session_id));
                 }
+                None
             }
         }
     }
@@ -238,21 +264,25 @@ impl PhoneProjectSources {
         self.retries.insert((deadline, id.to_owned()));
     }
 
-    /// The resolved source of `session`, read from its project identity
-    /// session as the entries are kept.
-    pub(super) fn source(
+    #[cfg(test)]
+    pub(super) fn resolved(
         &self,
-        session: &SessionRecord,
         controller: &Controller,
-    ) -> Option<&ProjectSourceIdentity> {
-        let session = controller.state.project_identity_session(session);
-        let checkout = controller.state.checkout(&session.id).ok()?;
+    ) -> mj_core::snapshot_map::SnapshotMap<String, crate::daemon::browser::ResolvedProjectSource>
+    {
         self.entries
-            .get(&session.id)
-            .filter(|entry| {
-                entry.key == ProjectSourceKey::of(session, &checkout, &controller.config)
+            .iter()
+            .filter(|(id, entry)| entry.key.matches(id, controller))
+            .filter_map(|(id, entry)| {
+                Some((
+                    id.clone(),
+                    crate::daemon::browser::ResolvedProjectSource {
+                        key: entry.key.clone(),
+                        source: entry.source.clone()?,
+                    },
+                ))
             })
-            .and_then(|entry| entry.source.as_ref())
+            .collect()
     }
 }
 

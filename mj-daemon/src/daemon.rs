@@ -2,6 +2,7 @@
 
 mod auto_afk;
 mod availability;
+pub(crate) mod browser;
 pub(crate) mod capacity;
 mod container_upgrade;
 mod feed;
@@ -275,6 +276,7 @@ pub struct RuntimeState {
     pub(crate) credential_targets:
         Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
     feed: Mutex<feed::RuntimeHistory>,
+    browser: Mutex<browser::BrowserState>,
     availability: Mutex<availability::Availability>,
     availability_requested: tokio::sync::Notify,
     recent_launch: tokio::sync::watch::Sender<Option<mj_core::go::RecentLaunch>>,

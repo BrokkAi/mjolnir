@@ -107,7 +107,7 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             native_agents: &native_rows,
             conversations: &Default::default(),
             sessions: &Default::default(),
-            project_sources: &sources,
+            project_sources: &sources.resolved(&controller),
             operations: &Default::default(),
             move_recoveries: &Default::default(),
             capacity: &[],
@@ -661,7 +661,7 @@ fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
                 // a daemon restart, before it has reattached to the worker.
                 sessions: &fixture_runtime_sessions(&Default::default(), &materialized_activity),
 
-                project_sources: &PhoneProjectSources::default(),
+                project_sources: &Default::default(),
                 operations: &std::collections::BTreeMap::new(),
                 move_recoveries: &std::collections::BTreeMap::new(),
                 capacity: &[],
@@ -749,7 +749,7 @@ fn only_a_stopped_sub_agent_can_read_its_history() {
             native_agents: &Default::default(),
             conversations: &mj_core::snapshot_map::SnapshotMap::new(),
             sessions: &Default::default(),
-            project_sources: &PhoneProjectSources::default(),
+            project_sources: &Default::default(),
             operations: &std::collections::BTreeMap::new(),
             move_recoveries: &std::collections::BTreeMap::new(),
             capacity: &[],
@@ -900,7 +900,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
                 conversations: &mj_core::snapshot_map::SnapshotMap::new(),
                 sessions: &fixture_runtime_sessions(operational, &materialized_activity),
 
-                project_sources: &PhoneProjectSources::default(),
+                project_sources: &Default::default(),
                 operations: &std::collections::BTreeMap::new(),
                 move_recoveries: &std::collections::BTreeMap::new(),
                 capacity: &[],
@@ -1243,7 +1243,7 @@ fn golden_phone_session_snapshot() {
                     conversations: &Default::default(),
                     sessions: &fixture_runtime_sessions(operational, &Default::default()),
 
-                    project_sources: &PhoneProjectSources::default(),
+                    project_sources: &Default::default(),
                     operations: &Default::default(),
                     move_recoveries: &Default::default(),
                     capacity: &[],
@@ -1394,35 +1394,43 @@ fn golden_phone_session_snapshot() {
     let conversations = |entries: Vec<crate::server::BrowserTranscriptEntry>| {
         mj_core::snapshot_map::SnapshotMap::from([(
             "session-1".to_owned(),
-            BrowserTranscript {
-                latest_seq: 3,
-                presentation_key: "key".into(),
-                window_start_seq: 1,
-                reset: false,
-                entries: entries.into_iter().map(Arc::new).collect(),
-            },
+            crate::daemon::browser::ConversationPreview::of(
+                ConversationProjectionKey {
+                    ordinal: 3,
+                    digest: String::new(),
+                },
+                &BrowserTranscript {
+                    latest_seq: 3,
+                    presentation_key: "key".into(),
+                    window_start_seq: 1,
+                    reset: false,
+                    entries: entries.into_iter().map(Arc::new).collect(),
+                },
+            ),
         )])
     };
-    let project_conversation =
-        |conversations: &mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>| {
-            viewer_snapshot(
-                &controller,
-                &[],
-                &BTreeMap::new(),
-                &PhoneSessionViews {
-                    native_agents: &Default::default(),
-                    conversations,
-                    sessions: &Default::default(),
-                    project_sources: &PhoneProjectSources::default(),
-                    operations: &Default::default(),
-                    move_recoveries: &Default::default(),
-                    capacity: &[],
-                    launch_failures: &[],
-                    reviews: &Default::default(),
-                },
-                1,
-            )
-        };
+    let project_conversation = |conversations: &mj_core::snapshot_map::SnapshotMap<
+        String,
+        crate::daemon::browser::ConversationPreview,
+    >| {
+        viewer_snapshot(
+            &controller,
+            &[],
+            &BTreeMap::new(),
+            &PhoneSessionViews {
+                native_agents: &Default::default(),
+                conversations,
+                sessions: &Default::default(),
+                project_sources: &Default::default(),
+                operations: &Default::default(),
+                move_recoveries: &Default::default(),
+                capacity: &[],
+                launch_failures: &[],
+                reviews: &Default::default(),
+            },
+            1,
+        )
+    };
     let with_top_level = project_conversation(&conversations(vec![
         entry(1, "user", Some(1_000)),
         entry(2, "tool", Some(9_999)),
@@ -1472,7 +1480,7 @@ fn golden_phone_session_snapshot() {
             native_agents: &Default::default(),
             conversations: &Default::default(),
             sessions: &Default::default(),
-            project_sources: &PhoneProjectSources::default(),
+            project_sources: &Default::default(),
             operations: &Default::default(),
             move_recoveries: &Default::default(),
             capacity: &[],
@@ -1620,7 +1628,7 @@ fn golden_phone_session_snapshot() {
             native_agents: &Default::default(),
             conversations: &Default::default(),
             sessions: &Default::default(),
-            project_sources: &PhoneProjectSources::default(),
+            project_sources: &Default::default(),
             operations: &Default::default(),
             move_recoveries: &Default::default(),
             capacity: &[],
@@ -1773,7 +1781,7 @@ fn snapshot_publishes_launch_availability_from_the_runtime_capture() {
             native_agents: &Default::default(),
             conversations: &Default::default(),
             sessions: &Default::default(),
-            project_sources: &sources,
+            project_sources: &sources.resolved(&controller),
             operations: &Default::default(),
             move_recoveries: &Default::default(),
             capacity: &capacity,
@@ -1817,7 +1825,7 @@ fn snapshot_with_project_sources(
             native_agents: &Default::default(),
             conversations: &Default::default(),
             sessions: &Default::default(),
-            project_sources: sources,
+            project_sources: &sources.resolved(controller),
             operations: &Default::default(),
             move_recoveries: &Default::default(),
             capacity: &[],
@@ -2391,7 +2399,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
                 native_agents: &Default::default(),
                 conversations: &mj_core::snapshot_map::SnapshotMap::new(),
                 sessions: &Default::default(),
-                project_sources: &PhoneProjectSources::default(),
+                project_sources: &Default::default(),
                 operations: &std::collections::BTreeMap::new(),
                 move_recoveries: &std::collections::BTreeMap::new(),
                 capacity: &[],
@@ -2439,16 +2447,20 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
 #[test]
 fn failed_launch_notice_survives_session_rollback_and_history_is_bounded() {
     let controller = controller_with_profiles(&["codex"]);
-    let mut failures = Vec::new();
+    let mut browser = crate::daemon::browser::BrowserInputs::default();
     for index in 0..20 {
-        record_launch_failure(
-            &mut failures,
-            index,
-            format!("workspace-{index}"),
-            Some(format!("session-{index}")),
-            Some(format!("worker bootstrap failed for {index}")),
+        browser.record_action(
+            None,
+            None,
+            Some(crate::server::ViewerLaunchFailure {
+                id: action_reference(index),
+                workspace_id: format!("workspace-{index}"),
+                session_id: Some(format!("session-{index}")),
+                error: Some(format!("worker bootstrap failed for {index}")),
+            }),
         );
     }
+    let failures = &browser.launch_failures;
     let snapshot = viewer_snapshot(
         &controller,
         &[],
@@ -2457,11 +2469,11 @@ fn failed_launch_notice_survives_session_rollback_and_history_is_bounded() {
             native_agents: &Default::default(),
             conversations: &mj_core::snapshot_map::SnapshotMap::new(),
             sessions: &Default::default(),
-            project_sources: &PhoneProjectSources::default(),
+            project_sources: &Default::default(),
             operations: &std::collections::BTreeMap::new(),
             move_recoveries: &std::collections::BTreeMap::new(),
             capacity: &[],
-            launch_failures: &failures,
+            launch_failures: failures,
             reviews: &std::collections::BTreeMap::new(),
         },
         1,
@@ -2522,32 +2534,23 @@ fn a_refused_action_reports_its_reason_and_any_other_failure_reports_a_reference
 // Hard-won: ce490a90: A prior action failure must not make all later waits report the session as errored.
 #[test]
 fn a_later_successful_action_clears_a_session_s_recorded_failure() {
-    let mut pending = std::collections::BTreeMap::new();
-
-    record_action_result(
-        &mut pending,
-        Some("session-1"),
-        &Err(PhoneActionFailure::internal("relay hiccup")),
-    );
+    let mut browser = crate::daemon::browser::BrowserInputs::default();
+    browser.record_action(Some("session-1"), Some("relay hiccup"), None);
     assert_eq!(
-        pending.get("session-1").map(String::as_str),
+        browser.action_errors.get("session-1").map(String::as_str),
         Some("relay hiccup")
     );
 
-    record_action_result(&mut pending, Some("session-2"), &Ok(()));
-    record_action_result(&mut pending, Some("session-1"), &Ok(()));
+    browser.record_action(Some("session-2"), None, None);
+    browser.record_action(Some("session-1"), None, None);
     assert!(
-        pending.is_empty(),
+        browser.action_errors.is_empty(),
         "the overlay has no other expiry, so a stale error would badge the session forever"
     );
 
     // A completion with no session cannot clear or record anything.
-    record_action_result(
-        &mut pending,
-        None,
-        &Err(PhoneActionFailure::internal("orphaned")),
-    );
-    assert!(pending.is_empty());
+    browser.record_action(None, Some("orphaned"), None);
+    assert!(browser.action_errors.is_empty());
 }
 
 #[test]
@@ -2761,7 +2764,7 @@ fn historical_sessions_do_not_restore_missing_workspace_tabs() {
             native_agents: &Default::default(),
             conversations: &mj_core::snapshot_map::SnapshotMap::new(),
             sessions: &Default::default(),
-            project_sources: &PhoneProjectSources::default(),
+            project_sources: &Default::default(),
             operations: &std::collections::BTreeMap::new(),
             move_recoveries: &std::collections::BTreeMap::new(),
             capacity: &[],
@@ -2869,7 +2872,7 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
             native_agents: &Default::default(),
             conversations: &Default::default(),
             sessions: &Default::default(),
-            project_sources: &sources,
+            project_sources: &sources.resolved(&controller),
             operations: &Default::default(),
             move_recoveries: &Default::default(),
             capacity: &[],

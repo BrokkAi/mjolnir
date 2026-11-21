@@ -1,5 +1,8 @@
 //! Bounded cursor history over immutable owner snapshots.
+use super::browser::BrowserInputs;
 use super::*;
+use crate::server::{BrowserViews, ViewerSnapshot};
+use crate::server_runtime::publication::ViewerPublication;
 use mj_client::runtime_feed::{
     RuntimeCursor, RuntimeDelta, RuntimeFrame, RuntimeMetadata, RuntimeProjection,
     ScopedProjection, SessionTailReply,
@@ -18,7 +21,10 @@ pub(super) struct RuntimeHistory {
     installed_engines: super::availability::InstalledEngines,
     incarnation: String,
     sequence: u64,
-    snapshots: VecDeque<(u64, RuntimeProjection, usize)>,
+    snapshots: VecDeque<RuntimeCapture>,
+    viewer: ViewerPublication,
+    latest_view: Option<(u64, Arc<ViewerSnapshot>)>,
+    browser_watch: Option<tokio::sync::watch::Sender<ViewerSnapshot>>,
     bytes: usize,
     native_owners: NativeOwners,
     full: RuntimeProjection,
@@ -26,6 +32,25 @@ pub(super) struct RuntimeHistory {
     /// Family-scoped views recently served, oldest first. A terminal's next
     /// poll finds its base here and scopes only the changes since.
     scoped: VecDeque<(u64, Arc<ScopedProjection>)>,
+}
+
+struct RuntimeCapture {
+    sequence: u64,
+    runtime: RuntimeProjection,
+    browser: BrowserInputs,
+    captured_at: u64,
+    bytes: usize,
+}
+
+impl RuntimeCapture {
+    fn browser_view(&self, cache: &mut ViewerPublication) -> ViewerSnapshot {
+        cache.project(
+            &self.runtime,
+            &self.browser,
+            self.sequence,
+            self.captured_at,
+        )
+    }
 }
 
 /// Scoped views kept for reuse; one per terminal scope covers the usual case.
@@ -41,13 +66,18 @@ impl RuntimeHistory {
         }
     }
 
+    #[cfg(test)]
     fn publish(&mut self, next: RuntimeProjection) -> Result<()> {
+        self.retain(next, BrowserInputs::default())
+    }
+
+    fn retain(&mut self, next: RuntimeProjection, browser: BrowserInputs) -> Result<()> {
         if self.incarnation.is_empty() {
             self.incarnation = new_command_id("runtime-feed")?;
         }
-        let size = if let Some((_, previous, _)) = self.snapshots.back() {
-            let delta = RuntimeDelta::between(previous, &next);
-            if delta.is_empty() {
+        let size = if let Some(previous) = self.snapshots.back() {
+            let delta = RuntimeDelta::between(&previous.runtime, &next);
+            if delta.is_empty() && previous.browser.same_as(&browser) {
                 return Ok(());
             }
             serde_json::to_vec(&delta)?.len()
@@ -55,24 +85,29 @@ impl RuntimeHistory {
             0
         };
         self.sequence += 1;
-        self.snapshots.push_back((self.sequence, next, size));
+        self.snapshots.push_back(RuntimeCapture {
+            sequence: self.sequence,
+            runtime: next,
+            browser,
+            captured_at: u64::try_from(mj_core::clock::epoch_millis()).unwrap_or_default() / 1_000,
+            bytes: size,
+        });
         self.bytes += size;
         while self.snapshots.len() > 1
             && (self.snapshots.len() > 4096 || self.bytes > 16 * 1024 * 1024)
         {
-            let (_, _, size) = self.snapshots.pop_front().expect("history entry");
-            self.bytes -= size;
+            self.bytes -= self.snapshots.pop_front().expect("history entry").bytes;
         }
         // The current projection is required even when one change exceeds the
         // history budget. It establishes a new snapshot boundary without retaining
         // that oversized change as a replayable batch.
         if self.bytes > 16 * 1024 * 1024 {
-            self.snapshots.back_mut().expect("current projection").2 = 0;
+            self.snapshots.back_mut().expect("current projection").bytes = 0;
             self.bytes = 0;
         }
         // A view of an evicted publication can no longer be served, and would
         // keep that publication's rows and tails alive.
-        let oldest = self.snapshots.front().expect("current projection").0;
+        let oldest = self.snapshots.front().expect("current projection").sequence;
         self.scoped.retain(|(sequence, _)| *sequence >= oldest);
         Ok(())
     }
@@ -84,11 +119,7 @@ impl RuntimeHistory {
         if cursor.incarnation != self.incarnation {
             return SessionTailReply::ResetRequired;
         }
-        let Some((_, projection, _)) = self
-            .snapshots
-            .iter()
-            .find(|(sequence, _, _)| *sequence == cursor.sequence)
-        else {
+        let Some(projection) = self.snapshot(cursor.sequence) else {
             return SessionTailReply::ResetRequired;
         };
         projection
@@ -102,11 +133,54 @@ impl RuntimeHistory {
         self.frame_for_subagent_parents(requested, &BTreeSet::new())
     }
 
+    fn index(&self, sequence: u64) -> Option<usize> {
+        let index =
+            usize::try_from(sequence.checked_sub(self.snapshots.front()?.sequence)?).ok()?;
+        (index < self.snapshots.len()).then_some(index)
+    }
+
     fn snapshot(&self, sequence: u64) -> Option<&RuntimeProjection> {
-        self.snapshots
-            .iter()
-            .find(|(held, _, _)| *held == sequence)
-            .map(|(_, projection, _)| projection)
+        Some(&self.snapshots[self.index(sequence)?].runtime)
+    }
+
+    fn latest_browser_view(&mut self) -> Arc<ViewerSnapshot> {
+        if let Some((sequence, view)) = &self.latest_view
+            && *sequence == self.sequence
+        {
+            return view.clone();
+        }
+        let capture = self.snapshots.back().expect("captured browser view");
+        let view = Arc::new(capture.browser_view(&mut self.viewer));
+        self.latest_view = Some((self.sequence, view.clone()));
+        if let Some(watch) = &self.browser_watch {
+            watch.send_replace((*view).clone());
+        }
+        view
+    }
+
+    fn browser_views(&mut self, requested: Option<&RuntimeCursor>) -> BrowserViews {
+        let cursor = self.cursor();
+        let current = self.latest_browser_view();
+        let base = requested
+            .filter(|requested| requested.incarnation == cursor.incarnation)
+            .and_then(|requested| {
+                self.index(requested.sequence)
+                    .map(|index| &self.snapshots[index])
+            })
+            .map(|base| {
+                if base.sequence == cursor.sequence {
+                    current.clone()
+                } else {
+                    // Walk the dependency differences in reverse. Unaffected rows
+                    // keep their allocations and the latest cache keeps its state.
+                    Arc::new(base.browser_view(&mut self.viewer.clone()))
+                }
+            });
+        BrowserViews {
+            cursor,
+            current,
+            base,
+        }
     }
 
     /// The retained publication at `sequence` scoped to `parents`. A view
@@ -151,7 +225,7 @@ impl RuntimeHistory {
     ) -> RuntimeFrame {
         let mut cursor = self.cursor();
         cursor.subagent_parents = parents.clone();
-        let sequence = self.snapshots.back().expect("captured projection").0;
+        let sequence = self.sequence;
         let requested = requested.filter(|requested| requested.subagent_parents == *parents);
         // Scope the client's base first so the current view can advance from it.
         let before = requested
@@ -208,12 +282,45 @@ impl RuntimeState {
             .clone())
     }
 
+    pub(crate) fn browser_views(&self, requested: Option<&RuntimeCursor>) -> Result<BrowserViews> {
+        self.capture_runtime()?;
+        Ok(self
+            .feed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .browser_views(requested))
+    }
+
+    pub(crate) fn subscribe_browser_views(
+        &self,
+    ) -> Result<tokio::sync::watch::Receiver<ViewerSnapshot>> {
+        self.capture_runtime()?;
+        let mut history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
+        let current = history.latest_browser_view();
+        Ok(history
+            .browser_watch
+            .get_or_insert_with(|| tokio::sync::watch::channel((*current).clone()).0)
+            .subscribe())
+    }
+
+    pub(crate) async fn follow_browser_views(
+        self: &Arc<Self>,
+        mut revisions: tokio::sync::watch::Receiver<u64>,
+    ) -> Result<()> {
+        while revisions.changed().await.is_ok() {
+            revisions.borrow_and_update();
+            let runtime = Arc::clone(self);
+            mj_core::runtime::spawn_blocking(move || runtime.browser_views(None)).await??;
+        }
+        bail!("daemon stopped publishing runtime revisions to the browser")
+    }
+
     fn capture_runtime(&self) -> Result<RuntimeCursor> {
         // History serialization never holds the operational owner. Only immutable
         // roots and the bounded active-operation projection cross that lock.
         let mut history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
         let reviews = self.review_host.views();
-        let (mut full, native_owners, committed) = {
+        let (mut full, mut browser, native_owners, committed) = {
             let owner = self.owner();
             owner.ensure_available()?;
             let controller = owner.controller();
@@ -222,10 +329,16 @@ impl RuntimeState {
                 .map(|state| state.moves.clone())
                 .unwrap_or_default();
             let lifecycles = Self::active_lifecycles_with(&owner);
+            let records = owner.projected_records();
+            let browser = self
+                .browser
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .capture(&owner, &history.full, &records);
             (
                 RuntimeProjection {
                     revision: self.revisions.current(),
-                    records: owner.projected_records(),
+                    records,
                     subagents: controller.state.subagents.clone(),
                     sessions: owner.sessions.clone(),
                     transcripts: owner.transcripts.clone(),
@@ -247,6 +360,7 @@ impl RuntimeState {
                     },
                     ..Default::default()
                 },
+                browser,
                 owner
                     .committed()
                     .map(|state| state.native_agents.clone())
@@ -327,13 +441,27 @@ impl RuntimeState {
             .map(|w| (w.id.clone(), w.name.clone()))
             .collect();
         full.metadata.reviews = reviews;
-        full.metadata.notices = self
-            .notices
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .map(|entry| entry.notice.clone())
-            .collect();
+        {
+            let notices = self.notices.lock().unwrap_or_else(PoisonError::into_inner);
+            full.metadata.notices = notices.iter().map(|entry| entry.notice.clone()).collect();
+            let public: Vec<_> = notices
+                .iter()
+                .filter_map(|entry| {
+                    Some(RuntimeNotice {
+                        text: entry.public_text.clone()?,
+                        ..entry.notice.clone()
+                    })
+                })
+                .collect();
+            let previous = history
+                .snapshots
+                .back()
+                .map(|capture| &capture.browser.notices);
+            browser.notices = previous
+                .filter(|previous| ***previous == public)
+                .cloned()
+                .unwrap_or_else(|| public.into());
+        }
         full.metadata.ui_requests = self
             .ui_requests
             .lock()
@@ -397,7 +525,7 @@ impl RuntimeState {
         }
         full.sessions = sessions;
         super::verdicts::project(&mut full, &history.full);
-        history.publish(full.clone())?;
+        history.retain(full.clone(), browser)?;
         source.metadata.unread_frontiers = full.metadata.unread_frontiers.clone();
         source.metadata.notification_dismissals = full.metadata.notification_dismissals.clone();
         source.metadata.notification_cards = full.metadata.notification_cards.clone();
@@ -1110,6 +1238,294 @@ mod tests {
             RuntimeFrame::ResetRequired
         ));
         assert!(matches!(history.frame(None), RuntimeFrame::Snapshot { .. }));
+    }
+
+    #[test]
+    fn browser_cursor_resumes_from_retained_runtime_capture_until_eviction_or_replacement() {
+        let mut history = RuntimeHistory::default();
+        let mut live = RuntimeProjection::default();
+        live.records
+            .insert("session".into(), record("session", SessionState::Running));
+        history.publish(live.clone()).unwrap();
+        let first = history.browser_views(None);
+        assert_eq!(first.cursor, history.cursor());
+
+        live.records
+            .get_mut("session")
+            .unwrap()
+            .session_title_override = Some("New browser title".into());
+        history.publish(live.clone()).unwrap();
+        let resumed = history.browser_views(Some(&first.cursor));
+        assert_eq!(
+            resumed.base.as_ref().unwrap().sessions.0,
+            first.current.sessions.0
+        );
+        assert_eq!(
+            resumed.current.sessions.0["session"].given_title.as_deref(),
+            Some("New browser title")
+        );
+        assert!(resumed.cursor.sequence > first.cursor.sequence);
+
+        let mut replacement = RuntimeHistory::default();
+        replacement.publish(live.clone()).unwrap();
+        let replaced = replacement.browser_views(Some(&first.cursor));
+        assert_ne!(replaced.cursor.incarnation, first.cursor.incarnation);
+        assert!(replaced.base.is_none());
+
+        for revision in 1..=4096 {
+            live.revision = revision;
+            history.publish(live.clone()).unwrap();
+        }
+        let evicted = history.browser_views(Some(&first.cursor));
+        assert_eq!(evicted.cursor.incarnation, first.cursor.incarnation);
+        assert!(evicted.base.is_none());
+        assert_eq!(
+            evicted.current.sessions.0["session"].given_title.as_deref(),
+            Some("New browser title")
+        );
+    }
+
+    #[test]
+    fn browser_reconnect_rebuilds_the_exact_rows_previously_served() {
+        let mut history = RuntimeHistory::default();
+        let mut runtime = RuntimeProjection::default();
+        for id in ["active", "unchanged"] {
+            runtime
+                .records
+                .insert(id.into(), record(id, SessionState::Running));
+        }
+        let mut view = RuntimeSessionView::from_managed(
+            "active".into(),
+            mj_client::session::ManagedSessionView {
+                connected: true,
+                ..Default::default()
+            },
+        );
+        let mut worker = mj_core::relay::RelaySnapshot::new("active".into()).operational_state();
+        worker.execution = mj_core::relay::RelayExecutionState::Running;
+        worker.current_step_started_at_ms = Some(1_000);
+        view.operational = Some(worker.clone().into());
+        runtime.sessions.insert("active".into(), view);
+        history.publish(runtime.clone()).unwrap();
+        history.snapshots.back_mut().unwrap().captured_at = 30;
+        let first = history.browser_views(None);
+
+        // A clock change does not invalidate a session row. Serve a view
+        // that already reused the previous capture's active row.
+        runtime.revision = 1;
+        history.publish(runtime.clone()).unwrap();
+        history.snapshots.back_mut().unwrap().captured_at = 60;
+        let served = history.browser_views(None);
+        assert!(Arc::ptr_eq(
+            &first.current.sessions.0.get_shared("active").unwrap(),
+            &served.current.sessions.0.get_shared("active").unwrap(),
+        ));
+        assert!(
+            served.current.sessions.0["active"]
+                .activity
+                .starts_with("Step")
+        );
+
+        for (revision, now) in [(2, 90), (3, 120), (4, 150)] {
+            runtime.revision = revision;
+            worker.current_step_started_at_ms = Some(now * 1_000);
+            runtime.sessions.get_mut("active").unwrap().operational = Some(worker.clone().into());
+            runtime
+                .records
+                .get_mut("active")
+                .unwrap()
+                .session_title_override = Some(format!("changed at {revision}"));
+            history.publish(runtime.clone()).unwrap();
+            history.snapshots.back_mut().unwrap().captured_at = now as u64;
+            history.browser_views(None);
+        }
+
+        let replay = history.browser_views(Some(&served.cursor));
+        let rebuilt = replay.base.unwrap();
+        assert_eq!(rebuilt.sessions.0, served.current.sessions.0);
+        assert_eq!(rebuilt.revision, served.cursor.sequence);
+        assert!(Arc::ptr_eq(
+            &replay.current.sessions.0.get_shared("unchanged").unwrap(),
+            &rebuilt.sessions.0.get_shared("unchanged").unwrap(),
+        ));
+    }
+
+    #[tokio::test]
+    async fn browser_projection_publishes_a_preview_without_other_changes_and_rejects_stale_results()
+     {
+        use crate::server::{BrowserTranscript, BrowserTranscriptEntry};
+        use crate::server_runtime::ConversationProjectionKey;
+
+        let id = "session";
+        let state = super::super::tests::test_runtime_state_holding(mj_core::state::State {
+            sessions: [(id.to_owned(), record(id, SessionState::Running))].into(),
+            ..Default::default()
+        });
+        let mut tail = mj_core::state::MaterializedSession::empty(id);
+        tail.applied_event_ordinal = 2;
+        tail.applied_event_digest = "newer".into();
+        state.owner().transcripts.insert(
+            id.to_owned(),
+            mj_client::runtime_feed::SessionTail::of(&tail, &Default::default(), 20),
+        );
+
+        let initial = state.browser_views(None).unwrap();
+        let mut latest_views = state.subscribe_browser_views().unwrap();
+        latest_views.borrow_and_update();
+        let terminal_initial = state.feed.lock().unwrap().frame(None);
+        let mut revisions = state.revisions();
+        revisions.borrow_and_update();
+        let transcript = |seq, text: &str| BrowserTranscript {
+            latest_seq: seq,
+            presentation_key: String::new(),
+            window_start_seq: 0,
+            reset: false,
+            entries: vec![Arc::new(BrowserTranscriptEntry {
+                command_id: None,
+                stable_id: None,
+                id: seq,
+                updated_seq: seq,
+                role: "agent",
+                label: "Agent".into(),
+                recorded_at_ms: Some(seq as i64),
+                tool_ended_at_ms: None,
+                generated: false,
+                lines: vec![text.into()],
+                mailbox_events: vec![],
+                glyph: "",
+                tone: "agent",
+                tool_status: None,
+                diffstats: vec![],
+            })],
+        };
+        let key = |ordinal, digest: &str| ConversationProjectionKey {
+            ordinal,
+            digest: digest.into(),
+        };
+        state.install_browser_conversation(
+            id.into(),
+            key(2, "newer"),
+            transcript(2, "newer-preview"),
+        );
+        assert!(revisions.has_changed().unwrap());
+        let previewed = state.browser_views(Some(&initial.cursor)).unwrap();
+        assert!(previewed.cursor.sequence > initial.cursor.sequence);
+        assert!(latest_views.has_changed().unwrap());
+        assert_eq!(
+            latest_views.borrow_and_update().revision,
+            previewed.cursor.sequence
+        );
+        assert!(
+            !previewed.base.unwrap().sessions.0[id].conversation_available,
+            "the base stays at the served revision",
+        );
+        assert_eq!(
+            previewed.current.sessions.0[id].preview,
+            ["Agent: newer-preview"]
+        );
+        assert_eq!(previewed.current.sessions.0[id].last_message_at_ms, Some(2));
+
+        revisions.borrow_and_update();
+        for (ordinal, digest) in [(1, "older"), (2, "obsolete-digest")] {
+            state.install_browser_conversation(
+                id.into(),
+                key(ordinal, digest),
+                transcript(ordinal, "obsolete-preview"),
+            );
+        }
+        assert!(!revisions.has_changed().unwrap());
+        assert_eq!(state.browser_views(None).unwrap().cursor, previewed.cursor);
+
+        state.record_browser_action(
+            Some(id),
+            Some("browser-action-error"),
+            Some(crate::server::ViewerLaunchFailure {
+                id: "launch-ref".into(),
+                workspace_id: "workspace".into(),
+                session_id: None,
+                error: Some("browser-launch-error".into()),
+            }),
+        );
+        let errors = state.browser_views(None).unwrap();
+        assert!(errors.current.sessions.0[id].has_error);
+        assert_eq!(errors.current.launch_failures[0].id, "launch-ref");
+        let mut history = state.feed.lock().unwrap();
+        let base = match terminal_initial {
+            RuntimeFrame::Snapshot { cursor, .. } => cursor,
+            _ => unreachable!(),
+        };
+        let delta = history.frame(Some(&base));
+        let fresh = history.frame(None);
+        for frame in [delta, fresh] {
+            let wire = serde_json::to_string(&frame).unwrap();
+            for private in [
+                "newer-preview",
+                "browser-action-error",
+                "browser-launch-error",
+                "launch-ref",
+            ] {
+                assert!(!wire.contains(private));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn resolved_project_identity_expires_with_its_checkout_inputs() {
+        use crate::daemon::browser::ResolvedProjectSource;
+        use crate::server_runtime::ProjectSourceKey;
+        use mj_core::state::{ProjectSourceIdentity, State};
+
+        let id = "project-session";
+        let mut record = record(id, SessionState::Running);
+        record.project_directory = Some("/first-checkout".into());
+        record.target_template_id = "local".into();
+        let config = super::super::tests::runtime_test_config();
+        let mut records = State {
+            sessions: [(id.into(), record)].into(),
+            ..Default::default()
+        };
+        let key = ProjectSourceKey::of(
+            &records.sessions[id],
+            &records.checkout(id).unwrap(),
+            &config,
+        );
+        let state = super::super::tests::test_runtime_state_with(Controller {
+            config: config.clone(),
+            state: records.clone(),
+        });
+        let result = ResolvedProjectSource {
+            key,
+            source: ProjectSourceIdentity::git_remote(
+                "https://github.com/example/resolved-project.git",
+                mj_core::remote_git::Shorthand::Rejected,
+            )
+            .unwrap(),
+        };
+        state.install_browser_project_source(id.into(), result.clone());
+        let served = state.browser_views(None).unwrap();
+        assert_eq!(
+            served.current.sessions.0[id].project_label,
+            "resolved-project"
+        );
+        let terminal = state.feed.lock().unwrap().frame(None);
+        assert!(
+            !serde_json::to_string(&terminal)
+                .unwrap()
+                .contains("resolved-project")
+        );
+
+        records.sessions.get_mut(id).unwrap().project_directory = Some("/second-checkout".into());
+        state.owner().install_controller(Controller {
+            config,
+            state: records,
+        });
+        state.install_browser_project_source(id.into(), result);
+        let changed = state.browser_views(Some(&served.cursor)).unwrap();
+        assert_eq!(
+            changed.current.sessions.0[id].project_label,
+            "second-checkout"
+        );
+        assert_eq!(changed.base.unwrap().sessions.0, served.current.sessions.0);
     }
 
     /// A tail is answered as it was at the asking client's cursor, not as it
@@ -1942,7 +2358,7 @@ mod tests {
             .snapshots
             .back()
             .unwrap()
-            .1
+            .runtime
             .for_subagent_parents(&BTreeSet::new());
         assert!(current.native_agents.is_empty());
         assert!(current.subagents.contains_key("child"));
@@ -1957,7 +2373,7 @@ mod tests {
                 .snapshots
                 .back()
                 .unwrap()
-                .1
+                .runtime
                 .for_subagent_parents(&BTreeSet::new())
                 .native_agents
                 .contains_key(&view_id)
@@ -1975,7 +2391,7 @@ mod tests {
             .snapshots
             .back()
             .unwrap()
-            .1
+            .runtime
             .for_subagent_parents(&BTreeSet::new());
         assert!(current.native_agents.is_empty());
         assert!(current.subagents.contains_key("child"));

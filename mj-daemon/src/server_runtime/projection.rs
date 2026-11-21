@@ -8,13 +8,13 @@ pub(super) const MAX_CONCURRENT_CONVERSATION_PROJECTIONS: usize = 2;
 pub(super) const CONVERSATION_PROJECTION_CHANNEL_CAPACITY: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConversationProjectionKey {
-    pub(super) ordinal: u64,
-    pub(super) digest: String,
+pub(crate) struct ConversationProjectionKey {
+    pub(crate) ordinal: u64,
+    pub(crate) digest: String,
 }
 
 impl ConversationProjectionKey {
-    pub(super) fn of(materialized: &MaterializedSession) -> Self {
+    pub(crate) fn of(materialized: &MaterializedSession) -> Self {
         Self {
             ordinal: materialized.applied_event_ordinal,
             digest: materialized.applied_event_digest.clone(),
