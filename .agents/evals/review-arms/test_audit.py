@@ -1053,3 +1053,45 @@ def test_engine_audit_resolves_search_without_path_from_recorded_cwd(tmp_path, n
     assert audit_call(tmp_path, call, engine=True)["passed"]
     call["locations"] = [{"path": f"/workspace/{OWN}/another-checkout/README.md"}]
     assert not audit_call(tmp_path, call, engine=True)["passed"]
+
+
+@pytest.fixture
+def engine_write_without_input():
+    # Scrubbed from retired engine session 2cac763b, turn 307, seq 333.
+    fixture = Path(__file__).with_name("fixtures") / "engine-write-without-input.json"
+    return json.loads(fixture.read_text())
+
+
+# Hard-won: 3a68d9227: an engine Write with one verified scratch target voided a live turn
+@pytest.mark.parametrize(("name", "status"), [("Write", "failed"), ("Edit", "completed")])
+def test_engine_certifies_location_only_scratch_write(tmp_path, engine_write_without_input, name, status):
+    call = engine_write_without_input
+    call.update(name=name, status=status, title=call["title"].replace("Write", name, 1),
+                _meta={"claudeCode": {"toolName": name}})
+    assert audit_call(tmp_path, call, cwd=ENGINE_CWD, engine=True)["passed"]
+
+
+@pytest.mark.parametrize("override", [
+    {"locations": []},
+    {"locations": [{"path": f"{ENGINE_CWD}/answer.json"}], "title": "Write answer.json"},
+    {"locations": [{"path": f"{ENGINE_CWD}/.rql-engine-{OWN}/answer.json"},
+                   {"path": f"{ENGINE_CWD}/another.json"}]},
+    {"title": "Write another.json"},
+    {"rawOutput": {"path": f"{ENGINE_CWD}/other.json"}},
+    {"content": [{"type": "diff", "path": f"{ENGINE_CWD}/other.json"}]},
+    {"name": "Read", "title": "Read", "_meta": {"claudeCode": {"toolName": "Read"}}},
+])
+def test_engine_needs_one_unambiguous_scratch_write_location(tmp_path, engine_write_without_input, override):
+    call = {**engine_write_without_input, **override}
+    report = audit_call(tmp_path, call, cwd=ENGINE_CWD, engine=True)
+    assert not report["passed"]
+    assert [hit["kind"] for hit in report["hits"]] == ["needs-inspection"]
+
+
+def test_engine_location_only_write_still_checks_tracked_symlinks(tmp_path, engine_write_without_input):
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({
+        "cwd": ENGINE_CWD, "tracked_symlinks": [f".rql-engine-{OWN}/answer.json"],
+    }))
+    report = audit_call(tmp_path, engine_write_without_input, engine=True)
+    assert not report["passed"]
+    assert any("tracked symlink" in finding["snippet"] for finding in report["hits"])

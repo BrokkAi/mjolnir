@@ -2238,6 +2238,39 @@ def antigravity_hits(call, own_workspace, cwd, evidence):
         yield "needs-inspection", f"unrecognized Antigravity tool: {name or '<missing name>'}"
 
 
+def engine_location_write(call, cwd, evidence):
+    name = call["name"]
+    if name not in {"Write", "Edit"} or not evidence.scratch or call.get("kind") not in {None, "edit"}:
+        return None
+    if call.keys() - {"toolCallId", "title", "name", "kind", "status", "content",
+                      "locations", "_meta", "rawInput"}:
+        return None
+    if call.get("_meta", {"claudeCode": {"toolName": name}}) != {"claudeCode": {"toolName": name}}:
+        return None
+    # Diagnostic text carries no path evidence. Other content forms can
+    # carry separate file targets, so only the plain text form is accepted.
+    content = call.get("content", [])
+    if not isinstance(content, list) or any(
+        not isinstance(row, dict) or row.keys() != {"type", "content"} or row["type"] != "content"
+        or not isinstance(row["content"], dict) or row["content"].keys() != {"type", "text"}
+        or row["content"]["type"] != "text" or not isinstance(row["content"]["text"], str)
+        for row in content
+    ):
+        return None
+    locations = call.get("locations")
+    if (not isinstance(locations, list) or len(locations) != 1 or not isinstance(locations[0], dict)
+            or locations[0].keys() != {"path"} or not isinstance(path := locations[0]["path"], str) or not path):
+        return None
+    target = recorded_path(path, cwd)
+    if not target or not target.startswith(evidence.scratch + "/"):
+        return None
+    # A title can disqualify conflicting evidence, but cannot supply a path.
+    title = call.get("title")
+    if title not in (None, "", name, f"{name} {target}", f"{name} {posixpath.relpath(target, evidence.root)}"):
+        return None
+    return path
+
+
 def engine_hits(call, own_workspace, cwd, evidence):
     name = call.get("name") if isinstance(call, dict) else None
     if not isinstance(name, str) or name not in ENGINE_TOOLS or call.get("kind") == "execute":
@@ -2245,6 +2278,8 @@ def engine_hits(call, own_workspace, cwd, evidence):
         return
 
     raw = call.get("rawInput")
+    if raw is None and (path := engine_location_write(call, cwd, evidence)) is not None:
+        raw = {"file_path": path}
     if not isinstance(raw, dict):
         yield "needs-inspection", f"missing or invalid {name} input"
         return
