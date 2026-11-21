@@ -626,8 +626,8 @@ function enqueueSettings(work) {
 /// whose models are not known yet, or a selected model whose efforts are not.
 function settingsDiscovering() {
   const options = settingsState.subagentOptions;
-  const subagentsPending = options && typeof options === 'object' && ['straightforward', 'subtle', 'oracle']
-    .some(task => options[task] === null || options[task]?.efforts_pending === true);
+  const subagentsPending = options && typeof options === 'object' && ['primary', 'straightforward', 'subtle', 'oracle']
+    .some(task => Object.values(options[task] || {}).some(choice => choice === null || choice?.efforts_pending === true));
   const reviewersPending = Object.values(settingsState.reviewerOptions || {})
     .some(choice => choice === null || choice?.efforts_pending === true);
   return subagentsPending || reviewersPending;
@@ -3247,10 +3247,8 @@ function targetOracleConfigured(draft) {
   return draftTarget(draft)?.oracle_configured ?? snapshot?.oracle_configured === true;
 }
 
-function subagentSetupReason(draft) {
-  return targetYolo(draft)
-    ? "Set up YOLO target sub-agents in mj's TUI Settings -> Sub-agents (uncheck \"Use the same subagents on all targets\")"
-    : "Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents";
+function subagentSetupReason() {
+  return "Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents";
 }
 
 // Every top-level session's message-only server carries ask_oracle, whatever its harness.

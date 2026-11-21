@@ -170,6 +170,21 @@ pub(super) async fn start_session(
                 )
                 .await?,
             ),
+            None if request.effort.is_none() => {
+                let subagents = backend.subagent_config().await?;
+                if subagents.primary_configured() {
+                    Some(
+                        crate::server::api::resolve_primary_session_selection(
+                            &backend,
+                            profile_hint.as_deref(),
+                            subagents.primary_choices(),
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                }
+            }
             None => None,
         }
     } else {

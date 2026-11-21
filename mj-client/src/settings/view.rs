@@ -168,12 +168,14 @@ fn read_only(path: &[String], draft: &Value) -> bool {
         {
             true
         }
-        [section, .., key]
+        [section, task, index, key]
             if section == "subagents"
+                && matches!(
+                    task.as_str(),
+                    "primary" | "straightforward" | "subtle" | "oracle"
+                )
                 && matches!(key.as_str(), "model" | "effort")
-                && schema::subagent_options_key(path)
-                    .and_then(|task| draft["_subagent_options"].get(&task))
-                    .is_none_or(Value::is_null) =>
+                && draft["_subagent_options"][task.as_str()][index.as_str()].is_null() =>
         {
             true
         }

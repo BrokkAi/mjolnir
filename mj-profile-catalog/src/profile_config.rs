@@ -61,10 +61,7 @@ pub async fn validate_session_subagent_policy(
                 .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
         )
     };
-    let yolo = config
-        .targets
-        .get(target_id)
-        .is_some_and(mj_core::config::TargetTemplate::is_yolo);
+    let _ = target_id;
     let kind = config.named_profile(profile_id)?.kind;
     // None asks for no Mjolnir sub-agents at all, so any harness accepts it;
     // only a Mjolnir policy needs the delegation tools.
@@ -88,26 +85,22 @@ pub async fn validate_session_subagent_policy(
     use mj_core::subagent::SubagentTaskType;
     if config
         .subagents
-        .effective_choice_for(policy, SubagentTaskType::Straightforward, yolo)
-        .is_none()
+        .effective_choices(policy, SubagentTaskType::Straightforward)
+        .is_empty()
     {
-        let key = if yolo {
-            "[subagents.yolo.straightforward]"
-        } else {
-            "[subagents.straightforward]"
-        };
-        return Err(refuse(format!(
-            "Mjolnir requires {key} or --subagent-straightforward <MODEL>{}",
-            if yolo { " on a YOLO target" } else { "" }
-        )));
+        return Err(refuse(
+            "Mjolnir requires [subagents.straightforward] or --subagent-straightforward <MODEL>"
+                .to_owned(),
+        ));
     }
     let task_types = [SubagentTaskType::Straightforward, SubagentTaskType::Subtle];
     let models = task_types
         .iter()
-        .filter_map(|task_type| {
+        .flat_map(|task_type| {
             config
                 .subagents
-                .effective_choice_for(policy, *task_type, yolo)
+                .effective_choices(policy, *task_type)
+                .iter()
                 .map(|choice| choice.model.clone())
         })
         .collect::<std::collections::BTreeSet<_>>();
@@ -115,21 +108,17 @@ pub async fn validate_session_subagent_policy(
         .admission_options(config, profile_id, models)
         .await?;
     for task_type in task_types {
-        let Some(choice) = config
-            .subagents
-            .effective_choice_for(policy, task_type, yolo)
-        else {
+        let choices = config.subagents.effective_choices(policy, task_type);
+        if choices.is_empty() {
             continue;
-        };
-        let options = &options[&choice.model];
-        let section = if yolo && policy.override_choice(task_type).is_none() {
-            format!("subagents.yolo.{}", task_type.id())
-        } else {
-            format!("subagents.{}", task_type.id())
-        };
-        options
-            .validate(choice)
-            .map_err(|message| refuse(format!("[{section}]: {message}")))?;
+        }
+        let section = format!("subagents.{}", task_type.id());
+        for choice in choices {
+            let options = &options[&choice.model];
+            options
+                .validate(choice)
+                .map_err(|message| refuse(format!("[{section}]: {message}")))?;
+        }
     }
     Ok(())
 }
@@ -1032,11 +1021,11 @@ mod tests {
         store("unsaved", &key, &catalog.model, &catalog);
         let mut draft = Config::default();
         draft.profiles.insert("unsaved".into(), profile);
-        assert!(!draft.subagents.is_configured_for(false));
-        draft.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+        assert!(!draft.subagents.is_configured());
+        draft.subagents.straightforward = vec![mj_core::config::SubagentChoice {
             model: "chosen".into(),
             effort: Some("high".into()),
-        });
+        }];
         for (model, effort, available) in [
             ("chosen", Some("high"), true),
             ("chosen", None, true),
@@ -1097,7 +1086,7 @@ mod tests {
         )
         .await
         .unwrap();
-        draft.subagents.straightforward = None;
+        draft.subagents.straightforward.clear();
         let missing = validate_session_subagent_policy(
             &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
             &draft,
@@ -1697,66 +1686,6 @@ mod tests {
         let codex_fingerprint = fingerprint(config.enabled_profile("codex").unwrap());
         assert!(load("codex", &None, &codex_fingerprint).is_some());
     }
-    #[tokio::test]
-    async fn a_yolo_target_needs_its_own_straightforward_choice() {
-        let mut config = Config::default();
-        config.profiles.insert(
-            "parent".into(),
-            HarnessProfile {
-                enabled: true,
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                codex_profile: None,
-                legacy_muse_auto_review: None,
-                load_balancing_may_consume_credits: false,
-                claude_permission_mode: None,
-                mjolnir_guardian: true,
-                aws: None,
-                models: Default::default(),
-                legacy_subagents: None,
-                ..HarnessProfile::new(mj_core::config::HarnessKind::Codex, "/fixture")
-            },
-        );
-        config.targets.insert(
-            "yolo".into(),
-            mj_core::config::TargetTemplate::SshBare {
-                ssh: mj_core::config::SshConnection {
-                    host: "builder.example.com".into(),
-                    user: None,
-                    identity_file: None,
-                    extra_args: Vec::new(),
-                },
-                permissions: mj_core::config::PermissionMode::Yolo,
-                workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
-            },
-        );
-        config.subagents.straightforward = Some(mj_core::config::SubagentChoice {
-            model: "shared".into(),
-            effort: None,
-        });
-        config.subagents.use_same_on_all_targets = false;
-        let error = validate_session_subagent_policy(
-            &crate::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
-            &config,
-            "parent",
-            &mj_core::subagent::SubagentPolicy::Mjolnir {
-                straightforward: None,
-                subtle: None,
-            },
-            "yolo",
-        )
-        .await
-        .unwrap_err();
-        let refusal = Refusal::of(&error).unwrap();
-        let message = refusal.message();
-        assert!(
-            message.contains("[subagents.yolo.straightforward]"),
-            "{message}"
-        );
-        assert!(message.contains("YOLO target"), "{message}");
-    }
-
     #[tokio::test]
     async fn create_and_move_mjolnir_policy_refuse_unconfigured_and_unsupported_parents() {
         for kind in [

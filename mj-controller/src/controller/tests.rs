@@ -3315,10 +3315,10 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
         Some(SubagentPolicy::Native)
     );
     let mut after = controller.config.clone();
-    after.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+    after.subagents.straightforward = vec![mj_core::config::SubagentChoice {
         model: "next".into(),
         effort: None,
-    });
+    }];
     controller
         .state
         .validate_setup_update(&controller.config, &after)
@@ -3391,10 +3391,10 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
     config.subagents.max_concurrent = 0;
-    config.subagents.oracle = Some(mj_core::config::SubagentChoice {
+    config.subagents.oracle = vec![mj_core::config::SubagentChoice {
         model: "oracle-model".into(),
         effort: Some("high".into()),
-    });
+    }];
     let profile = config.profiles["codex"].clone();
     config.profiles.insert("resolved-reviewer".into(), profile);
     let parent_id = "0123456789abcdef0123456789abcdef";

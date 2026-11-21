@@ -6124,13 +6124,13 @@ fn golden_single_choice_fast_paths() {
 #[test]
 fn oracle_choice_stays_available_when_delegation_is_none() {
     let mut config = config();
-    config.subagents.oracle = Some(mj_core::config::SubagentChoice {
+    config.subagents.oracle = vec![mj_core::config::SubagentChoice {
         model: "advisor".into(),
         effort: None,
-    });
+    }];
     let mut draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None);
     let profile = config.profiles.keys().next().unwrap().clone();
-    draft.update_choices(&profile, &config, &Default::default(), false);
+    draft.update_choices(&profile, &config, &Default::default());
     assert!(draft.oracle_available());
     assert_eq!(
         draft.apply(&Interaction::ComboBoxCommit(WizardControl::Oracle, 1)),
@@ -6138,12 +6138,12 @@ fn oracle_choice_stays_available_when_delegation_is_none() {
     );
     assert!(!draft.oracle);
     assert_eq!(draft.policy, mj_core::subagent::SubagentPolicy::None);
-    let override_choice = config.subagents.oracle.take();
+    let override_choice = config.subagents.oracle.pop();
     let mut override_draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None)
         .with_oracle(true, override_choice);
-    override_draft.update_choices(&profile, &config, &Default::default(), false);
+    override_draft.update_choices(&profile, &config, &Default::default());
     assert!(override_draft.oracle_available());
-    config.subagents.oracle = override_draft.oracle_choice.clone();
+    config.subagents.oracle = override_draft.oracle_choice.clone().into_iter().collect();
     let mut state = State::default();
     state.last_oracle_choices.insert(profile, false);
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
@@ -6166,12 +6166,12 @@ fn golden_create_delegation_availability_and_submission() {
                 model: "model".into(),
                 effort: None,
             };
-            dashboard.config.subagents.straightforward = Some(choice.clone());
-            dashboard.config.subagents.subtle = Some(choice);
-            dashboard.config.subagents.oracle = Some(SubagentChoice {
+            dashboard.config.subagents.straightforward = vec![choice.clone()];
+            dashboard.config.subagents.subtle = vec![choice];
+            dashboard.config.subagents.oracle = vec![SubagentChoice {
                 model: "advisor".into(),
                 effort: Some("high".into()),
-            });
+            }];
         }
         dashboard.state.last_subagent_policies.insert(
             String::new(),
@@ -6205,7 +6205,7 @@ fn golden_create_delegation_availability_and_submission() {
         let screen = drawn(&mut dashboard, 140, 40).join("\n");
         assert!(screen.contains("Sub-agents"));
         if !configured {
-            assert!(screen.contains("Set up YOLO target sub-agents"));
+            assert!(screen.contains("Set up Mjolnir sub-agents"));
         }
         output.push_str(&format!("=== configured={configured} ===\n{screen}\n"));
         let Mode::New(wizard) = &dashboard.mode else {
@@ -6283,10 +6283,10 @@ fn golden_create_delegation_availability_and_submission() {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.config.profiles.get_mut("codex-1").unwrap().kind = HarnessKind::Dsh;
         if configured {
-            dashboard.config.subagents.straightforward = Some(SubagentChoice {
+            dashboard.config.subagents.straightforward = vec![SubagentChoice {
                 model: "model".into(),
                 effort: None,
-            });
+            }];
         }
         dashboard
             .state
@@ -6368,41 +6368,15 @@ fn move_unconfigured_delegation_retains_none_until_changed() {
 }
 
 #[test]
-fn yolo_target_uses_its_own_configured_choices() {
-    let choice = |model: &str| mj_core::config::SubagentChoice {
-        model: model.into(),
-        effort: None,
-    };
-    let mut config = config();
-    config.subagents.straightforward = Some(choice("shared"));
-    config.subagents.yolo.straightforward = Some(choice("yolo"));
-    config.subagents.use_same_on_all_targets = false;
-    let mut draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::Mjolnir {
-        straightforward: None,
-        subtle: None,
-    });
-    draft.update_choices("claude-1", &config, &Default::default(), true);
-    assert!(draft.unavailable_reason().is_none());
-
-    config.subagents.yolo.straightforward = None;
-    draft.update_choices("claude-1", &config, &Default::default(), true);
-    let reason = draft.unavailable_reason().unwrap();
-    assert!(reason.contains("YOLO"), "{reason}");
-    // The shared set still serves ordinary targets.
-    draft.update_choices("claude-1", &config, &Default::default(), false);
-    assert!(draft.unavailable_reason().is_none());
-}
-
-#[test]
 fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
     use mj_core::subagent::SubagentPolicy;
     let mut draft = subagents::SubagentDraft::new(SubagentPolicy::Native);
     let mut config = config();
-    draft.update_choices("claude-1", &config, &Default::default(), false);
+    draft.update_choices("claude-1", &config, &Default::default());
     assert!(!draft.select_policy(1));
     assert!(draft.unavailable_reason().unwrap().contains("Settings"));
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Kimi;
-    draft.update_choices("claude-1", &config, &Default::default(), false);
+    draft.update_choices("claude-1", &config, &Default::default());
     assert!(!draft.select_policy(1));
     assert!(
         draft
@@ -6412,7 +6386,7 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
     );
     // DSH lists Mjolnir and None only; unconfigured Mjolnir stays disabled.
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Dsh;
-    draft.update_choices("claude-1", &config, &Default::default(), false);
+    draft.update_choices("claude-1", &config, &Default::default());
     assert_eq!(draft.policies(), ["Mjolnir", "None"]);
     assert_eq!(draft.enabled_policies(), [false, true]);
     assert_eq!(draft.selected(), SubagentPolicy::None);
@@ -6434,8 +6408,8 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         model: "model".into(),
         effort: None,
     };
-    dashboard.config.subagents.straightforward = Some(choice.clone());
-    dashboard.config.subagents.subtle = Some(choice);
+    dashboard.config.subagents.straightforward = vec![choice.clone()];
+    dashboard.config.subagents.subtle = vec![choice];
     dashboard.config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Grok;
     dashboard.state.last_subagent_policies.insert(
         "codex-1".into(),
@@ -6557,8 +6531,8 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
         model: "model".into(),
         effort: None,
     };
-    dashboard.config.subagents.straightforward = Some(choice.clone());
-    dashboard.config.subagents.subtle = Some(choice.clone());
+    dashboard.config.subagents.straightforward = vec![choice.clone()];
+    dashboard.config.subagents.subtle = vec![choice.clone()];
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
@@ -6568,7 +6542,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
         }
     );
     // Subtle is optional: straightforward alone keeps Mjolnir available.
-    dashboard.config.subagents.subtle = None;
+    dashboard.config.subagents.subtle.clear();
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
@@ -6578,15 +6552,15 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
         }
     );
     // Subtle alone is never enough.
-    dashboard.config.subagents.straightforward = None;
-    dashboard.config.subagents.subtle = Some(choice.clone());
+    dashboard.config.subagents.straightforward.clear();
+    dashboard.config.subagents.subtle = vec![choice.clone()];
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Native
     );
     assert!(new_wizard(&dashboard).subagents.error().is_none());
-    dashboard.config.subagents.straightforward = Some(choice.clone());
+    dashboard.config.subagents.straightforward = vec![choice.clone()];
     dashboard.set_profile_capabilities(Default::default());
     let Mode::New(wizard) = &mut dashboard.mode else {
         unreachable!()
@@ -6601,13 +6575,13 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     wizard
         .subagents
         .apply(&Interaction::ComboBoxCommit(WizardControl::Subagents, 1));
-    dashboard.config.subagents.straightforward = None;
+    dashboard.config.subagents.straightforward.clear();
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Native
     );
-    dashboard.config.subagents.straightforward = Some(choice);
+    dashboard.config.subagents.straightforward = vec![choice];
     dashboard
         .state
         .last_subagent_policies

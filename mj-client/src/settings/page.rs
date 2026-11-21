@@ -33,24 +33,10 @@ pub enum PageRow {
 
 /// Every row `paths` draws on the page `path`, in order.
 ///
-/// The first page groups its sections by heading. The Sub-agents page puts a
-/// heading before its conditional YOLO task rows, so the two sets stay
-/// visibly separate.
+/// The first page groups its sections by heading.
 pub fn page_plan(path: &[String], paths: &[Vec<String>]) -> Vec<PageRow> {
     if !path.is_empty() {
-        let mut plan = Vec::new();
-        let mut yolo_heading = false;
-        for (index, child) in paths.iter().enumerate() {
-            if path == ["subagents"]
-                && !yolo_heading
-                && child.get(1).is_some_and(|key| key == "yolo")
-            {
-                plan.push(PageRow::Heading("YOLO Target Subagents"));
-                yolo_heading = true;
-            }
-            plan.push(PageRow::Setting(index));
-        }
-        return plan;
+        return (0..paths.len()).map(PageRow::Setting).collect();
     }
     let mut plan = Vec::new();
     let mut group = None;
@@ -146,55 +132,20 @@ pub fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
 pub fn visible_paths(path: &[String], value: &Value) -> Vec<Vec<String>> {
     let keys = visible_keys(path, value);
     if path == ["subagents"] {
-        let mut fields = vec![vec!["subagents".to_owned(), "max_concurrent".to_owned()]];
-        for task in ["straightforward", "subtle", "oracle"] {
-            fields.push(vec![
-                "subagents".to_owned(),
-                task.to_owned(),
-                "model".to_owned(),
-            ]);
-            let model = value[task]["model"].as_str().unwrap_or_default();
-            if !model.is_empty() {
-                fields.push(vec![
-                    "subagents".to_owned(),
-                    task.to_owned(),
-                    "effort".to_owned(),
-                ]);
-            }
-        }
-        fields.push(vec![
-            "subagents".to_owned(),
-            "use_same_on_all_targets".to_owned(),
-        ]);
-        if !schema::shared_subagents(value) {
-            for task in ["straightforward", "subtle", "oracle"] {
-                if value["yolo"].get(task).is_none() {
-                    continue;
-                }
-                fields.push(vec![
-                    "subagents".to_owned(),
-                    "yolo".to_owned(),
-                    task.to_owned(),
-                    "model".to_owned(),
-                ]);
-                let model = value["yolo"][task]["model"].as_str().unwrap_or_default();
-                if !model.is_empty() {
-                    fields.push(vec![
-                        "subagents".to_owned(),
-                        "yolo".to_owned(),
-                        task.to_owned(),
-                        "effort".to_owned(),
-                    ]);
-                }
-            }
-        }
+        let mut fields = vec![
+            vec!["subagents".to_owned(), "max_concurrent".to_owned()],
+            vec!["subagents".to_owned(), "primary".to_owned()],
+            vec!["subagents".to_owned(), "straightforward".to_owned()],
+            vec!["subagents".to_owned(), "subtle".to_owned()],
+            vec!["subagents".to_owned(), "oracle".to_owned()],
+        ];
         let extras = visible_keys(path, value)
             .into_iter()
             .filter(|child| {
-                child != "max_concurrent"
-                    && child != "use_same_on_all_targets"
-                    && child != "yolo"
-                    && !["straightforward", "subtle", "oracle"].contains(&child.as_str())
+                !matches!(
+                    child.as_str(),
+                    "max_concurrent" | "primary" | "straightforward" | "subtle" | "oracle"
+                )
             })
             .map(|child| vec!["subagents".to_owned(), child])
             .collect::<Vec<_>>();
@@ -211,25 +162,7 @@ pub fn visible_paths(path: &[String], value: &Value) -> Vec<Vec<String>> {
 
 /// Page that owns the row for a full setting path.
 pub fn row_page(path: &[String]) -> &[String] {
-    let subagent_field = matches!(
-        path,
-        [section, task, field]
-            if section == "subagents"
-                && ["straightforward", "subtle", "oracle"].contains(&task.as_str())
-                && ["model", "effort"].contains(&field.as_str())
-    ) || matches!(
-        path,
-        [section, yolo, task, field]
-            if section == "subagents"
-                && yolo == "yolo"
-                && ["straightforward", "subtle", "oracle"].contains(&task.as_str())
-                && ["model", "effort"].contains(&field.as_str())
-    );
-    if subagent_field {
-        &path[..1]
-    } else {
-        path.get(..path.len().saturating_sub(1)).unwrap_or_default()
-    }
+    path.get(..path.len().saturating_sub(1)).unwrap_or_default()
 }
 
 /// Settings that exist in the stored shape but have no meaning on this entry,
@@ -258,9 +191,6 @@ pub fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
                     .unwrap_or(mj_core::config::LOCAL_MACHINE_ID)
                     == mj_core::config::LOCAL_MACHINE_ID
         }
-        // The YOLO set is retained while the shared set is active, but it is
-        // not a setting the page offers and edits to it do nothing.
-        ["subagents"] => key == "yolo" && schema::shared_subagents(value),
         _ => false,
     }
 }
@@ -414,30 +344,22 @@ mod target_tests {
     use super::*;
     use serde_json::json;
 
-    /// The YOLO set is retained in the draft but absent from the page and
-    /// from direct edits while the shared set is active. Unchecking reveals
-    /// the same rows under their own heading.
     #[test]
-    fn yolo_rows_are_hidden_refused_and_restored_by_the_checkbox() {
-        let mut value = json!({"subagents": {"straightforward": {"model": "shared"}, "yolo": {"straightforward": {"model": "yolo"}}}});
+    fn subagents_page_exposes_four_category_lists() {
+        let mut value = json!({"subagents": {}});
         schema::expand(&mut value, &mut Vec::new());
         let subagents = &value["subagents"];
         let path = ["subagents".to_owned()];
-        let yolo_model = vec![
-            "subagents".to_owned(),
-            "yolo".to_owned(),
-            "straightforward".to_owned(),
-            "model".to_owned(),
-        ];
-        assert!(!visible_paths(&path, subagents).contains(&yolo_model));
-        assert!(hidden_key(&path, subagents, "yolo"));
-
-        value["subagents"]["use_same_on_all_targets"] = json!(false);
-        let subagents = &value["subagents"];
         let paths = visible_paths(&path, subagents);
-        assert!(paths.contains(&yolo_model));
-        assert!(!hidden_key(&path, subagents, "yolo"));
-        assert!(page_plan(&path, &paths).contains(&PageRow::Heading("YOLO Target Subagents")));
-        assert_eq!(subagents["yolo"]["straightforward"]["model"], "yolo");
+        assert_eq!(
+            paths,
+            vec![
+                vec!["subagents".to_owned(), "max_concurrent".to_owned()],
+                vec!["subagents".to_owned(), "primary".to_owned()],
+                vec!["subagents".to_owned(), "straightforward".to_owned()],
+                vec!["subagents".to_owned(), "subtle".to_owned()],
+                vec!["subagents".to_owned(), "oracle".to_owned()],
+            ]
+        );
     }
 }

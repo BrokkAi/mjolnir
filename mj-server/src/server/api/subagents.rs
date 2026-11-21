@@ -32,15 +32,11 @@ pub(super) async fn spawn_subagent(
     if request.task_name.trim().is_empty() {
         return Err(ApiFailure::bad_request("task_name cannot be empty"));
     }
-    let yolo = backend
-        .session_is_yolo_target(parent_session_id.clone())
-        .await?;
     let selection = resolve_subagent_policy_selection(
         &backend,
         &parent.profile_id,
         &parent.subagents,
         request.task_type.unwrap_or_default(),
-        yolo,
     )
     .await?;
 
@@ -105,13 +101,25 @@ impl std::ops::Deref for ModelCandidate {
     }
 }
 
-/// Resolve the session override or global task choice, drawing a profile by quota.
+#[derive(Debug, Clone)]
+struct ChoiceCandidate {
+    candidate: SubagentCandidate,
+    model: model_catalog::ModelOffer,
+    choice_effort: Option<String>,
+}
+
+impl AsRef<SubagentCandidate> for ChoiceCandidate {
+    fn as_ref(&self) -> &SubagentCandidate {
+        &self.candidate
+    }
+}
+
+/// Resolve the session override or global task choices, drawing a profile by quota.
 pub async fn resolve_subagent_policy_selection(
     backend: &Arc<dyn SubagentBackend>,
     parent_profile: &str,
     policy: &mj_core::subagent::SubagentPolicy,
     task_type: mj_core::subagent::SubagentTaskType,
-    yolo: bool,
 ) -> Result<SubagentSelection, ApiFailure> {
     if task_type == mj_core::subagent::SubagentTaskType::Oracle {
         return Err(ApiFailure::bad_request(
@@ -124,57 +132,36 @@ pub async fn resolve_subagent_policy_selection(
         ));
     }
     let config = backend.subagent_config().await?;
-    let choice = config
-        .effective_choice_for(policy, task_type, yolo)
-        .ok_or_else(|| {
-            // A parent launched while subtle was configured can still ask for it.
-            if task_type == mj_core::subagent::SubagentTaskType::Subtle
-                && config
-                    .effective_choice_for(
-                        policy,
-                        mj_core::subagent::SubagentTaskType::Straightforward,
-                        yolo,
-                    )
-                    .is_some()
-            {
-                ApiFailure::conflict(
-                    "The user configured only the straightforward task type; spawn this child with task_type `straightforward`",
+    let choices = config.effective_choices(policy, task_type);
+    if choices.is_empty() {
+        // A parent launched while subtle was configured can still ask for it.
+        if task_type == mj_core::subagent::SubagentTaskType::Subtle
+            && !config
+                .effective_choices(
+                    policy,
+                    mj_core::subagent::SubagentTaskType::Straightforward,
                 )
-            } else {
-                let key = if yolo {
-                    format!("[subagents.yolo.{}]", task_type.id())
-                } else {
-                    format!("[subagents.{}]", task_type.id())
-                };
-                ApiFailure::conflict(format!(
-                    "Configure {key} or pass --subagent-{} <MODEL> before spawning this Mjolnir sub-agent",
-                    task_type.id()
-                ))
-            }
-        })?;
-    if choice.effort.as_deref() == Some("adaptive") {
-        return Err(ApiFailure::bad_request(
-            "adaptive sub-agent effort is not supported",
-        ));
+                .is_empty()
+        {
+            return Err(ApiFailure::conflict(
+                "The user configured only the straightforward task type; spawn this child with task_type `straightforward`",
+            ));
+        }
+        return Err(ApiFailure::conflict(format!(
+            "Configure [subagents.{}] or pass --subagent-{} <MODEL> before spawning this Mjolnir sub-agent",
+            task_type.id(),
+            task_type.id()
+        )));
     }
-    resolve_model_profile_selection_matching(
+    resolve_choices_selection(
         backend,
-        None,
-        &choice.model,
-        choice
-            .effort
-            .as_deref()
-            .map(EffortRequirement::Exact)
-            .unwrap_or(EffortRequirement::Default),
-        None,
+        choices,
         ModelProfileCandidateSource::Subagents { parent_profile },
     )
     .await
     .map_err(|error| {
         let context = if policy.override_choice(task_type).is_some() {
             format!("session --subagent-{} override", task_type.id())
-        } else if yolo {
-            format!("[subagents.yolo.{}]", task_type.id())
         } else {
             format!("[subagents.{}]", task_type.id())
         };
@@ -182,26 +169,212 @@ pub async fn resolve_subagent_policy_selection(
     })
 }
 
-/// The profile and effort for the oracle's model. Like a spawn, it ranks the
-/// enabled profiles that offer the model by quota.
+/// The profile and effort for the oracle's model choices. Like a spawn, it
+/// ranks the enabled profiles that offer any configured model by quota.
 pub async fn resolve_oracle_selection(
     backend: &Arc<dyn SubagentBackend>,
     parent_profile: &str,
-    choice: &mj_core::config::SubagentChoice,
+    choices: &[mj_core::config::SubagentChoice],
 ) -> Result<SubagentSelection, ApiFailure> {
-    resolve_model_profile_selection_matching(
+    resolve_choices_selection(
         backend,
-        None,
-        &choice.model,
-        choice
-            .effort
-            .as_deref()
-            .map(EffortRequirement::Exact)
-            .unwrap_or(EffortRequirement::Default),
-        None,
+        choices,
         ModelProfileCandidateSource::Subagents { parent_profile },
     )
     .await
+}
+
+/// Load-balance a bare `mj new` session across configured `[[subagents.primary]]`
+/// choices.
+pub(crate) async fn resolve_primary_session_selection(
+    backend: &Arc<dyn SubagentBackend>,
+    ranking_anchor: Option<&str>,
+    choices: &[mj_core::config::SubagentChoice],
+) -> Result<SubagentSelection, ApiFailure> {
+    resolve_choices_selection(
+        backend,
+        choices,
+        ModelProfileCandidateSource::Session { ranking_anchor },
+    )
+    .await
+}
+
+async fn resolve_choices_selection(
+    backend: &Arc<dyn SubagentBackend>,
+    choices: &[mj_core::config::SubagentChoice],
+    source: ModelProfileCandidateSource<'_>,
+) -> Result<SubagentSelection, ApiFailure> {
+    for choice in choices {
+        if choice.effort.as_deref() == Some("adaptive") {
+            return Err(ApiFailure::bad_request(
+                "adaptive sub-agent effort is not supported",
+            ));
+        }
+    }
+    if let [single] = choices {
+        return resolve_model_profile_selection_matching(
+            backend,
+            None,
+            &single.model,
+            single
+                .effort
+                .as_deref()
+                .map(EffortRequirement::Exact)
+                .unwrap_or(EffortRequirement::Default),
+            None,
+            source,
+        )
+        .await;
+    }
+    if choices.is_empty() {
+        return Err(ApiFailure::bad_request("no model choices configured"));
+    }
+    let candidates = match source {
+        ModelProfileCandidateSource::Session { .. } => backend.session_profile_candidates().await?,
+        ModelProfileCandidateSource::Reviewers => backend.reviewer_candidates().await?,
+        ModelProfileCandidateSource::ReviewersReady => {
+            backend
+                .reviewer_ready_candidates(choices[0].model.clone())
+                .await?
+        }
+        ModelProfileCandidateSource::Subagents { parent_profile } => {
+            backend
+                .subagent_candidates(parent_profile.to_owned())
+                .await?
+        }
+    };
+    let SubagentCandidates {
+        offered,
+        unavailable,
+    } = candidates;
+    let all_models = offered
+        .iter()
+        .flat_map(|candidate| candidate.choices.models.iter().cloned())
+        .collect::<Vec<_>>();
+    let now = now_epoch_seconds();
+    let mut matched_any = false;
+    let mut excluded = Vec::new();
+    let mut seen_pairs = std::collections::BTreeSet::new();
+    let mut eligible = Vec::new();
+    for choice in choices {
+        let identity = model_catalog::model_id(&all_models, &choice.model);
+        for candidate in &offered {
+            let Some(offer) =
+                model_catalog::offer(&candidate.choices.models, &identity, &choice.model)
+            else {
+                continue;
+            };
+            matched_any = true;
+            if let Some(reason) =
+                mj_controller::profile_scheduler::ineligibility(candidate, &identity, now)
+            {
+                excluded.push(reason.describe(&candidate.profile_id, &identity));
+                continue;
+            }
+            let key = (
+                candidate.profile_id.clone(),
+                offer.value.clone(),
+                choice.effort.clone(),
+            );
+            if seen_pairs.insert(key) {
+                eligible.push(ChoiceCandidate {
+                    candidate: candidate.clone(),
+                    model: offer,
+                    choice_effort: choice.effort.clone(),
+                });
+            }
+        }
+    }
+    if !matched_any {
+        let names = choices
+            .iter()
+            .map(|c| c.model.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ApiFailure::bad_request(no_profile_offers(
+            &names,
+            &offered,
+            &unavailable,
+            source.profile_description(),
+        )));
+    }
+    if eligible.is_empty() {
+        let names = choices
+            .iter()
+            .map(|c| c.model.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ApiFailure::conflict(format!(
+            "every {} profile that can run configured models ({names}) is out of subscription quota: {}. \
+             Try again after the quota resets.",
+            source.profile_description(),
+            excluded.join("; ")
+        )));
+    }
+    let prefer = backend.quota_preferences().await?;
+    let (anchor, placement) = match source {
+        ModelProfileCandidateSource::Subagents { parent_profile } => {
+            (Some(parent_profile), Placement::Child)
+        }
+        ModelProfileCandidateSource::Session { ranking_anchor } => {
+            (ranking_anchor, Placement::TopLevel)
+        }
+        ModelProfileCandidateSource::Reviewers
+        | ModelProfileCandidateSource::ReviewersReady => (None, Placement::Child),
+    };
+    let representative_identity = eligible[0].model.identity.clone();
+    draw_candidates(
+        &mut eligible,
+        anchor,
+        &prefer,
+        &representative_identity,
+        now_epoch_seconds(),
+        placement,
+    )?;
+    let mut selection_errors = Vec::new();
+    let mut unhealthy = Vec::new();
+    for entry in &eligible {
+        if let Some(note) = unhealthy_note(&entry.candidate, &entry.model.value) {
+            unhealthy.push(note);
+            continue;
+        }
+        let efforts = match model_efforts(backend, &entry.candidate, &entry.model.value).await {
+            Ok(efforts) => efforts,
+            Err(error) => {
+                selection_errors.push(format!("{}: {error:#}", entry.candidate.profile_id));
+                continue;
+            }
+        };
+        let effort = match entry.choice_effort.as_deref() {
+            Some(requested) if efforts.iter().any(|c| c.value == requested) => {
+                Some(requested.to_owned())
+            }
+            None => None,
+            Some(_) => {
+                selection_errors.push(format!(
+                    "{} offers efforts: {}",
+                    entry.candidate.profile_id,
+                    effort_names(&efforts)
+                ));
+                continue;
+            }
+        };
+        return Ok(selection(
+            entry.candidate.profile_id.clone(),
+            &entry.model.value,
+            effort,
+        ));
+    }
+    if !unhealthy.is_empty() && selection_errors.is_empty() {
+        return Err(ApiFailure::conflict(format!(
+            "every eligible profile is marked unhealthy: {}",
+            unhealthy.join("; ")
+        )));
+    }
+    Err(ApiFailure::bad_request(format!(
+        "no eligible profile supports the configured model/effort pairs ({})",
+        selection_errors.join("; ")
+    )))
 }
 
 /// Choose a profile for a user-created session from all enabled, usable
@@ -1800,8 +1973,8 @@ mod tests {
             staged: None,
             discovery_fails: true,
             config: SubagentConfig {
-                straightforward: Some(choice.clone()),
-                subtle: Some(choice),
+                straightforward: vec![choice.clone()],
+                subtle: vec![choice],
                 ..Default::default()
             },
             candidates: SubagentCandidates {
@@ -1820,7 +1993,6 @@ mod tests {
                 subtle: None,
             },
             SubagentTaskType::Straightforward,
-            false,
         )
         .await
         .unwrap_err();
@@ -2082,10 +2254,10 @@ mod tests {
                 staged: None,
                 discovery_fails: false,
                 config: SubagentConfig {
-                    straightforward: Some(SubagentChoice {
+                    straightforward: vec![SubagentChoice {
                         model: "sonnet".into(),
                         effort: Some("high".into()),
-                    }),
+                    }],
                     ..Default::default()
                 },
                 candidates: SubagentCandidates {
@@ -2097,10 +2269,10 @@ mod tests {
                 let selected = resolve_oracle_selection(
                     &backend,
                     "parent",
-                    &SubagentChoice {
+                    std::slice::from_ref(&SubagentChoice {
                         model: request.into(),
                         effort: Some("high".into()),
-                    },
+                    }),
                 )
                 .await
                 .unwrap();
@@ -2126,7 +2298,6 @@ mod tests {
                     subtle: None,
                 },
                 SubagentTaskType::Straightforward,
-                false,
             )
             .await
             .unwrap();
@@ -2138,20 +2309,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn yolo_spawn_uses_the_yolo_task_choice_instead_of_the_shared_one() {
-        use mj_core::config::{SubagentChoice, SubagentChoices, SubagentConfig};
+    async fn multi_choice_category_expands_across_configured_peers() {
+        use mj_core::config::{SubagentChoice, SubagentConfig};
         use mj_core::subagent::{SubagentPolicy, SubagentTaskType};
         let choice = |model: &str| SubagentChoice {
             model: model.into(),
             effort: None,
         };
         let config = SubagentConfig {
-            straightforward: Some(choice("shared")),
-            yolo: SubagentChoices {
-                straightforward: Some(choice("yolo")),
-                ..Default::default()
-            },
-            use_same_on_all_targets: false,
+            straightforward: vec![choice("claude-sonnet-4-6"), choice("gpt-5.4-mini")],
             ..Default::default()
         };
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
@@ -2160,7 +2326,10 @@ mod tests {
             discovery_fails: false,
             config,
             candidates: SubagentCandidates {
-                offered: vec![candidate("parent", Some(50), &["shared", "yolo"])],
+                offered: vec![
+                    candidate("claude-exhausted", Some(0), &["claude-sonnet-4-6"]),
+                    candidate("codex-ready", Some(80), &["gpt-5.4-mini"]),
+                ],
                 unavailable: vec![],
             },
         });
@@ -2168,26 +2337,16 @@ mod tests {
             straightforward: None,
             subtle: None,
         };
-        let yolo = resolve_subagent_policy_selection(
+        let selected = resolve_subagent_policy_selection(
             &backend,
-            "parent",
+            "claude-exhausted",
             &policy,
             SubagentTaskType::Straightforward,
-            true,
         )
         .await
         .unwrap();
-        assert_eq!(yolo.model, "yolo");
-        let shared = resolve_subagent_policy_selection(
-            &backend,
-            "parent",
-            &policy,
-            SubagentTaskType::Straightforward,
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(shared.model, "shared");
+        assert_eq!(selected.profile_id, "codex-ready");
+        assert_eq!(selected.model, "gpt-5.4-mini");
     }
 
     #[tokio::test]
@@ -2204,14 +2363,14 @@ mod tests {
             unavailable: vec![],
         };
         let config = SubagentConfig {
-            straightforward: Some(SubagentChoice {
+            straightforward: vec![SubagentChoice {
                 model: "no-effort".into(),
                 effort: None,
-            }),
-            subtle: Some(SubagentChoice {
+            }],
+            subtle: vec![SubagentChoice {
                 model: "fixed".into(),
                 effort: Some("high".into()),
-            }),
+            }],
             ..Default::default()
         };
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
@@ -2233,7 +2392,6 @@ mod tests {
                     subtle: None,
                 },
                 task_type,
-                false,
             )
             .await
             .unwrap();
@@ -2282,7 +2440,6 @@ mod tests {
             "parent",
             &any_policy,
             SubagentTaskType::Subtle,
-            false,
         )
         .await
         .unwrap();
@@ -2292,7 +2449,6 @@ mod tests {
             "parent",
             &any_policy,
             SubagentTaskType::Subtle,
-            false,
         )
         .await
         .unwrap_err();
@@ -2326,7 +2482,6 @@ mod tests {
                 "parent",
                 &mixed_policy,
                 task_type,
-                false,
             )
             .await
             .unwrap();
@@ -2347,7 +2502,6 @@ mod tests {
                 subtle: None,
             },
             SubagentTaskType::Subtle,
-            false,
         )
         .await
         .unwrap_err();
@@ -2361,10 +2515,10 @@ mod tests {
             staged: None,
             discovery_fails: false,
             config: SubagentConfig {
-                straightforward: Some(SubagentChoice {
+                straightforward: vec![SubagentChoice {
                     model: "no-effort".into(),
                     effort: None,
-                }),
+                }],
                 ..Default::default()
             },
             candidates: SubagentCandidates {
@@ -2381,7 +2535,6 @@ mod tests {
             "parent",
             &policy,
             SubagentTaskType::Subtle,
-            false,
         )
         .await
         .unwrap_err();
@@ -2395,7 +2548,6 @@ mod tests {
             "parent",
             &policy,
             SubagentTaskType::Straightforward,
-            false,
         )
         .await
         .unwrap();

@@ -1325,12 +1325,8 @@ impl Controller {
                 .oracle_choice
                 .as_ref()
                 .or(source.oracle_choice.as_deref())
-                .or_else(|| {
-                    self.config
-                        .subagents
-                        .choice_for(mj_core::subagent::SubagentTaskType::Oracle, yolo_target)
-                })
                 .is_none_or(|choice| choice.model.trim().is_empty())
+            && !self.config.subagents.oracle_configured()
         {
             selection.oracle = Some(false);
             selection.oracle_choice = None;

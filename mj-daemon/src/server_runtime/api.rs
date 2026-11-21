@@ -1291,14 +1291,12 @@ impl ApiBackend {
                         .exports
                         .session_record(parent_session_id)
                         .context("parent session disappeared")?;
-                    let yolo = self.exports.session_is_yolo_target(parent_session_id);
                     let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                     let selection = crate::server::api::resolve_subagent_policy_selection(
                         &backend,
                         &parent.last_profile,
                         &parent.subagents.clone().unwrap_or_default(),
                         *task_type,
-                        yolo,
                     )
                     .await
                     .map_err(|failure| anyhow::anyhow!(failure.message))?;

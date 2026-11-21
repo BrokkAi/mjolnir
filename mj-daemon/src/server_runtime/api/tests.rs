@@ -219,14 +219,14 @@ impl ExportRuntime for RecordingExports {
 
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         mj_core::config::SubagentConfig {
-            straightforward: Some(mj_core::config::SubagentChoice {
+            straightforward: vec![mj_core::config::SubagentChoice {
                 model: "luna".into(),
                 effort: Some("low".into()),
-            }),
-            subtle: Some(mj_core::config::SubagentChoice {
+            }],
+            subtle: vec![mj_core::config::SubagentChoice {
                 model: "nova".into(),
                 effort: Some("high".into()),
-            }),
+            }],
             ..Default::default()
         }
     }
@@ -1023,14 +1023,14 @@ struct ParentExports(SessionRecord);
 impl ExportRuntime for ParentExports {
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         mj_core::config::SubagentConfig {
-            straightforward: Some(mj_core::config::SubagentChoice {
+            straightforward: vec![mj_core::config::SubagentChoice {
                 model: "luna".into(),
                 effort: None,
-            }),
-            subtle: Some(mj_core::config::SubagentChoice {
+            }],
+            subtle: vec![mj_core::config::SubagentChoice {
                 model: "nova".into(),
                 effort: None,
-            }),
+            }],
             ..Default::default()
         }
     }

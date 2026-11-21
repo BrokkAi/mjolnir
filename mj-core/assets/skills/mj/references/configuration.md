@@ -526,58 +526,39 @@ for a DSH profile they offer Mjolnir or None, starting on Mjolnir only when the
 last choice was Mjolnir and it is configured; a DSH session's None does not
 change the remembered choice that Claude and Codex sessions start from. Mjolnir needs a
 straightforward choice, configured in Settings → Sub-agents or config.toml, or a
-session override. A YOLO target uses `[subagents.yolo.straightforward]` when
-the split is enabled. The subtle choice is optional, but cannot be configured
-without straightforward:
+session override. The subtle choice is optional, but cannot be configured
+without straightforward. Each category holds one or more equal-peer `(model, effort)`
+pairs (at most one model per provider):
 
 ```toml
 [subagents]
 max_concurrent = 6
 
-[subagents.straightforward]
-model = "your-codex-model"
-effort = "high"
-
-[subagents.subtle]
+[[subagents.primary]]
 model = "your-claude-model"
 effort = "high"
 
-[subagents.oracle]
+[[subagents.straightforward]]
+model = "your-codex-model"
+effort = "high"
+
+[[subagents.subtle]]
+model = "your-claude-model"
+effort = "high"
+
+[[subagents.oracle]]
 model = "your-strongest-model"
 effort = "high"
 ```
 
-`max_concurrent` is shared by every target. By default the task choices above
-are shared too. To give YOLO targets, where the harness runs without
-approvals (container runtimes, and SSH bare targets with `permissions = "yolo"`),
-their own choices, turn off **Use the same subagents on all targets** in Settings, which
-writes `use_same_on_all_targets = false`, and set the `[subagents.yolo.*]`
-tables:
-
-```toml
-[subagents]
-use_same_on_all_targets = false
-
-[subagents.yolo.straightforward]
-model = "your-cheaper-model"
-effort = "high"
-
-[subagents.yolo.oracle]
-model = "your-strongest-model"
-```
-
-The YOLO set starts empty when the box is first unchecked. An empty YOLO set
-means Mjolnir sub-agents and the oracle are unavailable on YOLO targets; it
-does not fall back to the shared choices. While `use_same_on_all_targets` is
-true, any `[subagents.yolo.*]` values are ignored but retained, so checking
-the box again hides and disables them, and unchecking restores them. A
-session uses this set when its harness runs without approvals: every container
-runtime, and an SSH bare target with `permissions = "yolo"`. Localhost and
-guardian SSH bare targets use the shared choices.
-
-`[subagents.oracle]` is optional and independent of the other two: it can be set
-without straightforward. It names the read-only advisor behind the `ask_oracle`
-tool, which every top-level session is offered whatever its delegation choice.
+When `[[subagents.primary]]` is configured, bare `mj new` (without `--profile`
+or `--model`) automatically load-balances across the configured primary choices.
+`[[subagents.oracle]]` is optional and independent of the other categories: it
+can be set without straightforward. It names the read-only advisor behind the
+`ask_oracle` tool, which every top-level session is offered whatever its
+delegation choice. Legacy singular `[subagents.<category>]` tables still load
+as 1-element lists, and removed `[subagents.yolo.*]` / `use_same_on_all_targets`
+keys are ignored on load and omitted on save.
 
 Each choice requires a non-empty model. Effort is optional and must be offered
 by that model when specified; omitted effort uses the harness default. Adaptive

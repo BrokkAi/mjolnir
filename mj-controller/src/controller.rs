@@ -1043,7 +1043,7 @@ impl Controller {
         };
         let profile = self.config.named_profile(profile_id)?;
         let template = self.config.ensure_target_enabled(target_id)?;
-        let yolo_target = template.is_yolo();
+        let _ = template.is_yolo();
         if create_managed_worktree == Some(true) && !is_bare_project_target(template) {
             bail!("managed worktree creation requires a bare Git project");
         }
@@ -1162,12 +1162,8 @@ impl Controller {
             && (oracle == Some(true) || options_oracle_explicit)
             && oracle_choice
                 .as_ref()
-                .or_else(|| {
-                    self.config
-                        .subagents
-                        .choice_for(mj_core::subagent::SubagentTaskType::Oracle, yolo_target)
-                })
                 .is_none_or(|choice| choice.model.trim().is_empty())
+            && !self.config.subagents.oracle_configured()
         {
             oracle_enabled = false;
             oracle_choice = None;

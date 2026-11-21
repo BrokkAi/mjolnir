@@ -140,8 +140,8 @@ action: None
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │ Sub-agents Native ▾                                                              │                 │
-│                 │ Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck "Use the same   │  ───────────────╯
-│                 │ subagents on all targets")                                                       │  ───────────────╮
+│                 │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯

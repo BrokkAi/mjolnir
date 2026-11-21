@@ -774,10 +774,9 @@ pub fn session_launch_config(
         .for_launch(profile.kind, subagent.is_some());
     // Only a delegating parent's spawn tool reads this. Other sessions keep
     // the default, so their launch files do not change.
-    let yolo = session.is_yolo_target(config);
     launch.subtle_subagents = !launch.subagents.uses_mjolnir()
-        || config.subagents.offers_subtle_for(&launch.subagents, yolo);
-    launch.oracle = oracle_launch_enabled(session, subagent.is_some(), &config.subagents, yolo);
+        || config.subagents.offers_subtle(&launch.subagents);
+    launch.oracle = oracle_launch_enabled(session, subagent.is_some(), &config.subagents);
     // Registration decided whether this child can be given the tool.
     launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
     launch.subagent_kind = subagent.as_ref().map(|child| child.kind);

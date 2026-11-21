@@ -171,11 +171,20 @@ impl PowerRankingStore {
             fetched_at_epoch_seconds: now_seconds,
             snapshot: fetched,
         };
-        write_cache(&self.shared.cache_path, &cache)?;
+        let write_result = write_cache(&self.shared.cache_path, &cache);
         let mut state = self.lock();
         state.fetched_at_epoch_seconds = Some(now_seconds);
         state.mj_version = Some(cache.mj_version);
         state.ranked = Ranked::new(cache.snapshot);
+        drop(state);
+        if let Err(error) = write_result {
+            tracing::warn!(
+                %error,
+                path = %self.shared.cache_path.display(),
+                "power-ranking cache write failed; updated in-memory snapshot"
+            );
+            return Err(error);
+        }
         Ok(())
     }
 

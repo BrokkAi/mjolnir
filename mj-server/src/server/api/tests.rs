@@ -1437,14 +1437,14 @@ impl SubagentBackend for FakeBackend {
                 .subagent_configuration
                 .clone()
                 .unwrap_or(mj_core::config::SubagentConfig {
-                    straightforward: Some(mj_core::config::SubagentChoice {
+                    straightforward: vec![mj_core::config::SubagentChoice {
                         model: "kimi-code/k3".into(),
                         effort: None,
-                    }),
-                    subtle: Some(mj_core::config::SubagentChoice {
+                    }],
+                    subtle: vec![mj_core::config::SubagentChoice {
                         model: "kimi-code/k3".into(),
                         effort: None,
-                    }),
+                    }],
                     ..Default::default()
                 }))
         })
@@ -3142,14 +3142,14 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
 async fn subagent_model_selection_uses_any_enabled_profile() {
     let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend {
         subagent_configuration: Some(mj_core::config::SubagentConfig {
-            straightforward: Some(mj_core::config::SubagentChoice {
+            straightforward: vec![mj_core::config::SubagentChoice {
                 model: "luna".into(),
                 effort: None,
-            }),
-            subtle: Some(mj_core::config::SubagentChoice {
+            }],
+            subtle: vec![mj_core::config::SubagentChoice {
                 model: "luna".into(),
                 effort: None,
-            }),
+            }],
             ..Default::default()
         }),
         session_model_candidates: Some(SubagentCandidates {
@@ -3188,7 +3188,6 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
             subtle: None,
         },
         mj_core::subagent::SubagentTaskType::Straightforward,
-        false,
     )
     .await
     .unwrap();

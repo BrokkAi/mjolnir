@@ -92,11 +92,6 @@ impl DashboardState {
             .expect("an offered profile was checked above");
         let profile_id = profile_id.as_str();
         let remembered = self.state.last_subagent_policy_for(profile_id);
-        let yolo = self
-            .config
-            .targets
-            .get(&nth_key(&self.config.targets, target))
-            .is_some_and(TargetTemplate::is_yolo);
         let mut delegation = subagents::SubagentDraft::new(remembered.clone());
         delegation.oracle = self.state.last_oracle_choice_for(profile_id);
         delegation.refresh_create(
@@ -105,7 +100,6 @@ impl DashboardState {
             &self.profile_capabilities,
             &remembered,
             self.state.last_oracle_choice_for(profile_id),
-            yolo,
         );
         self.mode = Mode::New(NewWizard {
             subagents: Box::new(delegation),

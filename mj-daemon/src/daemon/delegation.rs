@@ -209,8 +209,9 @@ fn spawn_power_ranking_refresh(state: &Arc<RuntimeState>, cancellation: Cancella
             tokio::select! {
                 _ = cancellation.cancelled() => break,
                 _ = tick.tick() => {
-                    // `refresh` logs and keeps the current snapshot when the fetch fails.
-                    let _ = ranking.refresh(mj_core::clock::epoch_seconds()).await;
+                    if let Err(error) = ranking.refresh(mj_core::clock::epoch_seconds()).await {
+                        tracing::warn!(%error, "power-ranking refresh task failed");
+                    }
                 }
             }
         }

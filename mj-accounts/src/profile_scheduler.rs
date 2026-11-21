@@ -89,12 +89,27 @@ fn last_good_schedulable(report: &crate::quota::ProfileQuota, now_seconds: i64) 
     if report.billing_class() == QuotaBilling::Usage || report.paid_credits.is_some() {
         return true;
     }
+    let refreshed_at = i64::try_from(report.refreshed_at_epoch_seconds).unwrap_or(i64::MAX);
+    let age = now_seconds.saturating_sub(refreshed_at);
     report.windows.iter().any(|window| {
-        window.remaining_percent.is_some()
-            || (window.used.is_some() && window.limit.is_some())
-            || window
-                .resets_at_epoch_seconds
-                .is_some_and(|reset| reset <= now_seconds)
+        if window.resets_at_epoch_seconds.is_some() {
+            window.remaining_percent.is_some()
+                || (window.used.is_some() && window.limit.is_some())
+                || window
+                    .resets_at_epoch_seconds
+                    .is_some_and(|reset| reset <= now_seconds)
+        } else {
+            let has_reading = window.remaining_percent.is_some()
+                || (window.used.is_some() && window.limit.is_some());
+            let max_age = window.duration_seconds.unwrap_or_else(|| {
+                if window.is_five_hour() {
+                    5 * 3600
+                } else {
+                    7 * 86_400
+                }
+            });
+            has_reading && age < max_age
+        }
     })
 }
 
@@ -710,5 +725,32 @@ mod tests {
                 ..
             } if windows.is_empty()
         ));
+    }
+
+    #[test]
+    fn undated_exhausted_last_good_expires_after_window_duration() {
+        let mut last_good = claude_window(0, None, None);
+        last_good.windows[0].duration_seconds = Some(5 * 3600);
+        last_good.refreshed_at_epoch_seconds = 1_000;
+        let failed = crate::quota::ProfileQuota {
+            windows: Vec::new(),
+            error: Some("connection reset by peer".into()),
+            ..last_good.clone()
+        };
+        let pub_record = publication(Some(failed), Some(last_good));
+        // Still within the 5-hour window duration: keep the exhausted reading.
+        let before_expiry = CandidateQuota::from_publication(
+            Some(&pub_record),
+            mj_core::config::HarnessKind::Claude,
+            1_000 + 5 * 3600 - 1,
+        );
+        assert!(matches!(before_expiry, CandidateQuota::Subscription { .. }));
+        // Once the window duration elapses, undated last_good expires to Unknown.
+        let after_expiry = CandidateQuota::from_publication(
+            Some(&pub_record),
+            mj_core::config::HarnessKind::Claude,
+            1_000 + 5 * 3600,
+        );
+        assert_eq!(after_expiry, CandidateQuota::Unknown);
     }
 }

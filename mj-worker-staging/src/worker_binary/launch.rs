@@ -6,9 +6,8 @@ pub fn oracle_launch_enabled(
     session: &mj_core::state::SessionRecord,
     managed_child: bool,
     choices: &mj_core::config::SubagentConfig,
-    yolo: bool,
 ) -> bool {
-    !managed_child && session.effective_oracle(choices, yolo).is_some()
+    !managed_child && !session.effective_oracle(choices).is_empty()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

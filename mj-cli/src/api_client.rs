@@ -1111,7 +1111,7 @@ impl ApiError {
         }
         let remedy = match self.code.as_deref() {
             Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE) => {
-                " Configure [subagents.straightforward] and optionally [subagents.subtle], or their [subagents.yolo.*] counterparts for a YOLO target, in config.toml or TUI Settings → Sub-agents."
+                " Configure [subagents.straightforward] and optionally [subagents.subtle] in config.toml or TUI Settings → Sub-agents."
             }
             _ => "",
         };

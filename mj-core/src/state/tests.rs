@@ -2145,10 +2145,10 @@ fn active_sessions_allow_creation_defaults_but_protect_their_profile_installatio
     let before = sample_config();
     let profile_id = &state.sessions.values().next().unwrap().last_profile;
     let mut after = before.clone();
-    after.subagents.straightforward = Some(crate::config::SubagentChoice {
+    after.subagents.straightforward = vec![crate::config::SubagentChoice {
         model: "chosen".into(),
         effort: None,
-    });
+    }];
     state.validate_setup_update(&before, &after).unwrap();
     for field in ["harness", "home", "environment", "remove"] {
         let mut changed = after.clone();

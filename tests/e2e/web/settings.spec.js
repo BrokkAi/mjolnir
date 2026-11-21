@@ -169,58 +169,64 @@ test('golden_viewer_settings', async ({ page }) => {
   await expect(page.locator('#settings .error')).toHaveText('Enter a whole number from 1 to 64.');
   await capture('a refused edit keeps what was typed beside the reason');
 
-  const subtleModel = page.getByRole('combobox', { name: 'Subtle model', exact: true });
-  const oracleModel = page.getByRole('combobox', { name: 'Oracle model', exact: true });
-  const straightforwardModel = page.getByRole('combobox', { name: 'Straightforward model', exact: true });
-  const straightforwardEffort = page.getByRole('combobox', { name: 'Straightforward effort', exact: true });
   await expect(page.locator('#settings-heading')).toHaveText('Sub-agents');
-  await expect(subtleModel.locator('option:checked')).toHaveText('None');
-  await expect(oracleModel.locator('option:checked')).toHaveText('None');
-  await expect(straightforwardModel.locator('option:checked')).toHaveText('None');
-  await expect(page.getByRole('combobox', { name: 'Subtle effort', exact: true })).toBeHidden();
-  await expect(page.getByRole('combobox', { name: 'Oracle effort', exact: true })).toBeHidden();
-  await expect(subtleModel.locator('option').first()).toHaveText('None');
-  await expect(straightforwardModel.locator('option').first()).toHaveText('None');
-  await expect(straightforwardEffort).toBeHidden();
-  await capture('inline task models start unset and efforts are hidden');
+  await expect(page.getByRole('checkbox', { name: 'Use the same subagents on all targets' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'YOLO Target Subagents' })).toHaveCount(0);
+  for (const category of ['Primary and supervisor', 'Straightforward', 'Subtle', 'Oracle']) {
+    await expect(page.locator('.settings-link', { hasText: category })).toBeVisible();
+  }
+  await capture('subagent categories are lists of pairs');
 
-  await subtleModel.selectOption({ label: 'opus' });
-  await expect(subtleModel.locator('option:checked')).toHaveText('opus');
-  await capture('Subtle model is edited inline');
+  // Choosing a listed value always sends the edit. An empty new pair has no
+  // matching option, so the browser shows the first model without a change.
+  const choose = async (name, label) => {
+    const select = page.getByRole('combobox', { name, exact: true });
+    await expect(select.locator('option', { hasText: label }).first()).toBeAttached();
+    await select.evaluate((node, label) => {
+      const option = [...node.options].find(item => item.textContent === label);
+      if (!option) throw new Error(`missing option ${label}`);
+      option.selected = true;
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+    }, label);
+    await expect(select.locator('option:checked')).toHaveText(label);
+  };
+
+  await page.locator('.settings-link', { hasText: 'Subtle' }).click();
+  await expect(page.locator('#settings-heading')).toHaveText('Subtle');
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await expect(page.locator('#settings-heading')).toHaveText('Item 1');
+  await choose('Model', 'opus');
+  await expect(page.locator('#settings-save')).toBeEnabled();
+  await capture('a Subtle pair chooses its model');
 
   await page.locator('#settings-save').click();
   await expect(page.locator('#settings-error')).toContainText('[subagents.subtle] requires [subagents.straightforward]');
-  await expect(page.locator('#settings')).toContainText('Subtle model');
-  await expect(page.locator('#settings')).toContainText('opus');
+  await expect(page.getByRole('combobox', { name: 'Model', exact: true }).locator('option:checked')).toHaveText('opus');
   await capture('a refused save keeps the Subtle model in the draft');
 
-  await straightforwardModel.selectOption({ label: 'opus' });
-  await expect(straightforwardEffort).toBeVisible();
-  await straightforwardEffort.selectOption({ label: 'high' });
+  await page.locator('#settings-trail button', { hasText: 'Sub-agents' }).click();
+  await page.locator('.settings-link', { hasText: 'Straightforward' }).click();
+  await expect(page.locator('#settings-heading')).toHaveText('Straightforward');
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await expect(page.locator('#settings-heading')).toHaveText('Item 1');
+  await choose('Model', 'opus');
+  await choose('Effort', 'high');
+  await expect(page.locator('#settings-save')).toBeEnabled();
+  await capture('a Straightforward pair is opus at high effort');
 
-  const useSame = page.getByRole('checkbox', { name: 'Use the same subagents on all targets' });
-  await expect(useSame).toBeChecked();
-  await useSame.uncheck();
-  const yoloGroup = page.locator('.settings-group').filter({
-    has: page.getByRole('heading', { name: 'YOLO Target Subagents' }),
-  });
-  await expect(yoloGroup).toBeVisible();
-  const yoloStraightforward = yoloGroup.getByRole('combobox', { name: 'Straightforward model', exact: true });
-  const yoloEffort = yoloGroup.getByRole('combobox', { name: 'Straightforward effort', exact: true });
-  await expect(yoloStraightforward.locator('option:checked')).toHaveText('None');
-  await yoloStraightforward.selectOption({ label: 'opus' });
-  await expect(yoloEffort).toBeVisible();
-  await yoloEffort.selectOption({ label: 'high' });
-  await capture('YOLO target choices start empty and are configured separately');
+  await page.locator('#settings-trail button', { hasText: 'Straightforward' }).click();
+  await expect(page.locator('#settings-heading')).toHaveText('Straightforward');
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await expect(page.locator('#settings-heading')).toHaveText('Item 2');
+  await choose('Model', 'sonnet');
+  await page.locator('#settings-save').click();
+  await expect(page.locator('#settings-error')).toContainText('at most one model per provider');
+  await expect(page.locator('#settings-error')).toContainText('Anthropic');
+  await expect(page.getByRole('combobox', { name: 'Model', exact: true }).locator('option:checked')).toHaveText('sonnet');
+  await capture('a second model from the same provider is refused');
 
-  await useSame.check();
-  await expect(yoloGroup).toBeHidden();
-  await useSame.uncheck();
-  await expect(yoloGroup).toBeVisible();
-  await expect(yoloStraightforward.locator('option:checked')).toHaveText('opus');
-  await expect(yoloEffort.locator('option:checked')).toHaveText('high');
-  await capture('YOLO target choices survive hiding the group');
-
+  await page.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(page.locator('#settings-heading')).toHaveText('Straightforward');
   await page.locator('#settings-save').click();
   await expect(page.locator('#settings-status')).toHaveText('Saved.');
   await capture('saving returns the saved draft');

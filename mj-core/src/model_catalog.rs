@@ -178,6 +178,58 @@ pub fn normalize_model(model: &str) -> String {
     model.to_owned()
 }
 
+/// Map a model name or identity to its owning [`crate::config::QuotaProvider`],
+/// if it belongs to a known model family.
+pub fn model_provider(model: &str) -> Option<crate::config::QuotaProvider> {
+    use crate::config::QuotaProvider;
+    let normalized = normalize_model(model.trim());
+    let base = normalized.split('[').next().unwrap_or(&normalized).trim();
+    if base.is_empty() {
+        return None;
+    }
+    let starts_with_token = |prefix: &str| {
+        base == prefix
+            || base
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with(['-', '_', '.', '/']))
+    };
+    if base.starts_with("claude")
+        || base.starts_with("opus")
+        || base.starts_with("sonnet")
+        || base.starts_with("haiku")
+        || base.starts_with("fable")
+        || base.starts_with("mythos")
+    {
+        Some(QuotaProvider::Anthropic)
+    } else if base.starts_with("gpt")
+        || starts_with_token("o1")
+        || starts_with_token("o3")
+        || starts_with_token("o4")
+    {
+        Some(QuotaProvider::OpenAI)
+    } else if base.starts_with("gemini")
+        || base.starts_with("argon")
+        || base.starts_with("g1-")
+    {
+        Some(QuotaProvider::Google)
+    } else if base.starts_with("grok") {
+        Some(QuotaProvider::XAI)
+    } else if base.starts_with("kimi")
+        || starts_with_token("k2")
+        || starts_with_token("k3")
+    {
+        Some(QuotaProvider::Moonshot)
+    } else if base.starts_with("deepseek") {
+        Some(QuotaProvider::DeepSeek)
+    } else if base.starts_with("glm") {
+        Some(QuotaProvider::Zai)
+    } else if base.starts_with("muse") {
+        Some(QuotaProvider::Meta)
+    } else {
+        None
+    }
+}
+
 /// Shared with utility inference: moving aliases precede numbered versions.
 pub fn model_version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
     let alias = |id: &str| {

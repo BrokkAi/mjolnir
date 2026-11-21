@@ -18,8 +18,8 @@
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │ Sub-agents Native ▾                                                              │                           │
-│                           │ Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck "Use the same   │                           │
-│                           │ subagents on all targets")                                                       │                           │
+│                           │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ─────────────────────────╮
 │                           │                                                                                  │                           │
@@ -59,8 +59,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │ Sub-agents None ▾                                                                │                           │
-│                           │ Set up YOLO╭ Values ─╮-agents in Settings -> Sub-agents (uncheck "Use the same   │                           │
-│                           │ subagents o│Native   │ts")                                                       │                           │
+│                           │ Set up Mjol╭ Values ─╮nts in Settings -> Sub-agents                              │                           │
+│                           │            │Native   │                                                           │                           │
 │                           │            │Mjolnir  │                                                           │  ─────────────────────────╯
 │                           │            │None     │                                                           │  ─────────────────────────╮
 │                           │            ╰─────────╯                                                           │                           │
@@ -266,8 +266,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │ Sub-agents None ▾                                                                │                           │
-│                           │ Set up YOLO╭ Values ─╮-agents in Settings -> Sub-agents (uncheck "Use the same   │                           │
-│                           │ subagents o│Mjolnir  │ts")                                                       │  ─────────────────────────╯
+│                           │ Set up Mjol╭ Values ─╮nts in Settings -> Sub-agents                              │                           │
+│                           │            │Mjolnir  │                                                           │  ─────────────────────────╯
 │                           │            │None     │                                                           │  ─────────────────────────╮
 │                           │            ╰─────────╯                                                           │                           │
 │                           │                                                                                  │                           │

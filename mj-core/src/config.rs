@@ -697,103 +697,129 @@ fn is_default_subagent_limit(value: &usize) -> bool {
 }
 
 /// Global policy for Mjolnir-managed child agents.
-///
-/// Sessions choose Native or Mjolnir; task model and effort choices are global,
-/// except that a target whose harness runs without approvals (a container,
-/// or `permissions = "yolo"`) can have its own choices.
+/// Sessions choose Native or Mjolnir; task model and effort choices are global
+/// lists of equal-peer `(model, effort)` pairs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "SubagentConfigInput")]
 pub struct SubagentConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub straightforward: Option<SubagentChoice>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subtle: Option<SubagentChoice>,
+    /// Choices for top-level primary auto-launch and supervisor sub-agents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary: Vec<SubagentChoice>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub straightforward: Vec<SubagentChoice>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtle: Vec<SubagentChoice>,
     /// The read-only advisor behind `ask_oracle`. Optional, and independent
-    /// of the other two.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oracle: Option<SubagentChoice>,
-    /// Deprecated global switch retained for read compatibility with
-    /// configurations written before the per-session choice existed. It is
-    /// ignored and omitted from newly written configurations.
-    #[serde(default, skip_serializing)]
-    pub enabled: bool,
+    /// of the other categories.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oracle: Vec<SubagentChoice>,
     #[serde(
         default = "default_subagent_limit",
         skip_serializing_if = "is_default_subagent_limit"
     )]
     pub max_concurrent: usize,
-    /// Old allowlist, accepted for compatibility and dropped when saved.
-    #[serde(default, rename = "eligible_profiles", skip_serializing)]
-    #[doc(hidden)]
-    pub legacy_eligible_profiles: BTreeMap<String, bool>,
-    /// Choices for targets whose permissions are `yolo`. Ignored while
-    /// `use_same_on_all_targets` is true, but retained so re-checking and
-    /// unchecking the box restores them.
-    #[serde(default, skip_serializing_if = "SubagentChoices::is_default")]
-    pub yolo: SubagentChoices,
-    /// Whether every target uses the choices above. `max_concurrent` is
-    /// always shared, whichever set a target uses.
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub use_same_on_all_targets: bool,
 }
 
-/// The task choices one target mode uses.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SubagentChoices {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub straightforward: Option<SubagentChoice>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subtle: Option<SubagentChoice>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oracle: Option<SubagentChoice>,
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrManyChoices {
+    One(SubagentChoice),
+    Many(Vec<SubagentChoice>),
 }
 
-impl SubagentChoices {
-    pub fn choice(&self, task_type: crate::subagent::SubagentTaskType) -> Option<&SubagentChoice> {
-        match task_type {
-            crate::subagent::SubagentTaskType::Straightforward => self.straightforward.as_ref(),
-            crate::subagent::SubagentTaskType::Subtle => self.subtle.as_ref(),
-            crate::subagent::SubagentTaskType::Oracle => self.oracle.as_ref(),
+impl OneOrManyChoices {
+    fn into_vec(self) -> Vec<SubagentChoice> {
+        match self {
+            Self::One(choice) => vec![choice],
+            Self::Many(choices) => choices,
         }
     }
+}
 
-    fn is_default(&self) -> bool {
-        self.straightforward.is_none() && self.subtle.is_none() && self.oracle.is_none()
-    }
+#[derive(Deserialize)]
+#[serde(default)]
+struct SubagentConfigInput {
+    primary: Option<OneOrManyChoices>,
+    straightforward: Option<OneOrManyChoices>,
+    subtle: Option<OneOrManyChoices>,
+    oracle: Option<OneOrManyChoices>,
+    #[serde(default = "default_subagent_limit")]
+    max_concurrent: usize,
+    #[serde(default)]
+    #[expect(dead_code, reason = "accepted only so that old files still load")]
+    enabled: Option<bool>,
+    #[serde(default)]
+    #[expect(dead_code, reason = "accepted only so that old files still load")]
+    eligible_profiles: Option<BTreeMap<String, bool>>,
+    #[serde(default)]
+    #[expect(dead_code, reason = "accepted only so that old files still load")]
+    use_same_on_all_targets: Option<bool>,
+    #[serde(default)]
+    #[expect(dead_code, reason = "accepted only so that old files still load")]
+    yolo: Option<serde_json::Value>,
+}
 
-    fn validate(&self, section: &str) -> Result<()> {
-        validate_subagent_choices(
-            section,
-            self.straightforward.as_ref(),
-            self.subtle.as_ref(),
-            self.oracle.as_ref(),
-        )
+impl Default for SubagentConfigInput {
+    fn default() -> Self {
+        Self {
+            primary: None,
+            straightforward: None,
+            subtle: None,
+            oracle: None,
+            max_concurrent: default_subagent_limit(),
+            enabled: None,
+            eligible_profiles: None,
+            use_same_on_all_targets: None,
+            yolo: None,
+        }
     }
 }
 
-fn validate_subagent_choices(
-    section: &str,
-    straightforward: Option<&SubagentChoice>,
-    subtle: Option<&SubagentChoice>,
-    oracle: Option<&SubagentChoice>,
-) -> Result<()> {
-    for (task, choice) in [
-        ("straightforward", straightforward),
-        ("subtle", subtle),
-        ("oracle", oracle),
-    ] {
-        if let Some(choice) = choice {
-            anyhow::ensure!(
-                choice.effort.as_deref() != Some("adaptive"),
-                "[{section}.{task}] adaptive effort is no longer supported"
+impl From<SubagentConfigInput> for SubagentConfig {
+    fn from(input: SubagentConfigInput) -> Self {
+        Self {
+            primary: input.primary.map_or_else(Vec::new, OneOrManyChoices::into_vec),
+            straightforward: input
+                .straightforward
+                .map_or_else(Vec::new, OneOrManyChoices::into_vec),
+            subtle: input.subtle.map_or_else(Vec::new, OneOrManyChoices::into_vec),
+            oracle: input.oracle.map_or_else(Vec::new, OneOrManyChoices::into_vec),
+            max_concurrent: input.max_concurrent,
+        }
+    }
+}
+
+fn validate_subagent_category(task: &str, choices: &[SubagentChoice]) -> Result<()> {
+    let mut seen_pairs: BTreeSet<(String, Option<String>)> = BTreeSet::new();
+    let mut seen_providers: BTreeMap<QuotaProvider, &str> = BTreeMap::new();
+    for choice in choices {
+        anyhow::ensure!(
+            !choice.model.trim().is_empty(),
+            "[subagents.{task}] model cannot be empty"
+        );
+        anyhow::ensure!(
+            choice.effort.as_deref() != Some("adaptive"),
+            "[subagents.{task}] adaptive effort is no longer supported"
+        );
+        let pair = (
+            crate::model_catalog::normalize_model(choice.model.trim()),
+            choice.effort.clone(),
+        );
+        anyhow::ensure!(
+            seen_pairs.insert(pair),
+            "[subagents.{task}] duplicate model/effort entry ({})",
+            choice.model
+        );
+        if let Some(provider) = crate::model_catalog::model_provider(&choice.model)
+            && let Some(previous) = seen_providers.insert(provider.clone(), &choice.model)
+        {
+            bail!(
+                "[subagents.{task}] may configure at most one model per provider (both {previous} and {} belong to {})",
+                choice.model,
+                provider.display_name()
             );
         }
     }
-    anyhow::ensure!(
-        subtle.is_none() || straightforward.is_some(),
-        "[{section}.subtle] requires [{section}.straightforward]; configure straightforward alone or both"
-    );
     Ok(())
 }
 
@@ -814,91 +840,94 @@ pub struct SubagentChoice {
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
-            straightforward: None,
-            subtle: None,
-            oracle: None,
-            enabled: false,
+            primary: Vec::new(),
+            straightforward: Vec::new(),
+            subtle: Vec::new(),
+            oracle: Vec::new(),
             max_concurrent: default_subagent_limit(),
-            legacy_eligible_profiles: BTreeMap::new(),
-            yolo: SubagentChoices::default(),
-            use_same_on_all_targets: true,
         }
     }
 }
 
 impl SubagentConfig {
-    /// The shared task choices, ignoring the YOLO split.
-    pub fn choice(&self, task_type: crate::subagent::SubagentTaskType) -> Option<&SubagentChoice> {
+    /// Choices configured for top-level primary auto-launch and supervisors.
+    pub fn primary_choices(&self) -> &[SubagentChoice] {
+        &self.primary
+    }
+
+    /// Whether at least one primary choice is configured.
+    pub fn primary_configured(&self) -> bool {
+        self.primary
+            .iter()
+            .any(|choice| !choice.model.trim().is_empty())
+    }
+
+    /// The configured choices for `task_type`.
+    pub fn choices(&self, task_type: crate::subagent::SubagentTaskType) -> &[SubagentChoice] {
         match task_type {
-            crate::subagent::SubagentTaskType::Straightforward => self.straightforward.as_ref(),
-            crate::subagent::SubagentTaskType::Subtle => self.subtle.as_ref(),
-            crate::subagent::SubagentTaskType::Oracle => self.oracle.as_ref(),
+            crate::subagent::SubagentTaskType::Straightforward => &self.straightforward,
+            crate::subagent::SubagentTaskType::Subtle => &self.subtle,
+            crate::subagent::SubagentTaskType::Oracle => &self.oracle,
         }
     }
-    /// The task choice a target with `yolo` permissions uses: its own set
-    /// when the split is enabled, else the shared set.
-    pub fn choice_for(
-        &self,
-        task_type: crate::subagent::SubagentTaskType,
-        yolo: bool,
-    ) -> Option<&SubagentChoice> {
-        if yolo && !self.use_same_on_all_targets {
-            self.yolo.choice(task_type)
-        } else {
-            self.choice(task_type)
-        }
-    }
-    /// A session's choice for `task_type`: its own override, else the choice
-    /// for this target mode.
-    pub fn effective_choice_for<'a>(
+
+    /// A session's effective choices for `task_type`: its own override when
+    /// set, else the global choices for that category.
+    pub fn effective_choices<'a>(
         &'a self,
         policy: &'a crate::subagent::SubagentPolicy,
         task_type: crate::subagent::SubagentTaskType,
-        yolo: bool,
-    ) -> Option<&'a SubagentChoice> {
-        policy
-            .override_choice(task_type)
-            .or_else(|| self.choice_for(task_type, yolo))
-    }
-    /// Whether a parent with `policy` may spawn subtle children. Without a
-    /// subtle choice, every child uses the straightforward choice.
-    pub fn offers_subtle_for(&self, policy: &crate::subagent::SubagentPolicy, yolo: bool) -> bool {
-        self.effective_choice_for(policy, crate::subagent::SubagentTaskType::Subtle, yolo)
-            .is_some()
-    }
-    /// Whether sessions on this target mode can be offered an oracle.
-    pub fn oracle_configured_for(&self, yolo: bool) -> bool {
-        self.choice_for(crate::subagent::SubagentTaskType::Oracle, yolo)
-            .is_some_and(|choice| !choice.model.trim().is_empty())
-    }
-    /// Straightforward is required; subtle is optional.
-    pub fn is_configured_for(&self, yolo: bool) -> bool {
-        self.choice_for(crate::subagent::SubagentTaskType::Straightforward, yolo)
-            .is_some_and(|choice| !choice.model.trim().is_empty())
-    }
-    /// The deprecated `enabled` key is never written, so a section holding
-    /// only that key is still a default section and stays out of the file.
-    fn is_default(&self) -> bool {
-        self.max_concurrent == default_subagent_limit()
-            && self.straightforward.is_none()
-            && self.subtle.is_none()
-            && self.oracle.is_none()
-            && self.yolo.is_default()
-            && self.use_same_on_all_targets
+    ) -> &'a [SubagentChoice] {
+        if let Some(choice) = policy.override_choice(task_type) {
+            std::slice::from_ref(choice)
+        } else {
+            self.choices(task_type)
+        }
     }
 
-    fn validate(&self) -> Result<()> {
-        validate_subagent_choices(
-            "subagents",
-            self.straightforward.as_ref(),
-            self.subtle.as_ref(),
-            self.oracle.as_ref(),
-        )?;
-        // Hidden choices are no-ops. They stay writable so re-checking the
-        // box never makes the configuration impossible to save.
-        if !self.use_same_on_all_targets {
-            self.yolo.validate("subagents.yolo")?;
+    /// Whether a parent with `policy` may spawn subtle children. Without a
+    /// subtle choice, every child uses the straightforward choices.
+    pub fn offers_subtle(&self, policy: &crate::subagent::SubagentPolicy) -> bool {
+        !self
+            .effective_choices(policy, crate::subagent::SubagentTaskType::Subtle)
+            .is_empty()
+    }
+
+    /// Whether sessions can be offered an oracle.
+    pub fn oracle_configured(&self) -> bool {
+        self.oracle
+            .iter()
+            .any(|choice| !choice.model.trim().is_empty())
+    }
+
+    /// Straightforward is required; subtle is optional.
+    pub fn is_configured(&self) -> bool {
+        self.straightforward
+            .iter()
+            .any(|choice| !choice.model.trim().is_empty())
+    }
+
+    fn is_default(&self) -> bool {
+        self.max_concurrent == default_subagent_limit()
+            && self.primary.is_empty()
+            && self.straightforward.is_empty()
+            && self.subtle.is_empty()
+            && self.oracle.is_empty()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        for (task, choices) in [
+            ("primary", self.primary.as_slice()),
+            ("straightforward", self.straightforward.as_slice()),
+            ("subtle", self.subtle.as_slice()),
+            ("oracle", self.oracle.as_slice()),
+        ] {
+            validate_subagent_category(task, choices)?;
         }
+        anyhow::ensure!(
+            self.subtle.is_empty() || !self.straightforward.is_empty(),
+            "[subagents.subtle] requires [subagents.straightforward]; configure straightforward alone or both"
+        );
         if !(1..=64).contains(&self.max_concurrent) {
             bail!("[subagents] `max_concurrent` must be between 1 and 64");
         }
@@ -1043,27 +1072,15 @@ impl Config {
     /// of a request; aggregating harnesses advertise hundreds of models.
     pub fn selected_models(&self, id: &str) -> BTreeSet<String> {
         let mut models = [
-            &self.subagents.straightforward,
-            &self.subagents.subtle,
-            &self.subagents.oracle,
+            self.subagents.primary.as_slice(),
+            self.subagents.straightforward.as_slice(),
+            self.subagents.subtle.as_slice(),
+            self.subagents.oracle.as_slice(),
         ]
         .into_iter()
         .flatten()
         .map(|choice| choice.model.clone())
         .collect::<BTreeSet<_>>();
-        // Hidden YOLO choices do nothing, including their capability demand.
-        if !self.subagents.use_same_on_all_targets {
-            models.extend(
-                [
-                    &self.subagents.yolo.straightforward,
-                    &self.subagents.yolo.subtle,
-                    &self.subagents.yolo.oracle,
-                ]
-                .into_iter()
-                .flatten()
-                .map(|choice| choice.model.clone()),
-            );
-        }
         let _ = id;
         models.extend(
             self.review
@@ -1071,6 +1088,14 @@ impl Config {
                 .iter()
                 .map(|choice| choice.model.clone()),
         );
+        if let Some(choice) = self
+            .review
+            .brief_writer
+            .as_ref()
+            .and_then(BriefWriterConfig::choice)
+        {
+            models.insert(choice.model);
+        }
         models
     }
 
@@ -1129,7 +1154,7 @@ impl Config {
 /// persistent SSH machine with a container runtime.
 pub const LEGACY_EC2_TARGET_NOTICE: &str = "Per-session EC2 targets were removed. Choose a persistent Podman target, or create one with `mj ec2 create <instance-type> --zone <zone>`.";
 
-pub const CONFIG_VERSION: u32 = 23;
+pub const CONFIG_VERSION: u32 = 24;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
@@ -1433,6 +1458,8 @@ const RETIRED_KEYS: &[&[&str]] = &[
     &["sessionwiki", "enabled"],
     &["subagents", "enabled"],
     &["subagents", "eligible_profiles"],
+    &["subagents", "use_same_on_all_targets"],
+    &["subagents", "yolo"],
     &["quota", "runtime"],
     &["profiles", "*", "muse_auto_review"],
     &["profiles", "*", "subagents"],
@@ -1753,8 +1780,9 @@ impl TryFrom<StoredConfig> for Config {
             // 18 moves the GitHub event switch to github.watch.enabled; 19 adds
             // `enabled` to runtimes; 20 adds `[daemon]`; 21 adds review counts;
             // 22 adds the session GitHub credential default; 23 adds
-            // target-specific sub-agent choices.
-            version: if matches!(version, 1..=22) {
+            // target-specific sub-agent choices; 24 generalizes [subagents]
+            // into multi-pair category lists and drops [subagents.yolo.*].
+            version: if matches!(version, 1..=23) {
                 CONFIG_VERSION
             } else {
                 version
@@ -2275,6 +2303,12 @@ impl Config {
             );
         }
         reject_removed_profile_overrides(&contents)?;
+        if loading::has_legacy_subagent_yolo_choices(&document) {
+            tracing::warn!(
+                config = %path.display(),
+                "ignoring removed [subagents.yolo.*] settings; Mjolnir now uses unified [[subagents.*]] lists across all targets, and the next save removes them"
+            );
+        }
         let removed = drop_removed_harness_profiles(&mut document);
         let contents = if removed.is_empty() {
             contents

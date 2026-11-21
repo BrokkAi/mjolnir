@@ -41,6 +41,8 @@ pub struct ViewerSnapshot {
     #[serde(default)]
     pub oracle_configured: bool,
     #[serde(default)]
+    pub primary_configured: bool,
+    #[serde(default)]
     pub subagents_configured: bool,
     pub revision: u64,
     pub generated_at: String,
@@ -491,8 +493,8 @@ impl ViewerSnapshot {
                 kind: target.kind_name().into(),
                 permission_mode: target.permission_mode(),
                 yolo: target.is_yolo(),
-                subagents_configured: config.subagents.is_configured_for(target.is_yolo()),
-                oracle_configured: config.subagents.oracle_configured_for(target.is_yolo()),
+                subagents_configured: config.subagents.is_configured(),
+                oracle_configured: config.subagents.oracle_configured(),
                 resource_allocation_kind: target.into(),
                 requires_project_directory: matches!(
                     target,
@@ -555,10 +557,11 @@ impl ViewerSnapshot {
             profile_capabilities: Default::default(),
             last_subagent_policies: state.last_subagent_policies.clone(),
             last_oracle_choices: state.last_oracle_choices.clone(),
-            oracle_configured: config.subagents.oracle_configured_for(false),
+            oracle_configured: config.subagents.oracle_configured(),
+            primary_configured: config.subagents.primary_configured(),
             operator_away: state.operator_presence.away,
             auto_afk_minutes: config.advanced.auto_afk_minutes,
-            subagents_configured: config.subagents.is_configured_for(false),
+            subagents_configured: config.subagents.is_configured(),
             revision,
             generated_at: now_unix().to_string(),
             server_time_ms: mj_core::clock::epoch_millis(),
