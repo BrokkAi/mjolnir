@@ -5553,11 +5553,12 @@ mod tests {
         fs::rename(staging, &final_path).unwrap();
         repair_workspace_snapshot(&crate::test_support::Git231, &snapshot, &final_path).unwrap();
         assert_eq!(
-            git(
+            fs::canonicalize(git(
                 &final_path.join(relative),
                 &["rev-parse", "--show-toplevel"]
-            ),
-            final_path.join(relative).to_str().unwrap()
+            ))
+            .unwrap(),
+            fs::canonicalize(final_path.join(relative)).unwrap()
         );
     }
 
@@ -6320,13 +6321,16 @@ mod tests {
             }
             let inventory =
                 workspace_inventory(&FileGit, &root.checkout, &CheckoutOwnership::Managed).unwrap();
+            let expected_modules = fs::canonicalize(root.checkout.join(".git/modules")).unwrap();
             assert!(inventory.origins_removed_by_teardown.iter().any(|origin| {
                 origin
                     .value
                     .object_provider
                     .as_ref()
                     .is_some_and(|provider| {
-                        provider.starts_with(root.checkout.join(".git/modules"))
+                        fs::canonicalize(provider)
+                            .unwrap_or_else(|_| provider.clone())
+                            .starts_with(&expected_modules)
                     })
             }));
             let error = capture_workspace_snapshot(

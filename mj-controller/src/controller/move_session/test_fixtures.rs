@@ -98,10 +98,16 @@ impl TestProxyGroupGuard {
         }
         let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(false)
-        } else {
-            Err(error)
+            return Ok(false);
         }
+        // On macOS, kill(-pgid, 0) returns EPERM when the only remaining
+        // members of a process group are zombies/exiting (or if the pgid was
+        // recycled to another user); no live fixture process remains.
+        #[cfg(target_os = "macos")]
+        if error.raw_os_error() == Some(libc::EPERM) {
+            return Ok(false);
+        }
+        Err(error)
     }
 }
 
