@@ -397,6 +397,7 @@ class Lab:
         }
         self.clients: list[PtyClient] = []
         self.daemon_pid: int | None = None
+        self.web_incarnation: str | None = None
         self.cookie_jar = http.cookiejar.CookieJar()
         self.http = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
         self.base_url = ""
@@ -958,16 +959,28 @@ pull_policy = "never"
                 if field in row or not isinstance(reference, str) or reference not in interned:
                     raise ScenarioFailure(f"snapshot has invalid interned reference for {field}")
                 row[field] = interned[reference]
+        incarnation = cursor["incarnation"]
+        sequence = cursor["sequence"]
         revision = value.get("revision")
         if not isinstance(revision, int):
             raise ScenarioFailure(f"snapshot has invalid revision: {revision!r}")
+        if revision != sequence:
+            raise ScenarioFailure(
+                f"snapshot revision {revision} does not match cursor sequence {sequence}"
+            )
         revisions = self.trace["revisions"]
         assert isinstance(revisions, dict)
         web = revisions["web"]
         assert isinstance(web, list)
-        if web and revision < web[-1]:
-            raise ScenarioFailure(f"web revision moved backwards from {web[-1]} to {revision}")
-        if not web or revision != web[-1]:
+        # Integer `revision` tracks `cursor.sequence`, which starts at 1 per
+        # daemon incarnation; cross-restart continuity uses `cursor.incarnation`.
+        same_incarnation = bool(web) and self.web_incarnation == incarnation
+        if same_incarnation and revision < web[-1]:
+            raise ScenarioFailure(
+                f"web revision moved backwards from {web[-1]} to {revision} within incarnation {incarnation}"
+            )
+        if not same_incarnation or revision != web[-1]:
+            self.web_incarnation = incarnation
             web.append(revision)
             self.write_trace()
         return value
