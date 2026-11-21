@@ -10,7 +10,7 @@ use crate::archive::git::{
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
     io::{Read, Seek, SeekFrom},
@@ -1538,15 +1538,71 @@ pub(crate) fn origin_tracking_objects(
     objects.dedup();
     Ok(OriginTracking { objects, ambiguous })
 }
+/// Ref names that must not be excluded when `remote` shares `checkout`'s
+/// common Git directory (for example an originless legacy linked worktree
+/// falling back to `source_repository` via `origin_override`). Otherwise
+/// `ls-remote` would advertise the session's own mutable branch back to
+/// capture and drop the session's commits from the pack.
+fn shared_source_skip_refs(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    remote: &str,
+    selected_refs: &BTreeMap<String, String>,
+) -> Result<(bool, BTreeSet<String>)> {
+    if remote.is_empty() {
+        return Ok((false, BTreeSet::new()));
+    }
+    let effective = run_git(runner, checkout, ["ls-remote", "--get-url", remote], &[])?;
+    if effective.status != 0 {
+        return Ok((false, BTreeSet::new()));
+    }
+    let text = std::str::from_utf8(
+        effective
+            .stdout
+            .strip_suffix(b"\n")
+            .unwrap_or(&effective.stdout),
+    )?;
+    let Some(local_remote) = local_origin_route(checkout, text)? else {
+        return Ok((false, BTreeSet::new()));
+    };
+    if !local_remote.exists() {
+        return Ok((false, BTreeSet::new()));
+    }
+    let checkout_common_out = run_git(runner, checkout, ["rev-parse", "--git-common-dir"], &[])?;
+    let remote_common_out =
+        run_git(runner, &local_remote, ["rev-parse", "--git-common-dir"], &[])?;
+    if checkout_common_out.status != 0 || remote_common_out.status != 0 {
+        return Ok((false, BTreeSet::new()));
+    }
+    let checkout_common =
+        crate::archive::git::absolute_git_path(checkout, &checkout_common_out.stdout)?;
+    let remote_common =
+        crate::archive::git::absolute_git_path(&local_remote, &remote_common_out.stdout)?;
+    let checkout_canonical = fs::canonicalize(&checkout_common).unwrap_or(checkout_common);
+    let remote_canonical = fs::canonicalize(&remote_common).unwrap_or(remote_common);
+    if checkout_canonical == remote_canonical {
+        Ok((true, selected_refs.keys().cloned().collect()))
+    } else {
+        Ok((false, BTreeSet::new()))
+    }
+}
+
 /// Capture and dry-run share origin queries and objects-only downloads.
 fn origin_exclusions(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
     remote: &str,
     refs: &BTreeMap<String, String>,
+    skip_shared_source_refs: &(bool, BTreeSet<String>),
 ) -> Result<OriginExclusions> {
     let fallback = origin_tracking_objects(runner, checkout, refs)?;
-    let mut result = remote_objects(runner, checkout, remote, &fallback.objects)?;
+    let mut result = remote_objects(
+        runner,
+        checkout,
+        remote,
+        &fallback.objects,
+        skip_shared_source_refs,
+    )?;
     if result.stale && result.objects.is_empty() {
         result.notice = Some(if fallback.ambiguous {
             "snapshot carries full history because origin was unreachable and its offline refs were ambiguous"
@@ -1562,7 +1618,9 @@ pub(crate) fn remote_objects(
     checkout: &Path,
     remote: &str,
     fallback: &[String],
+    skip_shared_source_refs: &(bool, BTreeSet<String>),
 ) -> Result<OriginExclusions> {
+    let (shares_common_dir, skip_refs) = skip_shared_source_refs;
     let advertised = run_git(runner, checkout, ["ls-remote", remote], &[]);
     let mut objects = Vec::new();
     let mut stale = false;
@@ -1573,6 +1631,11 @@ pub(crate) fn remote_objects(
                 let (oid, name) = line
                     .split_once('\t')
                     .context("malformed origin advertisement")?;
+                if *shares_common_dir
+                    && (skip_refs.contains(name) || name.starts_with("refs/heads/mj/"))
+                {
+                    continue;
+                }
                 if name.starts_with("refs/heads/") || name.starts_with("refs/tags/") {
                     tips.push(oid.to_owned());
                 }
@@ -1650,7 +1713,8 @@ pub(crate) fn submodule_selection_has_delta(
             .into_iter()
             .map(|entry| entry.commit),
     );
-    let exclusions = origin_exclusions(runner, checkout, "origin", &refs)?;
+    let no_skip = (false, BTreeSet::new());
+    let exclusions = origin_exclusions(runner, checkout, "origin", &refs, &no_skip)?;
     tips.sort();
     tips.dedup();
     if !missing_tips(runner, checkout, &tips)?.is_empty() {
@@ -1675,10 +1739,14 @@ fn snapshot_exclusions(
     checkout: &Path,
     remote: &str,
     refs: &BTreeMap<String, String>,
+    selected_refs: &BTreeMap<String, String>,
     source: &ExclusionSource,
 ) -> Result<OriginExclusions> {
     match source {
-        ExclusionSource::Origin => origin_exclusions(runner, checkout, remote, refs),
+        ExclusionSource::Origin => {
+            let skip_shared = shared_source_skip_refs(runner, checkout, remote, selected_refs)?;
+            origin_exclusions(runner, checkout, remote, refs, &skip_shared)
+        }
         ExclusionSource::Commits(commits) => {
             let mut objects = Vec::new();
             for commit in commits {
@@ -1957,8 +2025,8 @@ fn estimate_delta_with_source(
         history_cutoff,
     )?;
     let cut = pin_workspace_cut(runner, checkout, ownership)?;
-    let exclusions = snapshot_exclusions(runner, checkout, &remote, &cut.refs, source)?;
     let refs = selected_refs(runner, checkout, &cut, ownership)?;
+    let exclusions = snapshot_exclusions(runner, checkout, &remote, &cut.refs, &refs, source)?;
     let mut committed: Vec<_> = refs.values().cloned().collect();
     committed.push(cut.head.commit().to_owned());
     committed.extend(
@@ -2412,8 +2480,14 @@ fn capture_prepared_workspace(
     };
     let cut = pin_workspace_cut(runner, checkout, ownership)?;
     let refs = selected_refs(runner, checkout, &cut, ownership)?;
-    let exclusions =
-        snapshot_exclusions(runner, checkout, &remote, &cut.refs, &repository.exclusions)?;
+    let exclusions = snapshot_exclusions(
+        runner,
+        checkout,
+        &remote,
+        &cut.refs,
+        &refs,
+        &repository.exclusions,
+    )?;
     let mut notices = inventory.notices.clone();
     notices.extend(exclusions.notice.clone());
     let original_stash = selected_stash(runner, checkout, ownership)?;

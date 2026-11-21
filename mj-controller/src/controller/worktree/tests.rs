@@ -3358,6 +3358,13 @@ fn legacy_linked_worktree_origin_delta_capture_and_restore_as_clone() {
         .unwrap();
         assert!(!worktree_root.exists());
 
+        // Even if the retained session branch is subsequently deleted and
+        // pruned from the source repository, the OriginDelta pack must carry
+        // the session's commits independently so restore still recovers them.
+        test_git(&source, &["branch", "-D", &format!("mj/{session_id}")]);
+        test_git(&source, &["reflog", "expire", "--expire=now", "--all"]);
+        test_git(&source, &["gc", "--prune=now"]);
+
         // Restore into a fresh ManagedCheckoutKind::Clone (matching in-place resume upgrade).
         let upgraded_clone = ManagedWorktree {
             kind: ManagedCheckoutKind::Clone,
