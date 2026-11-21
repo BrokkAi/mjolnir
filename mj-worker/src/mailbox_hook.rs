@@ -22,17 +22,30 @@ pub fn request(socket: &Path) -> Result<()> {
     write_stdout(&serde_json::to_value(send_request(socket, request)?)?)
 }
 
+/// Output format expected by the calling harness's hook contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HookOutputFormat {
+    #[default]
+    Standard,
+    Antigravity,
+}
+
 /// Consume one harness hook request, write its response, then acknowledge the
 /// relay lease. Relay unavailability is deliberately fail-open: an unacked
 /// lease returns to the mailbox after its timeout or a worker restart.
 pub fn run(socket: &Path, hook_event: &str) -> Result<()> {
+    run_with_format(socket, hook_event, HookOutputFormat::Standard)
+}
+
+/// Consume one harness hook request using the specified hook output format.
+pub fn run_with_format(socket: &Path, hook_event: &str, format: HookOutputFormat) -> Result<()> {
     let mut stdin = std::io::stdin().lock();
     let hook_input = match serde_json::from_reader::<_, HookInput>(&mut stdin) {
         Ok(input) => input,
         Err(error) if error.is_io() => {
             return write_empty_with_diagnostic(&format!("could not consume hook input: {error}"));
         }
-        Err(_) => HookInput { agent_id: None },
+        Err(_) => HookInput::default(),
     };
     if let Err(error) = std::io::copy(&mut stdin, &mut std::io::sink()) {
         return write_empty_with_diagnostic(&format!("could not consume hook input: {error}"));
@@ -41,14 +54,31 @@ pub fn run(socket: &Path, hook_event: &str) -> Result<()> {
         return write_stdout(&json!({}));
     }
 
-    match drain(socket, hook_event) {
+    let conversation_id = match format {
+        HookOutputFormat::Standard => None,
+        HookOutputFormat::Antigravity => hook_input.conversation_id.as_deref(),
+    };
+
+    match drain(socket, hook_event, conversation_id) {
         Ok((Some(text), count, Some(lease_id))) if count > 0 => {
-            write_stdout(&json!({
-                "hookSpecificOutput": {
-                    "hookEventName": hook_event,
-                    "additionalContext": text,
-                }
-            }))?;
+            let output = match format {
+                HookOutputFormat::Standard => json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": hook_event,
+                        "additionalContext": text,
+                    }
+                }),
+                HookOutputFormat::Antigravity => json!({
+                    "injectSteps": [
+                        {
+                            "systemMessage": {
+                                "systemMessage": text,
+                            }
+                        }
+                    ]
+                }),
+            };
+            write_stdout(&output)?;
             if let Err(error) = acknowledge(socket, &lease_id) {
                 mj_core::diagnostic_stderr!(
                     "Mjolnir mailbox hook: could not acknowledge delivered events: {error:#}"
@@ -62,9 +92,12 @@ pub fn run(socket: &Path, hook_event: &str) -> Result<()> {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Default, serde::Deserialize)]
 struct HookInput {
+    #[serde(default)]
     agent_id: Option<String>,
+    #[serde(default, rename = "conversationId")]
+    conversation_id: Option<String>,
 }
 
 fn is_subagent_hook_input(input: &HookInput) -> bool {
@@ -74,7 +107,11 @@ fn is_subagent_hook_input(input: &HookInput) -> bool {
         .is_some_and(|agent_id| !agent_id.is_empty())
 }
 
-fn drain(socket: &Path, hook_event: &str) -> Result<(Option<String>, usize, Option<String>)> {
+fn drain(
+    socket: &Path,
+    hook_event: &str,
+    conversation_id: Option<&str>,
+) -> Result<(Option<String>, usize, Option<String>)> {
     anyhow::ensure!(
         matches!(hook_event, "PostToolUse" | "PostToolBatch"),
         "unsupported mailbox hook event"
@@ -83,6 +120,7 @@ fn drain(socket: &Path, hook_event: &str) -> Result<(Option<String>, usize, Opti
         socket,
         mj_core::relay::RelayRequest::DrainMailbox {
             hook_event: hook_event.to_owned(),
+            conversation_id: conversation_id.map(str::to_owned),
         },
     )? {
         mj_core::relay::RelayResponsePayload::MailboxDrained {

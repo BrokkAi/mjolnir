@@ -152,10 +152,10 @@ impl DurableRelay {
                             SteeringDeliveryMode::Acp | SteeringDeliveryMode::AcpWithMailbox => {
                                 self.steering_supported != Some(false)
                             }
-                            SteeringDeliveryMode::ClaudePostToolBatch => {
+                            SteeringDeliveryMode::HookPostToolBatch => {
                                 mj_core::acp::steering_text_context(prompt).is_some()
                             }
-                            SteeringDeliveryMode::ClaudeTurnEnd => false,
+                            SteeringDeliveryMode::HookTurnEnd => false,
                         }
                         && self
                             .snapshot
@@ -429,14 +429,7 @@ impl DurableRelay {
             )));
         }
         if matches!(command, RelayCommand::ClearContext) {
-            if !matches!(
-                self.verdict_harness,
-                Some(
-                    mj_core::config::HarnessKind::Codex
-                        | mj_core::config::HarnessKind::Claude
-                        | mj_core::config::HarnessKind::Kimi
-                )
-            ) {
+            if !self.supports_clear_context() {
                 return Ok(Err(relay_protocol_error(
                     RelayErrorCode::InvalidState,
                     "This harness does not support /clear",
@@ -1444,7 +1437,7 @@ impl DurableRelay {
         if !self.automatic_steering || self.checkpoint_only || self.has_held_claude_turn() {
             return None;
         }
-        if self.steering_delivery_mode == SteeringDeliveryMode::ClaudeTurnEnd {
+        if self.steering_delivery_mode == SteeringDeliveryMode::HookTurnEnd {
             return None;
         }
         // Automatic steering is only useful for a Hel-owned prompt. In a
@@ -2386,7 +2379,7 @@ impl DurableRelay {
 
     fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, &str)> {
         if hook_event != "PostToolBatch"
-            || self.steering_delivery_mode != SteeringDeliveryMode::ClaudePostToolBatch
+            || self.steering_delivery_mode != SteeringDeliveryMode::HookPostToolBatch
             // A turn being interrupted discards its input; the prompt runs next.
             || self.turn_cancellation_pending()
         {
@@ -2441,11 +2434,27 @@ impl DurableRelay {
     /// prompt context), so an unresolved or unsafe provider never receives a
     /// developer message between a tool call and its output (#1277).
     /// `PostToolBatch` drains are unaffected.
-    pub fn drain_mailbox(&mut self, hook_event: &str) -> Result<RelayResponsePayload> {
+    pub fn drain_mailbox(
+        &mut self,
+        hook_event: &str,
+        conversation_id: Option<&str>,
+    ) -> Result<RelayResponsePayload> {
         anyhow::ensure!(
             matches!(hook_event, "PostToolUse" | "PostToolBatch"),
             "unsupported mailbox hook event"
         );
+        if let (Some(incoming), Some(expected)) = (
+            conversation_id.filter(|id| !id.is_empty()),
+            self.snapshot.native_session_id.as_deref(),
+        ) && incoming != expected
+        {
+            return Ok(RelayResponsePayload::MailboxDrained {
+                lease_id: None,
+                text: None,
+                count: 0,
+                contexts: Vec::new(),
+            });
+        }
         if hook_event == "PostToolUse"
             && self.mailbox_delivery_mode
                 != Some(mj_core::mailbox::MailboxDeliveryMode::ToolBoundary)

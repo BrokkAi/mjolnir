@@ -1017,10 +1017,10 @@ pub(crate) fn record_runtime_event_with_facts(
             relay.set_steering_supported(steering_supported);
             // Every bridge that advertises the steering extension queues the
             // steer until the running turn can take it, at its next tool
-            // boundary. Do not require a second capability: the extension is
-            // the whole contract, and some bridges (Muse) implement it without
-            // advertising `idleBehaviors`.
-            relay.set_automatic_steering(steering_supported == Some(true));
+            // boundary. Hook-based harnesses (Claude, Antigravity) also steer
+            // automatically when their boundary hook is installed.
+            let automatic_steering = relay.effective_steering_supported() == Some(true);
+            relay.set_automatic_steering(automatic_steering);
         }
         RuntimeEvent::Connected { .. } => {
             relay.record_observation(RelayObservation::Warning {

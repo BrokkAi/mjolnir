@@ -167,6 +167,8 @@ enum WorkerCommand {
         socket: PathBuf,
         #[arg(long, value_parser = ["PostToolUse", "PostToolBatch"])]
         event: String,
+        #[arg(long, default_value = "standard", value_parser = ["standard", "antigravity"])]
+        format: String,
     },
     /// Exchange one mailbox lease request for a durable harness inbox.
     MailboxRequest {
@@ -758,8 +760,16 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             _root: _,
             history_socket,
         } => mj_worker::memory_mcp::run_mcp_stdio(history_socket),
-        WorkerCommand::MailboxHook { socket, event } => {
-            mj_worker::mailbox_hook::run(&socket, &event)
+        WorkerCommand::MailboxHook {
+            socket,
+            event,
+            format,
+        } => {
+            let format = match format.as_str() {
+                "antigravity" => mj_worker::mailbox_hook::HookOutputFormat::Antigravity,
+                _ => mj_worker::mailbox_hook::HookOutputFormat::Standard,
+            };
+            mj_worker::mailbox_hook::run_with_format(&socket, &event, format)
         }
         WorkerCommand::MailboxRequest { socket } => mj_worker::mailbox_hook::request(&socket),
 
