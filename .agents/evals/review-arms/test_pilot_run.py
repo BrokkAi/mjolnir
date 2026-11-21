@@ -572,11 +572,16 @@ class PilotTest(unittest.TestCase):
         paths = {}
         rollout_name = "rollout-test.jsonl"
         failed_export = set()
+        # Hard-won: d51b915: rollout retry used the container ID recorded at launch, not the current one
+        original_lookup = driver.session_container_id
+        self.addCleanup(setattr, driver, "session_container_id", original_lookup)
+        driver.session_container_id = lambda sid, missing_ok=False: f"current-{sid}"
 
         def run(argv, **kwargs):
             seen.append(argv)
             if argv[:2] == ["podman", "exec"]:
-                sid = argv[2]
+                self.assertTrue(argv[2].startswith("current-"), "capture must use the session's current container")
+                sid = argv[2].removeprefix("current-")
                 self.assertEqual(argv[-1], f"/var/lib/hel/profiles/{sid}/sessions")
                 if sid not in failed_export:
                     failed_export.add(sid)

@@ -106,8 +106,35 @@ host key and the dedicated authorization file private to that login. The
 hook enrolls the session, publishes its local record, and runs the container's
 MCP preflight so an unreachable address or wrong host pin stops setup. After
 capture, `install-assignment.py --revoke /absolute/path/to/tool-assignment.json`
-revokes that session's authorization and transport assignment. Both operations
-can be repeated.
+removes that session's authorization, transport assignment and staged key. It
+also clears the assignment and SSH credential files in a running container.
+Both operations can be repeated.
+
+On a host using rootless Podman with pasta, verify how the guest reaches the
+host before starting sshd. Podman 5.7's default `host.containers.internal`
+mapping need not reach a listener bound to host loopback. A port-specific pasta
+splice can forward guest loopback port 22222 to host loopback on compatible
+versions. On this configuration, bind sshd to `127.0.0.1`, set the private
+profile's `RQL_SSH_TARGET` to `ssh://PILOT_USER@127.0.0.1:22222`, and start the
+private daemon with `CONTAINERS_CONF_OVERRIDE` pointing to an instance-local
+file containing:
+
+```toml
+[network]
+pasta_options = ["-T", "22222"]
+```
+
+Verify that the guest reaches the SSH port, another host loopback port is
+unreachable from the guest, and sshd has no listener on a non-loopback address.
+Restart the private daemon with the override before each resumed run. When
+using frozen Mjolnir binaries, set `REVIEW_ARMS_MJ` and
+`REVIEW_ARMS_MJ_WORKER` in the dedicated sshd's server-side `SetEnv` as well as
+in the invoking shell. The forced command starts the engine independently.
+
+Use a separate transport JSON preconfigured with
+`"engine": "rql_mock.stub_engine:answer"` for a no-model transport test.
+Enrollment preserves an operator-selected engine in that private file and
+defaults a new transport config to the real engine.
 
 ## Slice 5 session setup
 

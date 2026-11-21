@@ -211,16 +211,20 @@ def capture_pilot_rollouts(d, sid):
     from audit import ROLLOUT_DIRECTORY
 
     destination = d / ROLLOUT_DIRECTORY
-    placement = d / "placement.json"
     if any(destination.glob("rollout-*.jsonl")):
         return True
     try:
         if not re.fullmatch(r"[0-9a-f]{32}", sid):
             raise ValueError("pilot rollout capture requires an exact session ID")
-        place = json.loads(placement.read_text())
+        # Resolve the session's current container by its mj label, not the ID recorded at launch:
+        # Mjolnir can recreate a missing container for the same session, and a retry against the
+        # old ID would stay in needs-recovery forever.
+        current = session_container_id(sid, missing_ok=True)
+        if current is None:
+            raise ValueError("no running container carries this session's label")
         source = f"/var/lib/hel/profiles/{sid}/sessions"
         with tempfile.TemporaryFile() as archive, tempfile.TemporaryDirectory(prefix=".rollouts-", dir=d) as staging:
-            subprocess.run(["podman", "exec", place["container"], "python3", "-c", PILOT_ROLLOUT_EXPORT, source],
+            subprocess.run(["podman", "exec", current, "python3", "-c", PILOT_ROLLOUT_EXPORT, source],
                            stdout=archive, stderr=subprocess.PIPE, timeout=300, check=True)
             archive.seek(0)
             private = pathlib.Path(staging) / ROLLOUT_DIRECTORY
@@ -235,7 +239,7 @@ def capture_pilot_rollouts(d, sid):
             if not any(private.iterdir()):
                 raise ValueError("session contains no Codex rollout files")
             private.rename(destination)
-    except (OSError, KeyError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
+    except (AssertionError, OSError, KeyError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
         save(d / "rollout-capture-error.json", {"session_id": sid, "error": str(error)})
         return False
     return True
@@ -412,14 +416,21 @@ def wait_idle(sid, limit=1200):
     raise TimeoutError(f"session {sid} did not become idle")
 
 
-def container(sid):
+def session_container_id(sid, *, missing_ok=False):
     ids = subprocess.check_output(["podman", "ps", "--filter", f"label=dev.mj.session={sid}",
                                    "--format", "{{.ID}}"]).decode().split()
+    if not ids and missing_ok:
+        return None
     assert len(ids) == 1, ids
-    mounts = json.loads(subprocess.check_output(["podman", "inspect", ids[0], "--format", "{{json .Mounts}}"]))
+    return ids[0]
+
+
+def container(sid):
+    container_id = session_container_id(sid)
+    mounts = json.loads(subprocess.check_output(["podman", "inspect", container_id, "--format", "{{json .Mounts}}"]))
     # The default instance's Podman target follows agent-dev:latest, so record the image per job.
-    image = subprocess.check_output(["podman", "inspect", ids[0], "--format", "{{.Image}}"]).decode().strip()
-    return {"container": ids[0], "image": image, "cwd": f"/workspace/{sid}/{REPO_DIR}",
+    image = subprocess.check_output(["podman", "inspect", container_id, "--format", "{{.Image}}"]).decode().strip()
+    return {"container": container_id, "image": image, "cwd": f"/workspace/{sid}/{REPO_DIR}",
             "mounts": [{"source": m.get("Source"), "destination": m.get("Destination"), "rw": m.get("RW")}
                        for m in mounts]}
 

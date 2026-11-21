@@ -2,7 +2,6 @@
 """Publish or revoke a pilot session's RQL assignment."""
 import argparse
 import fcntl
-import ipaddress
 import json
 import os
 from pathlib import Path
@@ -92,7 +91,7 @@ def host_assignment(assignment, *, revoke):
         Path(entry["log"]).parent.mkdir(parents=True, exist_ok=True)
         private, public = key_pair(key_dir, sid)
         config["manifest"] = str(Path(assignment["manifest"]).resolve())
-        config["engine"] = "rql_mock.engine:answer"
+        config.setdefault("engine", "rql_mock.engine:answer")
         sessions[sid] = entry
         atomic_write(transport, json.dumps(config, indent=2) + "\n")
         atomic_write(auth, "".join(f"{line}\n" for line in [*kept, authorized_entry(transport, sid, public)]))
@@ -115,12 +114,8 @@ def known_host(target):
     host = parsed.hostname
     if not parsed.username or not host or parsed.password or parsed.path or parsed.query or parsed.fragment:
         raise ValueError("RQL_SSH_TARGET must name a user and a Podman-reachable host")
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        address = None
-    if host == "localhost" or (address is not None and address.is_loopback):
-        raise ValueError("RQL_SSH_TARGET uses the container's loopback instead of a host address")
+    # A port-specific rootless pasta forward can make the server reachable
+    # on guest loopback. The pinned preflight proves the actual endpoint.
     port = parsed.port or 22
     label = f"[{host}]:{port}" if port != 22 else host
     public = Path(os.environ["RQL_SSH_HOST_PUBLIC_KEY"]).read_text().split()
@@ -152,6 +147,43 @@ for path, text in files:
 client = Path(environment["RQL_SSH_CONFIG"]).with_name("client.py")
 os.execve(sys.executable, [sys.executable, "-B", str(client), "--preflight"], {**os.environ, **environment})
 """
+
+REVOKE = """
+import json, sys
+from pathlib import Path
+
+for name in json.load(sys.stdin):
+    path = Path(name)
+    if not path.is_absolute():
+        raise ValueError("RQL client paths must be absolute")
+    path.unlink(missing_ok=True)
+"""
+
+
+def revoke(assignment):
+    sys.path.insert(0, str(HERE.parent))
+    from driver import session_container_id
+
+    sid, arm = assignment["session_id"], assignment["arm"]
+    if arm != "none":
+        host_assignment(assignment, revoke=True)
+    container_id = session_container_id(sid, missing_ok=True)
+    if container_id is None:
+        return
+    environment = client_environment()
+    paths = [str(Path(environment["RQL_SESSION_ASSIGNMENT_DIR"]) / f"{sid}.json")]
+    if arm != "none":
+        paths.extend(environment[name] for name in ("RQL_SSH_KEY", "RQL_SSH_KNOWN_HOSTS"))
+    try:
+        subprocess.run(
+            ["podman", "exec", "--interactive", container_id, "python3", "-B", "-c", REVOKE],
+            input=json.dumps(paths), text=True, check=True,
+        )
+    except subprocess.CalledProcessError:
+        # Pilot cleanup can already have accepted Destroy. If it finished
+        # while this command ran, there is no container left to clean.
+        if session_container_id(sid, missing_ok=True) is not None:
+            raise
 
 
 def publish(assignment):
@@ -188,8 +220,7 @@ def main():
                 or assignment["arm"] not in {"R", "R-loc", "none"}):
             raise ValueError("invalid pilot session assignment")
         if args.revoke:
-            if assignment["arm"] != "none":
-                host_assignment(assignment, revoke=True)
+            revoke(assignment)
         else:
             publish(assignment)
     except (OSError, ValueError, KeyError, TypeError, AssertionError, subprocess.SubprocessError) as error:
