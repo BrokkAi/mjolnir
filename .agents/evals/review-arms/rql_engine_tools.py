@@ -1,6 +1,8 @@
 """Claude Code tool policy for the pilot's mock engine."""
+from pathlib import PurePosixPath
 
 ENGINE_TOOLS = frozenset({"Read", "Grep", "Glob", "Write", "Edit"})
+SESSION_PROFILE_ROOT = PurePosixPath("/var/lib/hel/profiles")
 
 # Claude Code 2.1.326 SDK built-ins, legacy aliases and the MCP namespace.
 # Frozen mj cannot pass a session-specific SDK tools array.

@@ -11,7 +11,7 @@ import tomllib
 from uuid import uuid4
 from driver import PILOT_CLAUDE_EFFORT as EFFORT, PILOT_CLAUDE_MODEL as MODEL
 from driver import provider_model, verify_session_selection
-from rql_engine_tools import ENGINE_SETTINGS, STAGED_ENGINE_SETTINGS
+from rql_engine_tools import ENGINE_SETTINGS, SESSION_PROFILE_ROOT, STAGED_ENGINE_SETTINGS
 
 from .evidence import file_digests, save_bytes, save_json, sync_directory
 from .prompt import assert_blind, semantics_only, turn_prompt
@@ -22,7 +22,6 @@ SESSION_ID = re.compile(r"[a-f0-9]{32}")
 QUERY_SESSION_PROTOCOL = "sealed-session-per-query-v1"
 TURN_TIMEOUT = 1800
 RUN_ERRORS = (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError)
-SESSION_PROFILE_ROOT = PurePosixPath("/var/lib/hel/profiles")
 
 # Pass the credential over stdin so it stays out of process arguments.
 SYNC_CONTAINER_LOGIN = """
