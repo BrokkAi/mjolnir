@@ -1275,6 +1275,44 @@ pub fn clear_recorded_lifecycle_failure(
 
 /// Install a lifecycle transition together with the checkpoint it just
 /// verified and the harness session id that produced it.
+/// Point one checkpoint row at a replacement archive when it still names
+/// `expected_archive_path` and `expected_sha256`.
+///
+/// The update changes only `archive_path` and `sha256`, in one immediate
+/// transaction. `created_at` and `event_frontier` stay as they are. A missing
+/// row or a row that no longer matches returns `Ok(false)` so a concurrent
+/// checkpoint write is left alone. An illegal digest is an error from the
+/// table's check constraint.
+pub fn replace_checkpoint_archive_if_current(
+    session_id: &str,
+    expected_archive_path: &Path,
+    expected_sha256: &str,
+    replacement: &CheckpointMetadata,
+) -> Result<bool> {
+    let session_id = session_id.to_owned();
+    let expected_archive_path = path_to_blob(expected_archive_path);
+    let expected_sha256 = expected_sha256.to_owned();
+    let archive_path = path_to_blob(&replacement.archive_path);
+    let sha256 = replacement.sha256.clone();
+    submit_database_write("replace_checkpoint_archive_if_current", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE session_checkpoints
+                 SET archive_path = ?3, sha256 = ?4
+                 WHERE session_id = ?1 AND archive_path = ?2 AND sha256 = ?5",
+            params![
+                session_id,
+                expected_archive_path,
+                archive_path,
+                sha256,
+                expected_sha256,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(changed == 1)
+    })
+}
+
 pub fn save_checkpointed_session(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("save_checkpointed_session", move |_| {
