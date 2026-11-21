@@ -365,6 +365,92 @@ pub(super) fn regular_file_or_absent(path: &Path) -> bool {
     }
 }
 
+/// A profile subdirectory is created or traversed only when it is a real
+/// directory or does not exist yet; a symlink may lead out of the private profile.
+fn dir_or_absent(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata.is_dir(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Install the Mjolnir mailbox plugin hook in the session-private Antigravity
+/// home (`<home>/config/plugins/mjolnir-mailbox/{plugin.json,hooks.json}`) so
+/// `agy acp` discovers and merges it alongside any user `config/hooks.json`.
+pub(super) fn configure_antigravity_mailbox_hook(
+    root: &Path,
+    session_id: &str,
+    home: &Path,
+) -> Result<bool> {
+    let config_dir = home.join("config");
+    let plugins_dir = config_dir.join("plugins");
+    let plugin_dir = plugins_dir.join("mjolnir-mailbox");
+    let plugin_json_path = plugin_dir.join("plugin.json");
+    let hooks_json_path = plugin_dir.join("hooks.json");
+
+    let safe = root.is_absolute()
+        && private_staged_home(root, session_id, home)
+        && dir_or_absent(&config_dir)
+        && dir_or_absent(&plugins_dir)
+        && dir_or_absent(&plugin_dir)
+        && regular_file_or_absent(&plugin_json_path)
+        && regular_file_or_absent(&hooks_json_path);
+    if !safe {
+        tracing::warn!(
+            path = %home.display(),
+            "skipping Antigravity mailbox hook setup: profile path is not a private staged directory"
+        );
+        return Ok(false);
+    }
+
+    std::fs::create_dir_all(&plugin_dir)
+        .with_context(|| format!("create Antigravity plugin dir {}", plugin_dir.display()))?;
+
+    let worker = std::env::current_exe().context("locate worker for Antigravity mailbox hook")?;
+    let socket = root.join("control.sock");
+    let command = format!(
+        "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event PostToolBatch --format antigravity",
+        mj_core::targets::posix_quote(&worker.to_string_lossy()),
+        mj_core::targets::posix_quote(&socket.to_string_lossy())
+    );
+
+    let mut plugin_bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "name": "mjolnir-mailbox"
+    }))?;
+    plugin_bytes.push(b'\n');
+    if std::fs::read(&plugin_json_path).ok().as_deref() != Some(plugin_bytes.as_slice()) {
+        mj_core::config::atomic_write(&plugin_json_path, &plugin_bytes).with_context(|| {
+            format!(
+                "write Antigravity mailbox plugin manifest {}",
+                plugin_json_path.display()
+            )
+        })?;
+    }
+
+    let mut hooks_bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "mjolnir-mailbox": {
+            "PreInvocation": [
+                {
+                    "type": "command",
+                    "command": command,
+                    "timeout": mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS
+                }
+            ]
+        }
+    }))?;
+    hooks_bytes.push(b'\n');
+    if std::fs::read(&hooks_json_path).ok().as_deref() != Some(hooks_bytes.as_slice()) {
+        mj_core::config::atomic_write(&hooks_json_path, &hooks_bytes).with_context(|| {
+            format!(
+                "write Antigravity mailbox plugin hooks {}",
+                hooks_json_path.display()
+            )
+        })?;
+    }
+
+    Ok(true)
+}
+
 /// Install the mailbox command hook in the session-private Claude settings and
 /// resolve staged remote paths on the worker target before Claude reads them.
 ///
@@ -3694,5 +3780,75 @@ mod review_gate_tests {
         .unwrap();
         let servers = codex_servers(&home);
         assert!(servers.is_empty(), "{servers:?}");
+    }
+
+    #[test]
+    fn configure_antigravity_mailbox_hook_writes_and_protects_private_plugin() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("profile");
+        std::fs::create_dir_all(&home).unwrap();
+
+        assert!(configure_antigravity_mailbox_hook(root.path(), "session-1", &home).unwrap());
+
+        let plugin_dir = home.join("config/plugins/mjolnir-mailbox");
+        let plugin_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(plugin_dir.join("plugin.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            plugin_json,
+            serde_json::json!({ "name": "mjolnir-mailbox" })
+        );
+
+        let hooks_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(plugin_dir.join("hooks.json")).unwrap()).unwrap();
+        let hook = &hooks_json["mjolnir-mailbox"]["PreInvocation"][0];
+        assert_eq!(hook["type"], "command");
+        assert_eq!(hook["timeout"], mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS);
+        let command = hook["command"].as_str().unwrap();
+        assert!(command.starts_with("MJOLNIR_MAILBOX_HOOK=1 "), "{command}");
+        assert!(
+            command.contains("worker mailbox-hook --socket ")
+                && command.contains("--event PostToolBatch --format antigravity"),
+            "{command}"
+        );
+
+        // Stale worker path in hooks.json is overwritten on re-run.
+        std::fs::write(
+            plugin_dir.join("hooks.json"),
+            r#"{"mjolnir-mailbox":{"PreInvocation":[{"type":"command","command":"stale"}]}}"#,
+        )
+        .unwrap();
+        assert!(configure_antigravity_mailbox_hook(root.path(), "session-1", &home).unwrap());
+        let refreshed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(plugin_dir.join("hooks.json")).unwrap()).unwrap();
+        assert_eq!(
+            refreshed["mjolnir-mailbox"]["PreInvocation"][0]["command"],
+            command
+        );
+
+        // Refuses non-private home.
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(
+            !configure_antigravity_mailbox_hook(root.path(), "session-1", elsewhere.path())
+                .unwrap()
+        );
+
+        #[cfg(unix)]
+        {
+            // Refuses symlinked plugin file.
+            let outside = tempfile::tempdir().unwrap();
+            let target_file = outside.path().join("target.json");
+            std::fs::write(&target_file, "{}").unwrap();
+            std::fs::remove_file(plugin_dir.join("hooks.json")).unwrap();
+            std::os::unix::fs::symlink(&target_file, plugin_dir.join("hooks.json")).unwrap();
+            assert!(!configure_antigravity_mailbox_hook(root.path(), "session-1", &home).unwrap());
+
+            // Refuses symlinked plugin directory.
+            std::fs::remove_dir_all(&plugin_dir).unwrap();
+            let outside_dir = outside.path().join("plugin-dir");
+            std::fs::create_dir_all(&outside_dir).unwrap();
+            std::os::unix::fs::symlink(&outside_dir, &plugin_dir).unwrap();
+            assert!(!configure_antigravity_mailbox_hook(root.path(), "session-1", &home).unwrap());
+        }
     }
 }

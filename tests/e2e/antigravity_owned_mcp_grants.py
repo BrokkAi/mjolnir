@@ -48,6 +48,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import shlex
 import shutil
 import subprocess
 import sys
@@ -101,6 +102,7 @@ class FakeGemini:
         self.lock = threading.Lock()
         self.pending: tuple[str, dict] | None = None
         self.answers: list[dict] = []
+        self.requests: list[dict] = []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -143,6 +145,7 @@ class FakeGemini:
         answered = [part["functionResponse"] for part in contents[-1].get("parts", [])
                     if "functionResponse" in part]
         with self.lock:
+            self.requests.append(body)
             self.answers.extend(answered)
             if body.get("tools") and self.pending and not answered:
                 name, args = self.pending
@@ -326,9 +329,90 @@ def run_scenario(agy: str, grants: bool, server: str, tool: str) -> Agy:
         return client
 
 
+def hook_probe(log_path: str) -> None:
+    """PreInvocation hook probe: logs conversationId and injects a steer on the second call."""
+    payload = json.loads(sys.stdin.read() or "{}")
+    log = Path(log_path)
+    existing = log.read_text().splitlines() if log.exists() else []
+    call_index = len(existing)
+    with log.open("a") as fh:
+        fh.write(json.dumps({"conversationId": payload.get("conversationId")}) + "\n")
+    if call_index == 1:
+        print(json.dumps({
+            "injectSteps": [{
+                "systemMessage": {
+                    "systemMessage": "AGY_PRE_INVOCATION_STEER_9182",
+                }
+            }]
+        }), flush=True)
+    else:
+        print("{}", flush=True)
+
+
+def run_pre_invocation_hook_scenario(agy: str) -> None:
+    with tempfile.TemporaryDirectory(prefix="agy-pre-invocation-") as scratch:
+        scratch = Path(scratch)
+        home = scratch / "home"
+        home.mkdir()
+        stage_grants(home, Path.home())
+        hook_log = scratch / "hook.jsonl"
+        plugin_dir = home / "config/plugins/mjolnir-mailbox"
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        (plugin_dir / "plugin.json").write_text(json.dumps({"name": "mjolnir-mailbox"}) + "\n")
+        command = (
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} "
+            f"--hook-probe {shlex.quote(str(hook_log))}"
+        )
+        (plugin_dir / "hooks.json").write_text(json.dumps({
+            "mjolnir-mailbox": {
+                "PreInvocation": [{
+                    "type": "command",
+                    "command": command,
+                    "timeout": 10,
+                }]
+            }
+        }) + "\n")
+        workspace = scratch / "workspace"
+        workspace.mkdir()
+        model = FakeGemini()
+        client = Agy(agy, home, model)
+        try:
+            session = client.start(workspace, [{
+                "name": "mj-agents",
+                "command": sys.executable,
+                "args": [str(Path(__file__).resolve()), "--stub", "mj-agents", "send_message"],
+                "env": [],
+            }])
+            model.script("mcp_mj-agents_send_message", {"toolSummary": "Stub call"})
+            client.call("session/prompt", {"sessionId": session, "prompt": [{
+                "type": "text", "text": "Call mcp_mj-agents_send_message once.",
+            }]})
+        finally:
+            client.close()
+
+        calls = [json.loads(line) for line in hook_log.read_text().splitlines() if line.strip()]
+        assert len(calls) == 2, f"expected 2 PreInvocation calls (before tool and after tool), got {calls}"
+        assert all(c["conversationId"] == session for c in calls), (session, calls)
+        assert any(
+            "AGY_PRE_INVOCATION_STEER_9182" in json.dumps(req)
+            for req in model.requests
+        ), "injected PreInvocation systemMessage did not reach the model request"
+        user_chunks = [
+            m for m in client.messages
+            if m.get("method") == "session/update"
+            and m.get("params", {}).get("update", {}).get("sessionUpdate") == "user_message_chunk"
+            and "AGY_PRE_INVOCATION_STEER_9182" in json.dumps(m)
+        ]
+        assert user_chunks == [], f"unexpected user_message_chunk echo: {user_chunks}"
+        print("PreInvocation plugin hook: injected systemMessage with matching conversationId and no user_message_chunk echo")
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "--stub":
         stub_server(sys.argv[2], sys.argv[3])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "--hook-probe":
+        hook_probe(sys.argv[2])
         return
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--agy", default=shutil.which("agy") or str(Path.home() / ".local/bin/agy"))
@@ -352,6 +436,8 @@ def main() -> None:
     ungranted = run_scenario(arguments.agy, False, "mj-agents", "send_message")
     assert ungranted.permission_titles == ["Run mcp_mj-agents_send_message"], ungranted.permission_titles
     print("owned server without the file: asked, so the file is what grants")
+
+    run_pre_invocation_hook_scenario(arguments.agy)
 
 
 if __name__ == "__main__":

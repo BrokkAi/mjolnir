@@ -43,8 +43,19 @@ impl Controller {
     ) -> Result<LatchedCheckpoint> {
         let mut layout = self.session_export_layout(session_id, executor)?;
         if export_policy == CheckpointExportPolicy::OriginDelta {
+            let origin_override = self
+                .state
+                .checkout(session_id)
+                .ok()
+                .and_then(|checkout| checkout.managed_worktree().cloned())
+                .and_then(|worktree| {
+                    crate::controller::lifecycle::origin_delta::managed_origin_override(&worktree)
+                });
             for repository in &mut layout.repositories {
                 repository.capture = CheckpointRepositoryCapture::OriginDelta;
+                if repository.origin_override.is_none() {
+                    repository.origin_override = origin_override.clone();
+                }
             }
         } else if export_policy == CheckpointExportPolicy::SessionHandoff {
             for repository in &mut layout.repositories {

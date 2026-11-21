@@ -81,16 +81,22 @@ enum SteeringDeliveryMode {
     /// The harness has no mailbox hook; carry waking events through its
     /// ordinary durable prompt queue and safe-boundary steering instead.
     AcpWithMailbox,
-    ClaudePostToolBatch,
-    ClaudeTurnEnd,
+    HookPostToolBatch,
+    HookTurnEnd,
 }
 
 impl SteeringDeliveryMode {
-    fn for_harness(harness: mj_core::config::HarnessKind, claude_hook: bool) -> Self {
-        match (harness, claude_hook) {
+    fn for_harness(harness: mj_core::config::HarnessKind, boundary_hook: bool) -> Self {
+        match (harness, boundary_hook) {
             (mj_core::config::HarnessKind::Dsh, _) => Self::AcpWithMailbox,
-            (mj_core::config::HarnessKind::Claude, true) => Self::ClaudePostToolBatch,
-            (mj_core::config::HarnessKind::Claude, false) => Self::ClaudeTurnEnd,
+            (
+                mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Antigravity,
+                true,
+            ) => Self::HookPostToolBatch,
+            (
+                mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Antigravity,
+                false,
+            ) => Self::HookTurnEnd,
             _ => Self::Acp,
         }
     }
@@ -1417,7 +1423,7 @@ impl DurableRelay {
         state.jev_rate_limit = mj_core::jev::current_rate_limit();
         state.acp_ready = Some(self.is_acp_ready());
         state.checkpoint_only = self.checkpoint_only;
-        state.steering_supported = self.steering_supported;
+        state.steering_supported = self.effective_steering_supported();
         state.mailbox_delivery = self.mailbox_delivery_mode;
         // Harness-initiated turns have no owned prompt ID. Keep their existing
         // explicit interrupt surface; queue steering always needs an owned turn.
@@ -1430,14 +1436,7 @@ impl DurableRelay {
         state.foreground_tool_started_at_ms = self.foreground_tools.newest_started_at_ms();
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
         state.native_agent_count = self.native_agent_count();
-        state.clear_context = matches!(
-            self.verdict_harness,
-            Some(
-                mj_core::config::HarnessKind::Codex
-                    | mj_core::config::HarnessKind::Claude
-                    | mj_core::config::HarnessKind::Kimi
-            )
-        );
+        state.clear_context = self.supports_clear_context();
         state.background_commands = self.background_commands();
         state.background_work_known = self.background_work_known;
         // Answer the activity question once, here, where every fact is in
@@ -1499,21 +1498,43 @@ impl DurableRelay {
         self.steering_supported = supported;
     }
 
+    /// Effective steering capability combining ACP support with hook-based delivery.
+    pub fn effective_steering_supported(&self) -> Option<bool> {
+        match self.steering_delivery_mode {
+            SteeringDeliveryMode::HookPostToolBatch => self.steering_supported.map(|_| true),
+            SteeringDeliveryMode::HookTurnEnd => self.steering_supported.map(|_| false),
+            SteeringDeliveryMode::Acp | SteeringDeliveryMode::AcpWithMailbox => {
+                self.steering_supported
+            }
+        }
+    }
+
+    fn supports_clear_context(&self) -> bool {
+        matches!(
+            self.verdict_harness,
+            Some(
+                mj_core::config::HarnessKind::Codex
+                    | mj_core::config::HarnessKind::Claude
+                    | mj_core::config::HarnessKind::Kimi
+                    | mj_core::config::HarnessKind::Antigravity
+            )
+        )
+    }
+
     /// Allow the relay to steer queued prompts into the running turn itself.
     pub fn set_automatic_steering(&mut self, enabled: bool) {
         self.automatic_steering = enabled;
     }
 
     /// Select steering delivery for the configured harness and staged profile.
-    /// The safe Claude turn-end mode is selected before worker admission opens;
+    /// The safe turn-end mode is selected before worker admission opens;
     /// preparation upgrades it only after verifying a usable hook marker.
     pub fn set_steering_delivery_mode(
         &mut self,
         harness: mj_core::config::HarnessKind,
-        claude_post_tool_batch_hook: bool,
+        boundary_hook: bool,
     ) {
-        self.steering_delivery_mode =
-            SteeringDeliveryMode::for_harness(harness, claude_post_tool_batch_hook);
+        self.steering_delivery_mode = SteeringDeliveryMode::for_harness(harness, boundary_hook);
     }
 
     /// Set when a Codex session's mailbox messages may reach it, from the

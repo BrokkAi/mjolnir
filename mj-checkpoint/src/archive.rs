@@ -614,6 +614,15 @@ pub fn read_checkpoint_manifest(path: &Path) -> Result<ArchiveManifest> {
     read_checkpoint_manifest_from(&mut archive)
 }
 
+/// Whether the archive manifest records any `OriginDelta` repository snapshot.
+pub fn checkpoint_archive_uses_origin_delta(path: &Path) -> Result<bool> {
+    let manifest = read_checkpoint_manifest(path)?;
+    Ok(manifest
+        .repositories
+        .iter()
+        .any(|repository| repository.metadata.origin_delta.is_some()))
+}
+
 /// Read one payload from an archive whose manifest was already verified.
 ///
 /// The limit is checked before allocating or reading payload data. The entry

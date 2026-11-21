@@ -2073,8 +2073,8 @@ async fn prepare_and_start_harness(
             .await?;
     }
 
-    let mut claude_mailbox_hook_available = false;
-    let mut codex_mailbox_delivery = None;
+    let mut boundary_mailbox_hook_available = false;
+    let mut mailbox_delivery_mode = None;
     let profile_registration = match config.harness {
         HarnessKind::Codex => {
             let budget = preparation_step(
@@ -2129,7 +2129,7 @@ async fn prepare_and_start_harness(
                 })
                 .await?;
             config.environment = environment;
-            codex_mailbox_delivery = Some(mode);
+            mailbox_delivery_mode = Some(mode);
             registered
         }
         HarnessKind::Claude => {
@@ -2209,8 +2209,40 @@ async fn prepare_and_start_harness(
                     Ok((registered, mailbox_hook_available))
                 })
                 .await?;
-            claude_mailbox_hook_available = mailbox_hook_available;
+            boundary_mailbox_hook_available = mailbox_hook_available;
             registered
+        }
+        HarnessKind::Antigravity => {
+            let budget = preparation_step(
+                root,
+                status,
+                "harness-profile",
+                LOCAL_PREPARATION_STEP_TIMEOUT,
+                cancel,
+            )
+            .await?;
+            let home = credentials
+                .as_ref()
+                .map_err(|message| anyhow::anyhow!("{message}"))?
+                .home
+                .clone();
+            let root = root.to_owned();
+            let session_id = config.session_id.clone();
+            let mailbox_hook_available =
+                bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+                    if step_cancel.is_cancelled() {
+                        bail!("preparation cancelled before configuring the Antigravity profile");
+                    }
+                    super::subagents::configure_antigravity_mailbox_hook(&root, &session_id, &home)
+                })
+                .await?;
+            boundary_mailbox_hook_available = mailbox_hook_available;
+            mailbox_delivery_mode = Some(if mailbox_hook_available {
+                mj_core::mailbox::MailboxDeliveryMode::ToolBoundary
+            } else {
+                mj_core::mailbox::MailboxDeliveryMode::TurnBoundary
+            });
+            false // Antigravity receives its MCP servers through ACP.
         }
         HarnessKind::OpenCode => {
             let budget = preparation_step(
@@ -2288,9 +2320,9 @@ async fn prepare_and_start_harness(
     };
     {
         let mut relay = relay.lock().expect("relay state lock poisoned");
-        relay.set_steering_delivery_mode(config.harness, claude_mailbox_hook_available);
+        relay.set_steering_delivery_mode(config.harness, boundary_mailbox_hook_available);
         // Resolved before the harness starts, so no hook can drain earlier.
-        if let Some(mode) = codex_mailbox_delivery {
+        if let Some(mode) = mailbox_delivery_mode {
             relay.set_mailbox_delivery_mode(mode);
         }
     }
@@ -3531,7 +3563,7 @@ mod preparation_tests {
             .await;
         let mut journal = relay.lock().unwrap();
         let mj_core::relay::RelayResponsePayload::MailboxDrained { text, count, .. } =
-            journal.drain_mailbox("PostToolBatch").unwrap()
+            journal.drain_mailbox("PostToolBatch", None).unwrap()
         else {
             panic!("drain returned another payload")
         };

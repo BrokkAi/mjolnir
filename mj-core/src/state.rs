@@ -1162,7 +1162,10 @@ impl ManagedWorktree {
     #[must_use]
     pub fn uses_origin_delta_suspend(&self) -> bool {
         cfg!(any(target_os = "linux", target_os = "macos"))
-            && self.kind == ManagedCheckoutKind::Clone
+            && matches!(
+                self.kind,
+                ManagedCheckoutKind::Clone | ManagedCheckoutKind::Worktree
+            )
             && matches!(self.target, ManagedWorktreeTarget::Local)
     }
 

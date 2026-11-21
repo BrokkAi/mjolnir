@@ -13,21 +13,64 @@ pub(super) struct OriginDeltaSuspend {
     accepted: bool,
 }
 
+pub(in crate::controller) fn managed_origin_override(
+    worktree: &mj_core::state::ManagedWorktree,
+) -> Option<String> {
+    if !matches!(worktree.target, mj_core::state::ManagedWorktreeTarget::Local) {
+        return None;
+    }
+    mj_core::runtime::off_async_worker(|| {
+        use mj_checkpoint::archive::GitCommandRunner;
+        let origin = mj_checkpoint::archive::SystemGit
+            .run(
+                &worktree.worktree_root,
+                &mj_checkpoint::archive::GitCommand {
+                    arguments: ["config", "--get", "remote.origin.url"]
+                        .map(Into::into)
+                        .into(),
+                    ..Default::default()
+                },
+            )
+            .ok()?;
+        if origin.status == 0 && !origin.stdout.trim_ascii().is_empty() {
+            return None;
+        }
+        if !worktree.source_repository.exists() {
+            return None;
+        }
+        let git_dir = mj_checkpoint::archive::SystemGit
+            .run(
+                &worktree.source_repository,
+                &mj_checkpoint::archive::GitCommand {
+                    arguments: ["rev-parse", "--git-dir"].map(Into::into).into(),
+                    ..Default::default()
+                },
+            )
+            .ok()?;
+        if git_dir.status == 0 {
+            Some(worktree.source_repository.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    })
+}
+
 impl OriginDeltaSuspend {
     /// Whether this suspend captures OriginDelta. An accepted suspend keeps
     /// the capture it started with, even after its worker has exited. A new
-    /// one needs a live worker that can quiesce the checkout and a clone with
-    /// an origin to delta against; otherwise it keeps the capture this
-    /// release replaced, so an older worker or an originless clone suspends
+    /// one needs a live worker that can quiesce the checkout and either an
+    /// `origin` remote or a local source repository to delta against; otherwise
+    /// it keeps the capture this release replaced, so an older worker suspends
     /// as it did before the upgrade.
     pub(super) fn applies(
         controller: &Controller,
         session_id: &str,
-        clone: &std::path::Path,
+        worktree: &mj_core::state::ManagedWorktree,
     ) -> Result<bool> {
         let (_, root) = controller.worker_placement(session_id)?;
         let root = PathBuf::from(root);
-        mj_core::runtime::off_async_worker(|| -> Result<bool> {
+        let worktree = worktree.clone();
+        mj_core::runtime::off_async_worker(move || -> Result<bool> {
             if wire::read::<String>(&root, wire::ACCEPTED)?.is_some() {
                 return Ok(true);
             }
@@ -40,7 +83,7 @@ impl OriginDeltaSuspend {
             }
             use mj_checkpoint::archive::GitCommandRunner;
             let origin = mj_checkpoint::archive::SystemGit.run(
-                clone,
+                &worktree.worktree_root,
                 &mj_checkpoint::archive::GitCommand {
                     arguments: ["config", "--get", "remote.origin.url"]
                         .map(Into::into)
@@ -48,7 +91,10 @@ impl OriginDeltaSuspend {
                     ..Default::default()
                 },
             )?;
-            Ok(origin.status == 0 && !origin.stdout.trim_ascii().is_empty())
+            if origin.status == 0 && !origin.stdout.trim_ascii().is_empty() {
+                return Ok(true);
+            }
+            Ok(managed_origin_override(&worktree).is_some())
         })
     }
 
