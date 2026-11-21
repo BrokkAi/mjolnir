@@ -7,7 +7,8 @@
 use toml_edit::{Document, Item, TableLike};
 
 use super::{
-    LEGACY_DEFAULT_CONTAINER_IMAGE, LEGACY_DEFAULT_IMAGE_LAST_VERSION, is_removed_harness_profile,
+    LEGACY_DEFAULT_CONTAINER_IMAGE, LEGACY_DEFAULT_IMAGE_LAST_VERSION, RETIRED_KEYS,
+    is_removed_harness_profile,
 };
 
 /// The first version whose file shape this build writes in place. Earlier
@@ -130,9 +131,11 @@ pub(super) fn edit_in_place(existing: &str, loaded: &str, updated: &str) -> Opti
             after: &updated_table,
         },
         source.as_table(),
-        true,
         &mut next_position,
     );
+    for path in RETIRED_KEYS {
+        remove_retired(document.as_table_mut(), path, Some(&updated_table));
+    }
     // The version is not a setting and is equal in both serializations, so
     // it is written here: the file now holds what this build writes.
     if let Some(version) = updated_table.get("version")
@@ -153,28 +156,6 @@ pub(super) fn edit_in_place(existing: &str, loaded: &str, updated: &str) -> Opti
     // version is current, an explicitly chosen image is left alone.
     if version <= LEGACY_DEFAULT_IMAGE_LAST_VERSION as i64 {
         drop_legacy_default_images(&mut document, LEGACY_DEFAULT_CONTAINER_IMAGE);
-    }
-    // These keys are accepted only for legacy reads and must not survive the
-    // comment-preserving path merely because they are absent from both projections.
-    if let Some(subagents) = document
-        .get_mut("subagents")
-        .and_then(Item::as_table_like_mut)
-    {
-        subagents.remove("enabled");
-    }
-    if let Some(profiles) = document
-        .get_mut("profiles")
-        .and_then(Item::as_table_like_mut)
-    {
-        let ids = profiles
-            .iter()
-            .map(|(id, _)| id.to_owned())
-            .collect::<Vec<_>>();
-        for id in ids {
-            if let Some(profile) = profiles.get_mut(&id).and_then(Item::as_table_like_mut) {
-                profile.remove("subagents");
-            }
-        }
     }
     Some(document.to_string())
 }
@@ -202,6 +183,37 @@ fn drop_legacy_default_images(document: &mut Document, legacy: &str) {
     }
 }
 
+/// Remove the retired key at `path` under `table`, `*` matching every key at
+/// its level. A table that held nothing but retired keys is removed with
+/// them, unless this build writes it (`written` is what it writes there).
+fn remove_retired(table: &mut dyn TableLike, path: &[&str], written: Option<&toml::Table>) {
+    let [first, rest @ ..] = path else {
+        return;
+    };
+    let keys = if *first == "*" {
+        table.iter().map(|(key, _)| key.to_owned()).collect()
+    } else {
+        vec![(*first).to_owned()]
+    };
+    for key in keys {
+        if rest.is_empty() {
+            table.remove(&key);
+            continue;
+        }
+        let written = written
+            .and_then(|written| written.get(&key))
+            .and_then(toml::Value::as_table);
+        let Some(child) = table.get_mut(&key).and_then(Item::as_table_like_mut) else {
+            continue;
+        };
+        let had_keys = !child.is_empty();
+        remove_retired(child, rest, written);
+        if had_keys && child.is_empty() && written.is_none() {
+            table.remove(&key);
+        }
+    }
+}
+
 fn existing_version(document: &Document) -> Option<i64> {
     document.get("version").and_then(Item::as_integer)
 }
@@ -219,13 +231,13 @@ struct Tables<'a> {
 /// did not change exactly as the file wrote it.
 ///
 /// A key the save drops is removed when this build read it (the user
-/// cleared it), and at the top level whatever this build no longer writes,
-/// such as an obsolete section. A default the user wrote out stays.
+/// cleared it). A default the user wrote out stays, at every level: it is
+/// absent from both serializations, as a retired key is too, so retired keys
+/// are removed by name instead ([`RETIRED_KEYS`]).
 fn apply(
     target: &mut dyn TableLike,
     tables: Tables<'_>,
     source: &dyn TableLike,
-    top_level: bool,
     next_position: &mut usize,
 ) {
     let Tables { raw, before, after } = tables;
@@ -233,8 +245,7 @@ fn apply(
         .iter()
         .map(|(key, _)| key.to_owned())
         .filter(|key| {
-            !after.contains_key(key)
-                && (top_level || before.is_some_and(|before| before.contains_key(key)))
+            !after.contains_key(key) && before.is_some_and(|before| before.contains_key(key))
         })
         .collect::<Vec<_>>();
     for key in stale {
@@ -263,7 +274,7 @@ fn apply(
                         before: previous.and_then(toml::Value::as_table),
                         after: value,
                     };
-                    apply(table, tables, source, false, next_position);
+                    apply(table, tables, source, next_position);
                 } else if let Some(existing) = existing.as_value_mut()
                     && let Ok(mut value) = replacement.clone().into_value()
                 {
