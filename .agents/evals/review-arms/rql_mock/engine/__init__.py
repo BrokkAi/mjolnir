@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 from driver import expected_provider_model, repair_progress
-from rql_engine_tools import ENGINE_SETTINGS
+from rql_engine_tools import STAGED_ENGINE_SETTINGS
 
 from . import normalization
 from .evidence import save_json, sync_directory
@@ -71,7 +71,7 @@ def input_hash(catalogue, menu, model_version, served_steps, menu_sha256, verifi
     return digest(catalogue, menu, semantics_only(menu, served_steps), menu_sha256,
                   canonical(served_steps), MODEL, model_version, EFFORT, PROMPT, CLAUDE_TOOLS, ANSWER_SCHEMA, REPAIR,
                   QUERY_SESSION_PROTOCOL, verifier_sha256,
-                  file_sha256(Path(normalization.__file__)), canonical(ENGINE_SETTINGS))
+                  file_sha256(Path(normalization.__file__)), canonical(STAGED_ENGINE_SETTINGS))
 
 
 def file_sha256(path):

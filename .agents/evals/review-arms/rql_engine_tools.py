@@ -30,3 +30,11 @@ ENGINE_SETTINGS = {
         "blockWritesOutsideWorkingDirectories": True,
     },
 }
+
+# The frozen worker (mj f0beee634) adds these pre-approvals when it stages the
+# settings. Allow rules only pre-approve offered tools; the `mcp__*` deny keeps
+# these out of the model's context. The runner attests this staged form exactly.
+FROZEN_WORKER_ALLOW = ("mcp__mj-agents__ask_oracle", "mcp__mj-agents__fetch",
+                       "mcp__mj-agents__send_message")
+STAGED_ENGINE_SETTINGS = {**ENGINE_SETTINGS, "permissions": {
+    **ENGINE_SETTINGS["permissions"], "allow": list(FROZEN_WORKER_ALLOW)}}

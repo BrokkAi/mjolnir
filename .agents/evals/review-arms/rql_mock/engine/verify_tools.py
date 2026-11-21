@@ -9,16 +9,19 @@ import sys
 from tempfile import TemporaryDirectory
 from threading import Thread
 
-from rql_engine_tools import ENGINE_SETTINGS, ENGINE_TOOLS
+from rql_engine_tools import ENGINE_SETTINGS, ENGINE_TOOLS, STAGED_ENGINE_SETTINGS
 
 
 RUN_SDK = """
 const {createSdkMcpServer, query, tool} = await import(process.argv[1]);
 const cwd = process.argv[2];
+// Named like mj's server, with the tools the frozen worker pre-approves, so the
+// probe checks that the staged allow rules cannot bring them back.
 const probe = createSdkMcpServer({
-    name: "probe",
+    name: "mj-agents",
     alwaysLoad: true,
-    tools: [tool("sentinel", "Local verification tool", {}, async () => ({content: []}))],
+    tools: ["send_message", "fetch", "ask_oracle"].map(
+        (name) => tool(name, "Local verification tool", {}, async () => ({content: []}))),
 });
 const session = query({
     prompt: "Read the local sample",
@@ -31,7 +34,7 @@ const session = query({
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         sandbox: {enabled: false},
-        mcpServers: {probe},
+        mcpServers: {"mj-agents": probe},
         maxTurns: 3,
     },
 });
@@ -113,7 +116,7 @@ def probe(sdk):
         outside.write_text("outside", encoding="utf-8")
         config = root / ".claude"
         config.mkdir()
-        (config / "settings.json").write_text(json.dumps(ENGINE_SETTINGS), encoding="utf-8")
+        (config / "settings.json").write_text(json.dumps(STAGED_ENGINE_SETTINGS), encoding="utf-8")
         thread = Thread(target=server.serve_forever)
         thread.start()
         try:
@@ -135,7 +138,7 @@ def probe(sdk):
     print(json.dumps(actual, indent=2), flush=True)
     initialized = actual["initialization"]
     expected = sorted(ENGINE_TOOLS)
-    connected_mcp = {"name": "probe", "status": "connected", "source": "sdk"}
+    connected_mcp = {"name": "mj-agents", "status": "connected", "source": "sdk"}
     if (result.returncode or len(initialized) != 1 or initialized[0]["tools"] != expected
             or initialized[0]["permissionMode"] != "bypassPermissions"
             or connected_mcp not in initialized[0].get("mcpServers", [])

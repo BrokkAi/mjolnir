@@ -11,7 +11,7 @@ import tomllib
 from uuid import uuid4
 from driver import PILOT_CLAUDE_EFFORT as EFFORT, PILOT_CLAUDE_MODEL as MODEL
 from driver import provider_model, verify_session_selection
-from rql_engine_tools import ENGINE_SETTINGS
+from rql_engine_tools import ENGINE_SETTINGS, STAGED_ENGINE_SETTINGS
 
 from .evidence import file_digests, save_bytes, save_json, sync_directory
 from .prompt import assert_blind, semantics_only, turn_prompt
@@ -553,9 +553,14 @@ class EngineRunner(SealedRunner):
             capture_output=True, check=True, timeout=300,
         )
         settings = json.loads(proc.stdout)
-        # Frozen mj adds its own mailbox hook to this document. Attest the
-        # policy fields without recording unrelated settings.
-        policy = {key: settings.get(key) for key in ENGINE_SETTINGS} if isinstance(settings, dict) else None
-        if policy != ENGINE_SETTINGS:
+        # Frozen mj adds its own mailbox hook and MCP pre-approvals to this
+        # document. Attest the policy fields exactly, without recording
+        # unrelated settings. The order of allow rules has no meaning.
+        policy = {key: settings.get(key) for key in STAGED_ENGINE_SETTINGS} if isinstance(settings, dict) else None
+        permissions = policy.get("permissions") if policy else None
+        if isinstance(permissions, dict) and isinstance(permissions.get("allow"), list):
+            permissions = {**permissions, "allow": sorted(permissions["allow"], key=str)}
+            policy = {**policy, "permissions": permissions}
+        if policy != STAGED_ENGINE_SETTINGS:
             raise RuntimeError("staged Claude engine settings differ from the frozen tool policy")
         save_json(directory / "engine-tool-settings.json", policy)
