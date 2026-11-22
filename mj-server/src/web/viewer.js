@@ -5530,6 +5530,8 @@ function freshMoveDraft(session) {
     subagents: delegationPolicy(recovery?.subagents || session.subagents),
     storedOracle: session.oracle !== false,
     oracle: recovery?.oracle ?? (session.oracle !== false),
+    storedSupervisors: session.supervisors === true,
+    supervisors: recovery?.supervisors ?? (session.supervisors === true),
     storedOracleChoice: session.oracle_choice,
     oracleChoice: recovery?.oracle_choice ?? session.oracle_choice,
   };

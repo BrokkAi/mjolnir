@@ -324,6 +324,7 @@ impl ViewerSnapshot {
                     form_holder: None,
                     notifications_ignored: session.notifications_ignored,
                     oracle: session.oracle,
+                    supervisors: session.supervisors,
                     oracle_choice: session.oracle_choice.clone().map(|v| *v),
                     subagents: session.subagents.clone().unwrap_or_default(),
                     at: start.at,
@@ -652,6 +653,8 @@ pub struct ViewerSession {
     pub notifications_ignored: bool,
     #[serde(default = "oracle_default_enabled")]
     pub oracle: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supervisors: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     #[serde(default)]

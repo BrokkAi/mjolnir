@@ -6337,6 +6337,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     session.move_recovery = Some(Box::new(crate::server::ViewerMoveRecovery {
         failure_notice: None,
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         operation_id: "move-a".into(),
         source_profile_id: "destination".into(),
