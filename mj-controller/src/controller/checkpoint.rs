@@ -82,7 +82,7 @@ pub(in crate::controller) const CHECKPOINT_BARRIER_TIMEOUT: Duration = Duration:
 /// A close gets a fresh cancellation grace period once the worker accepts the
 /// request. This keeps an expensive status sync from consuming the whole
 /// cancellation budget before the worker has had a chance to settle.
-const CHECKPOINT_CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
+pub(in crate::controller) const CHECKPOINT_CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
 /// After a wedged ACP forces a worker restart, wait as long as native-session
 /// startup: session/load of a long kimi transcript can outlast 30s.
 pub(in crate::controller) const CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART: Duration =

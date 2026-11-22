@@ -450,25 +450,36 @@ pub fn serve_latch_relay() {
             launch_config,
         } = &request.request
         {
-            let body = match relay.admit_in_place_harness_restart(operation_id, expected_store_id) {
-                Err(error) => mj_core::relay::RelayResponseBody::Error { error: *error },
-                Ok(crate::relay::InPlaceHarnessRestartDecision::AlreadyRestarted) => {
-                    mj_core::relay::RelayResponseBody::Ok {
-                        payload: mj_core::relay::RelayResponsePayload::HarnessRestartedInPlace,
-                    }
-                }
-                Ok(crate::relay::InPlaceHarnessRestartDecision::Proceed) => {
-                    let _ = launch_config.write(&Path::new(&root).join("launch.json"));
-                    match relay.mark_in_place_harness_restarted(operation_id, expected_store_id) {
-                        Ok(()) => mj_core::relay::RelayResponseBody::Ok {
+            let body = if Path::new(&root).join("reject-in-place-restart").exists() {
+                mj_core::relay::relay_error(
+                    mj_core::relay::RelayErrorCode::InvalidState,
+                    "cannot restart harness in place while a turn or effectful command is in progress",
+                    true,
+                    None,
+                )
+            } else {
+                match relay.admit_in_place_harness_restart(operation_id, expected_store_id) {
+                    Err(error) => mj_core::relay::RelayResponseBody::Error { error: *error },
+                    Ok(crate::relay::InPlaceHarnessRestartDecision::AlreadyRestarted) => {
+                        mj_core::relay::RelayResponseBody::Ok {
                             payload: mj_core::relay::RelayResponsePayload::HarnessRestartedInPlace,
-                        },
-                        Err(error) => mj_core::relay::relay_error(
-                            mj_core::relay::RelayErrorCode::Internal,
-                            format!("complete in-place harness restart: {error:#}"),
-                            false,
-                            None,
-                        ),
+                        }
+                    }
+                    Ok(crate::relay::InPlaceHarnessRestartDecision::Proceed) => {
+                        let _ = launch_config.write(&Path::new(&root).join("launch.json"));
+                        match relay.mark_in_place_harness_restarted(operation_id, expected_store_id)
+                        {
+                            Ok(()) => mj_core::relay::RelayResponseBody::Ok {
+                                payload:
+                                    mj_core::relay::RelayResponsePayload::HarnessRestartedInPlace,
+                            },
+                            Err(error) => mj_core::relay::relay_error(
+                                mj_core::relay::RelayErrorCode::Internal,
+                                format!("complete in-place harness restart: {error:#}"),
+                                false,
+                                None,
+                            ),
+                        }
                     }
                 }
             };
