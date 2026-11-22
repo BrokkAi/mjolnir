@@ -46,8 +46,25 @@ pub const fn identity() -> BuildIdentity {
 /// A worker stand-in carrying this build's worker stamp, for a test in which
 /// a real program verifies the worker. Built before tests start, so executing
 /// it cannot race a test's writer.
-#[cfg(all(unix, feature = "test-hooks"))]
+#[cfg(unix)]
+#[doc(hidden)]
 #[must_use]
 pub fn fake_worker_dispatcher() -> std::path::PathBuf {
     std::path::Path::new(env!("OUT_DIR")).join("fake-worker.sh")
+}
+
+#[cfg(test)]
+mod tests {
+    use mj_core::{test_hooks, worker_build};
+
+    #[test]
+    fn linking_core_without_installing_an_identity_does_not_enable_test_mode() {
+        assert!(!test_hooks::test_hooks_enabled());
+        assert!(!test_hooks::test_fixtures_enabled());
+        assert!(std::panic::catch_unwind(worker_build::build_id).is_err());
+
+        test_hooks::enable_test_fixtures();
+        assert!(worker_build::worker_build_id().ends_with(&format!("+{:040x}", 0)));
+        assert!(!test_hooks::test_hooks_enabled());
+    }
 }

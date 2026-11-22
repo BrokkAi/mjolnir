@@ -1131,8 +1131,8 @@ impl Controller {
                 // Holds a create after its target exists, so a test can restart
                 // the daemon in the middle of it.
                 mj_core::test_hooks::reach_test_hook("create_after_target_provisioned")?;
-                #[cfg(feature = "test-hooks")]
-                if std::env::var("MJ_TEST_HOOK").as_deref() == Ok("create_after_target_provisioned")
+                if mj_core::test_hooks::test_hooks_enabled()
+                    && std::env::var("MJ_TEST_HOOK").as_deref() == Ok("create_after_target_provisioned")
                     && let Some(directory) = std::env::var_os("MJ_TEST_HOOK_DIR")
                 {
                     let marker = PathBuf::from(directory).join("create_after_target_provisioned.fail");
@@ -1698,7 +1698,7 @@ fn execute_repository_setup(
 /// Creation is the boundary that matters. A step that fails before the target
 /// exists has left nothing behind; every failure after it — a later plan step
 /// or locator discovery — owns a target no session record will point at.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn provision_target(
     plan: &targets::CommandPlan,
     target: &targets::TargetTemplate,
@@ -1729,7 +1729,7 @@ fn provision_target(
 /// Bring the target into existence and return the commands that populate its
 /// repositories. The caller may overlap that remainder with worker/profile
 /// installation once it has persisted the discovered locator.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn provision_target_creation(
     plan: &targets::CommandPlan,
     target: &targets::TargetTemplate,
@@ -1789,7 +1789,7 @@ fn provision_target_creation_plan(
 ///
 /// The teardown is the session's own close plan, so a failed launch and an
 /// ordinary close can never disagree about what removing a target means.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn cleanup_failed_provision(
     target: &targets::TargetTemplate,
     session_id: &str,
@@ -1805,7 +1805,7 @@ fn cleanup_failed_provision(
     )
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn cleanup_failed_provision_named(
     target: &targets::TargetTemplate,
     session_id: &str,
@@ -1870,7 +1870,7 @@ fn cleanup_failed_provision_named(
 ///
 /// Every target but AWS is named before its plan runs; an EC2 instance
 /// reports its own ID in the launch response.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn provisioned_locator_named(
     target: &targets::TargetTemplate,
     session_id: &str,

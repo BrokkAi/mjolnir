@@ -27,16 +27,14 @@ agent-client-protocol.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 getrandom.workspace = true
-image = { workspace = true, features = ["jpeg", "webp"] }
-serde = { workspace = true, features = ["rc"] }
-tokio = { workspace = true, features = ["sync"] }
+image.workspace = true
+serde.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 semver.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
-mj-core = { workspace = true, features = ["golden", "test-identity"] }
 mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime" }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "test-util"] }

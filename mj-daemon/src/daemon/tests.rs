@@ -1180,6 +1180,7 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
 }
 
 pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeState> {
+    mj_core::test_hooks::enable_test_fixtures();
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = remote.control.session_gate.clone();
     let upgrades =
@@ -16664,6 +16665,7 @@ fn adoption_waits_leave_the_blocking_pool_available() {
 }
 
 pub(super) fn isolate_runtime_feed_test(module: &str, name: &str) -> bool {
+    mj_core::test_hooks::enable_test_fixtures();
     const KEY: &str = "MJ_TEST_RUNTIME_FEED_ISOLATED";
     if std::env::var(KEY).ok().as_deref() == Some(name) {
         return false;
@@ -16682,6 +16684,7 @@ pub(super) fn isolate_runtime_feed_test(module: &str, name: &str) -> bool {
 #[cfg(unix)]
 #[tokio::test]
 async fn wiki_search_generations_cover_commits_and_running_requests_coalesce() {
+    mj_core::test_hooks::enable_test_hooks();
     const TEST: &str = "wiki_search_generations_cover_commits_and_running_requests_coalesce";
     const CHILD: &str = "MJ_TEST_WIKI_GENERATIONS";
     if std::env::var_os(CHILD).is_none() {

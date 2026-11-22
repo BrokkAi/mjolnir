@@ -5,6 +5,7 @@ use super::*;
 use std::path::Path;
 
 pub fn stamped_worker(body: &[u8]) -> Vec<u8> {
+    mj_core::test_hooks::enable_test_fixtures();
     let mut bytes = body.to_vec();
     bytes.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
     bytes

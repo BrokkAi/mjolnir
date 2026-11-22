@@ -270,7 +270,7 @@ impl Controller {
 
     /// Store-only fixtures have no launching daemon. Production must register
     /// with the manager first, or sends can misclassify a starting child.
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn register_subagent(
         &mut self,
         request: RegisterSubagentRequest,

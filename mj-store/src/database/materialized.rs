@@ -2467,7 +2467,7 @@ where
     })
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn apply_projection_page_to<T>(
     path: &Path,
     session_id: &str,
@@ -2578,7 +2578,7 @@ pub fn apply_projection_event(
     })
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn apply_projection_event_to(
     path: &Path,
     session_id: &str,

@@ -519,7 +519,7 @@ fn is_current_at(choices: &ProfileConfig, now: i64) -> bool {
 /// its last known choices instead of losing them. Production discovery uses
 /// [`resolve_cached_discovery`], which also reports whether the harness ran;
 /// this wrapper remains for its unit tests.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn resolve_cached(
     refresh: bool,
     current: impl FnOnce(&ProfileConfig) -> bool,

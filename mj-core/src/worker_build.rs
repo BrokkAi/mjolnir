@@ -20,12 +20,10 @@ use anyhow::{Context, Result, bail, ensure};
 /// The digest part of the identity a test binary reports: no commit has it.
 /// Keep it equal to `TEST_REVISION` in `build.rs`, which stamps the fake
 /// worker fixture with it.
-#[cfg(any(test, feature = "test-identity"))]
 const TEST_REVISION: &str = "0000000000000000000000000000000000000000";
 /// The worker stamp of the test identity. Only [`test_worker_executable`]
 /// names it, so its bytes are in a test executable that hands itself over as
 /// a worker and in nothing else.
-#[cfg(any(test, feature = "test-identity"))]
 const TEST_WORKER_BUILD_STAMP: &str = concat!(
     "\0MJ-WORKER-BUILD:",
     env!("CARGO_PKG_VERSION"),
@@ -51,21 +49,18 @@ pub struct BuildIdentity {
     pub release_image_carries_worker: bool,
 }
 
-#[cfg(any(test, feature = "test-identity"))]
 impl BuildIdentity {
     /// What a test binary reports. It names no commit, so it is the same
     /// after every commit and a test build stays fresh; its commit time is
     /// unknown, as for a build without Git.
     fn for_tests() -> Self {
+        // Generate the dummy digest so no literal test revision is linked
+        // into a program that uses the shared identity accessors.
+        static TEST_BUILD_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let id = TEST_BUILD_ID.get_or_init(|| format!("{}+{:040x}", env!("CARGO_PKG_VERSION"), 0));
         Self {
-            build_id: concat!(
-                env!("CARGO_PKG_VERSION"),
-                "+0000000000000000000000000000000000000000"
-            ),
-            worker_build_id: concat!(
-                env!("CARGO_PKG_VERSION"),
-                "+0000000000000000000000000000000000000000"
-            ),
+            build_id: id,
+            worker_build_id: id,
             commit_time: "",
             release_image_carries_worker: false,
         }
@@ -98,22 +93,23 @@ pub fn install(identity: BuildIdentity) {
 /// also linked, with the same features, into real `mj` and `mj-worker`
 /// binaries during a workspace test build, and a file with two different
 /// stamps is refused as conflicting (#1603).
-#[cfg(any(test, feature = "test-identity"))]
+#[doc(hidden)]
 #[must_use]
 pub fn test_worker_executable() -> std::path::PathBuf {
+    crate::test_hooks::enable_test_fixtures();
     debug_assert!(TEST_WORKER_BUILD_STAMP.contains(TEST_REVISION));
     std::hint::black_box(TEST_WORKER_BUILD_STAMP);
     std::env::current_exe().expect("locate the running test executable")
 }
 
 fn installed() -> &'static BuildIdentity {
-    // A test binary has no `main` of ours to install one.
-    #[cfg(any(test, feature = "test-identity"))]
-    return INSTALLED.get_or_init(BuildIdentity::for_tests);
-    #[cfg(not(any(test, feature = "test-identity")))]
-    INSTALLED
-        .get()
-        .expect("the program did not install its build identity before using it")
+    if let Some(identity) = INSTALLED.get() {
+        return identity;
+    }
+    if cfg!(test) || crate::test_hooks::test_fixtures_enabled() {
+        return INSTALLED.get_or_init(BuildIdentity::for_tests);
+    }
+    panic!("the program did not install its build identity before using it");
 }
 
 /// Identity of this daemon build: package version plus commit. It orders

@@ -1,17 +1,53 @@
 //! Crash-boundary hooks and subprocess fixtures for isolated tests.
 //!
-//! The default build contains only the no-op function. Environment lookup,
-//! marker files, and waiting are compiled in solely with `test-hooks`.
+//! Runtime hooks and shared test fixtures stay inactive until explicitly
+//! enabled via [`enable_test_hooks`] or [`enable_test_fixtures`].
+
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 
-#[cfg(not(feature = "test-hooks"))]
-#[inline]
-pub fn reach_test_hook(_name: &'static str) -> Result<()> {
-    Ok(())
+static TEST_HOOKS_ENABLED: AtomicBool = AtomicBool::new(false);
+static TEST_FIXTURES_ENABLED: AtomicBool = AtomicBool::new(false);
+static TEST_GLIDE_ENDPOINT: OnceLock<String> = OnceLock::new();
+
+#[doc(hidden)]
+pub fn enable_test_hooks() {
+    TEST_HOOKS_ENABLED.store(true, Ordering::Release);
 }
 
-#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+#[inline]
+pub fn test_hooks_enabled() -> bool {
+    TEST_HOOKS_ENABLED.load(Ordering::Acquire)
+}
+
+/// Opt a test process into shared library fixtures. Runtime hooks require
+/// their own opt-in.
+#[doc(hidden)]
+pub fn enable_test_fixtures() {
+    TEST_FIXTURES_ENABLED.store(true, Ordering::Release);
+}
+
+#[doc(hidden)]
+#[inline]
+pub fn test_fixtures_enabled() -> bool {
+    TEST_FIXTURES_ENABLED.load(Ordering::Acquire)
+}
+
+#[doc(hidden)]
+pub fn set_test_glide_endpoint(endpoint: String) {
+    TEST_GLIDE_ENDPOINT
+        .set(endpoint)
+        .expect("set test GLiDE endpoint once");
+}
+
+#[doc(hidden)]
+pub fn test_glide_endpoint() -> Option<&'static str> {
+    TEST_GLIDE_ENDPOINT.get().map(String::as_str)
+}
+
 pub fn reach_test_hook(name: &'static str) -> Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write as _;
@@ -20,6 +56,9 @@ pub fn reach_test_hook(name: &'static str) -> Result<()> {
 
     use anyhow::{Context as _, bail, ensure};
 
+    if !test_hooks_enabled() {
+        return Ok(());
+    }
     if std::env::var_os("MJ_TEST_HOOK").as_deref() != Some(std::ffi::OsStr::new(name)) {
         return Ok(());
     }
@@ -77,15 +116,18 @@ pub fn reach_test_hook(name: &'static str) -> Result<()> {
 }
 
 /// The checked-in executable used by fake commands and worker fixtures.
-#[cfg(all(unix, any(test, feature = "test-hooks")))]
+#[cfg(unix)]
+#[doc(hidden)]
 pub fn fake_command_dispatcher() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-command.sh")
 }
 
 /// A worker stand-in carrying the build identity a test binary reports.
 /// Built before tests start, so executing it cannot race a test's writer.
-#[cfg(all(unix, any(test, feature = "test-hooks")))]
+#[cfg(unix)]
+#[doc(hidden)]
 pub fn fake_worker_dispatcher() -> std::path::PathBuf {
+    enable_test_fixtures();
     std::path::Path::new(env!("OUT_DIR")).join("fake-worker.sh")
 }
 
@@ -104,7 +146,8 @@ pub fn fake_worker_dispatcher() -> std::path::PathBuf {
 /// `mj-core/tests/fixtures/fake-command.sh`, which this process never
 /// opens for writing, and the behaviour goes in `<program>.script`, which only
 /// `/bin/sh` ever reads. Nothing execs a written file at any point.
-#[cfg(all(unix, any(test, feature = "test-hooks")))]
+#[cfg(unix)]
+#[doc(hidden)]
 pub fn install_fake_command(directory: &std::path::Path, program: &str, script: &str) {
     install_fake_with_dispatcher(fake_command_dispatcher(), directory, program, script);
 }
@@ -112,7 +155,8 @@ pub fn install_fake_command(directory: &std::path::Path, program: &str, script: 
 /// Install a worker stand-in, like [`install_fake_command`], that carries a
 /// test binary's worker stamp, so controller code running in a test accepts it
 /// as a matching worker.
-#[cfg(all(unix, any(test, feature = "test-hooks")))]
+#[cfg(unix)]
+#[doc(hidden)]
 pub fn install_fake_worker(directory: &std::path::Path, program: &str, script: &str) {
     install_fake_with_dispatcher(fake_worker_dispatcher(), directory, program, script);
 }
@@ -120,7 +164,8 @@ pub fn install_fake_worker(directory: &std::path::Path, program: &str, script: &
 /// Install a worker stand-in from `dispatcher`. A test in which a real program
 /// verifies the worker passes the stand-in stamped with that program's
 /// identity (`mj_build_id::fake_worker_dispatcher`).
-#[cfg(all(unix, any(test, feature = "test-hooks")))]
+#[cfg(unix)]
+#[doc(hidden)]
 pub fn install_fake_worker_from(
     dispatcher: std::path::PathBuf,
     directory: &std::path::Path,
@@ -130,13 +175,14 @@ pub fn install_fake_worker_from(
     install_fake_with_dispatcher(dispatcher, directory, program, script);
 }
 
-#[cfg(all(unix, any(test, feature = "test-hooks")))]
+#[cfg(unix)]
 fn install_fake_with_dispatcher(
     dispatcher: std::path::PathBuf,
     directory: &std::path::Path,
     program: &str,
     script: &str,
 ) {
+    enable_test_fixtures();
     assert!(
         dispatcher.is_file(),
         "fake command dispatcher is missing at {}",
@@ -159,7 +205,7 @@ fn install_fake_with_dispatcher(
 /// relay: the parent test sets it on the command that runs the relay, and
 /// `mj_worker::stand_in_relay::serve_latch_relay` reads it. The relay runs as
 /// [`latch_relay::CHILD_TEST`] in a second process of the same test binary.
-#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
 pub mod latch_relay {
     /// The `--exact` test that serves the relay; every test binary that starts
     /// one defines it.
@@ -206,7 +252,7 @@ pub mod latch_relay {
 
 /// Environment of the stand-in relay that the leased-submission tests run;
 /// `mj_worker::stand_in_relay::serve_leased_relay` reads it.
-#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
 pub mod leased_relay {
     /// The `--exact` test that serves the relay; every test binary that starts
     /// one defines it.
@@ -221,9 +267,14 @@ pub mod leased_relay {
     pub const DROP_ADMISSION_OPEN_REPLY: &str = "MJ_TEST_DROP_ADMISSION_OPEN_REPLY";
 }
 
-#[cfg(all(test, unix, feature = "test-hooks"))]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_hooks_stay_off_without_explicit_opt_in() {
+        assert!(!test_hooks_enabled());
+    }
 
     #[test]
     fn fake_command_preserves_arguments_output_and_status_with_restricted_path() {

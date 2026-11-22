@@ -8,7 +8,7 @@ pub mod theme;
 
 pub mod chat;
 pub mod clipboard;
-#[cfg(any(test, feature = "golden"))]
+#[doc(hidden)]
 #[doc(hidden)]
 pub mod golden;
 pub mod modal;

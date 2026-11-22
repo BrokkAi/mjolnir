@@ -83,6 +83,7 @@ fn recover_native_session_from(
     missing_error: Option<serde_json::Value>,
     used: bool,
 ) {
+    mj_core::test_hooks::enable_test_fixtures();
     let original = if missing_error.is_some() {
         "missing-thread"
     } else {

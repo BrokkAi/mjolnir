@@ -405,7 +405,6 @@ pub fn session_problem_in(
         .problem_for(paths.all())
 }
 
-#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 /// One host with `/` holding the worker roots and `~/Projects` on a
 /// filesystem of its own, as on precision-3260.

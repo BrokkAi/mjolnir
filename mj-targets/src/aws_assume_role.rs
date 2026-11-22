@@ -160,7 +160,8 @@ impl ScopedAwsCredentials {
     }
 
     /// Whether the cache holds credentials for the session.
-    #[cfg(all(any(test, feature = "test-support"), unix))]
+    #[cfg(unix)]
+    #[doc(hidden)]
     pub fn holds(&self, session_id: &str) -> bool {
         self.entries
             .lock()
@@ -307,50 +308,62 @@ fn selected_profile(source: &AwsCredentialSource) -> &str {
 /// the async path loads it on the blocking pool. A rotation therefore takes
 /// effect when the daemon restarts, as it does for phone cookies.
 static SCOPE_KEY: OnceLock<Vec<u8>> = OnceLock::new();
+static FIXTURE_SCOPE_KEY: OnceLock<Vec<u8>> = OnceLock::new();
+
+fn scope_key_cache() -> Result<(&'static OnceLock<Vec<u8>>, bool)> {
+    let fixture = cfg!(test) || mj_core::test_hooks::test_fixtures_enabled();
+    let cache = if fixture {
+        // Check on the caller's thread. Blocking-pool threads do not see
+        // a test's thread-local failure flag.
+        anyhow::ensure!(
+            !SIGNING_KEY_UNAVAILABLE.with(std::cell::Cell::get),
+            "the signing key is unreadable (test)"
+        );
+        &FIXTURE_SCOPE_KEY
+    } else {
+        &SCOPE_KEY
+    };
+    Ok((cache, fixture))
+}
 
 /// Blocking: reads (or creates) the signing key on first use.
 fn scope_key() -> Result<&'static [u8]> {
-    #[cfg(any(test, feature = "test-support"))]
-    anyhow::ensure!(
-        !SIGNING_KEY_UNAVAILABLE.with(std::cell::Cell::get),
-        "the signing key is unreadable (test)"
-    );
-    if let Some(key) = SCOPE_KEY.get() {
+    let (cache, fixture) = scope_key_cache()?;
+    load_scope_key(cache, fixture)
+}
+
+fn load_scope_key(cache: &'static OnceLock<Vec<u8>>, fixture: bool) -> Result<&'static [u8]> {
+    if let Some(key) = cache.get() {
         return Ok(key);
     }
-    #[cfg(any(test, feature = "test-support"))]
-    let root = b"test signing key, not a secret".to_vec();
-    #[cfg(not(any(test, feature = "test-support")))]
-    let root =
+    let root = if fixture {
+        b"test signing key, not a secret".to_vec()
+    } else {
         crate::signing_key::load_or_create_cookie_key(&crate::signing_key::cookie_key_path())
-            .context("read the controller's signing key")?;
+            .context("read the controller's signing key")?
+    };
     use hmac::{Hmac, KeyInit, Mac};
     let mut derive =
         Hmac::<sha2::Sha256>::new_from_slice(&root).expect("HMAC accepts any key length");
     derive.update(b"mjolnir aws credential scope key v1");
-    Ok(SCOPE_KEY.get_or_init(|| derive.finalize().into_bytes().to_vec()))
+    Ok(cache.get_or_init(|| derive.finalize().into_bytes().to_vec()))
 }
 
 /// The key for code on the async runtime: the first use is loaded on the
 /// blocking pool, every later one is a read of the kept key.
 async fn scope_key_without_blocking() -> Result<&'static [u8]> {
-    // The blocking pool's threads do not see a test's flag.
-    #[cfg(any(test, feature = "test-support"))]
-    anyhow::ensure!(
-        !SIGNING_KEY_UNAVAILABLE.with(std::cell::Cell::get),
-        "the signing key is unreadable (test)"
-    );
-    if let Some(key) = SCOPE_KEY.get() {
+    let (cache, fixture) = scope_key_cache()?;
+    if let Some(key) = cache.get() {
         return Ok(key);
     }
-    mj_core::runtime::spawn_blocking(scope_key)
+    mj_core::runtime::spawn_blocking(move || load_scope_key(cache, fixture))
         .await
         .context("signing key load task stopped")?
 }
 
 // Lets a test make the signing key unreadable on the thread that sets this.
-#[cfg(any(test, feature = "test-support"))]
 thread_local! {
+    #[doc(hidden)]
     pub static SIGNING_KEY_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -572,7 +585,6 @@ pub fn obtain(
 
 /// The STS replies recorded for tests of role assumption, here and in the
 /// crates that drive it.
-#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_fixtures {
     pub const ASSUME_ROLE: &str = include_str!("../tests/fixtures/aws-sts-assume-role.json");
@@ -780,7 +792,7 @@ mod tests {
         let scope = issued.scope().unwrap().clone();
         let fingerprint = mj_core::aws_credentials::snapshot(&issued.encode().unwrap()).fingerprint;
         assert!(scope_is_authentic(&scope, &fingerprint).await.unwrap());
-        assert!(SCOPE_KEY.get().is_some());
+        assert!(FIXTURE_SCOPE_KEY.get().is_some());
         let mut forged = scope.clone();
         forged.role_arn.push('x');
         assert!(!scope_is_authentic(&forged, &fingerprint).await.unwrap());

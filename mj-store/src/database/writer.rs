@@ -296,6 +296,7 @@ pub(super) fn clear_database_writer(id: u64) {
 #[doc(hidden)]
 #[must_use = "the writer stops when this owner is dropped"]
 pub fn install_isolated_test_writer() -> DatabaseWriterOwner {
+    mj_core::test_hooks::enable_test_fixtures();
     start_database_writer().expect("install the writer for an isolated test child")
 }
 

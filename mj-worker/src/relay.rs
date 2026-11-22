@@ -1023,6 +1023,9 @@ impl DurableRelay {
             "relay operational state",
         )?;
 
+        // This crate's relay tests link core as a normal dependency.
+        #[cfg(test)]
+        mj_core::test_hooks::enable_test_fixtures();
         let mut relay = Self {
             in_place_harness_restart_in_flight: None,
             operator_away: Default::default(),

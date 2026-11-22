@@ -2,14 +2,12 @@
 
 mod destination;
 pub(in crate::controller) use destination::destroy_prepared_environment;
-#[cfg(test)]
-mod tests;
-// Shared with mj-daemon's move tests through the `test-support` feature.
 pub mod in_place;
 pub mod recovery;
-#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_fixtures;
+#[cfg(test)]
+mod tests;
 pub mod transport;
 mod viewer_recovery;
 pub use viewer_recovery::ViewerMoveRecovery;

@@ -4720,6 +4720,7 @@ fn live_observation(
 fn worker_state(
     activity: mj_core::activity::ActivityState,
 ) -> mj_core::relay::RelayOperationalState {
+    mj_core::test_hooks::enable_test_fixtures();
     let root = tempfile::tempdir().unwrap();
     let mut operational = mj_worker::relay::DurableRelay::open(root.path(), "session-1", "test")
         .unwrap()

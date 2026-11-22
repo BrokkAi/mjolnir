@@ -124,7 +124,7 @@ pub fn delegation_delivering(parent: String, request: String) -> Result<()> {
     })
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn record_delegation_result(parent: String, result: SubagentToolResult) -> Result<()> {
     record_stored_delegation_result(
         parent,

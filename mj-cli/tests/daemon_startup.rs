@@ -1546,6 +1546,7 @@ fn acp_with_an_unknown_workspace_refuses_at_start_when_a_daemon_is_running() {
 /// parked mid-pass, and the old daemon must exit without finishing it.
 // Hard-won: c87e5e887f: A live handoff took over 23 seconds because SessionWiki sync held admission; this checks the deferrable sync no longer delays handoff.
 // Hard-won: 3b15d8840: store release can precede the old process's final shutdown.
+#[cfg(feature = "test-hooks")]
 #[test]
 fn a_handoff_does_not_wait_for_a_sessionwiki_sync_in_flight() {
     use std::time::{Duration, Instant, SystemTime};

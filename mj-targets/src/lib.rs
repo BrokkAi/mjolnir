@@ -17,7 +17,7 @@ pub mod tailscale;
 pub mod target_storage;
 pub mod targets;
 pub mod termination;
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub mod test_isolation;
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub mod test_log;

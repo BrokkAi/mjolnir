@@ -106,6 +106,7 @@ fn failed(stderr: impl AsRef<[u8]>) -> CommandOutput {
 // Hard-won: #1266: a working Claude Bedrock profile was reported as needing subscription login.
 #[test]
 fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
+    mj_core::test_hooks::enable_test_fixtures();
     let ssh = RuntimeSshTarget {
         destination: "dev@docker.example.test".to_owned(),
         ssh_args: Vec::new(),

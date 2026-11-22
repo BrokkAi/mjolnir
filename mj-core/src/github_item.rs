@@ -392,24 +392,3 @@ mod tests {
 
 #[path = "github_item/history_unicode.rs"]
 pub mod history_unicode;
-
-/// Frozen tokenizer for aliases600 evidence budgets, without truncation or padding.
-/// Built once: parsing the embedded 3.5 MB definition on every evidence build
-/// was a measurable share of the daemon's page faults.
-#[cfg(feature = "github-history")]
-pub fn history_tokenizer() -> Result<&'static tokenizers::Tokenizer> {
-    static TOKENIZER: std::sync::OnceLock<std::result::Result<tokenizers::Tokenizer, String>> =
-        std::sync::OnceLock::new();
-    TOKENIZER
-        .get_or_init(|| {
-            let mut t = tokenizers::Tokenizer::from_bytes(include_bytes!(
-                "github_item/ettin-tokenizer.json"
-            ))
-            .map_err(|e| e.to_string())?;
-            t.with_padding(None);
-            t.with_truncation(None).map_err(|e| e.to_string())?;
-            Ok(t)
-        })
-        .as_ref()
-        .map_err(|e| anyhow::anyhow!("{e}"))
-}

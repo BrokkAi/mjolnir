@@ -587,6 +587,7 @@ fn worker_git_uses_the_requested_repository_despite_a_polluted_launcher() {
 
 #[test]
 fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
+    mj_core::test_hooks::enable_test_fixtures();
     use anyhow::{Context, Result, ensure};
     use std::time::Instant;
     let root = tempfile::tempdir().unwrap();

@@ -7,14 +7,6 @@
 //! recovery plans of `mj-session-types`. The controller's lifecycle operations
 //! use it; it does not know them.
 
-// `test-support` compiles the test-only items for the tests of the crates
-// above, which use only some of them. The dead-code lints still run on normal
-// and test builds.
-#![cfg_attr(
-    all(feature = "test-support", not(test)),
-    allow(dead_code, unused_imports)
-)]
-
 // The moved modules name these by their old paths.
 pub(crate) use mj_accounts::{claude_login, harness_auth, opencode_logins, profile_health};
 pub(crate) use mj_import::utility_llm;
@@ -24,7 +16,7 @@ pub(crate) use mj_targets::{
     aws_assume_role, aws_credentials, streamed_child, target_storage, targets,
 };
 // Only tests that need Unix use these.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 #[cfg_attr(not(unix), allow(unused_imports))]
 pub(crate) use mj_targets::{test_isolation, test_log};
 

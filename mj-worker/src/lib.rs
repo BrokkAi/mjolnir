@@ -32,7 +32,7 @@ mod checkpoint_tests;
 #[cfg(test)]
 mod test_support;
 // Served by the controller and daemon test binaries; see the module.
-#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
 pub mod stand_in_relay;
 
 pub mod cpu_usage;

@@ -2,19 +2,20 @@ use super::*;
 use mj_client::availability::{AvailabilityNote, AvailabilityVerdict};
 use std::collections::BTreeSet;
 
-#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static VIEWER_ROW_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static VIEWER_SESSION_SCAN_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn take_viewer_row_visits() -> usize {
+    mj_core::test_hooks::enable_test_fixtures();
     VIEWER_ROW_VISITS.with(|visits| visits.replace(0))
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub fn take_viewer_session_scan_visits() -> usize {
+    mj_core::test_hooks::enable_test_fixtures();
     VIEWER_SESSION_SCAN_VISITS.with(|visits| visits.replace(0))
 }
 
@@ -102,8 +103,9 @@ impl ViewerSessions {
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &ViewerSession> + ExactSizeIterator {
         self.0.values().inspect(|_| {
-            #[cfg(any(test, feature = "test-support"))]
-            VIEWER_SESSION_SCAN_VISITS.with(|visits| visits.set(visits.get() + 1));
+            if cfg!(test) || mj_core::test_hooks::test_fixtures_enabled() {
+                VIEWER_SESSION_SCAN_VISITS.with(|visits| visits.set(visits.get() + 1));
+            }
         })
     }
 
@@ -247,8 +249,9 @@ impl ViewerSnapshot {
         };
         let sessions = records
             .map(|session| {
-                #[cfg(any(test, feature = "test-support"))]
-                VIEWER_ROW_VISITS.with(|visits| visits.set(visits.get() + 1));
+                if cfg!(test) || mj_core::test_hooks::test_fixtures_enabled() {
+                    VIEWER_ROW_VISITS.with(|visits| visits.set(visits.get() + 1));
+                }
                 let checkout = state
                     .checkout(&session.id)
                     .expect("viewer session has a valid checkout owner");

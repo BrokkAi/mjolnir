@@ -398,11 +398,11 @@ fn commit_replacement(
 }
 
 fn pause_before_purge_commit() {
-    #[cfg(any(test, feature = "test-support"))]
-    commit_pause::wait_if_armed();
+    if cfg!(test) || mj_core::test_hooks::test_fixtures_enabled() {
+        commit_pause::wait_if_armed();
+    }
 }
 
-#[cfg(any(test, feature = "test-support"))]
 mod commit_pause {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
@@ -421,6 +421,7 @@ mod commit_pause {
 
     /// Block the next purge commit until [`PurgeCommitPause::release`].
     pub fn arm() -> PurgeCommitPause {
+        mj_core::test_hooks::enable_test_fixtures();
         let state = Arc::new(State {
             slot: Mutex::new(Slot {
                 entered: false,
@@ -484,7 +485,7 @@ mod commit_pause {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub use commit_pause::{PurgeCommitPause, arm as arm_purge_untracked_commit_pause};
 
 fn discard_unreferenced(path: &std::path::Path, error: anyhow::Error) -> anyhow::Error {

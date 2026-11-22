@@ -6,18 +6,10 @@
 //! This is a separate crate so that the session runtime, the lifecycle
 //! operations and the daemon can each use it without rebuilding one another.
 
-// `test-support` compiles the test-only items for the tests of the crates
-// above, which use only some of them. The dead-code lints still run on normal
-// and test builds.
-#![cfg_attr(
-    all(feature = "test-support", not(test)),
-    allow(dead_code, unused_imports)
-)]
-
 // The moved modules name these by their old paths.
 pub(crate) use mj_store::{database, upgrade};
 pub(crate) use mj_targets::{streamed_child, targets};
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) use mj_targets::{test_isolation, test_log};
 
 pub mod antigravity_usage;

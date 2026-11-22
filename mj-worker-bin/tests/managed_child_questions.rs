@@ -130,6 +130,7 @@ fn answer_form(root: &std::path::Path, elicitation_id: &str, choice: &str) -> bo
 // Hard-won: a3a103608: guessing the old permission ID left the real worker waiting forever.
 #[test]
 fn a_managed_child_sends_questions_to_its_parent_and_keeps_approvals_for_a_person() {
+    mj_core::test_hooks::enable_test_fixtures();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
     let answers = temp.path().join("answers.jsonl");

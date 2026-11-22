@@ -25,7 +25,7 @@ pub mod github_item;
 pub mod github_reference;
 pub mod go;
 pub mod goal;
-#[cfg(feature = "golden")]
+#[doc(hidden)]
 pub mod golden;
 pub mod guardian;
 #[cfg(unix)]

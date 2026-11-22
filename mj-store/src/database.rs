@@ -66,7 +66,7 @@ pub use subagent_questions::reconcile_pending_subagent_questions;
 mod events;
 pub use events::*;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use schema::forget_verified_schema;
 pub use schema::{check_read_compatibility, database_path};
 use schema::{open, open_reader};
@@ -112,12 +112,13 @@ pub use config_results::*;
 mod projects;
 pub use projects::*;
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub mod test_fixtures;
 #[cfg(test)]
 mod tests;
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn test_session(id: &str, bundle: &str) -> SessionRecord {
+    mj_core::test_hooks::enable_test_fixtures();
     SessionRecord {
         oracle_choice: None,
         oracle: true,

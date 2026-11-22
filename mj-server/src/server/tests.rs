@@ -2880,6 +2880,7 @@ const ISOLATED_STORE_CHILD: &str = "MJ_SERVER_ISOLATED_STORE_CHILD";
 /// store attachments under the data directory. Returns whether this process
 /// is that run.
 fn in_isolated_store(test: &str) -> bool {
+    mj_core::test_hooks::enable_test_fixtures();
     if std::env::var_os(ISOLATED_STORE_CHILD).is_some() {
         return true;
     }

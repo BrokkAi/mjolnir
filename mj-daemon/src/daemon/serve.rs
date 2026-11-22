@@ -784,14 +784,11 @@ pub(super) async fn blocking<T: Send + 'static>(
 }
 
 pub(super) async fn reach_test_hook(name: &'static str) -> Result<()> {
-    #[cfg(feature = "test-hooks")]
-    {
+    if mj_core::test_hooks::test_hooks_enabled() {
         mj_core::runtime::spawn_blocking(move || mj_core::test_hooks::reach_test_hook(name))
             .await
             .context("test hook task panicked")??;
     }
-    #[cfg(not(feature = "test-hooks"))]
-    let _ = name;
     Ok(())
 }
 

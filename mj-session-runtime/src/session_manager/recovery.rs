@@ -155,7 +155,7 @@ pub fn refresh_worker_launch_if_stale(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub async fn recover_worker(
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
@@ -203,6 +203,19 @@ pub async fn recover_worker_for_session(
 }
 
 pub fn recover_worker_admitted(
+    plan: WorkerRecoveryPlan,
+    restart_unresponsive: bool,
+    session_id: Option<&str>,
+    admission: Option<&crate::recovery_gate::SessionAdmission>,
+    executor: &impl CommandExecutor,
+) -> Result<WorkerRecoveryOutcome> {
+    if !cfg!(test) && session_id.is_none() {
+        bail!("worker recovery requires a session identity");
+    }
+    recover_worker_with_admission(plan, restart_unresponsive, session_id, admission, executor)
+}
+
+fn recover_worker_with_admission(
     mut plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<&str>,
@@ -214,14 +227,7 @@ pub fn recover_worker_admitted(
             id,
             admission.context("relay recovery has no session admission")?,
         )?),
-        None => {
-            #[cfg(not(any(test, feature = "test-support")))]
-            bail!("worker recovery requires a session identity");
-            #[cfg(any(test, feature = "test-support"))]
-            {
-                None
-            }
-        }
+        None => None,
     };
     let mut work = || -> Result<WorkerRecoveryOutcome> {
         let observed_state = if let Some(id) = session_id {
@@ -435,13 +441,14 @@ fn restart_owned_worker(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn recover_worker_controlled(
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<&str>,
     executor: &impl CommandExecutor,
 ) -> Result<WorkerRecoveryOutcome> {
+    mj_core::test_hooks::enable_test_fixtures();
     let admission = match session_id {
         Some(id) => match crate::database::test_fixtures::worker_test_gate()
             .try_start(id, crate::recovery_gate::BackgroundWork::RelayRecovery)
@@ -451,7 +458,7 @@ pub fn recover_worker_controlled(
         },
         None => None,
     };
-    recover_worker_admitted(
+    recover_worker_with_admission(
         plan,
         restart_unresponsive,
         session_id,

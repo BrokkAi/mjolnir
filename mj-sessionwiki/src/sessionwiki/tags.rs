@@ -146,7 +146,7 @@ pub fn read(
 /// (`super::index_is_writable`). Every test that points it somewhere has to
 /// take the same turn, so the guard lives here and the tests of this module and
 /// of its parent share it.
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub mod testing {
     /// Held for as long as a test relies on `SESSIONWIKI_DATA`.
     pub static INDEX: std::sync::Mutex<()> = std::sync::Mutex::new(());

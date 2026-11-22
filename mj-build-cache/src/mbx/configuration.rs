@@ -5,7 +5,7 @@ use super::*;
 use mj_core::state::BuildCacheApplication;
 use sha2::{Digest, Sha256};
 
-#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
+#[cfg(all(test, target_os = "linux"))]
 const DEFAULT_MARKER: &str = "# mj automatic shared budget: ";
 
 /// Already reachable through every session's cache mount, including sessions
@@ -57,7 +57,7 @@ pub fn read_file(
     ))
 }
 
-#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
+#[cfg(all(test, target_os = "linux"))]
 pub fn managed_document(settings: &TargetBuildCache, automatic: &str) -> Result<String> {
     #[derive(serde::Serialize)]
     struct Document<'a> {

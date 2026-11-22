@@ -110,6 +110,7 @@ fn record_worker(root: &Path, pid: u32, birth: &str) {
 }
 
 fn start_real_worker(root: &Path, scratch: &Path) -> Child {
+    mj_core::test_hooks::enable_test_fixtures();
     drop(
         mj_worker::relay::DurableRelay::open(root, "018f9dd2-a3b4-7c8d-9000-123456789abc", "test")
             .unwrap(),

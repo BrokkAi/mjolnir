@@ -49,18 +49,15 @@ pub fn image_pull_mutex(host: &ImageHost, image: &str) -> Arc<ImagePullLock> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     locks.retain(|_, lock| lock.strong_count() > 0);
-    // Unit tests share one process and must not write to the developer's
-    // data directory; the file lock has a test of its own. A test-support
-    // build still locks an isolated store: features unify across a workspace
-    // `cargo test`, and the `mj` binary that the ec2 fixture runs against its
-    // own store must keep the cross-process gate.
-    let unisolated_test_build = cfg!(feature = "test-support")
+    // Fixture processes with an isolated store still use the cross-process
+    // lock. Other in-process tests must keep the live store untouched.
+    let unisolated_fixture = mj_core::test_hooks::test_fixtures_enabled()
         && mj_core::config::ensure_may_control_store(
             &mj_core::config::data_dir(),
             "lock an image download",
         )
         .is_err();
-    let file = (!cfg!(test) && !unisolated_test_build).then(|| lock_file_path(&key));
+    let file = (!cfg!(test) && !unisolated_fixture).then(|| lock_file_path(&key));
     let slot = locks.entry(key).or_default();
     if let Some(lock) = slot.upgrade() {
         return lock;

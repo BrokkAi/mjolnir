@@ -566,6 +566,7 @@ mod tests {
 
     #[test]
     fn maintain_keeps_the_in_use_disk_and_removes_an_unkept_unused_reference() {
+        mj_core::test_hooks::enable_test_fixtures();
         use super::super::state::{STATE_FORMAT, VmVolume};
         let directory = tempfile::tempdir().unwrap();
         let layout = Layout::new(directory.path());

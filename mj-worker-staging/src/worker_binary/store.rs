@@ -300,7 +300,7 @@ fn collections() -> &'static Mutex<HashMap<String, Instant>> {
     LAST.get_or_init(Default::default)
 }
 
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(test, unix))]
 pub fn forget_collections() {
     collections()
         .lock()
