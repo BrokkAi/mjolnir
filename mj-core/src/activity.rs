@@ -60,6 +60,9 @@ pub struct ActivityFacts {
     /// Oldest start among background commands and user shells.
     pub background_started_at_ms: Option<i64>,
     pub background_commands: usize,
+    /// Oldest live task reported by Antigravity's native task tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antigravity_task_started_at_ms: Option<i64>,
     #[serde(default)]
     pub expected_continuation: Option<i64>,
     /// A generation-checked Jev inference; does not discharge owned work.
@@ -123,6 +126,7 @@ impl Default for ActivityFacts {
             tools_in_flight: Vec::new(),
             background_started_at_ms: None,
             background_commands: 0,
+            antigravity_task_started_at_ms: None,
             expected_continuation: None,
             inferred_idle_since_ms: None,
             active_user_shells: 0,
@@ -160,13 +164,6 @@ pub fn turn_imminent(facts: &ActivityFacts, now_ms: i64) -> bool {
         && facts.task_settled_at_ms.is_some_and(|settled| {
             (0..=IMMINENT_TURN_WINDOW_MS).contains(&now_ms.saturating_sub(settled))
         })
-}
-
-/// Kimi and Antigravity workers that track native tasks publish a
-/// synchronization status with their inventory. Only the provider can settle
-/// those tasks. A verdict about leftover processes cannot settle them.
-fn provider_background_work_active(facts: &ActivityFacts) -> bool {
-    facts.background_work_known.is_some() && facts.background_commands > 0
 }
 
 /// What a session is doing, at the granularity every part of Mjolnir agrees on.
@@ -452,9 +449,10 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
             last_activity_at_ms: facts.last_acp_activity_at_ms,
         };
     }
-    if provider_background_work_active(facts) {
+    // A verdict about leftover processes cannot settle a native task.
+    if let Some(started_at_ms) = facts.antigravity_task_started_at_ms {
         return ActivityState::Background {
-            started_at_ms: facts.background_started_at_ms,
+            started_at_ms: Some(started_at_ms),
         };
     }
     if let Some(since_ms) = facts.inferred_idle_since_ms
@@ -585,7 +583,7 @@ pub fn quiet_at(facts: &ActivityFacts, now_ms: i64) -> Quiet {
     }
     // Only the provider can settle work it owns. For leftover processes we
     // also take Jev's judgment into account.
-    if provider_background_work_active(facts)
+    if matches!(state, ActivityState::Background { .. })
         || (facts.background_needed != Some(false)
             && (facts.background_commands > 0 || facts.active_agent_terminals > 0))
     {
@@ -679,6 +677,15 @@ pub fn safe_to_replace(facts: &ActivityFacts, harness: HarnessKind) -> bool {
     is_quiet(facts) && replacement_provider_blocker(facts, harness).is_none()
 }
 
+/// A worker that predates Antigravity task tracking cannot synchronize its inventory.
+#[must_use]
+pub fn legacy_antigravity_worker(
+    harness: HarnessKind,
+    background_work_known: Option<bool>,
+) -> bool {
+    harness == HarnessKind::Antigravity && background_work_known.is_none()
+}
+
 fn replacement_provider_blocker(
     facts: &ActivityFacts,
     harness: HarnessKind,
@@ -690,7 +697,10 @@ fn replacement_provider_blocker(
         HarnessKind::Kimi if facts.background_work_known != Some(true) => {
             Some("Kimi background-agent state is not synchronized")
         }
-        HarnessKind::Antigravity if facts.background_work_known != Some(true) => {
+        _ if legacy_antigravity_worker(harness, facts.background_work_known) => Some(
+            "this legacy Antigravity worker has no native task tracking and cannot upgrade automatically",
+        ),
+        HarnessKind::Antigravity if facts.background_work_known == Some(false) => {
             Some("Antigravity background-task state is not synchronized")
         }
         _ => None,

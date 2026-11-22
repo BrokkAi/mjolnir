@@ -328,6 +328,11 @@ async fn antigravity_coordinator_orders_stop_after_buffered_output_and_preserves
             ActivityState::Background { .. }
         ));
         assert_eq!(snapshot.background_commands[0].command, "Build validation");
+        assert_eq!(
+            state.activity_facts().antigravity_task_started_at_ms,
+            Some(snapshot.background_commands[0].started_at_ms)
+        );
+        assert_eq!(state.activity_facts(), snapshot.facts());
         assert!(!snapshot.safe_to_replace(HarnessKind::Antigravity));
         assert!(!reserve_idle(&mut state));
 

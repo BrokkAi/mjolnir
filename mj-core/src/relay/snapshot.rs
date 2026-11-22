@@ -570,6 +570,29 @@ pub struct BackgroundCommand {
     pub can_stop: bool,
 }
 
+impl BackgroundCommand {
+    const ANTIGRAVITY_PREFIX: &'static str = "antigravity:";
+
+    pub fn antigravity(id: &str, started_at_ms: i64, command: String) -> Self {
+        Self {
+            id: format!("{}{id}", Self::ANTIGRAVITY_PREFIX),
+            started_at_ms,
+            command,
+            can_stop: false,
+        }
+    }
+
+    /// The existing relay inventory distinguishes native tasks from hosted
+    /// terminals by ID, including in snapshots from older tracking workers.
+    pub fn oldest_antigravity_task_start(commands: &[Self]) -> Option<i64> {
+        commands
+            .iter()
+            .filter(|command| command.id.starts_with(Self::ANTIGRAVITY_PREFIX))
+            .map(|command| command.started_at_ms)
+            .min()
+    }
+}
+
 /// The process owner behind one stoppable background-command id.
 ///
 /// This never crosses the relay wire. The worker resolves the opaque public id
@@ -1090,6 +1113,9 @@ impl RelayOperationalState {
                 )
                 .min(),
             background_commands: self.background_commands.len() + self.native_agent_count,
+            antigravity_task_started_at_ms: BackgroundCommand::oldest_antigravity_task_start(
+                &self.background_commands,
+            ),
             expected_continuation: self.expected_continuation,
             inferred_idle_since_ms: self.inferred_idle_since_ms,
             active_user_shells: self.active_user_shells.len(),

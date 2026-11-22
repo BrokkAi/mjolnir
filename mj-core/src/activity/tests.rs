@@ -523,31 +523,50 @@ fn a_disconnected_session_reports_no_silence_age() {
 // Hard-won: #1611: worker replacement could treat unreported or inferred-idle Antigravity tasks as settled.
 #[test]
 fn antigravity_replacement_waits_for_an_authoritative_empty_task_inventory() {
+    use crate::relay::{BackgroundCommand, RelaySnapshot};
+
     let harness = HarnessKind::Antigravity;
-    let mut facts = ActivityFacts {
-        acp_ready: Some(true),
-        ..ActivityFacts::default()
-    };
+    let mut state = RelaySnapshot::new("antigravity".into()).operational_state();
+    state.execution = RelayExecutionState::Idle;
+    state.acp_ready = Some(true);
     // A pre-tracking worker leaves the field absent even when a job is live.
     // An empty list from that worker cannot authorize its replacement.
-    assert!(!safe_to_replace(&facts, harness));
+    assert!(!state.safe_to_replace(harness));
 
-    facts.background_work_known = Some(true);
-    facts.background_commands = 1;
-    facts.background_started_at_ms = Some(NOW);
-    facts.inferred_idle_since_ms = Some(NOW);
-    facts.background_needed = Some(false);
-    assert!(matches!(classify(&facts), ActivityState::Background { .. }));
-    assert!(has_work_in_flight(&facts));
-    assert!(!safe_to_replace(&facts, harness));
+    state.background_work_known = Some(true);
+    state.inferred_idle_since_ms = Some(NOW);
+    state.background_needed = Some(false);
+    state.background_commands.push(BackgroundCommand {
+        id: "terminal:leftover".into(),
+        command: "sleep infinity".into(),
+        started_at_ms: NOW - 1,
+        can_stop: true,
+    });
+    assert!(state.activity_state().is_idle());
+    assert!(state.safe_to_replace(harness));
+    state
+        .background_commands
+        .push(BackgroundCommand::antigravity(
+            "task-70",
+            NOW,
+            "build".into(),
+        ));
+    assert!(matches!(
+        state.activity_state(),
+        ActivityState::Background {
+            started_at_ms: Some(NOW)
+        }
+    ));
+    assert!(state.has_work_in_flight());
+    assert!(!state.safe_to_replace(harness));
 
     // Losing the observation is not evidence that the task finished.
-    facts.background_commands = 0;
-    facts.background_work_known = Some(false);
-    assert!(!safe_to_replace(&facts, harness));
+    state.background_commands.truncate(1);
+    state.background_work_known = Some(false);
+    assert!(!state.safe_to_replace(harness));
 
-    facts.background_work_known = Some(true);
-    assert!(safe_to_replace(&facts, harness));
+    state.background_work_known = Some(true);
+    assert!(state.safe_to_replace(harness));
 }
 
 #[test]

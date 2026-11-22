@@ -257,7 +257,7 @@ impl RuntimeState {
             has_snapshot,
             "daemon received a session view"
         );
-        let recovered_failure = {
+        let (recovered_failure, legacy_worker_notice) = {
             let mut owner = self.owner();
             let controller = owner.controller();
             if !controller.state.sessions.contains_key(&session_id)
@@ -280,6 +280,7 @@ impl RuntimeState {
                 let error = record.public_error()?;
                 (start > previous.projection_ordinal).then(|| error.to_owned())
             });
+            let mut legacy_worker_notice = false;
             if view.connected
                 && let Some(snapshot) = view.snapshot.as_ref()
                 && let Some(session) = controller.state.sessions.get(&session_id)
@@ -294,6 +295,16 @@ impl RuntimeState {
                     );
                 }
                 let facts = snapshot.operational.facts();
+                let legacy = |known| {
+                    mj_core::activity::legacy_antigravity_worker(session.harness_kind, known)
+                };
+                legacy_worker_notice = !snapshot.operational.harness_preparation_failed()
+                    && legacy(facts.background_work_known)
+                    && !owner
+                        .sessions
+                        .get(&session_id)
+                        .and_then(|view| view.operational.as_deref())
+                        .is_some_and(|previous| legacy(previous.background_work_known));
                 // A busy session is not replaced, and that needs no comment.
                 // An idle one that is still not replaceable would otherwise
                 // be skipped without a trace (B-5).
@@ -354,8 +365,16 @@ impl RuntimeState {
                 .lock()
                 .expect("rejected logins poisoned")
                 .observe_worker(profile_id, &session_id, publication);
-            recovered_failure
+            (recovered_failure, legacy_worker_notice)
         };
+        if legacy_worker_notice {
+            self.push_public_notice(
+                &session_id,
+                format!(
+                    "This legacy Antigravity worker cannot track native background tasks. It cannot upgrade automatically, even after waiting. Once its work is done, use Suspend and then Resume in the session actions, or run `mj suspend --session {session_id}` followed by `mj resume --session {session_id}`."
+                ),
+            );
+        }
         if let Some(recorded_error) = recovered_failure {
             let state = self.clone();
             match mj_controller::upgrade::activity("lifecycle failure clear") {
