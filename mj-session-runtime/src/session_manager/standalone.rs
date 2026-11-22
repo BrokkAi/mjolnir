@@ -2,7 +2,7 @@ use super::*;
 use mj_core::guardian::{
     GUARDIAN_DISABLED_REASON, GUARDIAN_REVIEW_TIMEOUT, GuardianReviewOutcome,
     GuardianReviewRequest, GuardianReviewResult, MAX_PENDING_GUARDIAN_REVIEWS, Outcome,
-    WOLF_STAGE1_ALLOW_THRESHOLD,
+    WOLF_STAGE1_ALLOW_THRESHOLD, safe_daemon_guardian_failure_reason,
 };
 use mj_import::utility_llm::{GuardianUtilityOutcome, review_guardian_with_utility};
 use std::{future::Future, pin::Pin};
@@ -1285,7 +1285,7 @@ async fn execute_guardian_review(
     );
     let cancel = tokio_util::sync::CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
-    let decision = tokio::time::timeout(GUARDIAN_REVIEW_TIMEOUT, async {
+    let mut decision = tokio::time::timeout(GUARDIAN_REVIEW_TIMEOUT, async {
         let config = match mj_core::runtime::spawn_blocking(mj_core::config::Config::load).await {
             Ok(Ok(config)) => config,
             Ok(Err(error)) => {
@@ -1367,6 +1367,20 @@ async fn execute_guardian_review(
     .unwrap_or_else(|_| GuardianReviewOutcome::AskPerson {
         reason: "its daemon review timed out".into(),
     });
+    if let GuardianReviewOutcome::AskPerson { reason } = &mut decision
+        && reason != GUARDIAN_DISABLED_REASON
+    {
+        let safe_reason = safe_daemon_guardian_failure_reason(reason);
+        tracing::warn!(
+            target: "mj_guardian",
+            session_id = %request.session_id,
+            tool_call_id = %request.tool_call_id,
+            request_id = %request.request_id,
+            reason = safe_reason,
+            "daemon guardian review failed"
+        );
+        *reason = safe_reason.to_owned();
+    }
     GuardianReviewResult {
         request_id: request.request_id,
         decision,

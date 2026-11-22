@@ -19,6 +19,7 @@ use super::*;
 use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
 use mj_core::guardian::{
     GUARDIAN_DISABLED_REASON, GuardianReviewOutcome, collect_project_instructions,
+    safe_daemon_guardian_failure_reason,
 };
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
@@ -69,6 +70,7 @@ impl Guardian {
         input: Option<&serde_json::Value>,
         native_child: bool,
     ) -> GuardianDecision {
+        let deadline = tokio::time::Instant::now() + GUARDIAN_REVIEW_TIMEOUT;
         if self.spec.turn_context.guardian_tripped() {
             tracing::info!(
                 target: "mj_guardian",
@@ -88,8 +90,8 @@ impl Guardian {
         );
         let tool_call_id = request.tool_call.tool_call_id.to_string();
         let cwd = self.spec.cwd.clone();
-        let project_instructions = match tokio::time::timeout(
-            GUARDIAN_REVIEW_TIMEOUT,
+        let project_instructions = match tokio::time::timeout_at(
+            deadline,
             mj_core::runtime::spawn_blocking(move || collect_project_instructions(&cwd)),
         )
         .await
@@ -115,7 +117,7 @@ impl Guardian {
                     &tool_call_id,
                     &action,
                     project_instructions.as_deref(),
-                    tokio::time::Instant::now() + GUARDIAN_REVIEW_TIMEOUT,
+                    deadline,
                 )
                 .await
             {
@@ -129,12 +131,11 @@ impl Guardian {
                 {
                     return GuardianDecision::AskPerson { reason };
                 }
-                Ok(GuardianReviewOutcome::AskPerson { .. }) => {
-                    // A legacy daemon can include raw configuration or
-                    // provider errors in this field.
-                    tracing::warn!(target: "mj_guardian", %tool_call_id, "daemon guardian review failed");
+                Ok(GuardianReviewOutcome::AskPerson { reason }) => {
+                    let reason = safe_daemon_guardian_failure_reason(&reason);
+                    tracing::warn!(target: "mj_guardian", %tool_call_id, %reason, "daemon guardian review failed");
                     return GuardianDecision::Failed {
-                        reason: "the daemon reviewer failed".into(),
+                        reason: reason.into(),
                     };
                 }
                 Err(error) => {

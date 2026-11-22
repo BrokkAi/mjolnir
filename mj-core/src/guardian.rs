@@ -692,6 +692,41 @@ pub struct GuardianReviewResult {
     pub request_id: String,
     pub decision: GuardianReviewOutcome,
 }
+
+/// Retain the failure category carried in the preexisting `AskPerson`
+/// response. Older daemons can send configuration contents or provider text
+/// in that field. Report only known messages and fixed category names.
+pub fn safe_daemon_guardian_failure_reason(reason: &str) -> &str {
+    match reason {
+        "its daemon review timed out" | "the daemon review timed out" => {
+            "the daemon review timed out"
+        }
+        "invalid guardian assessment"
+        | "utility guardian inference failed"
+        | "utility guardian inference failed (InvalidRequest)"
+        | "utility guardian inference failed (Cancelled)"
+        | "utility guardian inference failed (Authentication)"
+        | "utility guardian inference failed (RateLimited)"
+        | "utility guardian inference failed (ContextLength)"
+        | "utility guardian inference failed (Transport)"
+        | "utility guardian inference failed (StructuredOutput)"
+        | "utility guardian inference failed (Provider)" => reason,
+        "could not load configuration" => reason,
+        reason if reason.starts_with("could not load configuration:") => {
+            "could not load configuration"
+        }
+        "could not read configuration" => reason,
+        reason if reason.starts_with("could not read configuration:") => {
+            "could not read configuration"
+        }
+        "could not select a utility guardian model" => reason,
+        reason if reason.starts_with("no usable utility model:") => {
+            "could not select a utility guardian model"
+        }
+        _ => "the daemon reviewer failed",
+    }
+}
+
 /// The exact action under review: the tool call the harness asked about,
 /// with each file edit as a unified patch rather than two whole-file copies.
 pub fn planned_action(

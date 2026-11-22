@@ -650,6 +650,72 @@ async fn guardian_relay_timeout_answers_antigravity_without_an_operator_form() {
 }
 
 #[tokio::test]
+async fn guardian_daemon_failure_keeps_the_category_and_redacts_sensitive_details() {
+    use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
+    use mj_core::guardian::{GuardianReviewOutcome, GuardianReviewResult};
+
+    let temp = tempfile::tempdir().unwrap();
+    let endpoint = Arc::new(GuardianEndpoint::default());
+    let (_requests, mut events, runtime, _) = start_scripted_harness(
+        temp.path(),
+        &["touch first", "touch second", "touch third"],
+        &[],
+        &[],
+        Some(endpoint.clone()),
+        |spec| {
+            spec.harness = HarnessKind::Kimi;
+            spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+            spec.approval_choices = Default::default();
+        },
+    );
+    let failures = [
+        (
+            "utility guardian inference failed (RateLimited)",
+            "utility guardian inference failed (RateLimited)",
+        ),
+        (
+            "could not load configuration: SECRET_DATA",
+            "could not load configuration",
+        ),
+        (
+            "utility guardian inference failed (Provider) SECRET_DATA",
+            "the daemon reviewer failed",
+        ),
+    ];
+    for (reason, expected) in failures {
+        let request = wait_for_guardian_request(&endpoint).await;
+        endpoint.complete(GuardianReviewResult {
+            request_id: request.request_id,
+            decision: GuardianReviewOutcome::AskPerson {
+                reason: reason.into(),
+            },
+        });
+        loop {
+            match next_event(&mut events).await {
+                RuntimeEvent::ElicitationRequested { request } => {
+                    panic!(
+                        "review failure opened an operator form: {}",
+                        request.message
+                    );
+                }
+                RuntimeEvent::Notice { message } if message.starts_with("Mjolnir guardian") => {
+                    assert!(message.ends_with(expected), "{message}");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    let replies = await_recorded(temp.path(), "session_outcomes", failures.len()).await;
+    for (reply, (_, expected)) in replies.iter().zip(failures) {
+        assert_eq!(reply["outcome"]["code"], -32603);
+        let message = reply["outcome"]["message"].as_str().unwrap();
+        assert!(message.ends_with(expected), "{message}");
+    }
+    runtime.abort();
+}
+
+#[tokio::test]
 async fn guardian_uses_acp_when_the_daemon_requests_fallback() {
     use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
     use mj_core::guardian::{GuardianReviewOutcome, GuardianReviewResult};

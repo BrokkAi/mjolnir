@@ -1695,7 +1695,7 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
         (
             "invalid-config",
             GuardianReviewOutcome::AskPerson {
-                reason: String::new(),
+                reason: "could not load configuration".into(),
             },
         ),
     ] {
@@ -1704,7 +1704,7 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
             "local-disabled" => local_off_config.save().unwrap(),
             "guardian-disabled" => guardian_off_config.save().unwrap(),
             "invalid-config" => {
-                mj_core::config::atomic_write(&config_path, b"invalid TOML").unwrap();
+                mj_core::config::atomic_write(&config_path, b"invalid SECRET_DATA").unwrap();
             }
             _ => {
                 mj_core::config::atomic_write(&config_path, &valid_config).unwrap();
@@ -1739,15 +1739,7 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
         .await
         .unwrap_or_else(|_| panic!("timed out awaiting {id}"));
         assert_eq!(result.request_id, id);
-        if id == "invalid-config" {
-            assert!(
-                matches!(result.decision, GuardianReviewOutcome::AskPerson { ref reason } if reason.contains("could not load configuration")),
-                "expected AskPerson on invalid config, got {:?}",
-                result.decision
-            );
-        } else {
-            assert_eq!(result.decision, expected, "{id}");
-        }
+        assert_eq!(result.decision, expected, "{id}");
     }
     shutdown.shutdown().await.unwrap();
 }
