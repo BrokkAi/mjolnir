@@ -122,7 +122,7 @@ it or introduce a dependency between sibling branches.
 - `brokk-mj-targets` (`mj-targets/`, library `mj_targets`) is where a
   session's worker runs (a local directory, a container, an SSH host, an EC2
   instance) and the commands that provision, control and clean it up. It uses
-  the foundation and client branches and knows nothing of the store or of
+  the foundation and knows nothing of the store or of
   session lifecycle. `mj_controller` re-exports its modules under their old
   names.
 - `brokk-mj-session-types` (`mj-session-types/`, library `mj_session_types`)
@@ -153,7 +153,7 @@ it or introduce a dependency between sibling branches.
 - `brokk-mj-build-cache` (`mj-build-cache/`, library `mj_build_cache`) is the
   caches Mjolnir keeps on a session's host: the mbx compiler cache and its
   installation, the shared clone cache, and the native build-tool caches. It
-  builds on the targets, store and import crates. `mj_controller::controller`
+  builds on the targets and store crates. `mj_controller::controller`
   re-exports its modules under their old names.
 - `brokk-mj-worker-staging` (`mj-worker-staging/`, library
   `mj_worker_staging`) puts what a session needs onto its target and keeps it

@@ -2704,3 +2704,6 @@ impl PhoneConfig {
 
 #[cfg(test)]
 mod tests;
+
+/// Release installed by Mjolnir for host setup and Nitro guests.
+pub const MBX_VERSION: &str = "1.30.0";

@@ -657,7 +657,6 @@ version = "2.73.0"
 dependencies = [
  "anyhow",
  "brokk-mj-core",
- "brokk-mj-import",
  "brokk-mj-store",
  "brokk-mj-targets",
  "dirs 6.0.0",
@@ -693,7 +692,6 @@ dependencies = [
  "brokk-mj-client",
  "brokk-mj-core",
  "brokk-mj-transcript",
- "brokk-mj-worker-runtime",
  "chrono",
  "crossterm",
  "linkify",
@@ -1163,7 +1161,6 @@ name = "brokk-mj-targets"
 version = "2.73.0"
 dependencies = [
  "anyhow",
- "brokk-mj-client",
  "brokk-mj-core",
  "chrono",
  "getrandom 0.3.4",
@@ -1246,8 +1243,8 @@ dependencies = [
  "anyhow",
  "brokk-mj-build-id",
  "brokk-mj-checkpoint",
- "brokk-mj-controller",
  "brokk-mj-core",
+ "brokk-mj-targets",
  "brokk-mj-worker-runtime",
  "clap",
  "libc",
@@ -1286,9 +1283,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
- "brokk-mj-build-cache",
  "brokk-mj-checkpoint",
- "brokk-mj-controller",
  "brokk-mj-core",
  "brokk-mj-review",
  "brokk-mj-transcript",
@@ -1330,7 +1325,6 @@ version = "2.73.0"
 dependencies = [
  "anyhow",
  "brokk-mj-accounts",
- "brokk-mj-client",
  "brokk-mj-core",
  "brokk-mj-session-types",
  "brokk-mj-store",

@@ -1789,7 +1789,7 @@ fn upload_legacy_profile_archive(
             destination,
             "send profile content"
         );
-        let token = mj_client::session::new_command_id("profile-stage")?;
+        let token = mj_core::relay::new_command_id("profile-stage")?;
         let work = format!("{PROFILE_CONTENT_STORE}/.stage-{token}");
         let _active = {
             let _store = super::store::lock_gate(

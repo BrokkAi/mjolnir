@@ -536,13 +536,7 @@ impl fmt::Debug for SessionControl {
     }
 }
 
-pub fn new_command_id(prefix: &str) -> Result<String> {
-    ensure!(!prefix.trim().is_empty(), "command ID prefix is required");
-    let mut random = [0_u8; 16];
-    getrandom::fill(&mut random)
-        .map_err(|error| anyhow::anyhow!("generate command ID: {error}"))?;
-    Ok(format!("{prefix}-{}", mj_core::hex::lower_hex(random)))
-}
+pub use mj_core::relay::new_command_id;
 
 /// A stopped session and a manager that resolves its live replacement.
 ///

@@ -214,7 +214,7 @@ pub fn stage_worker_binary_for_upgrade<'a, E: CommandExecutor>(
 ) -> Result<PreparedWorkerBinary<'a, E>> {
     let staging = format!(
         "hel.prepared-{}",
-        mj_client::session::new_command_id("upgrade-stage")?
+        mj_core::relay::new_command_id("upgrade-stage")?
     );
     let root = targets::worker_root(locator, session_id)?;
     let live = LiveStaging::register_and_sweep(executor, locator, session_id, &root, &staging)?;
@@ -340,7 +340,7 @@ pub fn prepare_managed_harness_for_upgrade(
     let worker_root = targets::worker_root(locator, session_id)?;
     let staging_root = format!(
         "{worker_root}/{}",
-        mj_client::session::new_command_id("harness-prepare")?
+        mj_core::relay::new_command_id("harness-prepare")?
     );
     let staging_binary = format!("{staging_root}/hel");
     let staging_config = format!("{staging_root}/launch.json");
