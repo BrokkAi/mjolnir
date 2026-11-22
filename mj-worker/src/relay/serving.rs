@@ -110,6 +110,7 @@ mod tests {
         let drain_mailbox = RelayRequest::DrainMailbox {
             hook_event: "PostToolUse".into(),
             conversation_id: None,
+            initial_num_steps: None,
         };
         assert_eq!(drain_mailbox.minimum_protocol(), 33);
         assert!(!drain_mailbox.supported_at(32));

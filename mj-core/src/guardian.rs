@@ -873,8 +873,7 @@ pub fn ask_person_preface(reason: &str) -> String {
 mod tests {
     use super::*;
     use crate::relay::{
-        RELAY_GUARDIAN_PROJECT_INSTRUCTIONS_PROTOCOL, RELAY_GUARDIAN_REVIEW_PROTOCOL, RelayRequest,
-        RelayVersionRange,
+        RELAY_GUARDIAN_REVIEW_PROTOCOL, RELAY_PROTOCOL_VERSION, RelayRequest, RelayVersionRange,
     };
 
     #[test]
@@ -888,7 +887,7 @@ mod tests {
             .negotiate(RelayVersionRange::CURRENT)
             .unwrap();
         assert_eq!(previous, 82);
-        assert_eq!(current, RELAY_GUARDIAN_PROJECT_INSTRUCTIONS_PROTOCOL);
+        assert_eq!(current, RELAY_PROTOCOL_VERSION);
         for request in [
             RelayRequest::GuardianRequests,
             RelayRequest::CompleteGuardianRequest {
