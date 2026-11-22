@@ -3780,3 +3780,51 @@ fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
         "refused resume must leave the local managed checkout and its untracked files intact"
     );
 }
+
+#[test]
+fn resolve_move_keep_dir_matches_worker_startup_for_subdirs_nested_repos_and_plain_dirs() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let sub = repo.join("packages/app");
+    let nested = repo.join("vendor/nested");
+    let plain = temp.path().join("plain-dir");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(&plain).unwrap();
+
+    for dir in [&repo, &nested] {
+        let out = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init failed in {}", dir.display());
+    }
+
+    let session_id = "move-keep-dir-resolve";
+    let backend = targets::TargetLocator::LocalBare {
+        worker_root: temp
+            .path()
+            .join("workers")
+            .join(session_id)
+            .to_string_lossy()
+            .into_owned(),
+    };
+
+    for (label, cwd) in [
+        ("repo subdirectory", &sub),
+        ("nested repository", &nested),
+        ("plain directory", &plain),
+    ] {
+        let mut env = std::collections::BTreeMap::new();
+        let startup_keep =
+            mj_core::session_keep::install_session_keep_dir(cwd, session_id, &mut env).unwrap();
+        let move_keep =
+            resolve_move_keep_dir(&ProcessExecutor, &backend, session_id, cwd).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&move_keep).unwrap(),
+            startup_keep,
+            "Move keep dir must match worker startup MJ_KEEP_DIR for {label}"
+        );
+    }
+}

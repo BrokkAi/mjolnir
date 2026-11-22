@@ -79,6 +79,30 @@ pub fn install_session_keep_dir(
     Ok(path)
 }
 
+/// Interpret the result of `git -C <cwd> rev-parse --show-toplevel` when
+/// locating a session's keep directory: returns `(top_level, true)` inside a
+/// Git repository, `(cwd, false)` for a plain directory (`exit 128` with
+/// `"not a git repository"`), and an error for any other Git failure.
+pub fn interpret_checkout_top_level(
+    cwd: &Path,
+    status: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<(PathBuf, bool)> {
+    if status == Some(0) {
+        let top = std::str::from_utf8(stdout)
+            .context("decode Git checkout top level")?
+            .trim();
+        ensure!(!top.is_empty(), "Git returned an empty checkout top level");
+        return Ok((PathBuf::from(top), true));
+    }
+    let stderr = String::from_utf8_lossy(stderr);
+    if status == Some(128) && stderr.contains("not a git repository") {
+        return Ok((cwd.to_path_buf(), false));
+    }
+    bail!("resolve checkout {}: {}", cwd.display(), stderr.trim())
+}
+
 fn checkout_top_level(cwd: &Path) -> Result<(PathBuf, bool)> {
     let cwd = std::path::absolute(cwd).with_context(|| format!("resolve {}", cwd.display()))?;
     let output = git(
@@ -86,22 +110,11 @@ fn checkout_top_level(cwd: &Path) -> Result<(PathBuf, bool)> {
         &["rev-parse", "--show-toplevel"],
         "resolve checkout top level",
     )?;
-    if output.status.success() {
-        let top = std::str::from_utf8(&output.stdout)
-            .context("decode Git checkout top level")?
-            .trim();
-        ensure!(!top.is_empty(), "Git returned an empty checkout top level");
-        let top = std::fs::canonicalize(Path::new(top))
-            .with_context(|| format!("resolve checkout top level {top}"))?;
-        return Ok((top, true));
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if output.status.code() == Some(128) && stderr.contains("not a git repository") {
-        let top = std::fs::canonicalize(&cwd)
-            .with_context(|| format!("resolve checkout {}", cwd.display()))?;
-        return Ok((top, false));
-    }
-    bail!("resolve checkout {}: {}", cwd.display(), stderr.trim())
+    let (top, repository) =
+        interpret_checkout_top_level(&cwd, output.status.code(), &output.stdout, &output.stderr)?;
+    let top = std::fs::canonicalize(&top)
+        .with_context(|| format!("resolve checkout top level {}", top.display()))?;
+    Ok((top, repository))
 }
 
 fn create_keep_directory(checkout: &Path, session_id: &str) -> Result<PathBuf> {
