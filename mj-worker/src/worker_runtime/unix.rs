@@ -1645,6 +1645,10 @@ pub async fn run_daemon_owned(
             cpu: Some(cpu_rx),
             preparation: Some(preparation_rx),
             preparation_cancel: Some(preparation_cancel.clone()),
+            antigravity_home: antigravity_task_home
+                .as_ref()
+                .and_then(|home| home.as_ref().ok())
+                .cloned(),
             has_subagent_tools,
             ..Default::default()
         },
@@ -2932,6 +2936,7 @@ pub(super) struct ConnectionRuntime {
     pub(super) cpu: Option<tokio::sync::watch::Receiver<crate::cpu_usage::CpuRead>>,
     pub(super) preparation: Option<watch::Receiver<PreparationSnapshot>>,
     pub(super) preparation_cancel: Option<CancellationToken>,
+    pub(super) antigravity_home: Option<PathBuf>,
     pub(super) has_subagent_tools: bool,
 }
 
@@ -2974,6 +2979,7 @@ pub(super) async fn serve_client_with_memory(
         cpu,
         preparation,
         preparation_cancel,
+        antigravity_home,
         has_subagent_tools,
     } = runtime;
     let relay_root = relay
@@ -3527,7 +3533,12 @@ pub(super) async fn serve_client_with_memory(
             let attach_preparation = preparation
                 .as_ref()
                 .and_then(|receiver| receiver.borrow().state.clone());
-            let mut response = match handle_request(&relay, envelope, attach_preparation).await {
+            let result = if matches!(envelope.request, RelayRequest::AntigravityStop { .. }) {
+                Ok(handle_antigravity_stop(&relay, envelope, antigravity_home.as_deref()).await)
+            } else {
+                handle_request(&relay, envelope, attach_preparation).await
+            };
+            let mut response = match result {
                 Ok(response) => response,
                 Err(error) => {
                     tracing::error!(

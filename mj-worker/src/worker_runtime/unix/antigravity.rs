@@ -1,5 +1,52 @@
 use super::*;
-use crate::acp::antigravity_tasks::AntigravityStateFollower;
+use crate::acp::antigravity_tasks::{AntigravityStateFollower, read_summary_row_digest};
+use std::path::Path;
+
+pub(super) async fn handle_antigravity_stop(
+    relay: &Arc<RelayCell>,
+    envelope: RelayRequestEnvelope,
+    home: Option<&Path>,
+) -> RelayResponseEnvelope {
+    let RelayRequest::AntigravityStop {
+        conversation_id,
+        fully_idle,
+        ..
+    } = &envelope.request
+    else {
+        unreachable!("handle_antigravity_stop only serves Antigravity Stop hooks");
+    };
+
+    let baseline = if *fully_idle != Some(true)
+        && let (Some(home), Some(id)) = (home, conversation_id.as_deref())
+        && relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .matches_antigravity_conversation(Some(id))
+    {
+        let home = home.to_owned();
+        let id = id.to_owned();
+        // Antigravity waits for the hook before publishing its deferred Idle
+        // transition. Read the committed row now, even if the monitor missed it.
+        match mj_core::runtime::spawn_blocking(move || read_summary_row_digest(&home, &id))
+            .await
+            .context("sample Antigravity Stop baseline")
+            .and_then(|result| result)
+        {
+            Ok(digest) => Some(digest),
+            Err(error) => {
+                tracing::warn!(%error, "could not read Antigravity Stop baseline");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    relay
+        .lock()
+        .expect("relay state lock poisoned")
+        .handle_with_antigravity_stop_baseline(envelope, baseline)
+}
 
 pub(crate) const ANTIGRAVITY_TASK_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(500);

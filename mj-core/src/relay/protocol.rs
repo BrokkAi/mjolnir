@@ -371,6 +371,8 @@ pub enum RelayRequest {
         hook_event: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         conversation_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initial_num_steps: Option<i64>,
     },
     /// Confirm that a hook wrote and flushed the leased events to its output.
     AckMailbox {

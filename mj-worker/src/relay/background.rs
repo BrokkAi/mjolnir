@@ -11,14 +11,24 @@ pub(super) struct AntigravityWorkState {
     summary_not_fully_idle: bool,
     summary_has_running_subagents: bool,
     summary_busy_started_at_ms: Option<i64>,
-    hook_not_fully_idle_gen: Option<u64>,
-    hook_not_fully_idle_started_at_ms: Option<i64>,
+    last_summary_row_digest: Option<[u8; 32]>,
+    last_pre_invocation_steps: Option<i64>,
+    pending_stop_work: Option<PendingStopWork>,
     hook_idle_gen: Option<u64>,
     warned_missing_fully_idle: bool,
     harness_turn_saw_running: bool,
     pending_turn_settle: Option<String>,
     running_tasks: Vec<BackgroundCommand>,
     task_first_seen_ms: BTreeMap<i64, i64>,
+}
+
+struct PendingStopWork {
+    started_at_ms: i64,
+    /// Row already on disk at Stop time, if any.
+    baseline_digest: Option<[u8; 32]>,
+    /// NO_TOOL_CALL appends a step after PreInvocation's initial step count.
+    min_step_count: Option<i64>,
+    saw_busy: bool,
 }
 
 impl AntigravityWorkState {
@@ -28,12 +38,17 @@ impl AntigravityWorkState {
             return;
         }
         let summary_fresh = self.hook_idle_gen != Some(self.summary_commit_gen);
+        let summary_running = self
+            .summary_status
+            .is_some_and(AntigravityRunStatus::is_active);
         let summary_reports_bg = summary_fresh
-            && ((self.summary_not_fully_idle && !turn_in_flight)
+            && (((self.summary_not_fully_idle || summary_running) && !turn_in_flight)
                 || self.summary_has_running_subagents);
-        if self.hook_not_fully_idle_gen.is_some() || summary_reports_bg {
+        if self.pending_stop_work.is_some() || summary_reports_bg {
             let (id, command) = if self.summary_has_running_subagents {
                 ("subagent", "Antigravity subagent running")
+            } else if summary_fresh && summary_running && !turn_in_flight {
+                ("turn", "Antigravity turn running")
             } else {
                 ("pending", "Antigravity background task")
             };
@@ -41,7 +56,9 @@ impl AntigravityWorkState {
                 id: background_task_id("antigravity", id),
                 command: command.into(),
                 started_at_ms: self
-                    .hook_not_fully_idle_started_at_ms
+                    .pending_stop_work
+                    .as_ref()
+                    .map(|pending| pending.started_at_ms)
                     .or(self.summary_busy_started_at_ms)
                     .expect("background evidence has a start time"),
                 can_stop: false,
@@ -645,7 +662,7 @@ impl DurableRelay {
         self.persist_activity_transition()
     }
 
-    fn matches_antigravity_conversation(&self, conversation_id: Option<&str>) -> bool {
+    pub(crate) fn matches_antigravity_conversation(&self, conversation_id: Option<&str>) -> bool {
         conversation_id
             .filter(|id| !id.is_empty())
             .is_some_and(|id| self.snapshot.native_session_id.as_deref() == Some(id))
@@ -665,6 +682,7 @@ impl DurableRelay {
     pub(super) fn antigravity_pre_invocation(
         &mut self,
         conversation_id: Option<&str>,
+        initial_num_steps: Option<i64>,
     ) -> Result<()> {
         if !self.matches_antigravity_conversation(conversation_id) {
             return Ok(());
@@ -676,6 +694,9 @@ impl DurableRelay {
             self.background_work_known = Some(false);
         }
         self.antigravity_work.hook_idle_gen = None;
+        if initial_num_steps.is_some() {
+            self.antigravity_work.last_pre_invocation_steps = initial_num_steps;
+        }
         if self.can_open_harness_turn() {
             self.antigravity_work.harness_turn_saw_running = false;
             self.antigravity_work.pending_turn_settle = None;
@@ -689,6 +710,7 @@ impl DurableRelay {
         conversation_id: Option<&str>,
         fully_idle: Option<bool>,
         termination_reason: Option<&str>,
+        observed_baseline_digest: Option<Option<[u8; 32]>>,
     ) -> Result<()> {
         if (self.background_work != BackgroundWorkPolicy::AntigravityTasks
             && self.harness_turns != HarnessTurnPolicy::Antigravity)
@@ -705,13 +727,24 @@ impl DurableRelay {
             self.background_work_known = Some(false);
         }
         if fully_idle == Some(true) {
-            work.hook_not_fully_idle_gen = None;
-            work.hook_not_fully_idle_started_at_ms = None;
+            work.pending_stop_work = None;
             work.hook_idle_gen = Some(work.summary_commit_gen);
         } else {
-            work.hook_not_fully_idle_gen = Some(work.summary_commit_gen);
-            work.hook_not_fully_idle_started_at_ms
-                .get_or_insert_with(epoch_millis);
+            let min_step_count = if termination_reason == Some("NO_TOOL_CALL") {
+                work.last_pre_invocation_steps.map(|n| n.saturating_add(1))
+            } else {
+                None
+            };
+            let started_at_ms = work
+                .pending_stop_work
+                .as_ref()
+                .map_or_else(epoch_millis, |pending| pending.started_at_ms);
+            work.pending_stop_work = Some(PendingStopWork {
+                started_at_ms,
+                baseline_digest: observed_baseline_digest.unwrap_or(work.last_summary_row_digest),
+                min_step_count,
+                saw_busy: false,
+            });
             work.hook_idle_gen = None;
             if fully_idle.is_none() && !work.warned_missing_fully_idle {
                 tracing::warn!(
@@ -756,6 +789,7 @@ impl DurableRelay {
             return Ok(false);
         }
         work.summary_commit_gen += u64::from(snapshot.summary_commit_changed);
+        work.last_summary_row_digest = snapshot.summary_row_digest;
         let indices: BTreeSet<_> = snapshot
             .running_tasks
             .iter()
@@ -796,7 +830,7 @@ impl DurableRelay {
             });
         }
 
-        if let Some(summary) = snapshot.summary {
+        if let Some(summary) = &snapshot.summary {
             work.summary_status = Some(summary.status);
             work.summary_not_fully_idle = summary.not_fully_idle;
             work.summary_has_running_subagents = summary.has_running_subagents;
@@ -813,18 +847,6 @@ impl DurableRelay {
             {
                 work.hook_idle_gen = None;
             }
-            if work
-                .hook_not_fully_idle_gen
-                .is_some_and(|generation| work.summary_commit_gen > generation)
-                && work.summary_status == Some(AntigravityRunStatus::Idle)
-                && !work.summary_not_fully_idle
-                && work.running_tasks.is_empty()
-                && snapshot.conversation_db_present
-            {
-                work.hook_not_fully_idle_gen = None;
-                work.hook_not_fully_idle_started_at_ms = None;
-            }
-
             if self.snapshot.active_prompt.is_none()
                 && self.snapshot.autonomous_harness_turn().is_some()
             {
@@ -836,6 +858,27 @@ impl DurableRelay {
                 {
                     work.pending_turn_settle = Some("end_turn".into());
                 }
+            }
+        }
+        if let Some(pending) = &mut work.pending_stop_work {
+            if !work.running_tasks.is_empty()
+                || snapshot.summary.as_ref().is_some_and(|summary| {
+                    summary.not_fully_idle
+                        || summary.status.is_active()
+                        || summary.has_running_subagents
+                })
+            {
+                pending.saw_busy = true;
+            } else if let Some(summary) = &snapshot.summary
+                && snapshot.conversation_db_present
+                && summary.status == AntigravityRunStatus::Idle
+                && (pending.saw_busy
+                    || (snapshot.summary_row_digest != pending.baseline_digest
+                        && pending
+                            .min_step_count
+                            .is_none_or(|min| summary.step_count >= min)))
+            {
+                work.pending_stop_work = None;
             }
         }
         self.note_background_work()?;

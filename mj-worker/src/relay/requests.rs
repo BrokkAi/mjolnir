@@ -2,9 +2,19 @@ use super::*;
 
 impl DurableRelay {
     pub fn handle(&mut self, envelope: RelayRequestEnvelope) -> RelayResponseEnvelope {
+        self.handle_with_antigravity_stop_baseline(envelope, None)
+    }
+
+    /// The outer option says whether the live worker read SQLite. A completed
+    /// read can report that the row did not exist.
+    pub(crate) fn handle_with_antigravity_stop_baseline(
+        &mut self,
+        envelope: RelayRequestEnvelope,
+        observed_baseline_digest: Option<Option<[u8; 32]>>,
+    ) -> RelayResponseEnvelope {
         let request_id = envelope.request_id.clone();
         let body = self
-            .handle_inner(&envelope)
+            .handle_inner(&envelope, observed_baseline_digest)
             .unwrap_or_else(|error| RelayResponseBody::Error {
                 error: RelayProtocolError {
                     code: RelayErrorCode::Internal,
@@ -80,7 +90,11 @@ impl DurableRelay {
         mj_core::relay::protocol::relay_protocol_rejection(envelope)
     }
 
-    fn handle_inner(&mut self, envelope: &RelayRequestEnvelope) -> Result<RelayResponseBody> {
+    fn handle_inner(
+        &mut self,
+        envelope: &RelayRequestEnvelope,
+        observed_baseline_digest: Option<Option<[u8; 32]>>,
+    ) -> Result<RelayResponseBody> {
         if let Some(body) = self.envelope_rejection(envelope) {
             return Ok(body);
         }
@@ -96,6 +110,7 @@ impl DurableRelay {
                     conversation_id.as_deref(),
                     *fully_idle,
                     termination_reason.as_deref(),
+                    observed_baseline_digest,
                 )?;
                 RelayResponsePayload::AntigravityStopObserved
             }
@@ -280,7 +295,12 @@ impl DurableRelay {
             RelayRequest::DrainMailbox {
                 hook_event,
                 conversation_id,
-            } => self.drain_mailbox(hook_event, conversation_id.as_deref())?,
+                initial_num_steps,
+            } => self.drain_mailbox_with_initial_steps(
+                hook_event,
+                conversation_id.as_deref(),
+                *initial_num_steps,
+            )?,
             RelayRequest::AckMailbox { lease_id } => self.ack_mailbox(lease_id)?,
             RelayRequest::ReserveIdle { command_id } => {
                 let already_accepted = self.snapshot.handled_commands.contains_key(command_id);

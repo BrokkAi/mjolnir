@@ -2761,6 +2761,15 @@ impl DurableRelay {
         hook_event: &str,
         conversation_id: Option<&str>,
     ) -> Result<RelayResponsePayload> {
+        self.drain_mailbox_with_initial_steps(hook_event, conversation_id, None)
+    }
+
+    pub(super) fn drain_mailbox_with_initial_steps(
+        &mut self,
+        hook_event: &str,
+        conversation_id: Option<&str>,
+        initial_num_steps: Option<i64>,
+    ) -> Result<RelayResponsePayload> {
         anyhow::ensure!(
             matches!(hook_event, "PostToolUse" | "PostToolBatch"),
             "unsupported mailbox hook event"
@@ -2778,7 +2787,7 @@ impl DurableRelay {
             });
         }
         if self.harness_turns == HarnessTurnPolicy::Antigravity && hook_event == "PostToolBatch" {
-            self.antigravity_pre_invocation(conversation_id)?;
+            self.antigravity_pre_invocation(conversation_id, initial_num_steps)?;
         }
         if hook_event == "PostToolUse"
             && self.mailbox_delivery_mode

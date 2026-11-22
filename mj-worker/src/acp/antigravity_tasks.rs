@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -49,13 +50,14 @@ pub struct AntigravitySnapshot {
     pub summary: Option<AntigravitySummarySnapshot>,
     pub conversation_db_present: bool,
     pub summary_commit_changed: bool,
+    pub summary_row_digest: Option<[u8; 32]>,
     pub running_tasks: Vec<AntigravityBackgroundTask>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct AntigravityRefreshCursor {
     data_version: Option<i64>,
-    summary_row: Option<SummaryRow>,
+    summary: Option<(AntigravitySummarySnapshot, [u8; 32])>,
 }
 
 #[derive(Debug)]
@@ -64,11 +66,9 @@ pub struct AntigravityStateFollower {
     conversation_id: String,
     summary: Option<Connection>,
     summary_identity: Option<(u64, u64)>,
-    data_version: Option<i64>,
-    summary_row: Option<SummaryRow>,
+    cursor: AntigravityRefreshCursor,
 }
 
-#[derive(Debug, Clone, PartialEq)]
 struct SummaryRow {
     status: String,
     not_fully_idle: Value,
@@ -79,6 +79,47 @@ struct SummaryRow {
 }
 
 impl SummaryRow {
+    fn digest(&self) -> [u8; 32] {
+        fn write_bytes(hash: &mut Sha256, bytes: &[u8]) {
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+
+        fn write_value(hash: &mut Sha256, value: &Value) {
+            match value {
+                Value::Null => hash.update([0]),
+                Value::Integer(n) => {
+                    hash.update([1]);
+                    hash.update(n.to_le_bytes());
+                }
+                Value::Real(n) => {
+                    hash.update([2]);
+                    hash.update(n.to_le_bytes());
+                }
+                Value::Text(s) => {
+                    hash.update([3]);
+                    write_bytes(hash, s.as_bytes());
+                }
+                Value::Blob(bytes) => {
+                    hash.update([4]);
+                    write_bytes(hash, bytes);
+                }
+            }
+        }
+
+        let mut hash = Sha256::new();
+        write_bytes(&mut hash, self.status.as_bytes());
+        write_value(&mut hash, &self.not_fully_idle);
+        write_value(&mut hash, &self.killed);
+        hash.update(self.step_count.to_le_bytes());
+        write_value(&mut hash, &self.last_modified_time);
+        hash.update([u8::from(self.raw_summary.is_some())]);
+        if let Some(bytes) = &self.raw_summary {
+            write_bytes(&mut hash, bytes);
+        }
+        hash.finalize().into()
+    }
+
     fn snapshot(&self) -> Result<AntigravitySummarySnapshot> {
         let mut summary = AntigravitySummarySnapshot {
             status: status_from_text(&self.status),
@@ -102,8 +143,7 @@ impl AntigravityStateFollower {
             conversation_id,
             summary: None,
             summary_identity: None,
-            data_version: None,
-            summary_row: None,
+            cursor: AntigravityRefreshCursor::default(),
         }
     }
     pub fn home(&self) -> &Path {
@@ -123,13 +163,7 @@ impl AntigravityStateFollower {
     /// cursor. Call [`Self::commit_refresh`] only after the relay accepts the
     /// snapshot so a rejected concurrent scan cannot drop a real commit.
     pub fn refresh_pending(&mut self) -> Result<(AntigravitySnapshot, AntigravityRefreshCursor)> {
-        ensure!(
-            !self.conversation_id.is_empty()
-                && !self.conversation_id.contains('/')
-                && !self.conversation_id.contains('\\')
-                && !self.conversation_id.contains(".."),
-            "invalid Antigravity conversation ID"
-        );
+        validate_conversation_id(&self.conversation_id)?;
         let dir = self.home.join("antigravity-cli");
         // Do not consume a summary commit if the steps read fails and the
         // relay cannot reconcile the resulting snapshot.
@@ -144,7 +178,7 @@ impl AntigravityStateFollower {
         } else {
             (false, Vec::new())
         };
-        let summary_path = dir.join("conversation_summaries.db");
+        let summary_path = summary_db_path(&self.home);
         if summary_path
             .try_exists()
             .context("locate Antigravity summary database")?
@@ -157,75 +191,41 @@ impl AntigravityStateFollower {
             if self.summary_identity != Some(identity) || self.summary.is_none() {
                 self.summary = Some(open_readonly(&summary_path)?);
                 self.summary_identity = Some(identity);
-                self.data_version = None;
+                self.cursor.data_version = None;
             }
         } else {
             self.summary = None;
             self.summary_identity = None;
         }
-        let (summary, summary_commit_changed, cursor) = if let Some(conn) = &self.summary {
+        let cursor = if let Some(conn) = &self.summary {
             let version: i64 = conn
                 .query_row("PRAGMA data_version", [], |r| r.get(0))
                 .context("read Antigravity summary data_version")?;
-            if self.data_version == Some(version) {
-                (
-                    self.summary_row
-                        .as_ref()
-                        .map(SummaryRow::snapshot)
-                        .transpose()?,
-                    false,
-                    AntigravityRefreshCursor {
-                        data_version: self.data_version,
-                        summary_row: self.summary_row.clone(),
-                    },
-                )
+            if self.cursor.data_version == Some(version) {
+                self.cursor.clone()
             } else {
-                // data_version covers the entire database. A child conversation
-                // can commit without changing any field in the parent's row.
-                let row = conn
-                    .query_row(
-                        "SELECT status, not_fully_idle, killed, step_count, last_modified_time, raw_summary
-                         FROM conversation_summaries WHERE conversation_id = ?1",
-                        [&self.conversation_id],
-                        |r| {
-                            Ok(SummaryRow {
-                                status: r.get(0)?,
-                                not_fully_idle: r.get(1)?,
-                                killed: r.get(2)?,
-                                step_count: r.get(3)?,
-                                last_modified_time: r.get(4)?,
-                                raw_summary: r.get(5)?,
-                            })
-                        },
-                    )
-                    .optional()
-                    .context("query Antigravity conversation_summaries")?;
-                let summary = row.as_ref().map(SummaryRow::snapshot).transpose()?;
-                let changed = row.is_some() && row != self.summary_row;
-                (
+                let summary = read_summary_row(conn, &self.conversation_id)?
+                    .map(|row| Ok::<_, anyhow::Error>((row.snapshot()?, row.digest())))
+                    .transpose()?;
+                AntigravityRefreshCursor {
+                    data_version: Some(version),
                     summary,
-                    changed,
-                    AntigravityRefreshCursor {
-                        data_version: Some(version),
-                        summary_row: row,
-                    },
-                )
+                }
             }
         } else {
-            (
-                None,
-                false,
-                AntigravityRefreshCursor {
-                    data_version: None,
-                    summary_row: None,
-                },
-            )
+            AntigravityRefreshCursor::default()
         };
+        // data_version covers the entire database. A child conversation
+        // can commit without changing any field in the parent's row.
+        let summary_row_digest = cursor.summary.as_ref().map(|(_, digest)| *digest);
+        let summary_commit_changed = summary_row_digest.is_some()
+            && summary_row_digest != self.cursor.summary.as_ref().map(|(_, digest)| *digest);
         Ok((
             AntigravitySnapshot {
-                summary,
+                summary: cursor.summary.as_ref().map(|(summary, _)| summary.clone()),
                 conversation_db_present,
                 summary_commit_changed,
+                summary_row_digest,
                 running_tasks,
             },
             cursor,
@@ -233,9 +233,59 @@ impl AntigravityStateFollower {
     }
 
     pub fn commit_refresh(&mut self, cursor: AntigravityRefreshCursor) {
-        self.data_version = cursor.data_version;
-        self.summary_row = cursor.summary_row;
+        self.cursor = cursor;
     }
+}
+
+fn validate_conversation_id(conversation_id: &str) -> Result<()> {
+    ensure!(
+        !conversation_id.is_empty()
+            && !conversation_id.contains('/')
+            && !conversation_id.contains('\\')
+            && !conversation_id.contains(".."),
+        "invalid Antigravity conversation ID"
+    );
+    Ok(())
+}
+
+fn summary_db_path(home: &Path) -> PathBuf {
+    home.join("antigravity-cli")
+        .join("conversation_summaries.db")
+}
+
+/// Sample the committed row while Antigravity is waiting for its Stop hook.
+#[cfg(unix)]
+pub fn read_summary_row_digest(home: &Path, conversation_id: &str) -> Result<Option<[u8; 32]>> {
+    validate_conversation_id(conversation_id)?;
+    let path = summary_db_path(home);
+    if !path
+        .try_exists()
+        .context("locate Antigravity summary database")?
+    {
+        return Ok(None);
+    }
+    let conn = open_readonly(&path)?;
+    Ok(read_summary_row(&conn, conversation_id)?.map(|row| row.digest()))
+}
+
+fn read_summary_row(conn: &Connection, conversation_id: &str) -> Result<Option<SummaryRow>> {
+    conn.query_row(
+        "SELECT status, not_fully_idle, killed, step_count, last_modified_time, raw_summary
+         FROM conversation_summaries WHERE conversation_id = ?1",
+        [conversation_id],
+        |r| {
+            Ok(SummaryRow {
+                status: r.get(0)?,
+                not_fully_idle: r.get(1)?,
+                killed: r.get(2)?,
+                step_count: r.get(3)?,
+                last_modified_time: r.get(4)?,
+                raw_summary: r.get(5)?,
+            })
+        },
+    )
+    .optional()
+    .context("query Antigravity conversation_summaries")
 }
 
 fn open_readonly(path: &Path) -> Result<Connection> {
@@ -501,7 +551,7 @@ mod tests {
         assert_eq!(s.background_task_count, 7);
         assert!(s.has_running_subagents);
         assert!(!follower.refresh().unwrap().summary_commit_changed);
-        let version = follower.data_version.unwrap();
+        let version = follower.cursor.data_version.unwrap();
         writer
             .execute(
                 "INSERT INTO conversation_summaries
@@ -511,7 +561,7 @@ mod tests {
             )
             .unwrap();
         let child_commit = follower.refresh().unwrap();
-        assert_ne!(follower.data_version.unwrap(), version);
+        assert_ne!(follower.cursor.data_version.unwrap(), version);
         assert!(!child_commit.summary_commit_changed);
 
         writer

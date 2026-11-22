@@ -8151,6 +8151,7 @@ fn request_mailbox_drain_for_test(
         RelayRequest::DrainMailbox {
             hook_event: "PostToolBatch".into(),
             conversation_id: None,
+            initial_num_steps: None,
         },
     ));
     let RelayResponseBody::Ok {
@@ -11175,7 +11176,10 @@ fn restored_schema_15_seed_preserves_load_before_replace_and_used_or_unknown_evi
         })
         .unwrap();
     assert_eq!(
-        relay.operational_state().replaced_unused_native_session_id.as_deref(),
+        relay
+            .operational_state()
+            .replaced_unused_native_session_id
+            .as_deref(),
         Some("archived-unused")
     );
     let fresh_evidence = relay.snapshot.native_use_evidence.as_ref().unwrap();

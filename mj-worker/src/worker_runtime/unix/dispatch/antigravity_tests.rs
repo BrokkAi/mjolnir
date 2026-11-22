@@ -56,6 +56,15 @@ impl Databases {
         ).unwrap();
     }
 
+    fn set_step_count(&self, step_count: i64) {
+        self.summary
+            .execute(
+                "UPDATE conversation_summaries SET step_count=?1 WHERE conversation_id=?2",
+                params![step_count, NATIVE],
+            )
+            .unwrap();
+    }
+
     fn task(&self, index: i64) {
         // Native TaskDetails protobuf fields 1 (id) and 7 (title).
         let details = b"\x0a\x04task\x3a\x10Build validation";
@@ -144,13 +153,67 @@ fn stop(relay: &mut DurableRelay, id: Option<&str>, fully_idle: Option<bool>, re
     ));
 }
 
+async fn stop_over_socket(home: &Path, relay: &Arc<RelayCell>, reason: &str) {
+    let (server, client) = UnixStream::pair().unwrap();
+    let (wake, _wakes) = mpsc::channel(1);
+    let (fatal, _errors) = mpsc::channel(1);
+    let task = mj_core::runtime::spawn(serve_client_with_memory(
+        server,
+        relay.clone(),
+        wake,
+        Err("fixture has no credentials".into()),
+        ConnectionRuntime {
+            antigravity_home: Some(home.to_owned()),
+            ..Default::default()
+        },
+        fatal,
+    ));
+    let mut client = BufReader::new(client);
+    let mut bytes = serde_json::to_vec(&RelayRequestEnvelope {
+        request_id: "stop-hook".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::AntigravityStop {
+            conversation_id: Some(NATIVE.into()),
+            fully_idle: Some(false),
+            termination_reason: Some(reason.into()),
+        },
+    })
+    .unwrap();
+    bytes.push(b'\n');
+    client.write_all(&bytes).await.unwrap();
+
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), client.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+    assert!(matches!(
+        response.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::AntigravityStopObserved,
+        },
+    ));
+    drop(client);
+    task.await.unwrap().unwrap();
+}
+
 fn pre_invocation(relay: &mut DurableRelay, id: Option<&str>) {
+    pre_invocation_with_steps(relay, id, None);
+}
+
+fn pre_invocation_with_steps(
+    relay: &mut DurableRelay,
+    id: Option<&str>,
+    initial_num_steps: Option<i64>,
+) {
     assert!(matches!(
         request(
             relay,
             RelayRequest::DrainMailbox {
                 hook_event: "PostToolBatch".into(),
                 conversation_id: id.map(str::to_owned),
+                initial_num_steps,
             }
         ),
         RelayResponsePayload::MailboxDrained { .. },
@@ -469,15 +532,15 @@ async fn antigravity_stale_scan_cannot_clear_a_concurrent_stop() {
     databases
         .summary
         .execute(
-            "UPDATE conversation_summaries SET status=?1,not_fully_idle=0,step_count=step_count+1 WHERE conversation_id=?2",
+            "UPDATE conversation_summaries SET status=?1,not_fully_idle=0,step_count=4 WHERE conversation_id=?2",
             params![IDLE, NATIVE],
         )
         .unwrap();
     let (stale_snapshot, _discarded_cursor) = follower.refresh_pending().unwrap();
     assert!(stale_snapshot.summary_commit_changed);
+    stop_over_socket(temp.path(), &relay, "NO_TOOL_CALL").await;
     {
         let mut state = relay.lock().unwrap();
-        stop(&mut state, Some(NATIVE), Some(false), "NO_TOOL_CALL");
         assert!(state.settle_pending_antigravity_harness_turn().unwrap());
         assert!(
             !state
@@ -487,14 +550,120 @@ async fn antigravity_stale_scan_cannot_clear_a_concurrent_stop() {
         assert!(!state.operational_state().background_commands.is_empty());
         assert!(!reserve_idle(&mut state));
     }
-    // Retry with no additional DB write: because the rejected scan did not
-    // commit its cursor, the retry still observes the uncommitted idle commit.
+    // The follower sees the previously unseen commit again. It was already
+    // on disk when Stop ran and cannot clear it.
     let epoch = relay.lock().unwrap().antigravity_hook_epoch();
     let (fresh, fresh_cursor) = follower.refresh_pending().unwrap();
     assert!(fresh.summary_commit_changed);
     let mut state = relay.lock().unwrap();
     assert!(state.antigravity_snapshot_changed(fresh, epoch).unwrap());
     follower.commit_refresh(fresh_cursor);
+    assert!(!state.operational_state().background_commands.is_empty());
+    assert!(!reserve_idle(&mut state));
+
+    databases.set_step_count(6);
+    assert!(
+        state
+            .antigravity_snapshot_changed(follower.refresh().unwrap(), epoch)
+            .unwrap()
+    );
+    assert!(state.operational_state().background_commands.is_empty());
+    assert!(reserve_idle(&mut state));
+}
+
+#[tokio::test]
+async fn antigravity_previous_turn_idle_flush_cannot_clear_stop() {
+    let temp = tempfile::tempdir().unwrap();
+    let databases = Databases::create(temp.path());
+    let relay = antigravity_relay(&temp.path().join("relay"));
+    let mut monitor = attach_monitor(temp.path(), &relay).await;
+    pre_invocation_with_steps(&mut relay.lock().unwrap(), Some(NATIVE), Some(5));
+
+    stop_over_socket(temp.path(), &relay, "NO_TOOL_CALL").await;
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .settle_pending_antigravity_harness_turn()
+            .unwrap()
+    );
+    databases.set_step_count(4);
+    monitor.refresh(&relay, true).await.unwrap();
+    {
+        let mut state = relay.lock().unwrap();
+        assert!(!state.operational_state().background_commands.is_empty());
+        assert!(!reserve_idle(&mut state));
+    }
+
+    databases.set_step_count(6);
+    monitor.refresh(&relay, true).await.unwrap();
+    let mut state = relay.lock().unwrap();
+    assert!(state.operational_state().background_commands.is_empty());
+    assert!(reserve_idle(&mut state));
+}
+
+#[tokio::test]
+async fn antigravity_hookless_running_summary_refuses_idle_reservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let databases = Databases::create(temp.path());
+    let relay = antigravity_relay(&temp.path().join("relay"));
+    let mut monitor = attach_monitor(temp.path(), &relay).await;
+    {
+        let mut state = relay.lock().unwrap();
+        request(
+            &mut state,
+            RelayRequest::Submit {
+                command_id: "first-prompt".into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from(
+                        "Hello",
+                    )],
+                },
+            },
+        );
+        let commands = state.claim_pending_commands(true).unwrap();
+        assert_eq!(commands[0].command_id, "first-prompt");
+        state
+            .record_command_completed(
+                "first-prompt",
+                RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                    diagnostic: None,
+                    usage: None,
+                    work_facts: None,
+                },
+            )
+            .unwrap();
+    }
+    monitor.refresh(&relay, true).await.unwrap();
+    {
+        let state = relay.lock().unwrap();
+        assert!(
+            state
+                .operational_state()
+                .safe_to_replace(HarnessKind::Antigravity)
+        );
+    }
+
+    for status in [
+        RUNNING,
+        "CASCADE_RUN_STATUS_CANCELING",
+        "CASCADE_RUN_STATUS_BUSY",
+    ] {
+        databases.set_summary(status, false);
+        monitor.refresh(&relay, true).await.unwrap();
+        let mut state = relay.lock().unwrap();
+        let snapshot = state.operational_state();
+        assert_eq!(
+            snapshot.background_commands[0].command,
+            "Antigravity turn running"
+        );
+        assert!(!reserve_idle(&mut state));
+    }
+
+    databases.set_summary(IDLE, false);
+    monitor.refresh(&relay, true).await.unwrap();
+    let mut state = relay.lock().unwrap();
     assert!(state.operational_state().background_commands.is_empty());
     assert!(reserve_idle(&mut state));
 }

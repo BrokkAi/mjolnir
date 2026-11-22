@@ -389,6 +389,7 @@ fn a_lost_drain_response_keeps_mailbox_events_for_a_restarted_worker() {
         request: RelayRequest::DrainMailbox {
             hook_event: "PostToolBatch".into(),
             conversation_id: None,
+            initial_num_steps: None,
         },
     });
     assert!(matches!(

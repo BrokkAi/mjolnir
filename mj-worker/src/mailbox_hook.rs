@@ -99,12 +99,15 @@ fn run_hook(
         };
     }
 
-    let conversation_id = match format {
-        HookOutputFormat::Standard => None,
-        HookOutputFormat::Antigravity => hook_input.conversation_id.as_deref(),
+    let (conversation_id, initial_num_steps) = match format {
+        HookOutputFormat::Standard => (None, None),
+        HookOutputFormat::Antigravity => (
+            hook_input.conversation_id.as_deref(),
+            hook_input.initial_num_steps,
+        ),
     };
 
-    match drain(socket, hook_event, conversation_id) {
+    match drain(socket, hook_event, conversation_id, initial_num_steps) {
         Ok((Some(text), count, Some(lease_id))) if count > 0 => {
             let output = match format {
                 HookOutputFormat::Standard => json!({
@@ -145,6 +148,8 @@ struct HookInput {
     agent_id: Option<String>,
     #[serde(default, rename = "conversationId")]
     conversation_id: Option<String>,
+    #[serde(default, rename = "initialNumSteps")]
+    initial_num_steps: Option<i64>,
     #[serde(default, rename = "fullyIdle")]
     fully_idle: Option<bool>,
     #[serde(default, rename = "terminationReason")]
@@ -162,6 +167,7 @@ fn drain(
     socket: &Path,
     hook_event: &str,
     conversation_id: Option<&str>,
+    initial_num_steps: Option<i64>,
 ) -> Result<(Option<String>, usize, Option<String>)> {
     anyhow::ensure!(
         matches!(hook_event, "PostToolUse" | "PostToolBatch"),
@@ -172,6 +178,7 @@ fn drain(
         mj_core::relay::RelayRequest::DrainMailbox {
             hook_event: hook_event.to_owned(),
             conversation_id: conversation_id.map(str::to_owned),
+            initial_num_steps,
         },
     )? {
         mj_core::relay::RelayResponsePayload::MailboxDrained {
