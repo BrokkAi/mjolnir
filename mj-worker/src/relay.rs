@@ -330,6 +330,7 @@ pub struct DurableRelay {
     foreground_tools: mj_core::activity::ToolsInFlight,
     turn_context: mj_transcript::turn_context::TurnContext,
     verdict_harness: Option<mj_core::config::HarnessKind>,
+    pub(crate) jev_disabled: bool,
     #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
     pub(crate) authentication_login_path: Option<PathBuf>,
     #[cfg_attr(not(unix), allow(dead_code))] // Read only by the Unix worker control runtime.
@@ -1060,6 +1061,7 @@ impl DurableRelay {
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
             turn_context: Default::default(),
             verdict_harness: None,
+            jev_disabled: mj_core::jev::disabled_by_environment(),
             authentication_login_path: None,
             login_identity: Default::default(),
             replied_verdict: Default::default(),
@@ -1720,6 +1722,7 @@ impl DurableRelay {
         if self.snapshot.managed_subagent != managed {
             self.record_observation(RelayObservation::ManagedSubagentConfigured { managed })?;
         }
+        self.settle_local_quota()?;
         self.suppress_child_assessment()
     }
 
