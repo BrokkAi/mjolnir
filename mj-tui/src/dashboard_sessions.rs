@@ -309,7 +309,13 @@ impl DashboardState {
             || self.sessions_text.matches.contains_key(&session.id)
     }
 
-    /// Matching live sessions outside the workspace shown by the Sessions pane.
+    /// The workspace rows Open can focus, shared with the cross-workspace count.
+    pub(crate) fn is_openable_workspace_session(&self, session: &SessionRecord) -> bool {
+        self.is_listed_top_level_session(session, &session.workspace_id)
+            && self.transition_kind(&session.id).is_none()
+    }
+
+    /// Matching workspace sessions not already shown by the Sessions pane.
     pub(crate) fn sessions_other_workspace_matches(&self) -> usize {
         let Some(filter) = self.sessions_filter.as_ref() else {
             return 0;
@@ -324,8 +330,8 @@ impl DashboardState {
             .values()
             .filter(|session| {
                 Some(session.workspace_id.as_str()) != self.active_workspace_id()
-                    && session.state.is_active()
-                    && self.is_listed_top_level_session(session, &session.workspace_id)
+                    && Some(session.id.as_str()) != self.selected_session_id()
+                    && self.is_openable_workspace_session(session)
                     && self.session_matches_filter(session, filter)
             })
             .count()

@@ -322,11 +322,19 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let count = dashboard.sessions_other_workspace_matches();
+    let label = format!(" {count} more ");
+    let width = Line::raw(&label).width() as u16;
+    // Reserve the search handoff before Create and Open so it also fits in
+    // the minimized sidebar, where the filter input itself is hidden.
+    let more_area = (count > 0 && area.width >= width)
+        .then(|| Rect::new(area.right() - width, area.y, width, 1));
+    let buttons_right = more_area.map_or(area.right(), |rect| rect.x.saturating_sub(1));
     let commands = session_actions(dashboard);
     let mut x = area.x;
     for (id, label) in commands {
         let width = Line::raw(label).width() as u16 + 2;
-        if x.saturating_add(width) > area.right() {
+        if x.saturating_add(width) > buttons_right {
             break;
         }
         let rect = Rect::new(x, area.y, width, 1);
@@ -351,14 +359,7 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
         x = x.saturating_add(width + 1);
     }
     drop(form);
-    let count = dashboard.sessions_other_workspace_matches();
-    let label = format!(" {count} more ");
-    let width = Line::raw(&label).width() as u16;
-    // Reserve space before laying out the field, so the button remains visible
-    // even when the pane is too narrow for the filter input.
-    let more = count > 0 && area.right().saturating_sub(x) >= width;
-    let input_row = if more {
-        let rect = Rect::new(area.right() - width, area.y, width, 1);
+    let input_row = if let Some(rect) = more_area {
         let control = SurfaceControl::MoreWorkspaceMatches;
         let mut form = dashboard.surface_form.borrow_mut();
         form.register(control, ControlKind::Button, rect, true);
@@ -1396,6 +1397,14 @@ mod tests {
             state: None,
             editing: true,
         });
+        let lines = append_state(
+            &mut output,
+            "selected session from another workspace is already displayed, not more",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(!lines.iter().any(|line| line.contains("1 more")));
+        cross.navigation.assign(cross.focused_pane(), None);
         assert_eq!(cross.sessions_other_workspace_matches(), 1);
         let lines = append_state(
             &mut output,
@@ -1430,6 +1439,50 @@ mod tests {
         let lines = append_state(
             &mut output,
             "conversation-only match in another workspace offers Open",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(lines.iter().any(|line| line.contains("1 more")));
+        cross
+            .session_verdicts
+            .get_mut("other-workspace")
+            .unwrap()
+            .transition = Some(mj_core::state::SessionTransitionKind::Moving);
+        let lines = append_state(
+            &mut output,
+            "transitioning match is unavailable in Open and not counted",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(!lines.iter().any(|line| line.contains("1 more")));
+        cross
+            .session_verdicts
+            .get_mut("other-workspace")
+            .unwrap()
+            .transition = None;
+        cross
+            .state
+            .sessions
+            .get_mut("other-workspace")
+            .unwrap()
+            .state = mj_core::state::SessionState::Stopped;
+        crate::test_support::serve_attention(
+            &mut cross,
+            &["other-workspace"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        crate::test_support::publish_fixture_verdicts(&mut cross);
+        let lines = append_state(
+            &mut output,
+            "stopped session needing attention remains an additional workspace match",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(lines.iter().any(|line| line.contains("1 more")));
+        cross.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+        let lines = append_state(
+            &mut output,
+            "minimized pane retains the more button and its search handoff",
             &mut cross,
             (140, 40),
         );

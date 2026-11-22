@@ -1067,7 +1067,7 @@ fn build_resume_rows(
 }
 
 impl DashboardState {
-    /// Every running session in every workspace, newest activity first,
+    /// Every session listed in a workspace, newest activity first,
     /// narrowed by the search box's text when there is any.
     ///
     /// Built here rather than in [`build_resume_rows`] because what the Sessions
@@ -1079,14 +1079,9 @@ impl DashboardState {
             .state
             .sessions
             .values()
-            // A session's own workspace id passes the pane's workspace check,
-            // which is how one list covers every workspace at once. The state
-            // check is this list's own: a stopped session the display setting
-            // reveals is listed there, and it is not running.
-            .filter(|session| {
-                session.state.is_active()
-                    && self.is_listed_top_level_session(session, &session.workspace_id)
-            })
+            // Use the pane's visibility owner across every workspace, including
+            // stopped sessions that still need a person's attention.
+            .filter(|session| self.is_openable_workspace_session(session))
             // The state filter reads the same attention level the Sessions
             // pane's letters read, so both narrow one list the same way. It
             // sits here, where the session id is still in hand.
@@ -2463,7 +2458,7 @@ pub(crate) fn render_resume_dialog(
             // Under a state filter the filter emptied the list, so say which.
             (ResumeTab::Live, _, true) => match dialog.live_state {
                 Some(state) => format!("No {} sessions", state.label()),
-                None => "No running sessions".to_owned(),
+                None => "No live sessions".to_owned(),
             },
             (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions".to_owned(),
             (ResumeTab::Import, _, true) => "No importable sessions".to_owned(),
@@ -2734,13 +2729,10 @@ fn resume_list_title(
         // A state filter replaces "every workspace": the list is still every
         // workspace's, and what it is narrowed to is the news.
         spans.push(match (dialog.tab, dialog.live_state) {
-            (ResumeTab::Live, Some(state)) => Span::raw(format!(
-                "Running sessions · {} · newest first",
-                state.label()
-            )),
-            (ResumeTab::Live, None) => {
-                Span::raw("Running sessions · every workspace · newest first")
+            (ResumeTab::Live, Some(state)) => {
+                Span::raw(format!("Live sessions · {} · newest first", state.label()))
             }
+            (ResumeTab::Live, None) => Span::raw("Live sessions · every workspace · newest first"),
             (ResumeTab::Hel, _) => Span::raw("Mjolnir sessions · newest first"),
             (ResumeTab::Import, _) => Span::raw("Importable sessions · newest first"),
             (ResumeTab::Archive, _) => Span::raw("Archived sessions · newest first"),
@@ -2860,7 +2852,7 @@ fn empty_search_message(dashboard: &DashboardState, dialog: &ResumeDialog) -> St
     .collect::<Vec<_>>();
     if elsewhere.is_empty() {
         return match dialog.tab {
-            ResumeTab::Live => "No matching running sessions".to_owned(),
+            ResumeTab::Live => "No matching live sessions".to_owned(),
             _ => "No matching sessions".to_owned(),
         };
     }
