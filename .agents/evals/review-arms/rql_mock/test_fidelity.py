@@ -17,7 +17,7 @@ from . import fidelity_live
 from .fidelity import (BARS, CENSUS, Query, accuracy, bar_failures, gate_report, load_inputs,
                        measure, pooled_prescience, prescience_metrics, sample, step_result, stratum_metrics)
 from .engine.grammar import MENU
-from .engine.runner import EngineRunner
+from .engine.runner import EngineRunner, SealedRunner
 from .fidelity_live import SONNET, TERRA, candidate_lines, model_usage, planned_calls
 from .fidelity_symbols import capture_symbols, changed_intervals
 
@@ -464,6 +464,146 @@ class TerraOutput(unittest.TestCase):
         self.assertEqual(output["rows"], [{"kind": "structural_match", "sites": [site], "fields": {
             "operand": {"site": site, "verbatim": [{"start_byte": 3, "end_byte": 5, "text": "α"}]},
         }}])
+
+    # Hard-won: d4028a66b: the live gate stopped on Terra's first repairable schema error.
+    def test_enumerator_repairs_in_session_and_restarts_a_stall_once(self):
+        query = Query("documented", "random", "fixture", "b" * 40, '(function :name "f")')
+        site = {"path": "source.rs", "start_line": 1, "end_line": 1}
+        operand = {"site": site, "verbatim": [{"text": "source"}]}
+
+        def answer(written):
+            return json.dumps({
+                "rows": [{"kind": "structural_match", "primary_site": site, "fields": {"operand": written}}],
+                "coverage": {"complete": True, "open": []}, "excluded": [],
+            }).encode()
+
+        good, bad = answer(operand), answer({**operand, "extra": True})
+        orphan = "c" * 40
+        model_usage = fidelity_live.model_usage
+        sessions, checks, destroyed = {}, [], []
+
+        def launch(*args, **kwargs):
+            sid = str(len(sessions) + 1) * 32
+            sessions[sid] = []
+            return sid
+
+        def session(sid):
+            return {"id": sid, "at": orphan, "base": orphan, "no_later_history": True,
+                    "harness_kind": "codex", "profile_id": "terra", "config_options": []}
+
+        def attest(runner, sid, snapshot, directory):
+            driver.save(directory / "pre-inventory.json", {"cwd": runner.checkout_root(sid)})
+            return session(sid)
+
+        def transport(runner, operation, *args, data=None):
+            sid = args[1]
+            turns = sessions[sid]
+            if operation == "message":
+                turns.append((args[3], data.decode()))
+                return json.dumps({"session_id": sid, "via": "turn", "turn_id": len(turns)}).encode()
+            if operation == "put-file":
+                return b""
+            if operation == "fetch":
+                return schedule[int(sid[0]) - 1][len(turns) - 1]
+            self.assertEqual(operation, "destroy")
+            destroyed.append(sid)
+            return json.dumps({"session_id": sid, "accepted": True}).encode()
+
+        def mj(operation, *args, **kwargs):
+            sid = args[1]
+            if operation == "wait":
+                return {"turn_id": len(sessions[sid]), "outcome": "finished"}
+            self.assertEqual(operation, "usage")
+            cursor = args[3] if "--after-seq" in args else 0
+            turns = [{"command_id": command, "accepted_ordinal": n} for n, (command, _) in
+                     enumerate(sessions[sid], 1) if n > cursor]
+            count = len(sessions[sid])
+            return {"session_id": sid, "latest_seq": count, "next_after_seq": count, "turns": turns,
+                    "turn_selections": {turn["command_id"]: {"model": TERRA, "effort": "high"} for turn in turns}}
+
+        def transcript(sid):
+            count = len(sessions[sid])
+            return [{"session_id": sid, "next_after_seq": count, "latest_seq": count, "items": [
+                {"role": "tool", "seq": n, "body": {"call": {"name": "exec_command",
+                 "kind": "read", "title": "List files", "toolCallId": f"exec-{n}"}}}
+                for n in range(1, count + 1)]}]
+
+        def capture(directory, sid, *, reuse_existing, directory_name):
+            self.assertFalse(reuse_existing)
+            destination = directory / directory_name
+            destination.mkdir()
+            rows = [{"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "CommandExecution", "id": f"exec-{n}", "command": ["ls"],
+                "cwd": f"/workspace/{sid}/engine-trees",
+            }}} for n in range(1, len(sessions[sid]) + 1)]
+            (destination / "rollout-fixture.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+            return True
+
+        def check(usage, command, turn, *args):
+            model = model_usage(usage, command, turn, *args)
+            checks.append((usage["session_id"], turn))
+            return model
+
+        with ExitStack() as stack:
+            for target, name, fake in (
+                (driver, "use_named_instance", lambda _: Path("fixture")),
+                (driver, "pilot_weekly_hold", lambda *args, **kwargs: None),
+                (driver, "wait_idle", session),
+                (driver, "session", session),
+                (driver, "verify_session_selection", lambda *args: TERRA),
+                (driver, "capture_pilot_rollouts", capture),
+                (driver, "transcript", transcript),
+                (driver, "mj", mj),
+                (fidelity_live, "blob_reader", lambda *args: lambda _: b"source\n"),
+                (fidelity_live, "prepared_snapshot", lambda *args: {"orphan": orphan, "tree": "tree"}),
+                (fidelity_live, "model_usage", check),
+                (fidelity_live.brief_driver, "sealed_launch", launch),
+                (fidelity_live.brief_driver, "configure_pilot_model_ready", lambda *args: None),
+                (SealedRunner, "attest", attest),
+                (SealedRunner, "clean_checkout", lambda runner, sid, *args: f".rql-engine-{sid}"),
+                (SealedRunner, "command", transport),
+            ):
+                stack.enter_context(patch.object(target, name, new=fake))
+            for schedule in (((bad, good),), ((bad, bad), (good,)), ((bad, bad), (bad, bad))):
+                with self.subTest(rounds=[len(turns) for turns in schedule]), TemporaryDirectory() as root:
+                    sessions.clear()
+                    checks.clear()
+                    destroyed.clear()
+                    directory = Path(root)
+                    adapter = fidelity_live.LiveModels.__new__(fidelity_live.LiveModels)
+                    adapter.config = {"instance": "terra-test", "snapshot_repo": "snapshot", "bundle": "fixture",
+                                      "destination": "engine-trees"}
+                    adapter.manifest = {"diffs": [], "eligible_diffs": [], "served_steps": [],
+                                        "model_versions": {"claude": "Sonnet 5.5"}}
+                    adapter.sources = {query.commit: "fixture"}
+                    adapter.catalogue = adapter.menu = adapter.claude_version = ""
+                    adapter.directory, adapter.terra_profile = directory, "terra"
+
+                    if schedule[-1][-1] == bad:
+                        engine = SimpleNamespace(answer=lambda *args, **kwargs: {"status": "ok", "rows": []})
+                        with self.assertRaisesRegex(RuntimeError, "Terra repair stalled in both sessions"):
+                            fidelity_live.run_sample(directory, [query], set(), engine, adapter,
+                                                     stop_request=directory / "stop")
+                        self.assertFalse((directory / query.key / "measurement.json").exists())
+                    else:
+                        result = adapter.enumerate_rows(query.repo, query.commit, query.text)
+                        self.assertEqual(len(result["rows"]), 1)
+                    self.assertEqual([len(turns) for turns in sessions.values()], [len(turns) for turns in schedule])
+                    self.assertEqual(destroyed, list(sessions))
+                    self.assertEqual(checks, [(sid, n) for sid, turns in sessions.items()
+                                              for n in range(1, len(turns) + 1)])
+                    stalls = directory / query.key / "terra-stalled"
+                    self.assertEqual(stalls.is_dir(), len(schedule) == 2)
+                    for index, turns in enumerate(sessions.values()):
+                        evidence = stalls if index == 0 and stalls.is_dir() else directory / query.key / "terra"
+                        self.assertTrue((evidence / "destroy-receipt.json").is_file())
+                        for n, (_, prompt) in enumerate(turns, 1):
+                            audit = json.loads((evidence / f"turn-{n}-audit.json").read_bytes())
+                            self.assertTrue(audit["passed"])
+                            self.assertTrue((evidence / audit["rollout_directory"]).is_dir())
+                            self.assertEqual("failed mechanical verification" in prompt, n > 1)
+                            if n > 1:
+                                self.assertIn("written evidence must contain only site and verbatim", prompt)
 
 
 class ModelIdentity(unittest.TestCase):

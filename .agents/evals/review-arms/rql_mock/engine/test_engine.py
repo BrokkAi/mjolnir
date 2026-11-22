@@ -1365,7 +1365,7 @@ class RetirementTests(unittest.TestCase):
                 (dst / "rollout-fixture.jsonl").write_text(json.dumps(event) + "\n")
                 return True
 
-        def run_turn(runner, sid, snapshot, directory, *args):
+        def run_turn(runner, sid, snapshot, directory, *args, **kwargs):
             if scenario == "turn":
                 capture.active = True
                 raise failure
