@@ -1326,6 +1326,27 @@ def test_engine_saved_result_requires_prior_audit_in_the_same_session(tmp_path, 
     assert any(hit["seq"] == read_seq for hit in report["hits"])
 
 
+COMPACTION_CARD = {"toolCallId": "13c7c8cd-2e74-40d8-8f56-15f09c006a70", "title": "Compact conversation",
+                   "kind": "think", "status": "completed",
+                   "_meta": {"jetbrains": {"air": {"version": 1, "contextCompaction": {"version": 1}}}}}
+
+
+# Hard-won: 936f78889: an automatic context compaction card voided a live engine session
+def test_engine_accepts_the_exact_context_compaction_card(tmp_path):
+    report = audit_engine_result(tmp_path, [dict(COMPACTION_CARD)])
+    assert report["passed"], report["hits"]
+
+
+@pytest.mark.parametrize("change", [
+    {"title": "Run tool"}, {"kind": "execute"}, {"rawInput": {"command": "ls"}},
+    {"locations": [{"path": "/etc/passwd"}]}, {"name": "Bash"},
+    {"_meta": {"jetbrains": {"air": {"version": 1}}}},
+])
+def test_engine_refuses_anything_beyond_the_compaction_card(tmp_path, change):
+    report = audit_engine_result(tmp_path, [{**COMPACTION_CARD, **change}])
+    assert not report["passed"]
+
+
 # Hard-won: eefcdaa95: a Grep confined to the engine's own saved Grep output voided a live turn
 def test_engine_can_grep_exactly_its_own_saved_tool_result(tmp_path, saved_engine_result):
     read = saved_engine_result[1]
