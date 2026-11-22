@@ -331,6 +331,21 @@ When Tailscale detection succeeds, Mjolnir may advertise a secure non-loopback
 listener without changing the configured loopback fallback. Explicit TLS takes
 precedence. See [Web viewer](/web-viewer/) for access and login.
 
+## Guardian `[guardian]`
+
+```toml
+[guardian]
+enabled = true
+local_classifier = true
+use_gpu = true
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `true` | Globally enables or disables Mjolnir's permission guardian across all profiles. `false` sends pending requests to you immediately for daemon reviews and new sessions, overriding per-profile `mjolnir_guardian = true`. |
+| `local_classifier` | boolean | no | `true` | Runs the local zero-shot Wolf Defender Jev ONNX approve-only first stage before escalating to utility or ACP review. `false` skips Stage 1 immediately without loading the local model. |
+| `use_gpu` | boolean | no | `true` | Allows the local Wolf classifier to use a GPU execution provider when available (`false` keeps Stage-1 inference on CPU). Takes effect when the background server next starts. |
+
 ## Automatic review `[review]`
 
 ```toml
@@ -672,7 +687,7 @@ home = "/home/me/.codex-work"
 | `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile takes `DEEPSEEK_API_KEY` from the key saved in DSH (`.credentials.yaml` in its home) first, then the environment Mjolnir started with, then `.env` in its home, and only then from this table. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 | `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
-| `mjolnir_guardian` | boolean | no | `true` | Whether the Mjolnir guardian reviews tool permission requests that reach Mjolnir under configured approvals. It uses a configured direct utility model, with ACP review on the session's harness and model when no utility model is configured. `false` sends pending requests to the person's permission form. Available on every profile and applies to new sessions. See [Profiles](/profiles/#turn-off-the-mjolnir-guardian). |
+| `mjolnir_guardian` | boolean | no | `true` | Whether the Mjolnir guardian reviews tool permission requests that reach Mjolnir under configured approvals (when `[guardian].enabled` is also `true`). It uses the local classifier when enabled, then a configured direct utility model, with ACP review on the session's harness and model when no utility model is configured. `false` sends pending requests to the person's permission form. Available on every profile and applies to new sessions. See [Profiles](/profiles/#turn-off-the-mjolnir-guardian). |
 | `models` | array of strings | no | empty (offer everything) | Exact model values, as `mj models --profile <id> --unrestricted` lists them, that Mjolnir offers from this profile in session model pickers, sub-agent choices, review slots and Autoconfigure. The profile's current model is always offered. Edits apply without rediscovery. `mj doctor` warns when a profile advertises more than 50 models without this list, and about entries the profile does not advertise. See [Profiles](/profiles/#limit-the-models-a-profile-offers). |
 
 The profile's harness-home variable cannot appear in `environment`; set `home`

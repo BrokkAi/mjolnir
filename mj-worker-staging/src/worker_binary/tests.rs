@@ -3077,6 +3077,7 @@ fn a_session_without_project_memory_launches_without_memory() {
                 &mj_core::state::TargetRuntimeSettings::from(
                     &mj_core::config::TargetTemplate::LocalBare,
                 ),
+                &mj_core::config::Config::default(),
             )
             .unwrap()
         };
@@ -3168,6 +3169,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
             ),
+            &mj_core::config::Config::default(),
         )
         .unwrap();
         let memory = memory.expect("a session without the opt-out has project memory");
@@ -4093,6 +4095,7 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
             parent_worktree: None,
         },
         &mj_core::state::TargetRuntimeSettings::from(&template),
+        &mj_core::config::Config::default(),
     )
     .unwrap()
     .0;
@@ -4380,6 +4383,7 @@ fn launches_on_every_target(
             parent_worktree: None,
         },
         &with_target_keys(&mj_core::config::TargetTemplate::LocalBare),
+        &mj_core::config::Config::default(),
     )
     .unwrap()
     .0;
@@ -4402,6 +4406,7 @@ fn launches_on_every_target(
             parent_worktree: None,
         },
         &with_target_keys(&container),
+        &mj_core::config::Config::default(),
     )
     .unwrap()
     .0;
@@ -4424,6 +4429,7 @@ fn launches_on_every_target(
             parent_worktree: None,
         },
         &with_target_keys(&container),
+        &mj_core::config::Config::default(),
     )
     .unwrap()
     .0;
@@ -4539,6 +4545,7 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
             parent_worktree: None,
         },
         &mj_core::state::TargetRuntimeSettings::from(&docker),
+        &mj_core::config::Config::default(),
     )
     .unwrap()
     .0;
@@ -4824,6 +4831,7 @@ fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
             parent_worktree: None,
         },
         &mj_core::state::TargetRuntimeSettings::from(&template),
+        &mj_core::config::Config::default(),
     )
     .unwrap();
 
@@ -4876,6 +4884,7 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
             parent_worktree: None,
         },
         &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
+        &mj_core::config::Config::default(),
     )
     .unwrap();
 
@@ -4976,6 +4985,7 @@ fn raw_local_muse_launches_with_guardian_approvals() {
             parent_worktree: None,
         },
         &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
+        &mj_core::config::Config::default(),
     )
     .unwrap();
 
@@ -5980,6 +5990,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
             ),
+            &mj_core::config::Config::default(),
         )
         .unwrap();
         let memory = memory.expect("a session without the opt-out has project memory");

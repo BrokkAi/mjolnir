@@ -857,6 +857,7 @@ fn nested_home_mapping_keeps_config_credentials_and_session_data_together() {
 
 fn sample_config() -> Config {
     Config {
+        guardian: GuardianConfig::default(),
         images: ImagesConfig::default(),
         version: CONFIG_VERSION,
         keys: Default::default(),
@@ -1070,6 +1071,48 @@ fn configured_approvals_preserve_other_profiles_and_select_guardians() {
         assert!(!kind.mjolnir_guardian_reviews(ExecutionPolicy::ConfiguredApprovals, disabled));
         assert!(!kind.mjolnir_guardian_reviews(ExecutionPolicy::Unconstrained, enabled));
     }
+
+    let mut config = Config::default();
+    assert_eq!(config.guardian, GuardianConfig::default());
+    let default_toml = toml::to_string(&config).expect("serialize default config");
+    assert!(!default_toml.contains("[guardian]"));
+
+    config.guardian = GuardianConfig {
+        enabled: false,
+        local_classifier: false,
+        use_gpu: false,
+    };
+    let custom_toml = toml::to_string(&config).expect("serialize custom guardian config");
+    let loaded: Config = toml::from_str(&custom_toml).expect("round-trip [guardian] settings");
+    assert_eq!(loaded.guardian, config.guardian);
+
+    let profile_on = HarnessProfile::new(HarnessKind::Kimi, PathBuf::from("/profiles/kimi"));
+    let profile_off = HarnessProfile {
+        mjolnir_guardian: false,
+        ..profile_on.clone()
+    };
+    let mut global_on = Config::default();
+    assert!(
+        global_on
+            .profile_approval_choices(&profile_on)
+            .mjolnir_guardian
+    );
+    assert!(
+        !global_on
+            .profile_approval_choices(&profile_off)
+            .mjolnir_guardian
+    );
+    global_on.guardian.enabled = false;
+    assert!(
+        !global_on
+            .profile_approval_choices(&profile_on)
+            .mjolnir_guardian
+    );
+    assert!(
+        !global_on
+            .profile_approval_choices(&profile_off)
+            .mjolnir_guardian
+    );
 
     let codex = HarnessKind::Codex
         .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)

@@ -6,7 +6,11 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "github":{}, "jev":{}, "quota":{}, "daemon":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "github":{}, "guardian":{}, "jev":{}, "quota":{}, "daemon":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+        }
+        "guardian" if path.len() == 1 => {
+            let g = mj_core::config::GuardianConfig::default();
+            json!({"enabled":g.enabled,"local_classifier":g.local_classifier,"use_gpu":g.use_gpu})
         }
         "phone" => {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -359,6 +363,8 @@ pub fn label(key: &str) -> String {
         "repositories" => "Repositories",
         "id" => "Name",
         "github" => "Git URL or GitHub owner/repository",
+        "guardian" => "Guardian",
+        "local_classifier" => "Local classifier",
         "local" => "Local repository directory",
         "destination" => "Checkout folder",
         "tools_directory" => "Native tool cache directory",
@@ -377,6 +383,8 @@ pub fn field_label(path: &[String]) -> String {
         .as_slice()
     {
         ["github"] => "GitHub events".to_owned(),
+        ["guardian", "use_gpu"] => "Use GPU for local classifier".to_owned(),
+        ["github", "watch", "use_gpu"] => "Use GPU for GitHub relevance".to_owned(),
         ["subagents", task, field]
             if ["straightforward", "subtle", "oracle"].contains(task)
                 && ["model", "effort"].contains(field) =>
@@ -604,6 +612,15 @@ pub fn section_summary(
                 "Off · Jev is off (Privacy)".to_owned()
             } else {
                 "On · GitHub activity".to_owned()
+            }
+        }
+        "guardian" => {
+            if section["enabled"] == Value::Bool(false) {
+                "Off".to_owned()
+            } else if section["local_classifier"] == Value::Bool(false) {
+                "On · utility/ACP only".to_owned()
+            } else {
+                "On · local classifier".to_owned()
             }
         }
         "quota" => "Host".to_owned(),
@@ -944,6 +961,26 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
                 "Automatically use a GPU only when it runs faster than the CPU. Turn off for CPU-only GitHub relevance scoring. Device failures select CPU and report a notice.",
             );
         }
+        ["guardian"] => {
+            return Some(
+                "Review permission requests using the local classifier and utility/ACP review path.",
+            );
+        }
+        ["guardian", "enabled"] => {
+            return Some(
+                "Controls daemon reviews and new sessions immediately. When off, permission requests are sent to you.",
+            );
+        }
+        ["guardian", "local_classifier"] => {
+            return Some(
+                "Controls daemon reviews and new sessions immediately. When off, Stage 1 is skipped and review goes to utility/ACP.",
+            );
+        }
+        ["guardian", "use_gpu"] => {
+            return Some(
+                "Use a GPU for the local classifier. This takes effect when the background server next starts.",
+            );
+        }
         ["github"] | ["github", "watch"] => {
             return Some(
                 "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",
@@ -1097,7 +1134,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Antigravity only: offer the Claude and GPT models of the account's third-party quota pool. Off: the profile offers only Gemini models, refuses switching to the others, and hides that pool's quota. A session already on one keeps it until you switch."
         }
         "mjolnir_guardian" => {
-            "On runtimes that keep configured approvals, Mjolnir reviews the tool permission requests that reach it after the harness applies its own rules. Off: pending requests go to your permission form. Applies to new sessions."
+            "On runtimes that keep configured approvals, Mjolnir reviews the tool permission requests that reach it after the harness applies its own rules. The top-level Guardian setting must also be enabled. Off: pending requests go to your permission form. Applies to new sessions."
         }
         "claude_permission_mode" => {
             "How new sessions on runtimes that ask for approvals handle Claude's permissions. Auto: Claude's classifier approves or denies each action. Accept edits: file edits run, everything else asks you. Manual: every action that needs permission asks you. Runtimes that allow all actions always bypass permissions."

@@ -85,6 +85,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
+        guardian: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),

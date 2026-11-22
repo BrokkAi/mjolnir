@@ -1685,6 +1685,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
             phone: Default::default(),
             daemon: Default::default(),
             github: Default::default(),
+            guardian: Default::default(),
             review: Default::default(),
             sessionwiki: Default::default(),
             legacy_startup: (),

@@ -246,7 +246,7 @@ pub(super) async fn run_daemon_runtime(
     }));
     let guardian_classifier = Arc::new(GuardianClassifier::new(
         mj_core::config::data_dir(),
-        controller.config.github.watch.use_gpu,
+        controller.config.guardian.use_gpu,
     ));
     manager_control
         .install_guardian_stage1(Arc::new(WolfGuardianStage1(guardian_classifier.clone())));

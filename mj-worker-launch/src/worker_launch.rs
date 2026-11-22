@@ -693,6 +693,7 @@ pub fn session_launch_config(
             parent_worktree: subagent_parent_worktree(config, state, session_id),
         },
         &target,
+        config,
     )?;
     launch.reviewer_launch = if subagent.is_some() {
         crate::database::load_subagent(session_id)?
@@ -883,6 +884,7 @@ pub fn session_launch_config(
                 parent_worktree: None,
             },
             &parent_target,
+            config,
         )?;
         launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
             parent_launch.cwd
