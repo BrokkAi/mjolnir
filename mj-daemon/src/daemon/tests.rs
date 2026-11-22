@@ -16682,6 +16682,7 @@ pub(super) fn isolate_runtime_feed_test(module: &str, name: &str) -> bool {
 #[cfg(unix)]
 #[tokio::test]
 async fn wiki_search_generations_cover_commits_and_running_requests_coalesce() {
+    mj_core::test_hooks::enable_test_hooks();
     const TEST: &str = "wiki_search_generations_cover_commits_and_running_requests_coalesce";
     const CHILD: &str = "MJ_TEST_WIKI_GENERATIONS";
     if std::env::var_os(CHILD).is_none() {

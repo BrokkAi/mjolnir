@@ -1,6 +1,9 @@
 //! Mjolnir's daemon: the control-plane process (`mj daemon-run`), its HTTP API
 //! and web viewer, and the daemon-owned services built on `mj-controller`.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 pub mod daemon;
 mod github_watch;
 pub mod pollers;

@@ -2,6 +2,8 @@
 //! stand-ins that hold the real root lock the way a worker does.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};

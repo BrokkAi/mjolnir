@@ -13,12 +13,6 @@ name = "mj_build_cache"
 # The crate has no doc tests; looking for them makes rustdoc compile it again.
 doctest = false
 
-[features]
-default = []
-test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks", "mj-store/test-hooks"]
-# Exposes the shared test fixtures to the tests of the crates above.
-test-support = ["mj-core/test-hooks", "mj-targets/test-support", "mj-store/test-support"]
-
 [lints]
 workspace = true
 
@@ -29,20 +23,17 @@ mj-store.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 flate2.workspace = true
-reqwest = { workspace = true, features = ["blocking", "json", "query", "stream"] }
+reqwest.workspace = true
 semver.workspace = true
-serde = { workspace = true, features = ["rc"] }
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 toml.workspace = true
-tokio = { workspace = true, features = ["full"] }
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-mj-core = { workspace = true, features = ["test-hooks", "golden"] }
-mj-targets = { workspace = true, features = ["test-support"] }
-mj-store = { workspace = true, features = ["test-support"] }
+
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }

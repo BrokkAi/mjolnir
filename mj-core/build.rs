@@ -51,25 +51,22 @@ fn main() {
         "cargo:rustc-env=MJ_AGENT_DEV_IMAGE_RELEASE={}",
         u8::from(release)
     );
-    if std::env::var_os("CARGO_FEATURE_TEST_HOOKS").is_some() {
-        // Generate this fixture at build time: writing an executable during
-        // parallel tests can leave inherited writable descriptors (ETXTBSY).
-        // It carries the identity a test binary has (`worker_build`'s test
-        // identity), not this build's: `mj-build-id` makes the one stamped
-        // with the real identity.
-        let fixture = root.join("tests/fixtures/fake-command.sh");
-        let script = tracked_read(&fixture).expect("fake command fixture");
-        let stamped = format!(
-            "{script}\n#MJ-BUILD-ID:{version}+{TEST_REVISION}\n#\0MJ-WORKER-BUILD:{version}+{TEST_REVISION}\0\n",
-        );
-        let destination =
-            PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("fake-worker.sh");
-        std::fs::write(&destination, stamped).expect("write stamped fake worker");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))
-                .expect("make fake worker executable");
-        }
+    // Generate this fixture at build time: writing an executable during
+    // parallel tests can leave inherited writable descriptors (ETXTBSY).
+    // It carries the identity a test binary has (`worker_build`'s test
+    // identity), not this build's: `mj-build-id` makes the one stamped
+    // with the real identity.
+    let fixture = root.join("tests/fixtures/fake-command.sh");
+    let script = tracked_read(&fixture).expect("fake command fixture");
+    let stamped = format!(
+        "{script}\n#MJ-BUILD-ID:{version}+{TEST_REVISION}\n#\0MJ-WORKER-BUILD:{version}+{TEST_REVISION}\0\n",
+    );
+    let destination = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("fake-worker.sh");
+    std::fs::write(&destination, stamped).expect("write stamped fake worker");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake worker executable");
     }
 }

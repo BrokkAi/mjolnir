@@ -961,7 +961,7 @@ mod tests {
 
     // Hard-won: #1452: interactive sign-in started the account login-shell
     // probe, so a slow shell spent its startup budget before every login.
-    #[cfg(all(unix, feature = "test-hooks"))]
+    #[cfg(unix)]
     #[tokio::test]
     async fn sign_in_uses_the_terminal_environment_without_starting_the_account_shell() {
         let _guard = TEST_LOCK.lock().await;
@@ -999,10 +999,11 @@ mod tests {
         );
     }
 
-    #[cfg(all(unix, feature = "test-hooks"))]
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "subprocess fixture for interactive sign-in environment handling"]
     async fn sign_in_environment_child() {
+        mj_core::test_hooks::enable_test_hooks();
         let root = PathBuf::from(std::env::var_os("MJ_TEST_SIGNIN_ROOT").unwrap());
         let profile = HarnessProfile::new(HarnessKind::Dsh, root.join("profile"));
         let (_, environment) = located_login(&profile).await.unwrap();

@@ -1,6 +1,9 @@
 //! Hel's target-side worker: the daemon and stdio proxy that run inside a
 //! container or on an SSH host.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 /// Default diagnostics include the local Jev and Mjolnir guardian decision
 /// trails. Explicit RUST_LOG overrides it.
 pub const DEFAULT_WORKER_LOG_FILTER: &str = "warn,mj_jev=info,mj_guardian=info";
@@ -32,7 +35,7 @@ mod checkpoint_tests;
 #[cfg(test)]
 mod test_support;
 // Served by the controller and daemon test binaries; see the module.
-#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
 pub mod stand_in_relay;
 
 pub mod cpu_usage;

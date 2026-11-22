@@ -15,7 +15,7 @@ use crate::targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, ProvisionStageGuard, SshTarget,
 };
 use mj_core::config::{HarnessKind, HarnessProfile, ProjectBundle, atomic_write, data_dir};
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use mj_core::harness_runtime::{CLAUDE_ACP_VERSION, CODEX_ACP_VERSION};
 use mj_core::project_memory::ProjectMemoryIdentity;
 use mj_core::worker_build::{verify_worker_build, worker_build_id};
@@ -88,7 +88,7 @@ mod process;
 pub use process::*;
 pub use process::{ControlWorker, recorded_exit_reason, run_control_command};
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub mod test_fixtures;
 #[cfg(test)]
 mod tests;

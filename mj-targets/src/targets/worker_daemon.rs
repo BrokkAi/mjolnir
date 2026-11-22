@@ -219,7 +219,7 @@ impl WorkerControlPlan {
     }
 
     /// A plan whose commands never run the control worker.
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn without_control(description: &str, commands: Vec<CommandSpec>) -> Self {
         Self {
             description: description.to_owned(),
@@ -271,20 +271,20 @@ impl WorkerControlPlan {
     }
 
     /// The scripts of any plan, for a test that inspects them. They skip staging.
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn scripts(&self) -> &[CommandSpec] {
         &self.commands
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 impl From<CommandSpec> for WorkerControlPlan {
     fn from(command: CommandSpec) -> Self {
         Self::without_control(&command.purpose.clone(), vec![command])
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 impl From<CommandPlan> for WorkerControlPlan {
     fn from(plan: CommandPlan) -> Self {
         Self::without_control(&plan.description, plan.commands)

@@ -1,3 +1,6 @@
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 mod backend;
 
 use anyhow::{Context, Result, bail};

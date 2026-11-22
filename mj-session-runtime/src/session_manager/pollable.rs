@@ -1,11 +1,10 @@
 //! Which sessions have a live target worth connecting to or sampling.
 
-#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static POLLABILITY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn take_pollability_visits() -> usize {
     POLLABILITY_VISITS.with(|visits| visits.replace(0))
 }
@@ -30,8 +29,9 @@ pub fn take_pollability_visits() -> usize {
 /// recovery would start it again. This predicate is what keeps the session
 /// manager, worker recovery and resource sampling away from parked children.
 pub fn session_target_is_pollable(session: &mj_core::state::SessionRecord) -> bool {
-    #[cfg(any(test, feature = "test-support"))]
-    POLLABILITY_VISITS.with(|visits| visits.set(visits.get() + 1));
+    if cfg!(test) || mj_core::test_hooks::test_fixtures_enabled() {
+        POLLABILITY_VISITS.with(|visits| visits.set(visits.get() + 1));
+    }
     session.state.is_active()
         && !matches!(
             session.state,

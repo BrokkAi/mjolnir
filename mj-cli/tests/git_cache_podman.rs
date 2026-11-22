@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::fs;
 use std::net::TcpListener;
 use std::os::unix::process::CommandExt;

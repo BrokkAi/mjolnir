@@ -1,6 +1,8 @@
 //! A managed child's questions go to its parent; its approvals stay with a person.
 #![cfg(unix)]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use anyhow::Context;
 use mj_core::elicitation::{ElicitationResponse, ElicitationValue};

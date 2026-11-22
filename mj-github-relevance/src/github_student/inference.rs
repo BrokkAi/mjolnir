@@ -54,7 +54,7 @@ impl Engine {
         })
     }
     /// Exercise probe ownership with real ORT inference and no GPU dependency.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(super) fn cpu_probe(&self, directory: &Path) -> Result<Gpu> {
         let session = Session::builder(&self.environment)?
             .with_intra_threads(1)

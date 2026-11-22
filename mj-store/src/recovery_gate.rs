@@ -46,7 +46,6 @@ pub struct ForegroundAdmission(Arc<ForegroundHolder>);
 
 struct ForegroundHolder {
     label: &'static str,
-    origin: LifecycleOrigin,
     identity: Arc<()>,
     session_id: String,
     gate: Arc<RecoveryGate>,
@@ -54,8 +53,7 @@ struct ForegroundHolder {
 
 impl Drop for ForegroundHolder {
     fn drop(&mut self) {
-        self.gate
-            .release(&self.session_id, &self.identity, self.origin);
+        self.gate.release(&self.session_id, &self.identity);
     }
 }
 
@@ -113,7 +111,6 @@ pub struct RecoveryGate {
     /// Which sessions are busy, for waiters. Published from inside the gate so
     /// every holder updates it, whatever started the work.
     busy: watch::Sender<BTreeSet<String>>,
-    foreground_releases: watch::Sender<BTreeMap<String, LifecycleOrigin>>,
 }
 
 impl Default for RecoveryGate {
@@ -122,7 +119,6 @@ impl Default for RecoveryGate {
             state: Mutex::default(),
             closed: Notify::new(),
             busy: watch::channel(BTreeSet::new()).0,
-            foreground_releases: watch::channel(BTreeMap::new()).0,
         }
     }
 }
@@ -219,13 +215,7 @@ impl RecoveryGate {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.reserve_locked(
-            &mut state,
-            session_id,
-            label,
-            ReservationKind::Foreground,
-            LifecycleOrigin::Person,
-        )
+        self.reserve_locked(&mut state, session_id, label, ReservationKind::Foreground)
     }
 
     fn reserve_locked(
@@ -234,7 +224,6 @@ impl RecoveryGate {
         session_id: &str,
         label: &'static str,
         kind: ReservationKind,
-        origin: LifecycleOrigin,
     ) -> ForegroundAdmission {
         let identity = Arc::new(());
         state
@@ -248,7 +237,6 @@ impl RecoveryGate {
             });
         ForegroundAdmission(Arc::new(ForegroundHolder {
             label,
-            origin,
             identity,
             session_id: session_id.to_owned(),
             gate: self.clone(),
@@ -259,7 +247,7 @@ impl RecoveryGate {
         self: &Arc<Self>,
         session_id: &str,
         label: &'static str,
-        origin: LifecycleOrigin,
+        _origin: LifecycleOrigin,
         cancelled: &AtomicBool,
         notices: &(impl mj_core::targets::CommandExecutor + Sync),
     ) -> anyhow::Result<ForegroundAdmission> {
@@ -269,7 +257,6 @@ impl RecoveryGate {
             cancelled,
             notices,
             ReservationKind::Foreground,
-            origin,
         )
         .await
     }
@@ -283,7 +270,7 @@ impl RecoveryGate {
         self: &Arc<Self>,
         session_id: &str,
         label: &'static str,
-        origin: LifecycleOrigin,
+        _origin: LifecycleOrigin,
     ) -> Result<ForegroundAdmission, Refusal> {
         if crate::upgrade::is_draining() {
             return Err(Refusal {
@@ -299,13 +286,7 @@ impl RecoveryGate {
         if let Some(refusal) = Self::foreground_try_refusal(&state, session_id) {
             return Err(refusal);
         }
-        Ok(self.reserve_locked(
-            &mut state,
-            session_id,
-            label,
-            ReservationKind::Foreground,
-            origin,
-        ))
+        Ok(self.reserve_locked(&mut state, session_id, label, ReservationKind::Foreground))
     }
 
     /// Reviews exclude background work except delegation replies without preempting it. They share
@@ -319,7 +300,6 @@ impl RecoveryGate {
                 &AtomicBool::new(false),
                 &mj_core::targets::ProcessExecutor,
                 ReservationKind::Review,
-                LifecycleOrigin::Automatic,
             )
             .await
             .expect("an uncancelled review admission retains its publication");
@@ -335,7 +315,6 @@ impl RecoveryGate {
         cancelled: &AtomicBool,
         notices: &(impl mj_core::targets::CommandExecutor + Sync),
         kind: ReservationKind,
-        origin: LifecycleOrigin,
     ) -> anyhow::Result<ForegroundAdmission> {
         let mut busy = self.subscribe();
         let mut reservation = None;
@@ -362,8 +341,7 @@ impl RecoveryGate {
                         .flatten()
                         .any(|holder| !kind.runs_beside(holder.kind))
                 {
-                    reservation =
-                        Some(self.reserve_locked(&mut state, session_id, label, kind, origin));
+                    reservation = Some(self.reserve_locked(&mut state, session_id, label, kind));
                     if kind == ReservationKind::Foreground
                         && let Some(holders) = state.busy.get(session_id)
                     {
@@ -412,7 +390,7 @@ impl RecoveryGate {
         }
     }
 
-    fn release(&self, session_id: &str, identity: &Arc<()>, origin: LifecycleOrigin) {
+    fn release(&self, session_id: &str, identity: &Arc<()>) {
         let mut state = self
             .state
             .lock()
@@ -423,16 +401,6 @@ impl RecoveryGate {
                 state.reservations.remove(session_id);
             }
             self.publish_busy(&state);
-            self.foreground_releases.send_modify(|released| {
-                released
-                    .entry(session_id.to_owned())
-                    .and_modify(|previous| {
-                        if origin == LifecycleOrigin::Person {
-                            *previous = origin;
-                        }
-                    })
-                    .or_insert(origin);
-            });
         }
     }
 
@@ -537,7 +505,7 @@ impl RecoveryGate {
     /// `try_enter_foreground` reports daemon handoff before it looks at this
     /// session, so a test that has closed the upgrade gate cannot use that
     /// call to see whether the session admission was released.
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn foreground_reservation_labels(&self, session_id: &str) -> Vec<&'static str> {
         self.state
             .lock()
@@ -995,21 +963,6 @@ impl Drop for RelayLeaseAdmission {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.leases.remove(session);
         gate.publish_busy(&state);
-    }
-}
-impl RecoveryGate {
-    pub fn foreground_releases(&self) -> watch::Receiver<BTreeMap<String, LifecycleOrigin>> {
-        let mut releases = self.foreground_releases.subscribe();
-        releases.mark_changed();
-        releases
-    }
-    pub fn take_foreground_releases(&self) -> BTreeMap<String, LifecycleOrigin> {
-        let mut ready = BTreeMap::new();
-        self.foreground_releases.send_if_modified(|releases| {
-            ready = std::mem::take(releases);
-            false
-        });
-        ready
     }
 }
 /// Per-session latest-state mailbox shared by the two background policies.

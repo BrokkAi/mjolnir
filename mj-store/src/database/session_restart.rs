@@ -487,8 +487,8 @@ pub enum ContainerUpgradeCommit {
     Waiting(Vec<String>),
 }
 
-#[cfg(any(test, feature = "test-support"))]
 impl ContainerUpgradeCommit {
+    #[doc(hidden)]
     pub fn is_committed(&self) -> bool {
         matches!(self, Self::Committed)
     }

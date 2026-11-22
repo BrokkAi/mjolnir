@@ -20,55 +20,6 @@ pub(super) fn public_quota_failure(error: &anyhow::Error, reference: &str) -> St
         .unwrap_or_else(|| format!("details are in the daemon log under reference {reference}"))
 }
 
-pub(super) fn quota_move_failure_notice(
-    result: &Result<MoveOutcome>,
-    session: &str,
-    reference: &str,
-    destination: &str,
-) -> Option<String> {
-    let (detail, recovery) = match result {
-        Ok(outcome) if outcome.outcome == "completed" => return None,
-        Ok(outcome) => {
-            tracing::warn!(session, reference, outcome=%outcome.outcome, error=?outcome.error,
-                "quota profile Move did not complete");
-            let error = anyhow::Error::msg(
-                outcome
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| format!("Move {}", outcome.outcome)),
-            );
-            (
-                public_quota_failure(&error, reference),
-                outcome.recovery.as_deref(),
-            )
-        }
-        Err(error) => {
-            tracing::warn!(session, reference, error=%format!("{error:#}"), "quota profile Move failed");
-            (public_quota_failure(error, reference), None)
-        }
-    };
-    Some(format!(
-        "The automatic switch to profile {destination} after the quota stop failed: {detail}.{}",
-        recovery.map(|text| format!(" {text}")).unwrap_or_default()
-    ))
-}
-
-pub(super) async fn record_quota_move_failure(
-    control: &SessionManagerControl,
-    session: &str,
-    operation: &str,
-    text: String,
-) -> Result<()> {
-    let handle = control.session(session.to_owned()).await?;
-    handle
-        .submit(
-            format!("quota-move-failure-{operation}"),
-            RelayCommand::RecordNotice { text },
-        )
-        .await?;
-    Ok(())
-}
-
 fn validate_prepared_move_environment(prepared: bool, durable: bool) -> Result<()> {
     ensure!(
         prepared == durable,
@@ -152,14 +103,13 @@ impl RuntimeState {
         self: &Arc<Self>,
         selection: MoveSelection,
     ) -> Result<MovePreparation> {
-        self.prepare_move_session_for(selection, mj_core::activity::MovePurpose::Manual)
-            .await
+        self.prepare_move_session_for(selection, None).await
     }
 
     async fn prepare_move_session_for(
         self: &Arc<Self>,
         selection: MoveSelection,
-        purpose: mj_core::activity::MovePurpose,
+        quota: Option<&mj_core::continuation::QuotaRecovery>,
     ) -> Result<MovePreparation> {
         let (source_harness, source_active, source_has_request_queue) = {
             let controller_owner = self.owner();
@@ -224,15 +174,26 @@ impl RuntimeState {
             let mut operational = snapshot.operational;
             operational.queued_prompts.clear();
             operational.checkpoint_barrier = None;
-            let purpose = if preparation.in_place && !preparation.cross_harness {
-                purpose
+            let purpose = if quota.is_some() && preparation.in_place && !preparation.cross_harness {
+                mj_core::activity::MovePurpose::QuotaRetry
             } else {
                 mj_core::activity::MovePurpose::Manual
             };
             preparation.active |= !operational.safe_to_move(source_harness, purpose);
-            if purpose == mj_core::activity::MovePurpose::QuotaRetry {
+            if let Some(quota) = quota
+                && purpose == mj_core::activity::MovePurpose::QuotaRetry
+            {
+                ensure!(
+                    preparation.source_profile_id == quota.profile_id
+                        && operational.continuation.user_command_id.as_ref()
+                            == Some(&quota.user_command_id)
+                        && operational.continuation.completed_command_id.as_ref()
+                            == Some(&quota.completed_command_id),
+                    "quota Move source frontier changed during preparation"
+                );
                 preparation.fingerprint =
                     mj_controller::controller::move_session::quota_move_fingerprint(
+                        &preparation.selection.session_id,
                         &preparation.fingerprint,
                         &operational,
                     )?;
@@ -245,6 +206,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_id: &str,
         profile_id: &str,
+        quota: &mj_core::continuation::QuotaRecovery,
     ) -> Result<MoveSessionRequest> {
         let preparation = self
             .prepare_move_session_for(
@@ -262,7 +224,7 @@ impl RuntimeState {
                     resource_allocation: None,
                     subagents: None,
                 },
-                mj_core::activity::MovePurpose::QuotaRetry,
+                Some(quota),
             )
             .await?;
         let blockers: Vec<_> = [
@@ -307,27 +269,20 @@ impl RuntimeState {
         request: MoveSessionRequest,
         reason: String,
         continuation: mj_core::state::QuotaMoveContinuation,
-    ) -> Result<()> {
-        let session_id = request.preparation.selection.session_id.clone();
-        let operation_id = request.preparation.operation_id.clone();
-        let result = self
+        admission: mj_controller::upgrade::Work,
+    ) -> Result<MoveOutcome> {
+        let started = self
             .admit_move_session(request, None, Some((reason, continuation)))
             .await?;
-        let state = self.clone();
-        mj_core::runtime::spawn(async move {
-            let channel = result.result.clone();
-            match Self::wait_lifecycle_result(result.result).await {
-                Ok(DaemonLifecycleResult::Move(_)) => {}
-                Ok(_) => tracing::error!(%session_id, %operation_id,
-                    "quota Move returned an unrelated lifecycle result"),
-                Err(error) => {
-                    tracing::warn!(%session_id, %operation_id, error=%format!("{error:#}"),
-                    "quota Move lifecycle failed")
-                }
-            }
-            state.remove_completed_lifecycle(&channel);
-        });
-        Ok(())
+        drop(admission);
+        let channel = started.result.clone();
+        let result = Self::wait_lifecycle_result(started.result).await;
+        self.remove_completed_lifecycle(&channel);
+        match result? {
+            DaemonLifecycleResult::Move(outcome) => Ok(outcome),
+            DaemonLifecycleResult::Done => bail!("quota Move was cancelled before it started"),
+            _ => bail!("quota Move returned an unrelated lifecycle result"),
+        }
     }
 
     /// Reserve lifecycle ownership before a web request is acknowledged.
@@ -356,69 +311,68 @@ impl RuntimeState {
             &quota_move,
         ))?;
         let session_id = selection.session_id.clone();
-        let quota_failure = quota_move.as_ref().map(|_| {
-            (
-                operation_id.clone(),
-                selection.profile_id.clone().unwrap_or_default(),
-            )
-        });
         let (accepted, acceptance) = tokio::sync::watch::channel(None);
-        let result = self.admit_prepared_lifecycle(
-            session_id.clone(),
-            LifecycleKind::Move,
-            super::lifecycle::LifecycleStart {
-                origin: if quota_move.is_some() { super::lifecycle::LifecycleOrigin::Automatic } else { super::lifecycle::LifecycleOrigin::Person },
-                resume_workspace_id: None,
-                request_key: Some(key),
-                control,
-                phase: LifecyclePhase::Executing,
-                move_operation_id: Some(operation_id.clone()),
-                deferrable_admission: None,
-                holds_through_drain: false,
-            },
-            Some(acceptance),
-            move |state, session_id, cancelled, session_admission| async move {
-                let result = async {
-                    let _capacity_lease = state.reserve_container_capacity_for_move(&request).await?;
-                let catalog = state.profile_catalog.get().expect("catalog installed before serving").clone();
-                state
-                    .clone()
-                    .run_move_controller_work(
-                        session_id.clone(),
-                        cancelled,
-                        |mut controller, executor, manager| async move {
-                            controller
-                                .move_session_managed_controlled_with_admission(&session_admission,
-                                    &catalog,
-                                    request, quota_move, &executor, &manager,
-                                    move || { accepted.send_replace(Some(Ok(()))); },
-                                )
-                                .await
-                        },
-                    )
-                    .await
-                }.await;
-                // Report before completing the admitted lifecycle, including
-                // refusals that happen before any Move record can be saved.
-                if let Some((operation, destination)) = quota_failure
-                    && let Some(text) = quota_move_failure_notice(&result, &session_id, &operation, &destination)
-                {
-                    state.push_notice(&session_id, text.clone());
-                    if let Err(error) = record_quota_move_failure(
-                        &state.session_manager, &session_id, &operation, text,
-                    ).await {
-                        tracing::warn!(%session_id, %operation, error=%format!("{error:#}"),
-                            "could not record quota Move failure in the conversation; the daemon log retains its reference");
+        let result = self
+            .admit_prepared_lifecycle(
+                session_id.clone(),
+                LifecycleKind::Move,
+                super::lifecycle::LifecycleStart {
+                    origin: if quota_move.is_some() {
+                        super::lifecycle::LifecycleOrigin::Automatic
+                    } else {
+                        super::lifecycle::LifecycleOrigin::Person
+                    },
+                    resume_workspace_id: None,
+                    request_key: Some(key),
+                    control,
+                    phase: LifecyclePhase::Executing,
+                    move_operation_id: Some(operation_id.clone()),
+                    deferrable_admission: None,
+                    holds_through_drain: false,
+                },
+                Some(acceptance),
+                move |state, session_id, cancelled, session_admission| async move {
+                    let result = async {
+                        let _capacity_lease =
+                            state.reserve_container_capacity_for_move(&request).await?;
+                        let catalog = state
+                            .profile_catalog
+                            .get()
+                            .expect("catalog installed before serving")
+                            .clone();
+                        state
+                            .clone()
+                            .run_move_controller_work(
+                                session_id.clone(),
+                                cancelled,
+                                |mut controller, executor, manager| async move {
+                                    controller
+                                        .move_session_managed_controlled_with_admission(
+                                            &session_admission,
+                                            &catalog,
+                                            request,
+                                            quota_move,
+                                            &executor,
+                                            &manager,
+                                            move || {
+                                                accepted.send_replace(Some(Ok(())));
+                                            },
+                                        )
+                                        .await
+                                },
+                            )
+                            .await
                     }
-                }
-                if result.is_err() {
-                    state
-                        .tell_live_parent_about_stopped_subagents(&session_id)
-                        .await;
-                }
-                result.map(DaemonLifecycleResult::Move)
-            },
-        ).await?;
+                    .await;
+                    if result.is_err() {
+                        state
+                            .tell_live_parent_about_stopped_subagents(&session_id)
+                            .await;
+                    }
+                    result.map(DaemonLifecycleResult::Move)
+                },
+            )
+            .await?;
         self.set_lifecycle_resume_destination(
             &session_id,
             selection.profile_id.clone().unwrap_or_default(),

@@ -434,15 +434,10 @@ impl VerdictClient {
     }
 
     fn resolve_blocking(source: Option<VerdictSource>) -> Option<Self> {
-        #[cfg(feature = "test-hooks")]
         let source = source.or_else(|| {
-            if std::env::var("MJ_CHAOS_ISOLATED").as_deref() == Ok("1") {
-                std::env::var("MJ_TEST_GLIDE_ENDPOINT")
-                    .ok()
-                    .map(|endpoint| VerdictSource::Hosted { endpoint })
-            } else {
-                None
-            }
+            mj_core::test_hooks::test_glide_endpoint().map(|endpoint| VerdictSource::Hosted {
+                endpoint: endpoint.to_owned(),
+            })
         });
         Self::resolve_with(source, mj_core::jev::disabled_by_environment())
     }

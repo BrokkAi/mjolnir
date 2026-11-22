@@ -208,7 +208,7 @@ impl BuildStateRelease {
     /// target: an SSH workspace, or a container that mounted the shared build
     /// cache. `None` for a target another session owns, one that never had
     /// build state Mjolnir can name, and a container that ran without the cache.
-    #[cfg(all(any(test, feature = "test-support"), unix))]
+    #[cfg(all(test, unix))]
     pub fn for_target(
         session: &SessionRecord,
         backend: &targets::TargetLocator,
@@ -589,27 +589,24 @@ pub fn recent_release_failures() -> Vec<ReleaseFailure> {
         .collect()
 }
 
-#[cfg(not(any(test, feature = "test-support")))]
-fn enabled() -> bool {
-    true
-}
-
 // Most controller tests tear sessions down through the real process
 // executor, and a release would then run this machine's own mbx against the
 // developer's live build cache. Releases stay off in unit tests unless a test
 // turns them on for its thread.
-#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn enabled() -> bool {
-    ENABLED.with(std::cell::Cell::get)
+    if cfg!(test) || mj_core::test_hooks::test_fixtures_enabled() {
+        ENABLED.with(std::cell::Cell::get)
+    } else {
+        true
+    }
 }
 
 /// Turn releases on for the current test thread until the guard drops.
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn enable_for_test() -> impl Drop {
     struct Guard;
     impl Drop for Guard {

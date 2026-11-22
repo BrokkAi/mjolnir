@@ -30,7 +30,7 @@ fn require_legacy_capture(manifest: &ArchiveManifest) -> Result<()> {
 
 /// A failed remote check is evidence of uncertainty, never permission to age
 /// away the only checkpoint. The checkpoint itself has already been verified.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn assess_clone_checkpoint(
     session: &SessionRecord,
     checkpoint: &CheckpointMetadata,

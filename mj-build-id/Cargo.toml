@@ -13,12 +13,6 @@ build = "build.rs"
 name = "mj_build_id"
 doctest = false
 
-[features]
-default = []
-# Also builds a worker stand-in stamped with this build's worker identity,
-# for tests in which a real `mj` verifies a fake worker.
-test-hooks = ["mj-core/test-hooks"]
-
 [lints]
 workspace = true
 

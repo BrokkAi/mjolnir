@@ -117,7 +117,7 @@ pub fn apply_jev_settings(launch: &mut WorkerLaunchConfig, config: &mj_core::con
 /// through `mj new` with neither flag given) gets its harness's own
 /// sub-agents. A child never gets them, and only a harness whose
 /// `HarnessKind::supports_delegation_tools` holds can receive them at all.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub fn subagent_tools_enabled(session: &mj_core::state::SessionRecord, is_child: bool) -> bool {
     let child = is_child.then(|| mj_core::subagent::SubagentRecord {
         kind: mj_core::subagent::SubagentKind::Worker,
@@ -176,7 +176,7 @@ pub struct LaunchWorkspace<'a> {
     pub parent_worktree: Option<&'a mj_core::state::ManagedWorktree>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn worker_launch_config(
     session: &mj_core::state::SessionRecord,
     profile: &mj_core::config::HarnessProfile,

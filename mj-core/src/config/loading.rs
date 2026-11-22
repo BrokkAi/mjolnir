@@ -11,6 +11,59 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::{CONFIG_VERSION, PRODUCT_DIR};
 
+/// Configuration load context with metadata safe to report without TOML input.
+#[derive(Debug)]
+pub enum ConfigLoadError {
+    Toml {
+        path: PathBuf,
+        location: Option<(usize, usize)>,
+    },
+    NewerSchema {
+        path: PathBuf,
+        version: u32,
+    },
+}
+
+impl std::fmt::Display for ConfigLoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Toml { path, .. } => write!(formatter, "parse Mjolnir config {}", path.display()),
+            Self::NewerSchema { path, version } => write!(
+                formatter,
+                "{} was written by a newer Mjolnir (config version {version}; this build supports \
+                 {CONFIG_VERSION}). Update Mjolnir",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigLoadError {}
+
+pub(super) fn config_toml_error(
+    path: &Path,
+    contents: &str,
+    error: toml::de::Error,
+) -> anyhow::Error {
+    let location = error.span().map(|span| {
+        let offset = contents.floor_char_boundary(span.start.min(contents.len()));
+        let prefix = &contents[..offset];
+        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let column = prefix
+            .rsplit('\n')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .count()
+            + 1;
+        (line, column)
+    });
+    anyhow::Error::new(error).context(ConfigLoadError::Toml {
+        path: path.to_owned(),
+        location,
+    })
+}
+
 /// The config version in `document` when it is above this build's.
 pub(super) fn newer_version(document: &toml::Value) -> Option<u32> {
     let version = document.get("version")?.as_integer()?;

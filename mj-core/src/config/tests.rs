@@ -2710,7 +2710,15 @@ fn a_config_without_a_version_names_the_line_to_add() {
         format!("version = {CONFIG_VERSION}\n[profiles.codex\n"),
     )
     .unwrap();
-    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    let error = Config::load_from(&path).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<ConfigLoadError>(),
+        Some(ConfigLoadError::Toml {
+            location: Some((2, 16)),
+            ..
+        })
+    ));
+    let error = format!("{error:#}");
     assert!(
         error.starts_with(&format!("parse Mjolnir config {}: ", path.display())),
         "{error}"

@@ -3053,7 +3053,7 @@ fn worktree_cleanup_notice(worktree_root: &Path, error: &anyhow::Error) -> Strin
     )
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn apply_failed_resume_rollback(
     current: &mut SessionRecord,
     previous: &SessionRecord,

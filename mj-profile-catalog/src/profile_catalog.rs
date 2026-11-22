@@ -13,7 +13,6 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result, bail};
 use futures::future::{FutureExt, Shared, join_all};
 use mj_client::session::BoxFuture;
-#[cfg(any(test, feature = "test-support"))]
 use mj_core::config::HarnessProfile;
 use mj_core::config::{Config, HarnessKind};
 use mj_core::profile_capabilities::{
@@ -26,9 +25,8 @@ use crate::quota::{ProfileQuota, QuotaReportMap};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub type Probe = dyn Fn(String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
-#[cfg(any(test, feature = "test-support"))]
 type ModelProbe = dyn Fn(String, String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
 type Attempt = Shared<BoxFuture<'static, Result<ProbeOutcome, AttemptError>>>;
 type CacheKey = (String, Option<String>);
@@ -269,11 +267,9 @@ pub struct ProfileCatalog {
     /// The daemon's latest quota report per profile. Without it every
     /// profile counts as a subscription when the legacy upgrade picks models.
     quota_reports: Mutex<Option<QuotaReports>>,
-    #[cfg(any(test, feature = "test-support"))]
     probe: Option<(Arc<Probe>, Arc<ModelProbe>)>,
     /// How long the home watch waits before re-probing an identity whose
     /// edit re-probe failed. Tests shorten this to observe the retry.
-    #[cfg(any(test, feature = "test-support"))]
     home_edit_retry_wait: Duration,
 }
 impl ProfileCatalog {
@@ -287,9 +283,7 @@ impl ProfileCatalog {
             legacy_review_upgrade_started: AtomicBool::new(false),
             config_path: None,
             quota_reports: Mutex::new(None),
-            #[cfg(any(test, feature = "test-support"))]
             probe: None,
-            #[cfg(any(test, feature = "test-support"))]
             home_edit_retry_wait: HOME_EDIT_RETRY_WAIT,
         })
     }
@@ -1108,14 +1102,7 @@ impl ProfileCatalog {
 
     /// How long after a failed edit re-probe the home watch tries again.
     fn home_edit_retry_wait(&self) -> Duration {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            self.home_edit_retry_wait
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            HOME_EDIT_RETRY_WAIT
-        }
+        self.home_edit_retry_wait
     }
 
     /// Probe again every ready entry that `expired` selects. Readers keep
@@ -1299,7 +1286,6 @@ impl ProfileCatalog {
         refresh: bool,
     ) -> Attempt {
         let probe: BoxFuture<'static, Result<crate::profile_config::Discovery>> = {
-            #[cfg(any(test, feature = "test-support"))]
             if let Some((probe, model_probe)) = &self.probe {
                 let future = match model {
                     None => probe(definition.id.clone()),
@@ -1314,17 +1300,6 @@ impl ProfileCatalog {
                 }
                 .boxed()
             } else {
-                crate::profile_config::discover_for(
-                    (*definition.config).clone(),
-                    definition.id.clone(),
-                    model,
-                    definition.cancellation.clone(),
-                    refresh,
-                )
-                .boxed()
-            }
-            #[cfg(not(any(test, feature = "test-support")))]
-            {
                 crate::profile_config::discover_for(
                     (*definition.config).clone(),
                     definition.id.clone(),
@@ -1917,7 +1892,7 @@ impl ProfileCatalog {
         inner
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn build(
         cancellation: CancellationToken,
         probe: Arc<Probe>,
@@ -1927,7 +1902,7 @@ impl ProfileCatalog {
         Arc::get_mut(&mut catalog).unwrap().probe = Some((probe, model_probe));
         catalog
     }
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn with_probe(probe: Arc<Probe>) -> Arc<Self> {
         let model_probe = probe.clone();
         Self::build(
@@ -1936,7 +1911,7 @@ impl ProfileCatalog {
             Arc::new(move |profile, _| model_probe(profile)),
         )
     }
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub async fn sync_now(self: &Arc<Self>, config: &Config) {
         self.sync(config);
         let discoveries = config.enabled_profiles().map(|(id, _)| async move {
@@ -2083,7 +2058,7 @@ fn home_digest(inputs: &[WatchedInput; 3]) -> [u8; 32] {
 }
 
 /// A configuration with the named profiles enabled.
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
     Config {
         profiles: profiles
@@ -2106,7 +2081,7 @@ pub fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
 
 /// A probe that answers with the profile's own id and counts its calls, so a
 /// test can prove that a warm answer runs none.
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn counting_probe(calls: Arc<std::sync::atomic::AtomicUsize>) -> Arc<Probe> {
     Arc::new(move |profile| {
         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2115,7 +2090,7 @@ pub fn counting_probe(calls: Arc<std::sync::atomic::AtomicUsize>) -> Arc<Probe> 
 }
 
 /// The capabilities a fixture probe reports for a profile.
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn test_choices(profile: &str) -> ProfileConfig {
     ProfileConfig {
         model: Some(format!("{profile}-model")),
@@ -2132,7 +2107,7 @@ pub fn test_choices(profile: &str) -> ProfileConfig {
 /// A probe that fails while the flag is set and counts its calls, so a test
 /// can drive the background pass, the call that retries after it, and the
 /// cache in between.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn flag_probe(
     fails: Arc<std::sync::atomic::AtomicBool>,
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -2154,7 +2129,7 @@ fn flag_probe(
 /// to release it, so a test can hold a discovery in flight and see who shares
 /// it. The release is a `watch` channel rather than a `Notify` so that a
 /// release arriving before a waiter does is still observed.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn gated_probe(
     calls: Arc<std::sync::atomic::AtomicUsize>,
     started: tokio::sync::mpsc::UnboundedSender<String>,

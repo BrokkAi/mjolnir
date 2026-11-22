@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use mj_core::config::ProjectRepository;
 use mj_core::config::{Config, TargetTemplate};
 use mj_core::local_git::canonical_repository;
@@ -323,7 +323,7 @@ impl Controller {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(super) fn prepare_managed_raw_worktree(
         &mut self,
         session_id: &str,
@@ -1121,7 +1121,7 @@ fn accepted_project_snapshot(
 
 /// Resolve where a raw session's checkout lives and which accepted bundle
 /// repository it represents. Reads Git; changes nothing.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn plan_raw_to_workspace(
     session: &SessionRecord,
     executor: &impl CommandExecutor,
@@ -1369,7 +1369,7 @@ pub(super) fn capture_legacy_raw_checkout_snapshot(
 
 /// Describe a raw-to-workspace conversion for a person to confirm. Reads Git
 /// and asks the remote for its default branch; changes nothing.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn raw_conversion_preview(
     session: &SessionRecord,
     conversion: &RawToWorkspaceConversion,
@@ -1812,7 +1812,7 @@ pub(super) fn managed_worktree_base_commit(
 
 /// Read where a raw session's checkout stands right now, on whichever host
 /// owns it.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn raw_checkout_position(
     session: &SessionRecord,
     config: &Config,

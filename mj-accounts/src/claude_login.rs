@@ -124,7 +124,7 @@ pub async fn install_keychain_login_if_newer(
 
 /// A hand-written macOS Keychain for tests: `security` as Claude Code's item
 /// answers it and as `security -i` writes it.
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub mod fake {
     use std::sync::Mutex;
 

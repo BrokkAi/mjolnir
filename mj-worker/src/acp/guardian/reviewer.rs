@@ -17,7 +17,10 @@
 
 use super::*;
 use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
-use mj_core::guardian::{GuardianReviewOutcome, collect_project_instructions};
+use mj_core::guardian::{
+    GUARDIAN_DISABLED_REASON, GuardianReviewOutcome, collect_project_instructions,
+    safe_daemon_guardian_failure_reason,
+};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
@@ -97,7 +100,7 @@ impl Guardian {
             Ok(Err(error)) => {
                 tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "could not collect project instructions");
                 return GuardianDecision::AskPerson {
-                    reason: format!("it could not collect project instructions: {error}"),
+                    reason: "it could not collect project instructions".into(),
                 };
             }
             Err(_) => {
@@ -123,13 +126,22 @@ impl Guardian {
                 Ok(GuardianReviewOutcome::Deny { rationale, .. }) => {
                     return self.record_verdict(Some(rationale));
                 }
-                Ok(GuardianReviewOutcome::AskPerson { reason }) => {
+                Ok(GuardianReviewOutcome::AskPerson { reason })
+                    if reason == GUARDIAN_DISABLED_REASON =>
+                {
                     return GuardianDecision::AskPerson { reason };
                 }
-                Err(error) => {
-                    tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "guardian review failed; asking the person");
+                Ok(GuardianReviewOutcome::AskPerson { reason }) => {
+                    let reason = safe_daemon_guardian_failure_reason(&reason);
+                    tracing::warn!(target: "mj_guardian", %tool_call_id, %reason, "daemon guardian review failed");
                     return GuardianDecision::AskPerson {
-                        reason: format!("its review failed: {error:#}"),
+                        reason: format!("its review failed: {reason}"),
+                    };
+                }
+                Err(error) => {
+                    tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "guardian relay failed");
+                    return GuardianDecision::AskPerson {
+                        reason: format!("its review failed: {error}"),
                     };
                 }
             }
@@ -187,10 +199,11 @@ impl Guardian {
                     %tool_call_id,
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     error = %format!("{error:#}"),
-                    "guardian review failed; asking the person"
+                    "ACP guardian review failed"
                 );
                 return GuardianDecision::AskPerson {
-                    reason: format!("its review failed: {error:#}"),
+                    reason: "its review failed: the ACP reviewer could not complete the review"
+                        .into(),
                 };
             }
             Err(_) => {
@@ -198,11 +211,11 @@ impl Guardian {
                     target: "mj_guardian",
                     harness = %self.spec.harness.display_name(),
                     %tool_call_id,
-                    "guardian review timed out; asking the person"
+                    "ACP guardian review timed out"
                 );
                 return GuardianDecision::AskPerson {
                     reason: format!(
-                        "its review did not finish within {} seconds",
+                        "the ACP review did not finish within {} seconds",
                         GUARDIAN_REVIEW_TIMEOUT.as_secs()
                     ),
                 };

@@ -6,13 +6,8 @@
 //! It builds on worker staging, the store and the accounts crate, and is a
 //! sibling of the session runtime: neither uses the other.
 
-// `test-support` compiles the test-only items for the tests of the crates
-// above, which use only some of them. The dead-code lints still run on normal
-// and test builds.
-#![cfg_attr(
-    all(feature = "test-support", not(test)),
-    allow(dead_code, unused_imports)
-)]
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
 
 // The moved modules name these by their old paths.
 pub(crate) use mj_accounts::{quota, review_selection};

@@ -1,5 +1,8 @@
 //! Client-facing contracts shared by Mjolnir's daemon and control surfaces.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 pub mod build_identity;
 pub mod image;
 pub mod quota;

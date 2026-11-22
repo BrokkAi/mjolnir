@@ -308,7 +308,6 @@ pub type QuotaReportMap = BTreeMap<String, QuotaReportPublication>;
 pub struct QuotaManager {
     codex_clients: HashMap<String, CodexUsageClient>,
     reports: BTreeMap<String, ProfileQuota>,
-    #[cfg(any(test, feature = "test-support"))]
     cache_root: Option<PathBuf>,
 }
 
@@ -374,10 +373,7 @@ impl QuotaManager {
         F: FnMut(QuotaRefreshOutcome) -> Fut,
         Fut: Future<Output = ()> + Send,
     {
-        #[cfg(any(test, feature = "test-support"))]
         let cache_root = self.cache_root.clone();
-        #[cfg(not(any(test, feature = "test-support")))]
-        let cache_root = None;
 
         let mut tasks = tokio::task::JoinSet::new();
         for request in requests {

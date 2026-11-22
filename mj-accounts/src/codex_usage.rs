@@ -5,14 +5,14 @@
 //! from the UI so protocol parsing and unavailable states remain testable.
 
 use std::collections::{HashMap, VecDeque};
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(test, unix))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mj_core::config::HarnessKind;
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(test, unix))]
 use mj_core::harness_runtime::{CODEX_CLI_ENTRYPOINT, LEASE_FILE, managed_harness_install_dir};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -56,7 +56,7 @@ pub struct CodexUsageWindow {
 pub enum CodexLauncher {
     /// This host's installed CLI, otherwise the pinned managed installation.
     Host,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     Program(PathBuf),
 }
 
@@ -69,7 +69,7 @@ impl CodexLauncher {
             Self::Host => crate::quota_harness::locate(HarnessKind::Codex, env)
                 .await
                 .map(Arc::new),
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             Self::Program(command) => Ok(Arc::new(crate::quota_harness::QuotaProgram {
                 command: crate::quota_harness::command_text(command)?,
                 environment: HashMap::new(),
@@ -495,7 +495,7 @@ pub(crate) async fn refresh_login_with_cache_root(
     }
 }
 
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(test, unix))]
 pub fn install_fake_managed_codex(cache_root: &Path, script: &str) -> PathBuf {
     let install = managed_harness_install_dir(cache_root, HarnessKind::Codex);
     let launcher = install.join(CODEX_CLI_ENTRYPOINT);

@@ -13,10 +13,6 @@ name = "mj_daemon"
 # The crate has no doc tests; looking for them makes rustdoc compile it again.
 doctest = false
 
-[features]
-default = []
-test-hooks = ["mj-core/test-hooks", "mj-controller/test-hooks", "mj-server/test-hooks"]
-
 [lints]
 workspace = true
 
@@ -25,7 +21,7 @@ portable-pty = "0.9"
 sysinfo.workspace = true
 mj-core.workspace = true
 mj-review.workspace = true
-mj-transcript = { workspace = true, features = ["github-history"] }
+mj-transcript.workspace = true
 mj-checkpoint.workspace = true
 mj-client.workspace = true
 agent-client-protocol.workspace = true
@@ -39,16 +35,16 @@ getrandom.workspace = true
 # persisted signing key); pairs with the existing `sha2`.
 hmac = "0.13"
 libc.workspace = true
-reqwest = { workspace = true, features = ["blocking", "json", "query", "stream"] }
+reqwest.workspace = true
 rusqlite.workspace = true
 sessionwiki.workspace = true
-serde = { workspace = true, features = ["rc"] }
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 toml.workspace = true
-tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true, features = ["compat", "io"] }
+tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 url.workspace = true
 anvil-client.workspace = true
@@ -59,12 +55,8 @@ mj-review-host.workspace = true
 mj-github-relevance.workspace = true
 
 [dev-dependencies]
-mj-core = { workspace = true, features = ["test-hooks", "golden"] }
-mj-controller = { workspace = true, features = ["test-support"] }
-mj-server = { workspace = true, features = ["test-support"] }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
-mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime", features = ["test-hooks"] }
+mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime" }
 tar.workspace = true
 http-body-util = "0.1"
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }

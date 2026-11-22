@@ -71,20 +71,20 @@ axum = "0.8"
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
 bytes = "1"
-# `clock` enables local-time support so `Local` can render reset timestamps in
-# the machine's wall-clock time (DST-correct); `default-features = false` drops
-# the wasm-only bits.
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Local-time support (chrono's default `clock`) renders reset timestamps
+# in the machine's wall-clock time.
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 dirs = "6"
 # `rust_backend` is flate2 1.1.9's whole default; naming it keeps every crate
 # on the pure-Rust deflate without a C toolchain.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-getrandom = "0.3"
-image = { version = "0.25", default-features = false, features = ["png"] }
+getrandom = { version = "0.3", features = ["std"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 imbl = { version = "7.0.2", features = ["serde"] }
-libc = "0.2"
+jsonc-parser = { version = "0.34", features = ["serde", "cst"] }
+libc = { version = "0.2", features = ["extra_traits"] }
 memchr = "2"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 rayon = "1"
@@ -92,13 +92,13 @@ rayon = "1"
 # pulling aws-lc-rs, which needs a C toolchain and complicates
 # cross-compilation. Every executable installs the ring provider at startup
 # through `mj_server::server::install_rustls_crypto_provider`.
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "blocking", "json", "query", "stream"] }
 ring = "0.17"
 rusqlite = { version = "0.41", features = ["backup", "bundled", "fallible_uint", "functions"] }
 ruzstd = "0.9"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1", features = ["derive", "rc", "alloc"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # Names config-file keys that no field reads; see `Config::load_from`.
 serde_ignored = "0.1"
 sha2 = "0.11"
@@ -107,14 +107,14 @@ hmac = "0.13"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tar = "0.4"
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "time"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tokio-stream = "0.1"
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "compat", "io", "codec"] }
 toml = "0.8"
 toml_edit = "0.20"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-url = "2"
+url = { version = "2", features = ["serde"] }
 # Windows-only crates add the API features they call.
 windows-sys = "0.61"
 zip = { version = "2", default-features = false, features = ["deflate", "zstd"] }
