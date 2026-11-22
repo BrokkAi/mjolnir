@@ -77,12 +77,19 @@ impl GuardianEndpoint {
         mut request: GuardianReviewRequest,
         deadline: Instant,
     ) -> Result<GuardianReviewResult> {
-        ensure!(Instant::now() < deadline, "the guardian review timed out");
+        let timeout = "the daemon guardian did not return a verdict before the relay deadline";
+        ensure!(Instant::now() < deadline, "{timeout}");
         let _permit = self
             .permits
             .try_acquire()
             .context("too many pending guardian reviews")?;
         let id = mj_core::state::new_session_id()?;
+        tracing::debug!(
+            target: "mj_guardian",
+            request_id = %id,
+            tool_call_id = %request.tool_call_id,
+            "queued a guardian request for the daemon"
+        );
         request.request_id = id.clone();
         let (reply, received) = oneshot::channel();
         self.pending
@@ -101,7 +108,7 @@ impl GuardianEndpoint {
             .send_modify(|generation| *generation = generation.wrapping_add(1));
         tokio::time::timeout_at(deadline, received)
             .await
-            .context("the guardian review timed out")?
+            .context(timeout)?
             .context("the guardian response channel closed")
     }
 }

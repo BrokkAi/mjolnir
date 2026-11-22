@@ -8201,9 +8201,8 @@ fn a_permission_form_shows_the_command_it_approves() {
 /// updates are replayed from the reviewer journal R4 saved
 /// (`reviewer-B-kimi-bash-permission.jsonl`), followed by a permission request
 /// that names the call and carries no input, as Kimi's did. Kimi has no
-/// guardian of its own, and the Mjolnir guardian's reviewer cannot start here
-/// (there is no `kimi-probe`), so the request reaches the person's form with
-/// the reason first.
+/// guardian of its own. Mjolnir guardian review is disabled for this fixture
+/// so the request reaches the person's form.
 // Hard-won: 11ace4e: Kimi permission forms omitted commands streamed in tool content rather than rawInput.
 #[tokio::test]
 async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
@@ -8240,7 +8239,10 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        approval_choices: Default::default(),
+        approval_choices: mj_core::config::ApprovalChoices {
+            mjolnir_guardian: false,
+            ..Default::default()
+        },
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
@@ -8335,15 +8337,8 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
             break request.message;
         }
     };
-    let (preface, request) = message
-        .split_once("Answer it yourself.\n")
-        .expect("the form names why the guardian handed it over");
-    assert!(
-        preface.starts_with("Mjolnir guardian could not decide this request (its review failed: "),
-        "{preface}"
-    );
     assert_eq!(
-        request,
+        message,
         "Kimi Code requests permission:\nBash\n$ git status --short && git ls-files && ls -a"
     );
     driver.abort();

@@ -17,7 +17,9 @@
 
 use super::*;
 use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
-use mj_core::guardian::{GuardianReviewOutcome, collect_project_instructions};
+use mj_core::guardian::{
+    GUARDIAN_DISABLED_REASON, GuardianReviewOutcome, collect_project_instructions,
+};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
@@ -67,7 +69,6 @@ impl Guardian {
         input: Option<&serde_json::Value>,
         native_child: bool,
     ) -> GuardianDecision {
-        let deadline = tokio::time::Instant::now() + GUARDIAN_REVIEW_TIMEOUT;
         if self.spec.turn_context.guardian_tripped() {
             tracing::info!(
                 target: "mj_guardian",
@@ -87,8 +88,8 @@ impl Guardian {
         );
         let tool_call_id = request.tool_call.tool_call_id.to_string();
         let cwd = self.spec.cwd.clone();
-        let project_instructions = match tokio::time::timeout_at(
-            deadline,
+        let project_instructions = match tokio::time::timeout(
+            GUARDIAN_REVIEW_TIMEOUT,
             mj_core::runtime::spawn_blocking(move || collect_project_instructions(&cwd)),
         )
         .await
@@ -96,13 +97,13 @@ impl Guardian {
             Ok(Ok(instructions)) => instructions,
             Ok(Err(error)) => {
                 tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "could not collect project instructions");
-                return GuardianDecision::AskPerson {
+                return GuardianDecision::Failed {
                     reason: format!("it could not collect project instructions: {error}"),
                 };
             }
             Err(_) => {
                 tracing::warn!(target: "mj_guardian", %tool_call_id, "collecting project instructions timed out");
-                return GuardianDecision::AskPerson {
+                return GuardianDecision::Failed {
                     reason: "collecting project instructions timed out".into(),
                 };
             }
@@ -114,7 +115,7 @@ impl Guardian {
                     &tool_call_id,
                     &action,
                     project_instructions.as_deref(),
-                    deadline,
+                    tokio::time::Instant::now() + GUARDIAN_REVIEW_TIMEOUT,
                 )
                 .await
             {
@@ -123,13 +124,23 @@ impl Guardian {
                 Ok(GuardianReviewOutcome::Deny { rationale, .. }) => {
                     return self.record_verdict(Some(rationale));
                 }
-                Ok(GuardianReviewOutcome::AskPerson { reason }) => {
+                Ok(GuardianReviewOutcome::AskPerson { reason })
+                    if reason == GUARDIAN_DISABLED_REASON =>
+                {
                     return GuardianDecision::AskPerson { reason };
                 }
+                Ok(GuardianReviewOutcome::AskPerson { .. }) => {
+                    // A legacy daemon can include raw configuration or
+                    // provider errors in this field.
+                    tracing::warn!(target: "mj_guardian", %tool_call_id, "daemon guardian review failed");
+                    return GuardianDecision::Failed {
+                        reason: "the daemon reviewer failed".into(),
+                    };
+                }
                 Err(error) => {
-                    tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "guardian review failed; asking the person");
-                    return GuardianDecision::AskPerson {
-                        reason: format!("its review failed: {error:#}"),
+                    tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "guardian relay failed");
+                    return GuardianDecision::Failed {
+                        reason: error.to_string(),
                     };
                 }
             }
@@ -187,10 +198,10 @@ impl Guardian {
                     %tool_call_id,
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     error = %format!("{error:#}"),
-                    "guardian review failed; asking the person"
+                    "ACP guardian review failed"
                 );
-                return GuardianDecision::AskPerson {
-                    reason: format!("its review failed: {error:#}"),
+                return GuardianDecision::Failed {
+                    reason: "the ACP reviewer failed".into(),
                 };
             }
             Err(_) => {
@@ -198,11 +209,11 @@ impl Guardian {
                     target: "mj_guardian",
                     harness = %self.spec.harness.display_name(),
                     %tool_call_id,
-                    "guardian review timed out; asking the person"
+                    "ACP guardian review timed out"
                 );
-                return GuardianDecision::AskPerson {
+                return GuardianDecision::Failed {
                     reason: format!(
-                        "its review did not finish within {} seconds",
+                        "the ACP review did not finish within {} seconds",
                         GUARDIAN_REVIEW_TIMEOUT.as_secs()
                     ),
                 };

@@ -26,7 +26,12 @@ use std::time::Duration;
 
 use crate::config::HarnessKind;
 
+/// The synchronous Codex guardian's 90-second review budget, adopted for
+/// Mjolnir permission reviews. See the Mjolnir guardian ExecPlan.
 pub const GUARDIAN_REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
+/// Protocol 82's `AskPerson` also carries daemon failures. This reason
+/// identifies the explicit settings choice to continue with manual approval.
+pub const GUARDIAN_DISABLED_REASON: &str = "Mjolnir guardian is disabled in settings";
 pub const MAX_PENDING_GUARDIAN_REVIEWS: usize = 8;
 
 /// Codex's security policy, inserted into the template below.

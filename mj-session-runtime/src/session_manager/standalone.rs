@@ -1,7 +1,8 @@
 use super::*;
 use mj_core::guardian::{
-    GUARDIAN_REVIEW_TIMEOUT, GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
-    MAX_PENDING_GUARDIAN_REVIEWS, Outcome, WOLF_STAGE1_ALLOW_THRESHOLD,
+    GUARDIAN_DISABLED_REASON, GUARDIAN_REVIEW_TIMEOUT, GuardianReviewOutcome,
+    GuardianReviewRequest, GuardianReviewResult, MAX_PENDING_GUARDIAN_REVIEWS, Outcome,
+    WOLF_STAGE1_ALLOW_THRESHOLD,
 };
 use mj_import::utility_llm::{GuardianUtilityOutcome, review_guardian_with_utility};
 use std::{future::Future, pin::Pin};
@@ -1275,6 +1276,13 @@ async fn execute_guardian_review(
     request: GuardianReviewRequest,
     classifier: Option<Arc<dyn GuardianStage1>>,
 ) -> GuardianReviewResult {
+    tracing::info!(
+        target: "mj_guardian",
+        session_id = %request.session_id,
+        tool_call_id = %request.tool_call_id,
+        request_id = %request.request_id,
+        "daemon guardian started reviewing a permission request"
+    );
     let cancel = tokio_util::sync::CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
     let decision = tokio::time::timeout(GUARDIAN_REVIEW_TIMEOUT, async {
@@ -1293,7 +1301,7 @@ async fn execute_guardian_review(
         };
         if !config.guardian.enabled {
             return GuardianReviewOutcome::AskPerson {
-                reason: "Mjolnir guardian is disabled in settings".into(),
+                reason: GUARDIAN_DISABLED_REASON.into(),
             };
         }
         let mut stage1_score = None;

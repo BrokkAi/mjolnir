@@ -546,6 +546,23 @@ where
                                 }
                                 return answered;
                             }
+                            Some(guardian::GuardianDecision::Failed { reason }) => {
+                                let message = format!("Mjolnir guardian could not review {subject}. Reason: {reason}");
+                                let (withdrawn, answered) = ticket.settle(|withdrawn| (withdrawn, if withdrawn {
+                                    responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))
+                                } else {
+                                    responder.respond_with_error(agent_client_protocol::Error::new(
+                                        agent_client_protocol::ErrorCode::INTERNAL_ERROR, &message,
+                                    ))
+                                }));
+                                if !withdrawn {
+                                    permission_events
+                                        .send(RuntimeEvent::Notice { message })
+                                        .await
+                                        .map_err(|_| relay_event_channel_error())?;
+                                }
+                                return answered;
+                            }
                             // A turn withdrawn from here on still reaches the
                             // form: registering it answers `cancelled`.
                             Some(guardian::GuardianDecision::AskPerson { reason }) => {

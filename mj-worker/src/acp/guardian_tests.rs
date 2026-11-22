@@ -42,7 +42,7 @@ def ask(ident, session, call, title, kind, raw_input):
         if message is None: sys.exit(0)
         if message.get('id') == ident and 'method' not in message:
             buffered[:0] = deferred
-            return message.get('result', {}).get('outcome')
+            return message.get('result', {}).get('outcome', message.get('error'))
         if 'method' in message and 'id' in message:
             send({'jsonrpc':'2.0','id':message['id'],'result':{}})
         else:
@@ -591,6 +591,58 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
     assert_eq!(
         await_recorded(temp.path(), "session_outcomes", 1).await,
         [json!({"command": "make deploy", "outcome": {"outcome": "cancelled"}})]
+    );
+    assert!(endpoint.requests().is_empty());
+    assert!(recorded(temp.path(), "reviewer_initialize").is_empty());
+    runtime.abort();
+}
+
+// Hard-won: a35beec20: a daemon guardian timeout left Antigravity waiting for manual approval.
+#[tokio::test]
+async fn guardian_relay_timeout_answers_antigravity_without_an_operator_form() {
+    use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
+
+    let temp = tempfile::tempdir().unwrap();
+    let endpoint = Arc::new(GuardianEndpoint::default());
+    let (_requests, mut events, runtime, _) = start_scripted_harness(
+        temp.path(),
+        &["touch marker"],
+        &[],
+        &[],
+        Some(endpoint.clone()),
+        |spec| {
+            spec.harness = HarnessKind::Antigravity;
+            spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+            spec.approval_choices = Default::default();
+            spec.harness
+                .configure_staged_home_environment(temp.path(), &mut spec.environment);
+        },
+    );
+    wait_for_guardian_request(&endpoint).await;
+    tokio::time::pause();
+    tokio::time::advance(GUARDIAN_REVIEW_TIMEOUT).await;
+    tokio::time::resume();
+
+    loop {
+        match next_event(&mut events).await {
+            RuntimeEvent::ElicitationRequested { request } => {
+                panic!(
+                    "review failure opened an operator form: {}",
+                    request.message
+                );
+            }
+            RuntimeEvent::Notice { message } if message.contains("relay deadline") => break,
+            _ => {}
+        }
+    }
+    let replies = await_recorded(temp.path(), "session_outcomes", 1).await;
+    assert_eq!(replies[0]["outcome"]["code"], -32603);
+    assert!(
+        replies[0]["outcome"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("the daemon guardian did not return a verdict before the relay deadline"),
+        "{replies:?}"
     );
     assert!(endpoint.requests().is_empty());
     assert!(recorded(temp.path(), "reviewer_initialize").is_empty());

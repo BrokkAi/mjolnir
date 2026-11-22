@@ -78,8 +78,11 @@ pub(super) enum GuardianDecision {
     Deny {
         rationale: String,
     },
-    /// The guardian could not decide; the person answers the ordinary form,
-    /// which shows this reason.
+    /// Review infrastructure failed. Finish the request with an ACP error.
+    Failed {
+        reason: String,
+    },
+    /// A policy decision handed this request to the person.
     AskPerson {
         reason: String,
     },
