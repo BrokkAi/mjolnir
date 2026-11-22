@@ -273,7 +273,7 @@ pub(super) async fn notification_message(
 }
 
 fn read_notification_completion(session_id: &str, through: u64) -> anyhow::Result<Option<String>> {
-    let item = mj_controller::database::load_materialized_agent_item_through(session_id, through)?;
+    let item = mj_store::database::load_materialized_agent_item_through(session_id, through)?;
     Ok(item.and_then(|item| {
         mj_core::transcript::materialized_agent_message_text(
             std::iter::once(&item),
@@ -283,7 +283,7 @@ fn read_notification_completion(session_id: &str, through: u64) -> anyhow::Resul
 }
 
 fn read_notification_item(session_id: &str, target: &str) -> anyhow::Result<Option<String>> {
-    let item = mj_controller::database::load_materialized_transcript_item(session_id, target)?;
+    let item = mj_store::database::load_materialized_transcript_item(session_id, target)?;
     Ok(item.and_then(|item| {
         mj_core::transcript::materialized_agent_message_text(std::iter::once(&item), target)
     }))
@@ -920,11 +920,10 @@ pub(super) async fn complete_path(
 
 pub(super) async fn discover_projects(
     State(state): State<ServerState>,
-    Json(request): Json<mj_controller::project_picker::ProjectDiscoveryRequest>,
-) -> Result<Json<mj_controller::project_picker::ProjectDiscovery>, ApiError> {
-    mj_controller::project_picker::validate_request(&request).map_err(|error| {
-        ApiError::bad_request(mj_controller::project_picker::error_message(&error))
-    })?;
+    Json(request): Json<mj_import::project_picker::ProjectDiscoveryRequest>,
+) -> Result<Json<mj_import::project_picker::ProjectDiscovery>, ApiError> {
+    mj_import::project_picker::validate_request(&request)
+        .map_err(|error| ApiError::bad_request(mj_import::project_picker::error_message(&error)))?;
     let (reply, result) = tokio::sync::oneshot::channel();
     state
         .preflight_tx
@@ -1319,10 +1318,9 @@ async fn catalog_response(
 
 /// The commit author in this host's global Git configuration. Sessions
 /// inherit it, so the new-session form asks for one when a part is missing.
-pub(super) async fn read_git_identity()
--> Result<Json<mj_controller::controller::GitIdentity>, ApiError> {
+pub(super) async fn read_git_identity() -> Result<Json<mj_client::daemon::GitIdentity>, ApiError> {
     // Reading runs `git`, so it stays off the async runtime.
-    mj_core::runtime::spawn_blocking(mj_controller::controller::controller_git_identity)
+    mj_core::runtime::spawn_blocking(mj_session_runtime::host_git_config::controller_git_identity)
         .await
         .map_err(|error| git_identity_failure("read", anyhow::anyhow!("{error}")))?
         .map(Json)
@@ -1352,7 +1350,10 @@ pub(super) async fn save_git_identity(
     };
     let saved = mj_core::runtime::spawn_blocking(move || {
         let _admission = admission;
-        mj_controller::controller::set_controller_git_identity(&request.name, &request.email)
+        mj_session_runtime::host_git_config::set_controller_git_identity(
+            &request.name,
+            &request.email,
+        )
     })
     .await;
     match saved {

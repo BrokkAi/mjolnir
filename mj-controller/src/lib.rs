@@ -64,8 +64,6 @@ pub use mj_targets::test_log;
 pub use mj_session_runtime::wait_policy;
 pub use mj_worker_launch::worker_launch;
 
-pub mod session_images;
-
 // Stand-in relays that tests start by running this test binary again; see
 // `mj_worker::stand_in_relay`. mj-controller's and mj-daemon's test binaries
 // both define these, under the names in `mj_core::test_hooks`.

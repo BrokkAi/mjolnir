@@ -26,6 +26,7 @@ pub(crate) use mj_targets::{test_isolation, test_log};
 pub mod checkpoint_transfer;
 pub mod github_app;
 pub mod github_credential;
+pub mod host_git_config;
 pub mod project_memory_merge;
 pub mod readiness;
 pub mod session_manager;

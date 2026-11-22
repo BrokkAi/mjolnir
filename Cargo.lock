@@ -1011,12 +1011,20 @@ dependencies = [
  "axum",
  "axum-server",
  "base64 0.22.1",
+ "brokk-mj-accounts",
+ "brokk-mj-build-cache",
  "brokk-mj-checkpoint",
  "brokk-mj-client",
- "brokk-mj-controller",
  "brokk-mj-core",
  "brokk-mj-github-relevance",
+ "brokk-mj-import",
+ "brokk-mj-profile-catalog",
  "brokk-mj-review",
+ "brokk-mj-session-runtime",
+ "brokk-mj-session-types",
+ "brokk-mj-sessionwiki",
+ "brokk-mj-store",
+ "brokk-mj-targets",
  "brokk-mj-transcript",
  "brokk-mj-worker-runtime",
  "chrono",
@@ -1084,6 +1092,7 @@ version = "2.73.0"
 dependencies = [
  "brokk-mj-core",
  "brokk-mj-targets",
+ "serde",
 ]
 
 [[package]]

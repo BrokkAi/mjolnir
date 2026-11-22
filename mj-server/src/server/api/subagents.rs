@@ -1,6 +1,6 @@
-use mj_controller::profile_scheduler::{Placement, ScheduledCandidate, guardian_eligible};
+use mj_accounts::profile_scheduler::{Placement, ScheduledCandidate, guardian_eligible};
 #[cfg(test)]
-use mj_controller::profile_scheduler::{
+use mj_accounts::profile_scheduler::{
     SchedulingContext, order_scheduled_candidates_by_draw, rank_scheduled_candidates,
 };
 use mj_core::config::ExecutionPolicy;
@@ -53,7 +53,7 @@ pub(super) async fn spawn_subagent(
     .await?;
 
     let relation = backend
-        .start_subagent(mj_controller::controller::RegisterSubagentRequest {
+        .start_subagent(mj_session_types::RegisterSubagentRequest {
             no_github_credentials: request.no_github_credentials,
             kind: mj_core::subagent::SubagentKind::Worker,
             supervisor: task_type == mj_core::subagent::SubagentTaskType::Supervisor,
@@ -92,7 +92,7 @@ pub(super) async fn spawn_subagent(
 /// Shared RAII handle for an in-flight quota placement reservation.
 #[derive(Debug, Default, Clone)]
 pub struct ReservationSlot(
-    std::sync::Arc<std::sync::Mutex<Option<mj_controller::quota_telemetry::PlacementReservation>>>,
+    std::sync::Arc<std::sync::Mutex<Option<mj_accounts::quota_telemetry::PlacementReservation>>>,
 );
 
 impl PartialEq for ReservationSlot {
@@ -104,7 +104,7 @@ impl PartialEq for ReservationSlot {
 impl Eq for ReservationSlot {}
 
 impl ReservationSlot {
-    pub fn new(reservation: Option<mj_controller::quota_telemetry::PlacementReservation>) -> Self {
+    pub fn new(reservation: Option<mj_accounts::quota_telemetry::PlacementReservation>) -> Self {
         Self(std::sync::Arc::new(std::sync::Mutex::new(reservation)))
     }
 
@@ -359,7 +359,7 @@ pub async fn resolve_provider_session_selection(
             })
             .unwrap_or("");
         if let Some(reason) =
-            mj_controller::profile_scheduler::ineligibility(candidate, current_model, now)
+            mj_accounts::profile_scheduler::ineligibility(candidate, current_model, now)
         {
             excluded.push(reason.describe(&candidate.profile_id, current_model));
             continue;
@@ -525,7 +525,7 @@ async fn resolve_choices_selection(
                 continue;
             }
             if let Some(reason) =
-                mj_controller::profile_scheduler::ineligibility(candidate, &identity, now)
+                mj_accounts::profile_scheduler::ineligibility(candidate, &identity, now)
             {
                 excluded.push(reason.describe(&candidate.profile_id, &identity));
                 continue;
@@ -971,7 +971,7 @@ async fn resolve_model_profile_selection_from(
                 ));
                 return false;
             }
-            match mj_controller::profile_scheduler::ineligibility(
+            match mj_accounts::profile_scheduler::ineligibility(
                 &candidate.candidate,
                 &identity,
                 now,
@@ -1281,8 +1281,8 @@ pub(crate) fn merge_same_models(
             &self.scheduled
         }
     }
-    let telemetry = mj_controller::quota_telemetry::QuotaTelemetrySnapshot::default();
-    let power_ranking = mj_controller::power_ranking::PowerRankingSnapshot::baseline();
+    let telemetry = mj_accounts::quota_telemetry::QuotaTelemetrySnapshot::default();
+    let power_ranking = mj_accounts::power_ranking::PowerRankingSnapshot::baseline();
     let ctx = SchedulingContext {
         execution_policy: ExecutionPolicy::Unconstrained,
         placement: Placement::Child,
@@ -1543,8 +1543,8 @@ mod tests {
                 &self.scheduled
             }
         }
-        let telemetry = mj_controller::quota_telemetry::QuotaTelemetrySnapshot::default();
-        let power_ranking = mj_controller::power_ranking::PowerRankingSnapshot::baseline();
+        let telemetry = mj_accounts::quota_telemetry::QuotaTelemetrySnapshot::default();
+        let power_ranking = mj_accounts::power_ranking::PowerRankingSnapshot::baseline();
         let ctx = SchedulingContext {
             execution_policy: ExecutionPolicy::Unconstrained,
             placement,
@@ -1587,8 +1587,8 @@ mod tests {
                 &self.scheduled
             }
         }
-        let telemetry = mj_controller::quota_telemetry::QuotaTelemetrySnapshot::default();
-        let power_ranking = mj_controller::power_ranking::PowerRankingSnapshot::baseline();
+        let telemetry = mj_accounts::quota_telemetry::QuotaTelemetrySnapshot::default();
+        let power_ranking = mj_accounts::power_ranking::PowerRankingSnapshot::baseline();
         let ctx = SchedulingContext {
             execution_policy: ExecutionPolicy::Unconstrained,
             placement,
@@ -1721,7 +1721,7 @@ mod tests {
                     monthly_price_usd: None,
                     refreshed_at_epoch_seconds: 0,
                     paid_credits: None,
-                    windows: vec![mj_controller::quota::QuotaWindow {
+                    windows: vec![mj_accounts::quota::QuotaWindow {
                         label: "Week".into(),
                         remaining_percent: Some(remaining),
                         duration_seconds: None,
@@ -1831,7 +1831,7 @@ mod tests {
             unreachable!("the fixture has a reading");
         };
         *paid_credits = mj_client::quota::PaidCredits::limited(1e12);
-        windows.push(mj_controller::quota::QuotaWindow {
+        windows.push(mj_accounts::quota::QuotaWindow {
             label: "Week (Fable)".into(),
             remaining_percent: Some(0),
             duration_seconds: Some(604_800),
@@ -2042,7 +2042,7 @@ mod tests {
         /// seconds, for the cold-start fallback; none is ready before that.
         staged: Option<Vec<(u64, SubagentCandidates)>>,
         discovery_fails: bool,
-        telemetry_store: Option<mj_controller::quota_telemetry::QuotaTelemetryStore>,
+        telemetry_store: Option<mj_accounts::quota_telemetry::QuotaTelemetryStore>,
         config: mj_core::config::SubagentConfig,
         candidates: SubagentCandidates,
     }
@@ -2079,7 +2079,7 @@ mod tests {
             }
         }
 
-        fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
+        fn quota_telemetry_store(&self) -> mj_accounts::quota_telemetry::QuotaTelemetryStore {
             self.telemetry_store.clone().unwrap_or_default()
         }
 
@@ -2392,7 +2392,7 @@ mod tests {
                 candidate.choices.efforts = efforts(&["high"]);
             }
         }
-        let telemetry_store = mj_controller::quota_telemetry::QuotaTelemetryStore::new();
+        let telemetry_store = mj_accounts::quota_telemetry::QuotaTelemetryStore::new();
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
             staged: None,
@@ -2885,8 +2885,8 @@ mod tests {
                 if profiles.contains(&candidate.profile_id.as_str()) {
                     candidate.unhealthy.insert(
                         "fixed".into(),
-                        mj_controller::profile_health::Unhealthy {
-                            fault: mj_controller::profile_health::ProfileFault::RateLimited,
+                        mj_accounts::profile_health::Unhealthy {
+                            fault: mj_accounts::profile_health::ProfileFault::RateLimited,
                             until: std::time::SystemTime::UNIX_EPOCH
                                 + std::time::Duration::from_secs(1_792_937_100),
                             message: "exceeded retry limit, last status: 429".into(),
@@ -3039,8 +3039,8 @@ mod tests {
         let mut unhealthy_map = std::collections::BTreeMap::new();
         unhealthy_map.insert(
             "gpt-6.1-luna".to_owned(),
-            mj_controller::profile_health::Unhealthy {
-                fault: mj_controller::profile_health::ProfileFault::RateLimited,
+            mj_accounts::profile_health::Unhealthy {
+                fault: mj_accounts::profile_health::ProfileFault::RateLimited,
                 message: "rate limited".to_owned(),
                 until: std::time::SystemTime::now() + std::time::Duration::from_secs(300),
             },

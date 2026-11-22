@@ -10,7 +10,7 @@
 
 use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,19 @@ pub enum CacheHost {
     /// The machine running the controller.
     Local,
     Ssh(SshTarget),
+}
+
+/// Resolve the login home on the machine that owns an editable path.
+pub fn resolve_target_input_path(
+    target: &mj_core::config::TargetTemplate,
+    path: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<PathBuf> {
+    if !mj_core::path_input::needs_home(path)? {
+        return Ok(path.to_path_buf());
+    }
+    let host = CacheHost::for_path_target(target)?;
+    mj_core::path_input::expand_home(path, Some(&host.home(executor)?))
 }
 
 /// A cache host's operating system, which decides which of its sessions can

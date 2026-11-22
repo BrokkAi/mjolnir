@@ -19,3 +19,4 @@ workspace = true
 [dependencies]
 mj-core.workspace = true
 mj-targets.workspace = true
+serde.workspace = true

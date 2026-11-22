@@ -38,7 +38,7 @@ pub(super) async fn subagent_options(
         .map_err(|error| ApiFailure::unavailable(error.to_string()))?
         .map_err(|error| ApiFailure::unavailable(error.to_string()))?;
     let backend = backend(&state)?;
-    let options = mj_controller::controller::profile_config::subagent_options_with(
+    let options = mj_profile_catalog::profile_config::subagent_options_with(
         &config,
         &profile_id,
         query.model,

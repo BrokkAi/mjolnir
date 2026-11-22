@@ -2,7 +2,7 @@ use super::*;
 use axum::http::HeaderMap;
 use axum::response::Sse;
 use axum::response::sse::{Event, KeepAlive};
-use mj_controller::database::{ApiEvent, ApiEventData, ApiEventFilter, ApiEventPage};
+use mj_store::database::{ApiEvent, ApiEventData, ApiEventFilter, ApiEventPage};
 use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Debug, Default, Deserialize)]
@@ -216,7 +216,7 @@ pub(super) fn load_events(
 ) -> BoxFuture<'static, AnyResult<ApiEventPage>> {
     Box::pin(async move {
         mj_core::runtime::spawn_blocking(move || {
-            mj_controller::database::load_api_events(&filter, after_seq, 200)
+            mj_store::database::load_api_events(&filter, after_seq, 200)
         })
         .await?
     })

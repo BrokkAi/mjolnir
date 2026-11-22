@@ -197,9 +197,9 @@ it or introduce a dependency between sibling branches.
   which it inspects and which does not use it.
 - `brokk-mj-server` (`mj-server/`, library `mj_server`) is the daemon's HTTP
   API and web viewer server: routes, request and response types,
-  authentication, and the embedded viewer assets. It builds on the controller
-  and knows nothing of the daemon's live state; the daemon implements its
-  backend traits.
+  authentication, image build endpoints, and the embedded viewer assets. It
+  uses the shared store, target, and session crates. The daemon implements
+  its backend traits over live state.
 - `brokk-mj-daemon` (`mj-daemon/`, library `mj_daemon`) is the daemon process
   (`mj daemon-run`): its runtime state, the implementation of the HTTP API
   over that state, and the daemon-owned services and pollers. It builds on the

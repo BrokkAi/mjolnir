@@ -30,7 +30,7 @@ const allowed = {
   'brokk-mj-store': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets'],
   'brokk-mj-controller': ['brokk-mj-worker-launch', 'brokk-mj-session-runtime', 'brokk-mj-profile-catalog', 'brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-accounts', 'brokk-mj-import', 'brokk-mj-sessionwiki', 'brokk-mj-build-cache', 'brokk-mj-session-types', 'brokk-mj-worker-staging'],
   'brokk-mj-setup': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-accounts', 'brokk-mj-import', 'brokk-mj-controller'],
-  'brokk-mj-server': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-github-relevance'],
+  'brokk-mj-server': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-accounts', 'brokk-mj-build-cache', 'brokk-mj-import', 'brokk-mj-profile-catalog', 'brokk-mj-session-runtime', 'brokk-mj-session-types', 'brokk-mj-sessionwiki', 'brokk-mj-store', 'brokk-mj-targets', 'brokk-mj-github-relevance'],
   'brokk-mj-daemon': ['brokk-mj-review-host', 'brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-server', 'brokk-mj-github-relevance', 'brokk-mj-setup'],
   'brokk-mj-chat': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client'],
   'brokk-mj-tui': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-chat'],

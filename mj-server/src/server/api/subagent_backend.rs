@@ -47,21 +47,19 @@ pub trait SubagentBackend: Send + Sync {
     /// Current trailing-60-minute velocity and durable placement reservations.
     fn quota_telemetry(
         &self,
-    ) -> BoxFuture<'_, AnyResult<mj_controller::quota_telemetry::QuotaTelemetrySnapshot>> {
+    ) -> BoxFuture<'_, AnyResult<mj_accounts::quota_telemetry::QuotaTelemetrySnapshot>> {
         Box::pin(async { Ok(Default::default()) })
     }
 
-    fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
-        mj_controller::quota_telemetry::QuotaTelemetryStore::new()
+    fn quota_telemetry_store(&self) -> mj_accounts::quota_telemetry::QuotaTelemetryStore {
+        mj_accounts::quota_telemetry::QuotaTelemetryStore::new()
     }
 
     /// Current power-ranking snapshot (compiled baseline or cached fetch).
     fn power_ranking(
         &self,
-    ) -> BoxFuture<'_, AnyResult<mj_controller::power_ranking::PowerRankingSnapshot>> {
-        Box::pin(async {
-            Ok(mj_controller::power_ranking::PowerRankingSnapshot::baseline().clone())
-        })
+    ) -> BoxFuture<'_, AnyResult<mj_accounts::power_ranking::PowerRankingSnapshot>> {
+        Box::pin(async { Ok(mj_accounts::power_ranking::PowerRankingSnapshot::baseline().clone()) })
     }
 
     /// Record an accepted placement in the daemon's in-memory telemetry so
@@ -79,7 +77,7 @@ pub trait SubagentBackend: Send + Sync {
     fn validate_github_bundle(
         &self,
         _bundle_id: String,
-    ) -> BoxFuture<'_, Result<(), mj_controller::controller::GithubBundleSelectionError>> {
+    ) -> BoxFuture<'_, Result<(), mj_session_runtime::github_app::GithubBundleSelectionError>> {
         Box::pin(async { Ok(()) })
     }
 
@@ -104,7 +102,7 @@ pub trait SubagentBackend: Send + Sync {
     ) -> BoxFuture<'_, AnyResult<mj_core::storage::TranscriptHistoryPage>> {
         Box::pin(async move {
             mj_core::runtime::spawn_blocking(move || {
-                mj_controller::database::load_transcript_history(&session_id, before.as_ref(), 128)?
+                mj_store::database::load_transcript_history(&session_id, before.as_ref(), 128)?
                     .context("session history is unavailable")
             })
             .await?
@@ -119,16 +117,16 @@ pub trait SubagentBackend: Send + Sync {
     ) -> BoxFuture<'_, AnyResult<mj_core::native_agent::NativeAgentHistoryPage>> {
         Box::pin(async move {
             mj_core::runtime::spawn_blocking(move || {
-                mj_controller::database::native_agent_history(&owner, &child, before)
+                mj_store::database::native_agent_history(&owner, &child, before)
             })
             .await?
         })
     }
     fn events(
         &self,
-        filter: mj_controller::database::ApiEventFilter,
+        filter: mj_store::database::ApiEventFilter,
         after_seq: Option<u64>,
-    ) -> BoxFuture<'_, AnyResult<mj_controller::database::ApiEventPage>> {
+    ) -> BoxFuture<'_, AnyResult<mj_store::database::ApiEventPage>> {
         events::load_events(filter, after_seq)
     }
 
@@ -138,7 +136,7 @@ pub trait SubagentBackend: Send + Sync {
         model: Option<String>,
         refresh: bool,
     ) -> BoxFuture<'_, AnyResult<mj_core::worker_launch::ProfileConfig>> {
-        Box::pin(mj_controller::controller::profile_config::discover(
+        Box::pin(mj_profile_catalog::profile_config::discover(
             profile, model, refresh,
         ))
     }
@@ -210,7 +208,7 @@ pub trait SubagentBackend: Send + Sync {
     }
     fn start_subagent(
         &self,
-        _request: mj_controller::controller::RegisterSubagentRequest,
+        _request: mj_session_types::RegisterSubagentRequest,
     ) -> BoxFuture<'_, AnyResult<mj_core::subagent::SubagentRecord>> {
         Box::pin(async { anyhow::bail!("sub-agent creation is unavailable") })
     }
@@ -220,18 +218,18 @@ pub trait SubagentBackend: Send + Sync {
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::subagent::SubagentRecord>>> {
         Box::pin(async move {
             mj_core::runtime::spawn_blocking(move || {
-                mj_controller::database::list_subagents(&parent_session_id)
+                mj_store::database::list_subagents(&parent_session_id)
             })
             .await?
         })
     }
     /// Whether a sub-agent child has handed back its report for its parent's
-    /// newest task; see [`mj_controller::controller::subagent_has_handed_back`].
+    /// newest task; see [`mj_store::database::subagent_has_handed_back`].
     fn subagent_handed_back(&self, child_session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
         Box::pin(async move {
             let liveness = self.subagent_work_liveness(child_session_id.clone()).await;
             mj_core::runtime::spawn_blocking(move || {
-                mj_controller::controller::subagent_has_handed_back(&child_session_id, &liveness)
+                mj_store::database::subagent_has_handed_back(&child_session_id, &liveness)
             })
             .await?
         })
@@ -278,7 +276,7 @@ pub trait SubagentBackend: Send + Sync {
         &self,
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
         Box::pin(async {
-            mj_core::runtime::spawn_blocking(mj_controller::database::list_workspaces).await?
+            mj_core::runtime::spawn_blocking(mj_store::database::list_workspaces).await?
         })
     }
     /// One listed workspace, read from the store. `None` means the list
@@ -289,7 +287,7 @@ pub trait SubagentBackend: Send + Sync {
         id: String,
     ) -> BoxFuture<'_, AnyResult<Option<mj_core::workspace::WorkspaceRecord>>> {
         Box::pin(async move {
-            mj_core::runtime::spawn_blocking(move || mj_controller::database::workspace_record(&id))
+            mj_core::runtime::spawn_blocking(move || mj_store::database::workspace_record(&id))
                 .await?
         })
     }
@@ -305,7 +303,7 @@ pub trait SubagentBackend: Send + Sync {
     ) -> BoxFuture<'_, AnyResult<mj_core::workspace::WorkspaceRecord>> {
         Box::pin(async move {
             mj_core::runtime::spawn_blocking(move || {
-                mj_controller::database::create_or_get_workspace(&name)
+                mj_store::database::create_or_get_workspace(&name)
             })
             .await?
         })
@@ -439,10 +437,10 @@ pub trait SubagentBackend: Send + Sync {
         session_id: String,
         after_seq: u64,
         limit: usize,
-    ) -> BoxFuture<'_, AnyResult<Option<mj_controller::database::UsagePage>>> {
+    ) -> BoxFuture<'_, AnyResult<Option<mj_store::database::UsagePage>>> {
         Box::pin(async move {
             mj_core::runtime::spawn_blocking(move || {
-                mj_controller::database::load_session_usage(&session_id, after_seq, limit)
+                mj_store::database::load_session_usage(&session_id, after_seq, limit)
             })
             .await?
         })
@@ -454,10 +452,10 @@ pub trait SubagentBackend: Send + Sync {
         &self,
         session_id: String,
         review_id: Option<String>,
-    ) -> BoxFuture<'_, AnyResult<Option<mj_controller::database::FinishedReview>>> {
+    ) -> BoxFuture<'_, AnyResult<Option<mj_store::database::FinishedReview>>> {
         Box::pin(async move {
             mj_core::runtime::spawn_blocking(move || {
-                mj_controller::database::finished_review(&session_id, review_id.as_deref())
+                mj_store::database::finished_review(&session_id, review_id.as_deref())
             })
             .await?
         })
@@ -466,12 +464,10 @@ pub trait SubagentBackend: Send + Sync {
     fn usage_tree(
         &self,
         parent: String,
-    ) -> BoxFuture<'_, AnyResult<Option<mj_controller::database::UsageTree>>> {
+    ) -> BoxFuture<'_, AnyResult<Option<mj_store::database::UsageTree>>> {
         Box::pin(async move {
-            mj_core::runtime::spawn_blocking(move || {
-                mj_controller::database::load_usage_tree(&parent)
-            })
-            .await?
+            mj_core::runtime::spawn_blocking(move || mj_store::database::load_usage_tree(&parent))
+                .await?
         })
     }
 
@@ -480,9 +476,9 @@ pub trait SubagentBackend: Send + Sync {
         query: mj_core::usage::SessionUsageQuery,
     ) -> BoxFuture<'_, AnyResult<mj_core::usage::SessionUsageReport>> {
         Box::pin(async move {
-            let models = mj_controller::controller::profile_config::advertised_models();
+            let models = mj_profile_catalog::profile_config::advertised_models();
             mj_core::runtime::spawn_blocking(move || {
-                mj_controller::database::load_session_usage_report(&query, models)
+                mj_store::database::load_session_usage_report(&query, models)
             })
             .await?
         })

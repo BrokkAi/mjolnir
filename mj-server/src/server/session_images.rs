@@ -51,7 +51,7 @@ impl ImageBuilds {
         status: bool,
         shutdown: &CancellationToken,
     ) -> Result<ImageStarted> {
-        let _accepted = crate::upgrade::activity_unless_draining("image build start")?;
+        let _accepted = mj_store::upgrade::activity_unless_draining("image build start")?;
         ensure!(!shutdown.is_cancelled(), "daemon is shutting down");
         let operation_id = mj_core::state::new_session_id()?;
         let operation = Arc::new(Operation {
@@ -164,12 +164,11 @@ struct Selection {
 }
 
 fn select(request: &ImageRequest, status: bool) -> Result<Selection> {
-    let controller = crate::controller::Controller::load()?;
-    let config = controller.config;
+    let (config, state) = mj_store::database::load_config_and_state()?;
     let session = request
         .session_id
         .as_deref()
-        .and_then(|id| controller.state.sessions.get(id));
+        .and_then(|id| state.sessions.get(id));
     let bundle = request
         .bundle
         .clone()
@@ -267,7 +266,7 @@ async fn platform(config: &Config, target: &str, cancel: &CancellationToken) -> 
     let executor = mj_core::targets::CancellableProcessExecutor::new(Default::default())
         .with_cancellation(cancel.clone());
     mj_core::runtime::spawn_blocking(move || {
-        crate::controller::backend::session_image_platform(&template, &executor)
+        mj_targets::targets::session_image_platform(&template, &executor)
     })
     .await
     .context("join image platform probe")?
@@ -346,7 +345,7 @@ async fn probe_builder(host: ImageHost, cancel: &CancellationToken) -> Result<()
     let executor = mj_core::targets::CancellableProcessExecutor::new(Default::default())
         .with_cancellation(cancel.clone());
     mj_core::runtime::spawn_blocking(move || {
-        crate::controller::execute_checked(&executor, command).map(|_| ())
+        mj_targets::command_checks::execute_checked(&executor, command).map(|_| ())
     })
     .await
     .context("join image builder probe")?
@@ -539,7 +538,7 @@ async fn run(
     ensure!(!operation.cancel.is_cancelled(), "image build cancelled");
     let image = reference.clone();
     mj_core::runtime::spawn_blocking(move || {
-        let _assignment = crate::upgrade::activity_unless_draining("image assignment")?;
+        let _assignment = mj_store::upgrade::activity_unless_draining("image assignment")?;
         Config::update(|config| {
             ensure!(
                 config.bundles.contains_key(&selection.bundle),
@@ -649,8 +648,8 @@ async fn prepare(
     let executor = mj_core::targets::CancellableProcessExecutor::new(Default::default())
         .with_cancellation(operation.cancel.clone());
     mj_core::runtime::spawn_blocking(move || {
-        let lock = crate::image_pull_gate::image_pull_mutex(&host_for_pull, &base_for_pull);
-        let _guard = crate::image_pull_gate::hold_image_pull(
+        let lock = mj_targets::image_pull_gate::image_pull_mutex(&host_for_pull, &base_for_pull);
+        let _guard = mj_targets::image_pull_gate::hold_image_pull(
             &lock,
             || executor.cancellation_requested(),
             || {},

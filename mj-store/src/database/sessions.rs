@@ -244,6 +244,39 @@ pub fn load_subagent(child_session_id: &str) -> Result<Option<mj_core::subagent:
         .transpose()
 }
 
+/// Whether a sub-agent child has handed back its report for its parent's
+/// newest task, from what the store holds; see
+/// [`mj_core::subagent::has_handed_back`]. A session that is not a child, or
+/// that has never finished a turn, has not.
+pub fn subagent_has_handed_back(
+    child_session_id: &str,
+    liveness: &mj_core::subagent::Liveness,
+) -> Result<bool> {
+    let Some(relation) = load_subagent(child_session_id)? else {
+        return Ok(false);
+    };
+    // A child is parked only once its turn ended and its parent was told, so
+    // whatever the parent was going to get from it, it has.
+    if load_session_state(child_session_id)? == Some(SessionState::Parked) {
+        return Ok(true);
+    }
+    let Some((execution, active_turn, last_turn)) =
+        load_materialized_turn_outcome(child_session_id)?
+    else {
+        return Ok(false);
+    };
+    let report = load_subagent_report(child_session_id)?;
+    let working = active_turn.is_some() || !matches!(execution, MaterializedExecutionState::Idle);
+    Ok(mj_core::subagent::has_handed_back(
+        relation.handback_tool,
+        &report,
+        working,
+        last_turn.as_ref(),
+        liveness,
+        mj_core::clock::epoch_millis(),
+    ))
+}
+
 pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::SubagentRecord>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(

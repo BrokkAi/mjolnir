@@ -10,33 +10,8 @@ use mj_core::config::HarnessKind;
 use mj_core::state::{SessionRecord, SessionState, new_session_id};
 use mj_core::subagent::SubagentRecord;
 
-#[derive(Debug, Clone)]
-pub struct RegisterSubagentRequest {
-    pub no_github_credentials: bool,
-    pub kind: mj_core::subagent::SubagentKind,
-    pub supervisor: bool,
-    pub reviewer_launch: Option<mj_core::worker_launch::ReviewerLaunchConfig>,
-    pub parent_session_id: String,
-    pub task_name: String,
-    pub profile_id: String,
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub fast_mode: bool,
-    /// Empty means the parent's working directory. An absolute path is used
-    /// as-is; a relative path is resolved against the parent's working
-    /// directory. The path is interpreted on the parent's target and must
-    /// exist there; no other restriction applies.
-    pub working_directory: PathBuf,
-    pub initial_prompt: String,
-    pub request_key: String,
-    /// The absolute directory on the parent's target that holds its
-    /// children's report directories, from [`Controller::prepare_subagent_report_root`].
-    /// `None` registers a child without one.
-    pub report_root: Option<String>,
-    /// Canonical task category stored on the accounting row: `primary`,
-    /// `straightforward`, `subtle`, `oracle`, `reviewer`, or `brief_writer`.
-    pub category: String,
-}
+pub use mj_session_types::RegisterSubagentRequest;
+use mj_store::database::subagent_has_handed_back;
 
 /// Creates a report directory on a target and prints its absolute path.
 ///
@@ -728,40 +703,6 @@ fn slot_refusal(live: &[LiveSubagent], maximum: usize) -> String {
          when you close it.",
         live.len()
     )
-}
-
-/// Whether a sub-agent child has handed back its report for its parent's
-/// newest task, from what the store holds; see
-/// [`mj_core::subagent::has_handed_back`]. A session that is not a child, or
-/// that has never finished a turn, has not.
-pub fn subagent_has_handed_back(
-    child_session_id: &str,
-    liveness: &mj_core::subagent::Liveness,
-) -> Result<bool> {
-    let Some(relation) = crate::database::load_subagent(child_session_id)? else {
-        return Ok(false);
-    };
-    // A child is parked only once its turn ended and its parent was told, so
-    // whatever the parent was going to get from it, it has.
-    if crate::database::load_session_state(child_session_id)? == Some(SessionState::Parked) {
-        return Ok(true);
-    }
-    let Some((execution, active_turn, last_turn)) =
-        crate::database::load_materialized_turn_outcome(child_session_id)?
-    else {
-        return Ok(false);
-    };
-    let report = crate::database::load_subagent_report(child_session_id)?;
-    let working = active_turn.is_some()
-        || !matches!(execution, mj_core::state::MaterializedExecutionState::Idle);
-    Ok(mj_core::subagent::has_handed_back(
-        relation.handback_tool,
-        &report,
-        working,
-        last_turn.as_ref(),
-        liveness,
-        mj_core::clock::epoch_millis(),
-    ))
 }
 
 /// What a parent's record keeps about a child its suspend stops: the child's

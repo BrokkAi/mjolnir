@@ -24,32 +24,7 @@ pub(super) mod origin_delta;
 mod subagent;
 use origin_delta::OriginDeltaSuspend;
 
-/// Trusted public guidance attached at the failing lifecycle boundary. Never
-/// derive it from an error chain, which can contain credentials and host paths.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LifecycleFailureReason {
-    WorkerContact,
-    Checkpoint,
-    Cleanup,
-    RetainedMoveSource,
-    UnsealedMoveSource,
-    HarnessUnavailable,
-}
-
-impl std::fmt::Display for LifecycleFailureReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::WorkerContact => "Suspension could not contact the worker. Resume the session to repair its runtime, then retry suspension.",
-            Self::Checkpoint => "Suspension could not save its recovery checkpoint. Retry suspension; the existing environment was kept.",
-            Self::Cleanup => "Suspension could not finish removing its target. Retry suspension to finish cleanup; retained environments and recovery data were kept.",
-            Self::RetainedMoveSource => "Suspension interrupted Move before the destination was ready; the source workspace was kept. Resume the session to repair its runtime, then retry suspension.",
-            Self::UnsealedMoveSource => "Suspension could not establish a sealed Move checkpoint. Resume the session to repair its runtime, then retry suspension; existing environments and recovery data were kept.",
-            Self::HarnessUnavailable => "Suspension could not save the session without its harness, which failed to open; the environment was kept. Resume the session to retry its harness, or destroy it.",
-        })
-    }
-}
-
-impl std::error::Error for LifecycleFailureReason {}
+pub use mj_session_types::LifecycleFailureReason;
 
 /// What destroying a session does with its managed worktree's git branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -24,11 +24,11 @@ pub fn is_turn_control_command(command: &mj_core::relay::RelayCommand) -> bool {
 #[allow(clippy::large_enum_variant)]
 pub enum ControllerAction {
     PushSubscribe {
-        subscription: mj_controller::web_push::Subscription,
+        subscription: mj_store::web_push::Subscription,
     },
     PushRenew {
         old_endpoint: String,
-        subscription: mj_controller::web_push::Subscription,
+        subscription: mj_store::web_push::Subscription,
     },
     PushUnsubscribe {
         endpoint: String,
@@ -455,9 +455,9 @@ pub enum PreflightRequest {
 /// A project picker lookup sharing the preflight supervision and concurrency cap.
 #[derive(Debug)]
 pub struct ProjectDiscoveryPreflight {
-    pub request: mj_controller::project_picker::ProjectDiscoveryRequest,
+    pub request: mj_import::project_picker::ProjectDiscoveryRequest,
     pub reply: tokio::sync::oneshot::Sender<
-        Result<mj_controller::project_picker::ProjectDiscovery, &'static str>,
+        Result<mj_import::project_picker::ProjectDiscovery, &'static str>,
     >,
 }
 
@@ -721,7 +721,7 @@ pub(super) fn deserialize_api_session_review<'de, D: serde::Deserializer<'de>>(
 pub fn lifecycle_failure_message(
     prefix: &str,
     refusal: Option<&mj_core::refusal::Refusal>,
-    reason: Option<mj_controller::controller::LifecycleFailureReason>,
+    reason: Option<mj_session_types::LifecycleFailureReason>,
     reference: &str,
 ) -> String {
     let reason = if let Some(refusal) = refusal {
