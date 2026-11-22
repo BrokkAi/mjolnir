@@ -111,11 +111,33 @@ struct SettingControl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SettingKind {
     Page,
+    RemoveEntry,
     Checkbox,
     Choices(Vec<Value>),
     Field,
     ReadOnly,
     ManagedHarness(usize),
+}
+
+pub(super) const SUBAGENT_CATEGORIES: [&str; 4] =
+    ["primary", "straightforward", "subtle", "oracle"];
+
+pub(super) fn is_subagent_category_page(path: &[String]) -> bool {
+    path.len() == 2 && path[0] == "subagents" && SUBAGENT_CATEGORIES.contains(&path[1].as_str())
+}
+
+pub(super) fn setup_page_for_path(path: &[String]) -> Vec<String> {
+    if path.len() >= 2 && is_subagent_category_page(&path[..2]) {
+        path[..2].to_vec()
+    } else {
+        row_page(path).to_vec()
+    }
+}
+
+pub(super) fn subagent_row_index(path: &[String]) -> Option<usize> {
+    (path.len() >= 3 && is_subagent_category_page(&path[..2]))
+        .then(|| path[2].parse().ok())
+        .flatten()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -44,8 +44,8 @@ fn one_click_opens_a_page_and_a_real_dropdown() {
         ("interface", &[][..], "Theme", vec!["interface", "theme"]),
         (
             "subagents",
-            &["straightforward", "0"][..],
-            "Model",
+            &["straightforward"][..],
+            "opus",
             vec!["subagents", "straightforward", "0", "model"],
         ),
     ] {

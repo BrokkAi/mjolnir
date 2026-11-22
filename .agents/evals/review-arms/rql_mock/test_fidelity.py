@@ -1,19 +1,23 @@
 """Offline fidelity gate fixtures. No session tools are invoked."""
 from collections import Counter
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from io import StringIO
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
+import driver
 from driver import expected_provider_model, verify_session_selection
+from rql_engine_tools import STAGED_ENGINE_SETTINGS
 
 from . import fidelity_live
 from .fidelity import (BARS, CENSUS, Query, accuracy, bar_failures, gate_report, load_inputs,
                        measure, pooled_prescience, prescience_metrics, sample, step_result, stratum_metrics)
 from .engine.grammar import MENU
+from .engine.runner import EngineRunner, SealedRunner
 from .fidelity_live import SONNET, TERRA, candidate_lines, model_usage, planned_calls
 from .fidelity_symbols import capture_symbols, changed_intervals
 
@@ -461,8 +465,288 @@ class TerraOutput(unittest.TestCase):
             "operand": {"site": site, "verbatim": [{"start_byte": 3, "end_byte": 5, "text": "α"}]},
         }}])
 
+    # Hard-won: d4028a66b: the live gate stopped on Terra's first repairable schema error.
+    def test_enumerator_repairs_in_session_and_restarts_a_stall_once(self):
+        query = Query("documented", "random", "fixture", "b" * 40, '(function :name "f")')
+        site = {"path": "source.rs", "start_line": 1, "end_line": 1}
+        operand = {"site": site, "verbatim": [{"text": "source"}]}
+
+        def answer(written):
+            return json.dumps({
+                "rows": [{"kind": "structural_match", "primary_site": site, "fields": {"operand": written}}],
+                "coverage": {"complete": True, "open": []}, "excluded": [],
+            }).encode()
+
+        good, bad = answer(operand), answer({**operand, "extra": True})
+        # Normalizes cleanly but fails answer validation with three errors.
+        staged = json.dumps({
+            "rows": [{"kind": "structural_match", "primary_site": site, "fields": {"operand": operand}}],
+            "coverage": {"complete": True, "open": [{"reason": 3}, {"reason": 4}]}, "excluded": [],
+        }).encode()
+        errors_named = {bad: "written evidence must contain only site and verbatim",
+                        staged: "coverage.complete must be true exactly when coverage.open is empty"}
+        orphan = "c" * 40
+        model_usage = fidelity_live.model_usage
+        sessions, checks, destroyed = {}, [], []
+
+        def launch(*args, **kwargs):
+            sid = str(len(sessions) + 1) * 32
+            sessions[sid] = []
+            return sid
+
+        def session(sid):
+            return {"id": sid, "at": orphan, "base": orphan, "no_later_history": True,
+                    "harness_kind": "codex", "profile_id": "terra", "config_options": []}
+
+        def attest(runner, sid, snapshot, directory):
+            driver.save(directory / "pre-inventory.json", {"cwd": runner.checkout_root(sid)})
+            return session(sid)
+
+        def transport(runner, operation, *args, data=None):
+            sid = args[1]
+            turns = sessions[sid]
+            if operation == "message":
+                turns.append((args[3], data.decode()))
+                return json.dumps({"session_id": sid, "via": "turn", "turn_id": len(turns)}).encode()
+            if operation == "put-file":
+                return b""
+            if operation == "fetch":
+                return schedule[int(sid[0]) - 1][len(turns) - 1]
+            self.assertEqual(operation, "destroy")
+            destroyed.append(sid)
+            return json.dumps({"session_id": sid, "accepted": True}).encode()
+
+        def mj(operation, *args, **kwargs):
+            sid = args[1]
+            if operation == "wait":
+                return {"turn_id": len(sessions[sid]), "outcome": "finished"}
+            self.assertEqual(operation, "usage")
+            cursor = args[3] if "--after-seq" in args else 0
+            turns = [{"command_id": command, "accepted_ordinal": n} for n, (command, _) in
+                     enumerate(sessions[sid], 1) if n > cursor]
+            count = len(sessions[sid])
+            return {"session_id": sid, "latest_seq": count, "next_after_seq": count, "turns": turns,
+                    "turn_selections": {turn["command_id"]: {"model": TERRA, "effort": "high"} for turn in turns}}
+
+        def transcript(sid):
+            count = len(sessions[sid])
+            return [{"session_id": sid, "next_after_seq": count, "latest_seq": count, "items": [
+                {"role": "tool", "seq": n, "body": {"call": {"name": "exec_command",
+                 "kind": "read", "title": "List files", "toolCallId": f"exec-{n}"}}}
+                for n in range(1, count + 1)]}]
+
+        def capture(directory, sid, *, reuse_existing, directory_name):
+            self.assertFalse(reuse_existing)
+            destination = directory / directory_name
+            destination.mkdir()
+            rows = [{"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "CommandExecution", "id": f"exec-{n}", "command": ["ls"],
+                "cwd": f"/workspace/{sid}/engine-trees",
+            }}} for n in range(1, len(sessions[sid]) + 1)]
+            (destination / "rollout-fixture.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+            return True
+
+        def check(usage, command, turn, *args):
+            model = model_usage(usage, command, turn, *args)
+            checks.append((usage["session_id"], turn))
+            return model
+
+        with ExitStack() as stack:
+            for target, name, fake in (
+                (driver, "use_named_instance", lambda _: Path("fixture")),
+                (driver, "pilot_weekly_hold", lambda *args, **kwargs: None),
+                (driver, "wait_idle", session),
+                (driver, "session", session),
+                (driver, "verify_session_selection", lambda *args: TERRA),
+                (driver, "capture_pilot_rollouts", capture),
+                (driver, "transcript", transcript),
+                (driver, "mj", mj),
+                (fidelity_live, "blob_reader", lambda *args: lambda _: b"source\n"),
+                (fidelity_live, "prepared_snapshot", lambda *args: {"orphan": orphan, "tree": "tree"}),
+                (fidelity_live, "model_usage", check),
+                (fidelity_live.brief_driver, "sealed_launch", launch),
+                (fidelity_live.brief_driver, "configure_pilot_model_ready", lambda *args: None),
+                (SealedRunner, "attest", attest),
+                (SealedRunner, "clean_checkout", lambda runner, sid, *args: f".rql-engine-{sid}"),
+                (SealedRunner, "command", transport),
+            ):
+                stack.enter_context(patch.object(target, name, new=fake))
+            # Hard-won: 2da79e863: fixing normalization exposed more validation errors and counted as a stall
+            for schedule in (((bad, good),), ((bad, staged, good),), ((bad, bad), (good,)), ((bad, bad), (bad, bad))):
+                with self.subTest(rounds=[len(turns) for turns in schedule]), TemporaryDirectory() as root:
+                    sessions.clear()
+                    checks.clear()
+                    destroyed.clear()
+                    directory = Path(root)
+                    adapter = fidelity_live.LiveModels.__new__(fidelity_live.LiveModels)
+                    adapter.config = {"instance": "terra-test", "snapshot_repo": "snapshot", "bundle": "fixture",
+                                      "destination": "engine-trees"}
+                    adapter.manifest = {"diffs": [], "eligible_diffs": [], "served_steps": [],
+                                        "model_versions": {"claude": "Sonnet 5.5"}}
+                    adapter.sources = {query.commit: "fixture"}
+                    adapter.catalogue = adapter.menu = adapter.claude_version = ""
+                    adapter.directory, adapter.terra_profile = directory, "terra"
+
+                    if schedule[-1][-1] == bad:
+                        engine = SimpleNamespace(answer=lambda *args, **kwargs: {"status": "ok", "rows": []})
+                        with self.assertRaisesRegex(RuntimeError, "Terra repair stalled in both sessions"):
+                            fidelity_live.run_sample(directory, [query], set(), engine, adapter,
+                                                     stop_request=directory / "stop")
+                        self.assertFalse((directory / query.key / "measurement.json").exists())
+                    else:
+                        result = adapter.enumerate_rows(query.repo, query.commit, query.text)
+                        self.assertEqual(len(result["rows"]), 1)
+                    self.assertEqual([len(turns) for turns in sessions.values()], [len(turns) for turns in schedule])
+                    self.assertEqual(destroyed, list(sessions))
+                    self.assertEqual(checks, [(sid, n) for sid, turns in sessions.items()
+                                              for n in range(1, len(turns) + 1)])
+                    stalls = directory / query.key / "terra-stalled"
+                    self.assertEqual(stalls.is_dir(), len(schedule) == 2)
+                    for index, turns in enumerate(sessions.values()):
+                        evidence = stalls if index == 0 and stalls.is_dir() else directory / query.key / "terra"
+                        self.assertTrue((evidence / "destroy-receipt.json").is_file())
+                        for n, (_, prompt) in enumerate(turns, 1):
+                            audit = json.loads((evidence / f"turn-{n}-audit.json").read_bytes())
+                            self.assertTrue(audit["passed"])
+                            self.assertTrue((evidence / audit["rollout_directory"]).is_dir())
+                            self.assertEqual("failed mechanical verification" in prompt, n > 1)
+                            if n > 1:
+                                self.assertIn(errors_named[schedule[index][n - 2]], prompt)
+
 
 class ModelIdentity(unittest.TestCase):
+    # Hard-won: d7e5de2d6: the live adjudicator could run an unauditable scratch script.
+    def test_adjudicator_uses_the_restricted_login_and_engine_audit(self):
+        sid, orphan = "a" * 32, "b" * 40
+        profile, provider = "restricted-alias", "claude-sonnet-5-5"
+        checkout = f"/workspace/{sid}/engine-trees"
+        scratch = f".rql-engine-{sid}"
+        configured = {"id": sid, "at": orphan, "base": orphan, "no_later_history": True,
+                      "harness_kind": "claude", "profile_id": profile, "config_options": [
+                          {"key": "model", "current": SONNET, "choices": [
+                              {"value": SONNET, "name": "Claude Sonnet 5.5"}]},
+                          {"key": "effort", "current": "high"},
+                      ]}
+        query = Query("documented", "random", "fixture", "c" * 40, "(function)")
+        candidates = {"0": {"sites": [{"path": "source.rs", "start_line": 1, "end_line": 1}]}}
+        decisions = {"0": {"in_scope": True, "key": "definition", "reason": "the source declares it"}}
+        calls = []
+        command = None
+
+        def quota(login, floor, **kwargs):
+            calls.append(("quota", login, floor, kwargs["short_floor"]))
+            return ((50, 50), None) if login == "claude5" else (None, "quota held")
+
+        def sync(runner, session=None):
+            calls.append(("sync", runner.login.login_profile, runner.login.engine_profile, session))
+
+        def launch(bundle, at, alias, title, **kwargs):
+            calls.append(("launch", alias))
+            return sid
+
+        def attest(runner, session, snapshot, directory):
+            driver.save(directory / "pre-inventory.json", {"cwd": checkout})
+            return configured
+
+        def clean(runner, session, pin, *, clear=True):
+            self.assertEqual((session, pin), (sid, orphan))
+            return scratch
+
+        def podman(argv, **kwargs):
+            self.assertEqual(argv[:3], ["podman", "exec", "fixture-container"])
+            if argv[3] == "cat":
+                return SimpleNamespace(stdout=json.dumps(STAGED_ENGINE_SETTINGS).encode())
+            self.assertEqual(argv[3:5], ["python3", "-c"])
+            return SimpleNamespace(stdout="2.1.326\n")
+
+        def transport(runner, operation, *args, data=None):
+            nonlocal command
+            self.assertEqual(args[:2], ("--session", sid))
+            if operation == "message":
+                command = args[args.index("--command-id") + 1]
+                self.assertIn(("sync", "claude5", profile, sid), calls)
+                self.assertIn(b"only Read, Grep, Glob, Write and Edit, with no shell", data)
+                self.assertIn(f"Use Write to save the JSON object to {checkout}/{scratch}/output.json".encode(), data)
+                return json.dumps({"session_id": sid, "via": "turn", "turn_id": 1}).encode()
+            if operation == "put-file":
+                self.assertTrue(args[3].startswith(scratch + "/"))
+                return b""
+            if operation == "fetch":
+                self.assertEqual(args[3], f"{scratch}/output.json")
+                return json.dumps(decisions).encode()
+            self.assertEqual(operation, "destroy")
+            return json.dumps({"session_id": sid, "accepted": True}).encode()
+
+        def mj(operation, *args, **kwargs):
+            if operation == "set-config":
+                return {}
+            if operation == "wait":
+                return {"turn_id": 1, "outcome": "finished"}
+            self.assertEqual(operation, "usage")
+            if "--after-seq" not in args:
+                return {"latest_seq": 0}
+            return {"session_id": sid, "latest_seq": 5, "next_after_seq": 5,
+                    "turns": [{"command_id": command, "accepted_ordinal": 1, "usage": {
+                        "provider_details": {"model_usage": {provider: {}}}}}],
+                    "turn_selections": {command: {"model": SONNET, "effort": "high"}}}
+
+        with TemporaryDirectory() as root, ExitStack() as stack:
+            directory = Path(root)
+            adapter = fidelity_live.LiveModels.__new__(fidelity_live.LiveModels)
+            adapter.config = {"instance": "fidelity-test", "bundle": "fixture", "snapshot_repo": "snapshot",
+                              "destination": "engine-trees", "logins": [
+                                  {"profile": "held", "engine_profile": "held-alias"},
+                                  {"profile": "claude5", "engine_profile": profile},
+                              ]}
+            adapter.manifest = {"eligible_diffs": [], "served_steps": [], "model_versions": {"claude": "Sonnet 5.5"}}
+            adapter.sources, adapter.claude_version = {query.commit: "fixture"}, provider
+            adapter.catalogue = adapter.menu = adapter.rulings = ""
+            for target, name, fake in (
+                (driver, "use_named_instance", lambda _: directory),
+                (driver, "_quota_status", quota),
+                (driver, "wait_idle", lambda _: configured),
+                (driver, "session", lambda _: configured),
+                (driver, "container", lambda _: {"container": "fixture-container"}),
+                (driver, "capture_pilot_rollouts", lambda *args, **kwargs: self.fail("Claude exported a rollout")),
+                (driver, "mj", mj),
+                (driver.subprocess, "run", podman),
+                (fidelity_live, "blob_reader", lambda *args: lambda _: b"def source(): pass\n"),
+                (fidelity_live, "prepared_snapshot", lambda *args: {"orphan": orphan, "tree": "tree"}),
+                (fidelity_live.brief_driver, "sealed_launch", launch),
+                (EngineRunner, "attest", attest),
+                (EngineRunner, "clean_checkout", clean),
+                (EngineRunner, "credential_hold", lambda *args: None),
+                (EngineRunner, "sync_login", sync),
+                (EngineRunner, "command", transport),
+            ):
+                stack.enter_context(patch.object(target, name, new=fake))
+            for tool in ({"name": "Write", "kind": "edit", "rawInput": {
+                              "file_path": f"{checkout}/{scratch}/output.json", "content": json.dumps(decisions)}},
+                         {"name": "Bash", "kind": "execute", "rawInput": {"command": "pwd"}}):
+                with self.subTest(tool=tool["name"]):
+                    adapter.directory = directory / tool["name"]
+                    calls.clear()
+                    pages = [{"session_id": sid, "next_after_seq": 5, "latest_seq": 5,
+                              "items": [{"role": "tool", "seq": 5, "body": {"call": tool}}]}]
+                    with patch.object(driver, "transcript", new=lambda _: pages):
+                        if tool["name"] == "Bash":
+                            with self.assertRaisesRegex(RuntimeError, "failed the pilot audit"):
+                                adapter.adjudicate(query, candidates)
+                        else:
+                            self.assertEqual(adapter.adjudicate(query, candidates), decisions)
+                    artifacts = adapter.directory / query.key / "adjudicator"
+                    self.assertEqual(calls, [("quota", "held", 25, 20), ("quota", "claude5", 0, 0),
+                                             ("sync", "claude5", profile, None), ("launch", profile),
+                                             ("sync", "claude5", profile, sid), ("quota", "claude5", 0, 0)])
+                    self.assertEqual(json.loads((artifacts / "engine-runtime.json").read_bytes()),
+                                     {"session_id": sid, "claude_code_version": "2.1.326"})
+                    self.assertTrue((artifacts / "engine-tool-settings.json").is_file())
+                    self.assertTrue((artifacts / "destroy-receipt.json").is_file())
+                    audit = json.loads((artifacts / "turn-1-audit.json").read_bytes())
+                    self.assertEqual(audit["passed"], tool["name"] == "Write")
+                    if not audit["passed"]:
+                        self.assertIn("tool outside the engine allowlist: 'Bash'", audit["hits"][0]["snippet"])
+
     def test_sonnet_alias_and_provider_usage_must_both_match(self):
         manifest = {"models": {"engine": "sonnet/high", "judge": "sonnet/high"},
                     "model_versions": {"claude": "Sonnet 5.5", "claude_provider_id": "claude-sonnet-5-5"}}
@@ -484,6 +768,7 @@ class ModelIdentity(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, f"{TERRA}/high"):
             model_usage(usage, "call", 1, TERRA, "claude-sonnet-5-5")
 
+    # Hard-won: 0674966cf: mailbox context made a valid Codex prompt fail the turn join.
     def test_codex_null_usage_effort_requires_the_exact_native_turn_context(self):
         sid, command, native_id = "a" * 32, "fidelity-command", "codex-turn"
         content = [{"type": "text", "text": "The same prompt may be retried."}]
@@ -494,18 +779,34 @@ class ModelIdentity(unittest.TestCase):
         pages = [{"session_id": sid, "items": [{"stable_id": f"user:{command}", "role": "user",
                   "position": 33, "created_at_ms": 100, "body": {"content": content}}]}]
         meta = {"type": "session_meta", "payload": {"id": "thread", "cwd": f"/workspace/{sid}/engine-trees"}}
+        prompt_context = {"type": "text", "text_elements": [],
+                          "text": 'mj://prompt-context\n<context ref="mj://prompt-context">\n'
+                                  "<untrusted-mailbox-events>\nProject tools are being installed.\n"
+                                  "</untrusted-mailbox-events>\n</context>"}
         message = {"type": "event_msg", "payload": {
             "type": "item_completed", "thread_id": "thread", "turn_id": native_id, "completed_at_ms": 105,
-            "item": {"type": "UserMessage", "id": "item", "content": content}}}
+            "item": {"type": "UserMessage", "id": "item", "content": [prompt_context, *content]}}}
         context = {"type": "turn_context", "payload": {"turn_id": native_id, "model": TERRA, "effort": "high"}}
 
         def with_payload(row, **fields):
             return {**row, "payload": {**row["payload"], **fields}}
 
+        def with_content(parts):
+            return with_payload(message, item={**message["payload"]["item"], "content": parts})
+
         earlier_message = with_payload(message, turn_id="earlier", completed_at_ms=98)
         earlier_context = with_payload(context, turn_id="earlier")
+        other_message = with_payload(message, turn_id="earlier", completed_at_ms=160)
+        unknown = {**prompt_context, "text": prompt_context["text"] + "\ntrailing text"}
+        different_prompt = {**content[0], "text": content[0]["text"][:-1] + "!"}
         cases = (
             ("matching", [earlier_message, earlier_context, message, context], None),
+            ("unknown part", [with_content([unknown, *content]), context], "missing or ambiguous"),
+            ("different prompt", [with_content([prompt_context, different_prompt]), context],
+             "missing or ambiguous"),
+            ("duplicate prompt part", [with_content([prompt_context, *content, *content]), context],
+             "missing or ambiguous"),
+            ("two matching messages", [message, context, other_message, earlier_context], "missing or ambiguous"),
             ("effort", [message, with_payload(context, effort="low")], "selected .*low"),
             ("model", [message, with_payload(context, model="gpt-6.1-sol")], "selected .*sol"),
             ("missing", [message], "missing or ambiguous"),
