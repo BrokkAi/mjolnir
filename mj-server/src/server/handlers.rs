@@ -1432,6 +1432,18 @@ pub fn validate_new_preflight(
     request: &mj_client::daemon::NewSessionPreflightRequest,
     snapshot: &ViewerSnapshot,
 ) -> Result<(), String> {
+    // Auto (Primary) and provider load-balancing submit an empty profile_id;
+    // preflight only validates target, bundle, and mounts, while actual
+    // profile resolution runs when session creation starts.
+    let profile_id = if request.profile_id.is_empty() {
+        snapshot
+            .profiles
+            .first()
+            .map(|profile| profile.id.clone())
+            .ok_or_else(|| "no enabled profile is configured".to_owned())?
+    } else {
+        request.profile_id.clone()
+    };
     let action = ControllerAction::New {
         oracle: None,
         supervisors: None,
@@ -1450,7 +1462,7 @@ pub fn validate_new_preflight(
         base: None,
         no_later_history: false,
         workspace_id: request.workspace_id.clone(),
-        profile_id: request.profile_id.clone(),
+        profile_id,
         bundle_id: request.bundle_id.clone(),
         target_id: request.target_id.clone(),
         resource_allocation: None,

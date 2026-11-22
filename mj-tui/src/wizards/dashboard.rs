@@ -15,12 +15,12 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
             form.declare_with_enabled(
                 WizardControl::ProfileList,
                 ControlKind::ChoiceList {
-                    len: wizard.profile_count(dashboard),
-                    selected: wizard.profile(),
+                    len: wizard.profile_list_len(dashboard),
+                    selected: wizard.profile_list_selected(dashboard),
                 },
                 true,
             );
-            declare_wizard_buttons(&mut form, false, true);
+            declare_wizard_buttons(&mut form, false, wizard.profile_advance_enabled(dashboard));
         }
         WizardStep::Target => {
             let enabled = target_advance_enabled(dashboard, wizard);
@@ -65,9 +65,9 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
             let submit_enabled = wizard.declare_review_extras(dashboard, &mut form);
             declare_review_controls(&mut form, can_attach, submit_enabled);
         }
-        WizardStep::Bundle
-        | WizardStep::NewBundle
-        | WizardStep::ProjectDirectory => wizard.declare_extra_step(dashboard, &mut form),
+        WizardStep::Bundle | WizardStep::NewBundle | WizardStep::ProjectDirectory => {
+            wizard.declare_extra_step(dashboard, &mut form)
+        }
     }
     form.end_frame(initial);
 }
@@ -188,6 +188,7 @@ impl DashboardState {
         if wizard.input_locked() {
             return self.keep(wizard);
         }
+        wizard.reconcile_profile_picker(self);
         declare_wizard_controls(self, &wizard);
         if let Event::Key(key) = &event
             && key.kind == crossterm::event::KeyEventKind::Release
@@ -214,7 +215,19 @@ impl DashboardState {
         };
         let action = wizard.route_extra_interaction(action);
         if let Some(interaction) = wizard.mounts_mut().access_combo.route(action) {
-            return self.apply_wizard_interaction(wizard, interaction);
+            let toggle_provider = matches!(
+                &event,
+                Event::Mouse(mouse)
+                    if matches!(
+                        mouse.kind,
+                        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left)
+                    ) && wizard
+                        .form()
+                        .borrow()
+                        .control_area(WizardControl::ProfileList)
+                        .is_some_and(|area| mouse.column < area.x.saturating_add(4))
+            );
+            return self.apply_wizard_interaction(wizard, interaction, toggle_provider);
         }
         if result.consumed {
             return self.keep(wizard);
@@ -235,6 +248,7 @@ impl DashboardState {
         &mut self,
         mut wizard: W,
         interaction: Interaction<WizardControl>,
+        is_click: bool,
     ) -> DashboardAction {
         match interaction {
             Interaction::Cancel => {
@@ -263,9 +277,7 @@ impl DashboardState {
             }
             Interaction::Select(WizardControl::ProfileList, selected) => {
                 wizard.note_draft_change(self, DraftChange::ProfileSelected);
-                if wizard.profile() != selected {
-                    wizard.set_profile(selected);
-                }
+                wizard.select_profile_row(self, selected, is_click);
                 self.keep(wizard)
             }
             Interaction::Select(WizardControl::TargetList, row) => {

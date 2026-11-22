@@ -344,9 +344,8 @@ impl DashboardState {
             workspace_id: wizard.workspace_id.clone(),
             // A profile that vanished after the launch was submitted is
             // refused by name by the controller.
-            profile_id: self
-                .new_wizard_profile_id(wizard.profile)
-                .unwrap_or_default(),
+            profile_id: wizard.selected_profile_id(self).unwrap_or_default(),
+            provider: wizard.selected_provider(self),
             bundle_id: if raw_project {
                 raw_project_context_id(&wizard.project_directory)
             } else {
@@ -540,6 +539,7 @@ impl DashboardState {
             create_managed_worktree: Some(raw_project && source_had_worktree),
             workspace_id,
             profile_id,
+            provider: None,
             bundle_id,
             project_directory: directory,
             target_template_id,
