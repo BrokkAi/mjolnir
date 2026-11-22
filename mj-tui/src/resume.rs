@@ -1067,7 +1067,7 @@ fn build_resume_rows(
 }
 
 impl DashboardState {
-    /// Every running session in every workspace, newest activity first,
+    /// Every session listed in a workspace, newest activity first,
     /// narrowed by the search box's text when there is any.
     ///
     /// Built here rather than in [`build_resume_rows`] because what the Sessions
@@ -1079,14 +1079,9 @@ impl DashboardState {
             .state
             .sessions
             .values()
-            // A session's own workspace id passes the pane's workspace check,
-            // which is how one list covers every workspace at once. The state
-            // check is this list's own: a stopped session the display setting
-            // reveals is listed there, and it is not running.
-            .filter(|session| {
-                session.state.is_active()
-                    && self.is_listed_top_level_session(session, &session.workspace_id)
-            })
+            // Use the pane's visibility owner across every workspace, including
+            // stopped sessions that still need a person's attention.
+            .filter(|session| self.is_openable_workspace_session(session))
             // The state filter reads the same attention level the Sessions
             // pane's letters read, so both narrow one list the same way. It
             // sits here, where the session id is still in hand.
@@ -1194,6 +1189,15 @@ impl DashboardState {
                     .moves
                     .get(session_id)
                     .or_else(|| self.move_operations.get(session_id)),
+                (ResumeRowKey::Live(session_id), _)
+                    if self
+                        .state
+                        .sessions
+                        .get(session_id)
+                        .is_some_and(|session| !session.state.is_active()) =>
+                {
+                    self.move_operations.get(session_id)
+                }
                 _ => None,
             }
             .filter(|operation| operation.offers_retry())
@@ -1308,6 +1312,16 @@ impl DashboardState {
         // The dialog opens on Live with nothing focused yet, so the list gets
         // the default focus `end_frame` hands out; `/` or a click moves it to
         // the search box from there.
+    }
+
+    /// Seed Open with the workspace filter before its first background search.
+    pub fn set_resume_filter(&mut self, query: String, state: Option<crate::SessionStateFilter>) {
+        if let Some(dialog) = resume_dialog_mut(&mut self.mode) {
+            dialog.search = TextInput::from_value(query);
+            dialog.live_state = state;
+        }
+        self.rebuild_resume_rows();
+        self.resync_resume_selection();
     }
 
     /// One session's record: the live one from the runtime feed, or else a
@@ -2160,27 +2174,30 @@ impl DashboardState {
             self.notices.set(format!("Cannot {action}: {reason}"));
             return DashboardAction::None;
         }
+        if let Some(operation) = row.move_recovery {
+            self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::RecoverMove {
+                operation: Box::new(operation),
+            }));
+            return DashboardAction::None;
+        }
         match row.key {
             ResumeRowKey::Live(session_id) => {
-                let Some(workspace_id) = self
+                let Some((workspace_id, active)) = self
                     .state
                     .sessions
                     .get(&session_id)
-                    .map(|session| session.workspace_id.clone())
+                    .map(|session| (session.workspace_id.clone(), session.state.is_active()))
                 else {
                     self.notices.set("That session is no longer running.");
                     return DashboardAction::None;
                 };
                 self.cancel_modal();
+                if !active {
+                    return self.begin_resume_in_workspace(&session_id, workspace_id);
+                }
                 self.focus_session_anywhere(&workspace_id, &session_id)
             }
             ResumeRowKey::Hel(session_id) => {
-                if let Some(operation) = row.move_recovery {
-                    self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::RecoverMove {
-                        operation: Box::new(operation),
-                    }));
-                    return DashboardAction::None;
-                }
                 if self.session_record(&session_id).is_none() {
                     // The dialog lists rows, not records. Fetch the one picked
                     // and open the wizard when it arrives.
@@ -2453,7 +2470,7 @@ pub(crate) fn render_resume_dialog(
             // Under a state filter the filter emptied the list, so say which.
             (ResumeTab::Live, _, true) => match dialog.live_state {
                 Some(state) => format!("No {} sessions", state.label()),
-                None => "No running sessions".to_owned(),
+                None => "No live sessions".to_owned(),
             },
             (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions".to_owned(),
             (ResumeTab::Import, _, true) => "No importable sessions".to_owned(),
@@ -2724,13 +2741,10 @@ fn resume_list_title(
         // A state filter replaces "every workspace": the list is still every
         // workspace's, and what it is narrowed to is the news.
         spans.push(match (dialog.tab, dialog.live_state) {
-            (ResumeTab::Live, Some(state)) => Span::raw(format!(
-                "Running sessions · {} · newest first",
-                state.label()
-            )),
-            (ResumeTab::Live, None) => {
-                Span::raw("Running sessions · every workspace · newest first")
+            (ResumeTab::Live, Some(state)) => {
+                Span::raw(format!("Live sessions · {} · newest first", state.label()))
             }
+            (ResumeTab::Live, None) => Span::raw("Live sessions · every workspace · newest first"),
             (ResumeTab::Hel, _) => Span::raw("Mjolnir sessions · newest first"),
             (ResumeTab::Import, _) => Span::raw("Importable sessions · newest first"),
             (ResumeTab::Archive, _) => Span::raw("Archived sessions · newest first"),
@@ -2850,7 +2864,7 @@ fn empty_search_message(dashboard: &DashboardState, dialog: &ResumeDialog) -> St
     .collect::<Vec<_>>();
     if elsewhere.is_empty() {
         return match dialog.tab {
-            ResumeTab::Live => "No matching running sessions".to_owned(),
+            ResumeTab::Live => "No matching live sessions".to_owned(),
             _ => "No matching sessions".to_owned(),
         };
     }
