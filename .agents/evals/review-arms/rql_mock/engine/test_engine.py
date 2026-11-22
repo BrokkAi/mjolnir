@@ -1300,7 +1300,6 @@ class RetirementTests(unittest.TestCase):
         replace(fidelity_live, "prepared_snapshot", lambda *args: snapshot)
         replace(fidelity_live, "blob_reader", lambda *args: SOURCE.get)
         replace(driver, "pilot_weekly_hold", lambda *args, **kwargs: None)
-        replace(driver, "pilot_claude_hold", lambda *args: None)
         launches = []
 
         def launch(*args, **kwargs):
@@ -1384,13 +1383,12 @@ class RetirementTests(unittest.TestCase):
             return rows
 
         adapter.run_turn = run_turn
-        for scenario in ("turn", "audit", "output", "rollout", "transcript", "codex", "claude",
+        for scenario in ("turn", "audit", "output", "rollout", "transcript", "codex",
                          "incomplete", "changed"):
             with self.subTest(scenario=scenario), TemporaryDirectory() as root:
                 directory = Path(root)
-                harness = "claude" if scenario == "claude" else "codex"
-                model = fidelity_live.SONNET if harness == "claude" else fidelity_live.TERRA
-                version = VERSION if harness == "claude" else model
+                harness = "codex"
+                model = version = fidelity_live.TERRA
                 result = {"session": SESSION, "turn": 1, "model": model, "version": version, "effort": "high"}
                 capture = FidelityCapture(directory, clean=scenario not in ("audit", "rollout"), models=())
                 launches.clear()
@@ -1459,14 +1457,10 @@ class RetirementTests(unittest.TestCase):
                 if scenario != "turn":
                     turn_audit = json.loads((directory / "turn-1-audit.json").read_text())
                     self.assertEqual(turn_audit["passed"], scenario != "audit")
-                if harness == "claude":
-                    self.assertEqual(capture.rollout_calls, 0)
-                    self.assertFalse(list(directory.glob(f"*-{ROLLOUT_DIRECTORY}-*")))
-                else:
-                    self.assertEqual(capture.rollout_calls, 1 if scenario == "turn" else 2)
-                    index = json.loads((directory / "capture.json").read_text())
-                    final = json.loads((directory / "audit.json").read_bytes())
-                    self.assertIn(f"{final['rollout_directory']}/rollout-fixture.jsonl", index["files_sha256"])
+                self.assertEqual(capture.rollout_calls, 1 if scenario == "turn" else 2)
+                index = json.loads((directory / "capture.json").read_text())
+                final = json.loads((directory / "audit.json").read_bytes())
+                self.assertIn(f"{final['rollout_directory']}/rollout-fixture.jsonl", index["files_sha256"])
 
 
 class SnapshotTests(unittest.TestCase):

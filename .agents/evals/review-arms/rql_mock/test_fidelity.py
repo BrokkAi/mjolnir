@@ -1,19 +1,23 @@
 """Offline fidelity gate fixtures. No session tools are invoked."""
 from collections import Counter
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from io import StringIO
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
+import driver
 from driver import expected_provider_model, verify_session_selection
+from rql_engine_tools import STAGED_ENGINE_SETTINGS
 
 from . import fidelity_live
 from .fidelity import (BARS, CENSUS, Query, accuracy, bar_failures, gate_report, load_inputs,
                        measure, pooled_prescience, prescience_metrics, sample, step_result, stratum_metrics)
 from .engine.grammar import MENU
+from .engine.runner import EngineRunner
 from .fidelity_live import SONNET, TERRA, candidate_lines, model_usage, planned_calls
 from .fidelity_symbols import capture_symbols, changed_intervals
 
@@ -463,6 +467,138 @@ class TerraOutput(unittest.TestCase):
 
 
 class ModelIdentity(unittest.TestCase):
+    # Hard-won: d7e5de2d6: the live adjudicator could run an unauditable scratch script.
+    def test_adjudicator_uses_the_restricted_login_and_engine_audit(self):
+        sid, orphan = "a" * 32, "b" * 40
+        profile, provider = "restricted-alias", "claude-sonnet-5-5"
+        checkout = f"/workspace/{sid}/engine-trees"
+        scratch = f".rql-engine-{sid}"
+        configured = {"id": sid, "at": orphan, "base": orphan, "no_later_history": True,
+                      "harness_kind": "claude", "profile_id": profile, "config_options": [
+                          {"key": "model", "current": SONNET, "choices": [
+                              {"value": SONNET, "name": "Claude Sonnet 5.5"}]},
+                          {"key": "effort", "current": "high"},
+                      ]}
+        query = Query("documented", "random", "fixture", "c" * 40, "(function)")
+        candidates = {"0": {"sites": [{"path": "source.rs", "start_line": 1, "end_line": 1}]}}
+        decisions = {"0": {"in_scope": True, "key": "definition", "reason": "the source declares it"}}
+        calls = []
+        command = None
+
+        def quota(login, floor, **kwargs):
+            calls.append(("quota", login, floor, kwargs["short_floor"]))
+            return ((50, 50), None) if login == "claude5" else (None, "quota held")
+
+        def sync(runner, session=None):
+            calls.append(("sync", runner.login.login_profile, runner.login.engine_profile, session))
+
+        def launch(bundle, at, alias, title, **kwargs):
+            calls.append(("launch", alias))
+            return sid
+
+        def attest(runner, session, snapshot, directory):
+            driver.save(directory / "pre-inventory.json", {"cwd": checkout})
+            return configured
+
+        def clean(runner, session, pin, *, clear=True):
+            self.assertEqual((session, pin), (sid, orphan))
+            return scratch
+
+        def podman(argv, **kwargs):
+            self.assertEqual(argv[:3], ["podman", "exec", "fixture-container"])
+            if argv[3] == "cat":
+                return SimpleNamespace(stdout=json.dumps(STAGED_ENGINE_SETTINGS).encode())
+            self.assertEqual(argv[3:5], ["python3", "-c"])
+            return SimpleNamespace(stdout="2.1.326\n")
+
+        def transport(runner, operation, *args, data=None):
+            nonlocal command
+            self.assertEqual(args[:2], ("--session", sid))
+            if operation == "message":
+                command = args[args.index("--command-id") + 1]
+                self.assertIn(("sync", "claude5", profile, sid), calls)
+                self.assertIn(b"only Read, Grep, Glob, Write and Edit, with no shell", data)
+                self.assertIn(f"Use Write to save the JSON object to {checkout}/{scratch}/output.json".encode(), data)
+                return json.dumps({"session_id": sid, "via": "turn", "turn_id": 1}).encode()
+            if operation == "put-file":
+                self.assertTrue(args[3].startswith(scratch + "/"))
+                return b""
+            if operation == "fetch":
+                self.assertEqual(args[3], f"{scratch}/output.json")
+                return json.dumps(decisions).encode()
+            self.assertEqual(operation, "destroy")
+            return json.dumps({"session_id": sid, "accepted": True}).encode()
+
+        def mj(operation, *args, **kwargs):
+            if operation == "set-config":
+                return {}
+            if operation == "wait":
+                return {"turn_id": 1, "outcome": "finished"}
+            self.assertEqual(operation, "usage")
+            if "--after-seq" not in args:
+                return {"latest_seq": 0}
+            return {"session_id": sid, "latest_seq": 5, "next_after_seq": 5,
+                    "turns": [{"command_id": command, "accepted_ordinal": 1, "usage": {
+                        "provider_details": {"model_usage": {provider: {}}}}}],
+                    "turn_selections": {command: {"model": SONNET, "effort": "high"}}}
+
+        with TemporaryDirectory() as root, ExitStack() as stack:
+            directory = Path(root)
+            adapter = fidelity_live.LiveModels.__new__(fidelity_live.LiveModels)
+            adapter.config = {"instance": "fidelity-test", "bundle": "fixture", "snapshot_repo": "snapshot",
+                              "destination": "engine-trees", "logins": [
+                                  {"profile": "held", "engine_profile": "held-alias"},
+                                  {"profile": "claude5", "engine_profile": profile},
+                              ]}
+            adapter.manifest = {"eligible_diffs": [], "served_steps": [], "model_versions": {"claude": "Sonnet 5.5"}}
+            adapter.sources, adapter.claude_version = {query.commit: "fixture"}, provider
+            adapter.catalogue = adapter.menu = adapter.rulings = ""
+            for target, name, fake in (
+                (driver, "use_named_instance", lambda _: directory),
+                (driver, "_quota_status", quota),
+                (driver, "wait_idle", lambda _: configured),
+                (driver, "session", lambda _: configured),
+                (driver, "container", lambda _: {"container": "fixture-container"}),
+                (driver, "capture_pilot_rollouts", lambda *args, **kwargs: self.fail("Claude exported a rollout")),
+                (driver, "mj", mj),
+                (driver.subprocess, "run", podman),
+                (fidelity_live, "blob_reader", lambda *args: lambda _: b"def source(): pass\n"),
+                (fidelity_live, "prepared_snapshot", lambda *args: {"orphan": orphan, "tree": "tree"}),
+                (fidelity_live.brief_driver, "sealed_launch", launch),
+                (EngineRunner, "attest", attest),
+                (EngineRunner, "clean_checkout", clean),
+                (EngineRunner, "credential_hold", lambda *args: None),
+                (EngineRunner, "sync_login", sync),
+                (EngineRunner, "command", transport),
+            ):
+                stack.enter_context(patch.object(target, name, new=fake))
+            for tool in ({"name": "Write", "kind": "edit", "rawInput": {
+                              "file_path": f"{checkout}/{scratch}/output.json", "content": json.dumps(decisions)}},
+                         {"name": "Bash", "kind": "execute", "rawInput": {"command": "pwd"}}):
+                with self.subTest(tool=tool["name"]):
+                    adapter.directory = directory / tool["name"]
+                    calls.clear()
+                    pages = [{"session_id": sid, "next_after_seq": 5, "latest_seq": 5,
+                              "items": [{"role": "tool", "seq": 5, "body": {"call": tool}}]}]
+                    with patch.object(driver, "transcript", new=lambda _: pages):
+                        if tool["name"] == "Bash":
+                            with self.assertRaisesRegex(RuntimeError, "failed the pilot audit"):
+                                adapter.adjudicate(query, candidates)
+                        else:
+                            self.assertEqual(adapter.adjudicate(query, candidates), decisions)
+                    artifacts = adapter.directory / query.key / "adjudicator"
+                    self.assertEqual(calls, [("quota", "held", 25, 20), ("quota", "claude5", 0, 0),
+                                             ("sync", "claude5", profile, None), ("launch", profile),
+                                             ("sync", "claude5", profile, sid), ("quota", "claude5", 0, 0)])
+                    self.assertEqual(json.loads((artifacts / "engine-runtime.json").read_bytes()),
+                                     {"session_id": sid, "claude_code_version": "2.1.326"})
+                    self.assertTrue((artifacts / "engine-tool-settings.json").is_file())
+                    self.assertTrue((artifacts / "destroy-receipt.json").is_file())
+                    audit = json.loads((artifacts / "turn-1-audit.json").read_bytes())
+                    self.assertEqual(audit["passed"], tool["name"] == "Write")
+                    if not audit["passed"]:
+                        self.assertIn("tool outside the engine allowlist: 'Bash'", audit["hits"][0]["snippet"])
+
     def test_sonnet_alias_and_provider_usage_must_both_match(self):
         manifest = {"models": {"engine": "sonnet/high", "judge": "sonnet/high"},
                     "model_versions": {"claude": "Sonnet 5.5", "claude_provider_id": "claude-sonnet-5-5"}}
