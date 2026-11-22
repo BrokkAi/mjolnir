@@ -2037,13 +2037,20 @@ impl Controller {
             ).with_code(QUOTA_MOVE_SAFETY_REFUSAL).into());
         }
         checked.stops_subagents = prepared.stops_subagents;
-        let queue = request.queue.unwrap_or(ResumeQueueDisposition::Discard);
         let source = self.state.sessions[&id].clone();
         let retry = crate::database::load_move_operation(&id)?.filter(|op| {
             !move_needs_fresh_capture(op, &source)
                 && matches_move_retry_selection(op, &checked.selection)
                 && op.checkpoint_retained()
         });
+        let locked_queue = retry
+            .as_ref()
+            .filter(|op| op.queue_admission_started)
+            .map(|op| op.queue);
+        let queue = request
+            .queue
+            .or(locked_queue)
+            .unwrap_or(ResumeQueueDisposition::Discard);
         let updates_retry_policy = retry
             .as_ref()
             .is_some_and(|op| op.selection.subagents != checked.selection.subagents);
@@ -2067,7 +2074,7 @@ impl Controller {
             "active work will be interrupted; confirm Move again with interruption acknowledgement"
         );
         ensure!(
-            checked.queued_commands.is_empty() || request.queue.is_some(),
+            checked.queued_commands.is_empty() || request.queue.is_some() || locked_queue.is_some(),
             "pending work requires an explicit queue choice: discard or start"
         );
         let timestamp = now();

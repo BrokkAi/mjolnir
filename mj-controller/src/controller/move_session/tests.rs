@@ -430,3 +430,193 @@ fn recover_legacy_move_operation_probes_dead_source_and_handles_stopped_checkpoi
         SessionState::Stopped
     );
 }
+
+// Hard-won: #1631: retrying a partially started Move without --queue defaulted to Discard and was refused.
+#[cfg(unix)]
+#[test]
+fn retrying_partially_started_move_without_queue_preserves_original_choice() {
+    let name = crate::controller::test_support::test_name(
+        module_path!(),
+        "retrying_partially_started_move_without_queue_preserves_original_choice",
+    );
+    if std::env::var_os("MJ_RETRY_LOCKED_QUEUE_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(name)
+            .env("MJ_RETRY_LOCKED_QUEUE_CHILD", "1")
+            .env(
+                "MJ_WORKER_BINARY",
+                super::test_fixtures::fake_worker_dispatcher(),
+            )
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path().join("checkout");
+    let source_home = dir.path().join("source-home");
+    let dest_home = dir.path().join("dest-home");
+    std::fs::create_dir_all(&checkout).unwrap();
+    std::fs::create_dir_all(&source_home).unwrap();
+    std::fs::create_dir_all(&dest_home).unwrap();
+    let mut config = mj_core::config::Config::default();
+    config.profiles.insert(
+        "source".into(),
+        mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Claude, source_home),
+    );
+    config.profiles.insert(
+        "destination".into(),
+        mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Claude, dest_home),
+    );
+    config.targets.insert(
+        "local-bare".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    let mut session = crate::controller::test_support::checkpoint_test_session("sess-locked-queue");
+    session.harness_kind = mj_core::config::HarnessKind::Claude;
+    session.state = SessionState::Stopped;
+    session.last_profile = "source".into();
+    session.target_template_id = "local-bare".into();
+    session.target = None;
+    session.project_directory = Some(checkout);
+    crate::database::save_session(&session).unwrap();
+    let mut controller = crate::controller::Controller {
+        config,
+        state: mj_core::state::State::default(),
+    };
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session.clone());
+
+    let mut failed = super::test_fixtures::source_recovery_operation(&session);
+    failed.phase = MovePhase::Failed;
+    failed.queue = ResumeQueueDisposition::Start;
+    failed.queue_admission_started = true;
+    failed.queue_admission_finished = false;
+    failed.source_snapshot = Some(Box::new(mj_core::state::MoveSourceSnapshot {
+        archive_path: dir.path().join("missing-snapshot.hel.zip"),
+        sha256: "a".repeat(64),
+        manifest: None,
+        queued_prompts: Vec::new(),
+        mailbox: None,
+    }));
+    let catalog =
+        crate::profile_catalog::ProfileCatalog::new(tokio_util::sync::CancellationToken::new());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let channels = crate::session_manager::spawn_session_manager().unwrap();
+        let executor = crate::targets::ProcessExecutor;
+        let admission = crate::controller::test_support::session_admission(&session.id);
+
+        // 1) Empty captured queue: explicit conflicting choice is still refused;
+        //    omitted queue inherits the locked Start choice.
+        crate::database::save_move_operation(&failed).unwrap();
+        let preparation = controller
+            .prepare_move_session_controlled(&catalog, failed.selection.clone(), &executor)
+            .await
+            .unwrap();
+        assert!(preparation.queued_commands.is_empty());
+
+        let rejected_accepted = std::sync::atomic::AtomicBool::new(false);
+        let mismatch = controller
+            .move_session_managed_controlled_with_admission(
+                &admission,
+                &catalog,
+                mj_core::state::MoveSessionRequest {
+                    preparation: preparation.clone(),
+                    queue: Some(ResumeQueueDisposition::Discard),
+                    acknowledge_interruption: true,
+                },
+                None,
+                &executor,
+                &channels.control,
+                || rejected_accepted.store(true, std::sync::atomic::Ordering::SeqCst),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{mismatch:#}").contains("queued work may already have run"),
+            "{mismatch:#}"
+        );
+        assert!(!rejected_accepted.load(std::sync::atomic::Ordering::SeqCst));
+
+        let omitted_accepted = std::sync::atomic::AtomicBool::new(false);
+        let _ = controller
+            .move_session_managed_controlled_with_admission(
+                &admission,
+                &catalog,
+                mj_core::state::MoveSessionRequest {
+                    preparation,
+                    queue: None,
+                    acknowledge_interruption: true,
+                },
+                None,
+                &executor,
+                &channels.control,
+                || {
+                    omitted_accepted.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let stored = crate::database::load_move_operation(&session.id)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(stored.queue, ResumeQueueDisposition::Start);
+                },
+            )
+            .await;
+        assert!(
+            omitted_accepted.load(std::sync::atomic::Ordering::SeqCst),
+            "omitting queue on a locked retry should inherit the original Start choice"
+        );
+
+        // 2) Non-empty captured queue: omitting queue on a locked retry also
+        //    inherits Start without demanding a redundant queue choice.
+        failed
+            .source_snapshot
+            .as_deref_mut()
+            .unwrap()
+            .queued_prompts
+            .push(mj_core::archive::CanonicalQueuedPrompt {
+                command_id: "queued-1".into(),
+                kind: mj_core::archive::CanonicalQueuedCommandKind::Prompt,
+                content: vec![serde_json::json!({"type": "text", "text": "continue"})],
+                queued_at_ms: 1,
+            });
+        crate::database::save_move_operation(&failed).unwrap();
+        let preparation = controller
+            .prepare_move_session_controlled(&catalog, failed.selection.clone(), &executor)
+            .await
+            .unwrap();
+        assert_eq!(preparation.queued_commands.len(), 1);
+        let queued_omitted_accepted = std::sync::atomic::AtomicBool::new(false);
+        let _ = controller
+            .move_session_managed_controlled_with_admission(
+                &admission,
+                &catalog,
+                mj_core::state::MoveSessionRequest {
+                    preparation,
+                    queue: None,
+                    acknowledge_interruption: true,
+                },
+                None,
+                &executor,
+                &channels.control,
+                || {
+                    queued_omitted_accepted.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let stored = crate::database::load_move_operation(&session.id)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(stored.queue, ResumeQueueDisposition::Start);
+                },
+            )
+            .await;
+        assert!(
+            queued_omitted_accepted.load(std::sync::atomic::Ordering::SeqCst),
+            "omitting queue on a locked retry with captured prompts should inherit Start"
+        );
+
+        channels.shutdown.shutdown().await.unwrap();
+    });
+}
