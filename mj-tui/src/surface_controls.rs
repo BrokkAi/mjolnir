@@ -328,7 +328,12 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
         .iter()
         .map(|(_, label)| label.len() + 3)
         .sum::<usize>()
-        + format!(" {count} more ").len();
+        + format!(" {count} more ").len()
+        + if dashboard.sessions_minimized() {
+            0
+        } else {
+            FILTER_LABEL.len() + usize::from(FILTER_FIELD_MIN) + 2
+        };
     let compact = count > 0 && usize::from(area.width) < regular_width;
     let padding = if compact { "" } else { " " };
     let label = format!("{padding}{count} more{padding}");
@@ -1430,6 +1435,24 @@ mod tests {
             "{}",
             lines.join("\n")
         );
+        for index in 1..10 {
+            let mut extra = cross.state.sessions.get("other-workspace").unwrap().clone();
+            extra.id = format!("extra-{index}");
+            cross.state.sessions.insert(extra.id.clone(), extra);
+        }
+        crate::test_support::publish_fixture_verdicts(&mut cross);
+        let lines = append_state(
+            &mut output,
+            "two digit match count keeps the filter input visible at 80 columns",
+            &mut cross,
+            (80, 40),
+        );
+        point(&lines, "10 more");
+        point(&lines, "Filter:");
+        for index in 1..10 {
+            cross.state.sessions.remove(&format!("extra-{index}"));
+        }
+        crate::test_support::publish_fixture_verdicts(&mut cross);
         cross
             .state
             .sessions
@@ -1538,6 +1561,27 @@ mod tests {
         append_state(
             &mut output,
             "Open keeps the workspace search and shows the other workspace match",
+            &mut cross,
+            (140, 40),
+        );
+
+        crate::resume::resume_dialog_mut(&mut cross.mode)
+            .unwrap()
+            .form
+            .get_mut()
+            .focus(crate::resume::ResumeFocus::Sessions);
+        let action = cross.handle_key(key(KeyCode::Enter));
+        assert!(matches!(action, DashboardAction::None));
+        let Mode::Resume(wizard) = &cross.mode else {
+            panic!(
+                "stopped match must open the resume wizard: {:?}",
+                cross.mode
+            );
+        };
+        assert_eq!(wizard.workspace_id, "elsewhere");
+        append_state(
+            &mut output,
+            "Open on a stopped remote match starts resume in its own workspace",
             &mut cross,
             (140, 40),
         );

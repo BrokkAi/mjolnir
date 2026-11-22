@@ -640,6 +640,48 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 
+=== two digit match count keeps the filter input visible at 80 columns (80x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+│ default                            ≡ ││                                      │
+╰──────────────────────────────────────╯│                                      │
+╭ Sessions · /needle × ───────── ▁   ▄ ╮│                                      │
+│New Open  Filter: needle _____ 10 more││                                      │
+│No sessions match · Esc clears the    ││                                      │
+│filter                                ││                                      │
+│                                      ││                                      │
+│                                      ││           ✦  M J O L N I R           │
+│                                      ││                                      │
+│                                      ││  Create a session to start building. │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      │╰──────────────────────────────────────╯
+│                                      │╭ No live session ─────────────────────╮
+│                                      ││No live session in this workspace.    │
+│                                      ││Press ctrl+b c to create a session or │
+╰──────────────────────────────────────╯╰──────────────────────────────────────╯
+╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets  CPU  RAM                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                     │
+│  claude-1: refreshing…                                                       │
+│OPENAI                                                                        │
+│  codex-1: refreshing…                                                        │
+│  codex-2: refreshing…                                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
+
 === no other workspace matches hides the button (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -929,6 +971,48 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
 │                                                                                                                                          │
+│                  ││Quick reply:                                                                                                     Send │
+│                  ││ Go to Session   Clear & Next   Skip   Ignore Session                                                                 │
+╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?1) · b panes · q detach · : / ? palette
+
+=== Open on a stopped remote match starts resume in its own workspace (140x40) ===
+╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default ▾      ≡ ││                                                                                                                      │
+╰──────────────────╯│                                                                                                                      │
+╭ S ·  × ▁   ▄   □ ╮│                                                                                                                      │
+│New Open    1 more││                                                                                                                      │
+│⠁ Syncing session…││                                                   ✦  M J O L N I R                                                   │
+│No sessions match ││                                                                                                                      │
+│· Esc clears the  ││                                                                                                                      │
+│filter            ││       ╭ × Resume · 1/3 profile (cross-harness supported) ────────────────────────────────╮                           │
+│                  ││       │                                                                                  │                           │
+│                  ││       │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
+│                  ││       │   claude-1  Claude Code  refreshing      (lossy: text-only transcript)           │                           │
+│                  ││       │   codex-1   Codex        refreshing                                              │                           │
+│                  ││       │   codex-2   Codex        refreshing                                              │                           │
+│                  │╰─────  │                                                                                  │  ─────────────────────────╯
+│                  │╭ No l  │ Same agent: the conversation continues natively.                                 │  ─────────────────────────╮
+│                  ││No li  │                                                                                  │                           │
+│                  ││Press  │                                                                                  │                           │
+│                  │╰─────  │                                                                                  │  ─────────────────────────╯
+│                  │╭ Targ  │                                                                                  │  ────────────────── ▁   ▄ ╮
+│                  ││  Hos  │                                                                                  │                           │
+│                  │╰─────  │                                                                                  │  ─────────────────────────╯
+│                  │╭ Prof  │                                                                                  │  ────────────────── ▁   ▄ ╮
+│                  ││ANTHR  │                                                                                  │                           │
+│                  ││  cla  │                                                                                  │                           │
+│                  ││OPENA  │                                                                                  │                           │
+│                  ││  cod  │                                                                                  │                           │
+│                  ││  cod  │                                                                                  │                           │
+│                  │╰─────  │                                                                                  │  ─────────────────────────╯
+│                  │╭ Noti  │                                                                                  │  ────────────────── ▁   ▄ ╮
+│                  ││? unr  │   Cancel     Next                                                                │                           │
+│                  ││       ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
+│                  ││ Wait                                                                                                                 │
+│                  ││                                                                                                                      │
+│                  ││                                                                                                                      │
+│                  ││                                                                                                                      │
 │                  ││Quick reply:                                                                                                     Send │
 │                  ││ Go to Session   Clear & Next   Skip   Ignore Session                                                                 │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

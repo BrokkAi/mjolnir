@@ -2167,16 +2167,23 @@ impl DashboardState {
         }
         match row.key {
             ResumeRowKey::Live(session_id) => {
-                let Some(workspace_id) = self
+                let Some((workspace_id, active)) = self
                     .state
                     .sessions
                     .get(&session_id)
-                    .map(|session| session.workspace_id.clone())
+                    .map(|session| (session.workspace_id.clone(), session.state.is_active()))
                 else {
                     self.notices.set("That session is no longer running.");
                     return DashboardAction::None;
                 };
                 self.cancel_modal();
+                if !active {
+                    let action = self.begin_resume_for(&session_id);
+                    if let Mode::Resume(wizard) = &mut self.mode {
+                        wizard.workspace_id = workspace_id;
+                    }
+                    return action;
+                }
                 self.focus_session_anywhere(&workspace_id, &session_id)
             }
             ResumeRowKey::Hel(session_id) => {
