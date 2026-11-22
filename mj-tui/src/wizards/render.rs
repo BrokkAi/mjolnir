@@ -131,19 +131,30 @@ fn missing_profile_help(dashboard: &DashboardState) -> Vec<Line<'static>> {
 fn new_wizard_profile_rows(dashboard: &DashboardState, wizard: &NewWizard) -> Vec<PickerChoice> {
     let expanded_providers = wizard.effective_expanded_providers(dashboard);
     let items = new_wizard_profile_items(dashboard, &expanded_providers);
+    let predicted_cells = |predicted: Option<String>| match predicted.as_deref() {
+        Some(id) => {
+            let (weekly, five_hour) = dashboard.profile_quota_cells(id);
+            (PickerCell::text(id), weekly, five_hour)
+        }
+        None => (
+            PickerCell::styled(theme::glyphs().none, theme::muted()),
+            PickerCell::blank(),
+            PickerCell::blank(),
+        ),
+    };
     let mut rows = Vec::new();
     for item in items {
         match item {
             ProfilePickerItem::Auto => {
-                rows.push(PickerChoice::heading(vec![PickerCell::blank()]));
+                let (profile_cell, weekly, five_hour) =
+                    predicted_cells(dashboard.predicted_auto_primary_profile());
                 rows.push(PickerChoice::table(vec![
                     PickerCell::blank(),
-                    PickerCell::text("Auto (Primary)"),
-                    PickerCell::text("auto"),
-                    PickerCell::blank(),
-                    PickerCell::blank(),
+                    PickerCell::text("Auto"),
+                    profile_cell,
+                    weekly,
+                    five_hour,
                 ]));
-                rows.push(PickerChoice::heading(vec![PickerCell::blank()]));
             }
             ProfilePickerItem::Provider(provider) => {
                 let expanded = expanded_providers.contains(&provider);
@@ -156,23 +167,25 @@ fn new_wizard_profile_rows(dashboard: &DashboardState, wizard: &NewWizard) -> Ve
                 };
                 let accent = crate::render::provider_accent(&provider);
                 let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+                let (profile_cell, weekly, five_hour) =
+                    predicted_cells(dashboard.predicted_provider_profile(&provider));
                 rows.push(PickerChoice::table(vec![
                     PickerCell::blank(),
                     PickerCell::styled(
                         format!("{arrow} {}", provider.display_name().to_uppercase()),
                         heading_style,
                     ),
-                    PickerCell::styled("auto", theme::muted()),
-                    PickerCell::blank(),
-                    PickerCell::blank(),
+                    profile_cell,
+                    weekly,
+                    five_hour,
                 ]));
             }
-            ProfilePickerItem::Profile { id, harness, .. } => {
-                rows.push(dashboard.indented_profile_choice(&id, harness));
+            ProfilePickerItem::Profile { id, .. } => {
+                rows.push(dashboard.new_wizard_profile_choice(&id));
             }
         }
     }
-    profile_table(rows)
+    new_wizard_profile_table(rows)
 }
 
 pub(crate) fn step_initial(step: WizardStep) -> WizardControl {
