@@ -8180,16 +8180,19 @@ esac
         Cancel,
         StaleCancel,
     }
-    for (index, (in_place, restart, sealed, has_prepared_destination, origin)) in [
-        (false, false, true, false, Origin::Suspend),
-        (true, false, true, false, Origin::Suspend),
-        (false, true, true, true, Origin::Suspend),
-        (true, true, true, false, Origin::Suspend),
-        (false, false, false, false, Origin::Suspend),
-        (false, true, false, false, Origin::Suspend),
-        (false, true, true, true, Origin::Cancel),
-        (false, true, true, true, Origin::StaleCancel),
-        (false, false, true, true, Origin::Suspend),
+    for (index, (in_place, restart, sealed, has_prepared_destination, checkout_only, origin)) in [
+        (false, false, true, false, false, Origin::Suspend),
+        (true, false, true, false, false, Origin::Suspend),
+        (false, true, true, true, false, Origin::Suspend),
+        (true, true, true, false, false, Origin::Suspend),
+        (false, false, false, false, false, Origin::Suspend),
+        (false, true, false, false, false, Origin::Suspend),
+        (false, true, true, true, false, Origin::Cancel),
+        (false, true, true, true, false, Origin::StaleCancel),
+        (false, false, true, true, false, Origin::Suspend),
+        // Crash after creating a destination clone and binding its ledger
+        // environment, before runtime provisioning sets `destination.target`.
+        (false, true, true, false, true, Origin::Suspend),
     ]
     .into_iter()
     .enumerate()
@@ -8199,8 +8202,16 @@ esac
         let id = format!("1542{:028}", index + 1);
         let id = id.as_str();
         let source_root = root.path().join("source").join(id);
-        let mut destination_root = root.path().join("destination").join(id);
+        let destination_repo = root.path().join("destination-repo");
+        let mut destination_root = if checkout_only {
+            destination_repo.join(".mj").join("clones").join(id)
+        } else {
+            root.path().join("destination").join(id)
+        };
         std::fs::create_dir_all(&source_root).unwrap();
+        if checkout_only {
+            std::fs::create_dir_all(&destination_repo).unwrap();
+        }
         if !in_place {
             std::fs::create_dir_all(&destination_root).unwrap();
             std::fs::write(
@@ -8310,7 +8321,19 @@ esac
         mj_controller::database::save_move_operation(&operation).unwrap();
         let mut destination = source.clone();
         destination.state = SessionState::Provisioning;
-        if !in_place {
+        if checkout_only {
+            destination.target = None;
+            destination.project_directory = Some(destination_root.clone());
+            destination.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+                kind: mj_core::state::ManagedCheckoutKind::Clone,
+                source_project_directory: destination_repo.clone(),
+                source_repository: destination_repo.clone(),
+                worktree_root: destination_root.clone(),
+                branch: format!("mj/{id}"),
+                target: mj_core::state::ManagedWorktreeTarget::Local,
+                base_commit: None,
+            }));
+        } else if !in_place {
             destination.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
                 worker_root: destination_root.clone(),
             }));
@@ -8323,7 +8346,7 @@ esac
             destination.state = SessionState::Closing;
             mj_controller::database::save_lifecycle_session(&destination).unwrap();
         }
-        if requested_close && restart && sealed && !in_place {
+        if requested_close && restart && sealed && !in_place && !checkout_only {
             // Restore can publish Running just before Move records StartingQueue.
             // Closing and that destination's readiness must become durable together.
             destination.state = SessionState::Running;
@@ -8564,10 +8587,12 @@ esac
                 "startup must leave superseded Move to close"
             );
             assert!(owned.closes.contains(id));
-            assert!(
-                interrupted_suspend_session_ids(&Controller::load().unwrap())
-                    .contains(&id.to_owned())
-            );
+            if !checkout_only {
+                assert!(
+                    interrupted_suspend_session_ids(&Controller::load().unwrap())
+                        .contains(&id.to_owned())
+                );
+            }
             None
         } else {
             Some(

@@ -971,24 +971,52 @@ impl Controller {
                     "superseded Move no longer owns its retained source"
                 );
                 let current = &self.state.sessions[session_id];
-                if let Some(current_target) = current.target.as_deref()
-                    && !current_target.same_resource(source_target)
-                {
-                    // A crash during provisioning can leave the session bound to
-                    // a partial destination. Retire it under its own ledger entry
-                    // before rebinding the session to the retained source.
-                    let destination = crate::database::session_environment(session_id)?
-                        .context("superseded Move has no durable destination environment")?;
-                    ensure!(
-                        destination.id != source_environment.id
-                            && destination.owner_session_id == session_id
-                            && destination
-                                .placement
-                                .target
-                                .as_ref()
-                                .is_some_and(|target| target.same_resource(current_target)),
-                        "superseded Move no longer owns its provisional destination"
-                    );
+                let current_destination = current
+                    .target
+                    .as_deref()
+                    .filter(|target| !target.same_resource(source_target));
+                // A crash after creating a destination checkout (even before
+                // runtime provisioning sets `current.target`) leaves the
+                // session bound to a distinct provisional environment in the
+                // ledger. Retire it before rebinding the session to the
+                // retained source.
+                let provisional_destination =
+                    match crate::database::session_environment(session_id)? {
+                        Some(destination) if destination.id != source_environment.id => {
+                            ensure!(
+                                destination.owner_session_id == session_id,
+                                "superseded Move no longer owns its provisional destination"
+                            );
+                            if let Some(current_target) = current_destination {
+                                ensure!(
+                                    destination
+                                        .placement
+                                        .target
+                                        .as_ref()
+                                        .is_some_and(|target| target.same_resource(current_target)),
+                                    "superseded Move no longer owns its provisional destination"
+                                );
+                            } else {
+                                ensure!(
+                                    destination
+                                        .placement
+                                        .target
+                                        .as_ref()
+                                        .is_none_or(|target| !target.same_resource(source_target)),
+                                    "provisional Move destination still names the retained source"
+                                );
+                            }
+                            Some(destination)
+                        }
+                        _ => {
+                            ensure!(
+                                current_destination.is_none(),
+                                "superseded Move has no durable destination environment"
+                            );
+                            None
+                        }
+                    };
+                if let Some(destination) = provisional_destination {
                     if let (Some(source), Some(destination)) = (
                         &source_environment.placement.managed_worktree,
                         &destination.placement.managed_worktree,
