@@ -706,6 +706,10 @@ pub struct CreateSessionRequest {
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub profile_id: String,
+    /// When `profile_id` is empty and `provider` is set, load-balance across
+    /// enabled profiles belonging to this provider instead of `[[subagents.primary]]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<mj_core::config::QuotaProvider>,
     pub bundle_id: String,
     pub project_directory: Option<PathBuf>,
     pub target_template_id: String,

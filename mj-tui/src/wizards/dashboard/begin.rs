@@ -135,6 +135,10 @@ impl DashboardState {
             self.state.last_oracle_choice_for(profile_id),
             self.state.last_supervisor_choice_for(profile_id),
         );
+        let mut expanded_providers = std::collections::BTreeSet::new();
+        if let Some(provider) = NewWizard::provider_for_profile(self, profile) {
+            expanded_providers.insert(provider);
+        }
         self.mode = Mode::New(NewWizard {
             subagents: Box::new(delegation),
             worktree_options: None,
@@ -143,6 +147,8 @@ impl DashboardState {
             step: WizardStep::Profile,
 
             profile,
+            expanded_providers,
+            focused_provider: None,
             bundle,
             target,
             target_step_skipped: false,

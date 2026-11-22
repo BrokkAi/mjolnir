@@ -7243,6 +7243,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             initial_prompt: None,
             workspace_id: workspace.id.clone(),
             profile_id: "codex".into(),
+            provider: None,
             bundle_id: "project".into(),
             project_directory: Some(project.clone()),
             target_template_id: "localhost".into(),
@@ -8274,7 +8275,7 @@ esac
                 profile_id: Some("codex".into()),
                 target_template_id: Some("local".into()),
                 consent: Default::default(),
-            skip_keep_paths: Vec::new(),
+                skip_keep_paths: Vec::new(),
                 clear_resource_allocation: false,
                 additional_mounts: None,
                 resource_allocation: None,
@@ -9689,9 +9690,7 @@ async fn a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushe
 
     let refusal = tokio::time::timeout(
         Duration::from_secs(60),
-        clone
-            .state
-            .suspend_session(LATCH_RELAY_SESSION.to_owned()),
+        clone.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
     )
     .await
     .unwrap()
@@ -9763,9 +9762,7 @@ async fn a_suspend_without_the_acknowledgement_ignores_review_refs_on_a_publishe
 
     tokio::time::timeout(
         Duration::from_secs(60),
-        clone
-            .state
-            .suspend_session(LATCH_RELAY_SESSION.to_owned()),
+        clone.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
     )
     .await
     .unwrap()
@@ -9981,7 +9978,7 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
                 discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
                 abort_operations: mj_core::suspend_consent::OperationConsent::None,
                 without_checkpoint: true,
-            confirm_no_checkpoint: true,
+                confirm_no_checkpoint: true,
             }),
     )
     .await

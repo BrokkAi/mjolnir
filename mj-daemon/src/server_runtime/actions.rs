@@ -194,6 +194,7 @@ pub(super) async fn apply_phone_action(
                         initial_prompt: None,
                         workspace_id,
                         profile_id,
+                        provider: None,
                         bundle_id,
                         project_directory,
                         target_template_id: target_id,

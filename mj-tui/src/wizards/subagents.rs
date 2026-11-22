@@ -383,7 +383,7 @@ impl DashboardState {
         }
         let (profile, target_id) = match &self.mode {
             Mode::New(wizard) => (
-                self.new_wizard_profile_id(wizard.profile)?,
+                wizard.selected_profile_id(self)?,
                 nth_key(&self.config.targets, wizard.target),
             ),
             Mode::Resume(wizard) => (
@@ -402,7 +402,7 @@ impl DashboardState {
     pub(crate) fn take_subagent_discovery(&mut self) -> Option<DashboardAction> {
         let creating = matches!(&self.mode, Mode::New(_));
         let remembered = if let Mode::New(wizard) = &self.mode {
-            let profile = self.new_wizard_profile_id(wizard.profile)?;
+            let profile = wizard.selected_profile_id(self)?;
             Some(self.state.last_subagent_policy_for(&profile))
         } else {
             None

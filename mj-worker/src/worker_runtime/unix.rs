@@ -1523,13 +1523,13 @@ pub async fn run_daemon_owned(
     // Only Claude Code's adapter marks the end of a turn it started on its
     // own, so only it can model those turns without leaving a session stuck
     // Running. See `.agents/docs/claude-autonomous-turns.md`.
+    durable_relay.jev_disabled |= config
+        .environment
+        .get(mj_core::jev::DISABLED_ENVIRONMENT)
+        .is_some_and(|value| value == "1");
     durable_relay.recovers_child_quota = config.subagent_kind
         == Some(mj_core::subagent::SubagentKind::Worker)
-        && !mj_core::jev::disabled_by_environment()
-        && !config
-            .environment
-            .get(mj_core::jev::DISABLED_ENVIRONMENT)
-            .is_some_and(|value| value == "1");
+        && !durable_relay.jev_disabled;
     durable_relay.set_managed_subagent(config.is_managed_subagent())?;
     durable_relay.set_turn_verdict_harness(config.harness);
     if config.harness == HarnessKind::Claude {
