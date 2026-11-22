@@ -345,7 +345,7 @@ async fn a_failed_lease_keeps_the_cause_that_decides_a_worker_restart() {
             returns: _releases_tx.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
-            idle_harness: None,
+            idle_replacement: None,
         })
         .await
         .unwrap();
@@ -2944,7 +2944,7 @@ async fn lease_a_live_actor() -> (LeasedActor, u64, StandaloneSession) {
             returns: releases_tx.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
-            idle_harness: None,
+            idle_replacement: None,
         })
         .await
         .unwrap();
@@ -2988,7 +2988,7 @@ async fn released_connection_can_be_leased_again_immediately() {
             returns: actor.releases.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
-            idle_harness: None,
+            idle_replacement: None,
         })
         .unwrap();
     assert!(
@@ -3012,7 +3012,7 @@ async fn released_connection_can_be_leased_again_immediately() {
                 returns: actor.releases.clone(),
                 admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
                 reply,
-                idle_harness: None,
+                idle_replacement: None,
             })
             .unwrap();
         let mut granted = response
@@ -3070,7 +3070,7 @@ async fn cancelled_lease_request_is_skipped_before_sync() {
             returns: actor.releases.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
-            idle_harness: None,
+            idle_replacement: None,
         })
         .unwrap();
     let (reply, response) = oneshot::channel();
@@ -3092,7 +3092,7 @@ async fn cancelled_lease_request_is_skipped_before_sync() {
         .send(ActorCommand::Lease {
             returns: actor.releases.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
-            idle_harness: None,
+            idle_replacement: None,
             reply,
         })
         .await
@@ -4450,7 +4450,7 @@ async fn lifecycle_lease_stops_delegation_dials_until_control_returns() {
         .send(ActorCommand::Lease {
             returns: actor.releases.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
-            idle_harness: None,
+            idle_replacement: None,
             reply,
         })
         .await

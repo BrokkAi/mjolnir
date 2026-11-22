@@ -1192,7 +1192,10 @@ impl Controller {
             BarrierRecovery::Checkpoint(LatchExclusivity::ReleaseAfterLatch)
         ) {
             let harness = self.state.sessions[session_id].harness_kind;
-            if matches!(harness, HarnessKind::Kimi | HarnessKind::Codex) {
+            if matches!(
+                harness,
+                HarnessKind::Kimi | HarnessKind::Codex | HarnessKind::Antigravity
+            ) {
                 let safe_to_restart = relay
                     .connection_mut()
                     .sync()

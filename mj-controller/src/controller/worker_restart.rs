@@ -6,7 +6,7 @@
 //! and reconnect, so the sequence lives here once and each caller supplies
 //! only what it tells the operator.
 
-use mj_core::targets::SshTrafficClass;
+use mj_core::{activity::WorkerReplacement, targets::SshTrafficClass};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -185,11 +185,16 @@ impl Controller {
             wait_for_native_session(&mut connection, executor, harness).await?;
             let swap = crate::upgrade::activity_unless_draining("resume checkout worker swap")?;
             if let Some((command_id, cursor)) =
-                super::IdleWorkspaceLease::reserve_connection_for_upgrade(&mut connection, harness)
-                    .await?
+                super::IdleWorkspaceLease::reserve_connection_for_upgrade(
+                    &mut connection,
+                    harness,
+                    WorkerReplacement::Explicit,
+                )
+                .await?
                 && super::IdleWorkspaceLease::verify_reserved_connection(
                     &mut connection,
                     harness,
+                    WorkerReplacement::Explicit,
                     &command_id,
                     &cursor,
                 )
@@ -408,6 +413,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
+        replacement: WorkerReplacement,
     ) -> Result<()> {
         let (backend, worker_root) = self.worker_placement(session_id)?;
         let reconnect = targets::reconnect_plan(&backend, session_id)?
@@ -492,8 +498,13 @@ impl Controller {
         let harness = self.state.sessions[session_id].harness_kind;
         let swap = crate::upgrade::activity_unless_draining("worker swap for suspend")
             .context("cannot upgrade older worker before suspend while daemon is draining")?;
-        let Some(mut lease) =
-            super::IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, harness).await?
+        let Some(mut lease) = super::IdleWorkspaceLease::acquire_for_replacement(
+            admission,
+            &handle,
+            harness,
+            replacement,
+        )
+        .await?
         else {
             anyhow::bail!("cannot upgrade older worker before suspend: worker is not idle");
         };

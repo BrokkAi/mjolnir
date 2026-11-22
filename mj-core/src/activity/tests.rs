@@ -530,8 +530,12 @@ fn antigravity_replacement_waits_for_an_authoritative_empty_task_inventory() {
     state.execution = RelayExecutionState::Idle;
     state.acp_ready = Some(true);
     // A pre-tracking worker leaves the field absent even when a job is live.
-    // An empty list from that worker cannot authorize its replacement.
+    // Only an explicit operation can authorize replacing a quiet legacy worker.
     assert!(!state.safe_to_replace(harness));
+    assert!(state.safe_to_replace_for(harness, WorkerReplacement::Explicit));
+    assert!(state.safe_to_move(harness, MovePurpose::Manual));
+    assert!(!state.safe_to_move(harness, MovePurpose::IdleReplacement));
+    assert!(!state.safe_to_move(harness, MovePurpose::QuotaRetry));
 
     state.background_work_known = Some(true);
     state.inferred_idle_since_ms = Some(NOW);
@@ -544,6 +548,9 @@ fn antigravity_replacement_waits_for_an_authoritative_empty_task_inventory() {
     });
     assert!(state.activity_state().is_idle());
     assert!(state.safe_to_replace(harness));
+    state.activity = Some(ActivityState::Idle {
+        since_ms: Some(NOW),
+    });
     state
         .background_commands
         .push(BackgroundCommand::antigravity(
@@ -559,11 +566,13 @@ fn antigravity_replacement_waits_for_an_authoritative_empty_task_inventory() {
     ));
     assert!(state.has_work_in_flight());
     assert!(!state.safe_to_replace(harness));
+    assert!(!state.safe_to_replace_for(harness, WorkerReplacement::Explicit));
 
     // Losing the observation is not evidence that the task finished.
     state.background_commands.truncate(1);
     state.background_work_known = Some(false);
     assert!(!state.safe_to_replace(harness));
+    assert!(!state.safe_to_replace_for(harness, WorkerReplacement::Explicit));
 
     state.background_work_known = Some(true);
     assert!(state.safe_to_replace(harness));

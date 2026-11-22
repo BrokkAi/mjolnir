@@ -15,6 +15,7 @@ use agent_client_protocol::v1::schema::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::activity::WorkerReplacement;
 use crate::attention::NotificationStack;
 use crate::config::HarnessKind;
 use crate::elicitation::ElicitationRequest;
@@ -1141,13 +1142,16 @@ impl RelayOperationalState {
         }
     }
 
-    /// What this session is doing: the worker's published answer, or the same
-    /// classification of the same facts when the worker is too old to publish
-    /// one.
+    /// What this session is doing. Older workers can publish an inferred idle
+    /// state even while their authoritative native inventory reports a task.
     #[must_use]
     pub fn activity_state(&self) -> crate::activity::ActivityState {
         self.activity
             .clone()
+            .filter(|_| {
+                BackgroundCommand::oldest_antigravity_task_start(&self.background_commands)
+                    .is_none()
+            })
             .unwrap_or_else(|| crate::activity::classify(&self.facts()))
     }
 
@@ -1172,6 +1176,15 @@ impl RelayOperationalState {
     /// Whether a controller may replace this worker without losing work.
     #[must_use]
     pub fn safe_to_replace(&self, harness: HarnessKind) -> bool {
+        self.safe_to_replace_for(harness, WorkerReplacement::Automatic)
+    }
+
+    #[must_use]
+    pub fn safe_to_replace_for(
+        &self,
+        harness: HarnessKind,
+        replacement: WorkerReplacement,
+    ) -> bool {
         if self.harness_preparation_failed() {
             // This process can never start its harness. Accepted commands stay
             // in the journal; independently running processes must still settle.
@@ -1182,7 +1195,7 @@ impl RelayOperationalState {
                 && self.native_agent_count == 0
                 && self.tools_in_flight.is_empty();
         }
-        crate::activity::safe_to_replace(&self.facts(), harness)
+        crate::activity::safe_to_replace_for(&self.facts(), harness, replacement)
     }
 
     /// Move's purpose-specific interruption decision.
@@ -1192,10 +1205,15 @@ impl RelayOperationalState {
         harness: HarnessKind,
         purpose: crate::activity::MovePurpose,
     ) -> bool {
-        if purpose == crate::activity::MovePurpose::Manual {
-            return self.safe_to_replace(harness);
+        match purpose {
+            crate::activity::MovePurpose::Manual => {
+                self.safe_to_replace_for(harness, WorkerReplacement::Explicit)
+            }
+            crate::activity::MovePurpose::IdleReplacement => self.safe_to_replace(harness),
+            crate::activity::MovePurpose::QuotaRetry => {
+                crate::activity::safe_to_move(&self.facts(), harness, purpose)
+            }
         }
-        crate::activity::safe_to_move(&self.facts(), harness, purpose)
     }
 
     /// Terminal startup failure; this worker cannot retry preparation in place.

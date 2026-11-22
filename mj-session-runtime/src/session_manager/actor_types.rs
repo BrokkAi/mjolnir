@@ -71,7 +71,10 @@ pub enum ActorCommand {
     /// which formatting the error to a string would destroy.
     Lease {
         admission: crate::recovery_gate::RelayLeaseAdmission,
-        idle_harness: Option<mj_core::config::HarnessKind>,
+        idle_replacement: Option<(
+            mj_core::config::HarnessKind,
+            mj_core::activity::WorkerReplacement,
+        )>,
         reply: oneshot::Sender<Result<ManagedSessionLease>>,
         returns: mpsc::UnboundedSender<ReturnedConnection>,
     },

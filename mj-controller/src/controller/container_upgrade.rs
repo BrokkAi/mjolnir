@@ -84,7 +84,7 @@ impl Controller {
                         } else {
                             let handle = while_upgrade_active(executor, manager.wait_for_session(session_id, Duration::from_secs(5))).await?;
                             executor.end_resumable_work("container worker swap")?;
-                            let Some(mut lease) = while_upgrade_active(executor, super::IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, record.harness_kind)).await? else {
+                            let Some(mut lease) = while_upgrade_active(executor, super::IdleWorkspaceLease::acquire_for_replacement(admission, &handle, record.harness_kind, mj_core::activity::WorkerReplacement::Explicit)).await? else {
                                 executor.begin_resumable_work()?;
                                 return Ok(false);
                             };

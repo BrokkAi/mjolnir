@@ -674,7 +674,23 @@ pub fn is_quiet(facts: &ActivityFacts) -> bool {
 /// Older workers can appear quiet even when they cannot report native work.
 #[must_use]
 pub fn safe_to_replace(facts: &ActivityFacts, harness: HarnessKind) -> bool {
-    is_quiet(facts) && replacement_provider_blocker(facts, harness).is_none()
+    safe_to_replace_for(facts, harness, WorkerReplacement::Automatic)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerReplacement {
+    Automatic,
+    /// The user requested the operation that will stop this worker.
+    Explicit,
+}
+
+#[must_use]
+pub fn safe_to_replace_for(
+    facts: &ActivityFacts,
+    harness: HarnessKind,
+    replacement: WorkerReplacement,
+) -> bool {
+    is_quiet(facts) && replacement_provider_blocker(facts, harness, replacement).is_none()
 }
 
 /// A worker that predates Antigravity task tracking cannot synchronize its inventory.
@@ -689,6 +705,7 @@ pub fn legacy_antigravity_worker(
 fn replacement_provider_blocker(
     facts: &ActivityFacts,
     harness: HarnessKind,
+    replacement: WorkerReplacement,
 ) -> Option<&'static str> {
     match harness {
         HarnessKind::Codex if !facts.goal_synchronized => Some(
@@ -697,9 +714,13 @@ fn replacement_provider_blocker(
         HarnessKind::Kimi if facts.background_work_known != Some(true) => {
             Some("Kimi background-agent state is not synchronized")
         }
-        _ if legacy_antigravity_worker(harness, facts.background_work_known) => Some(
-            "this legacy Antigravity worker has no native task tracking and cannot upgrade automatically",
-        ),
+        _ if replacement == WorkerReplacement::Automatic
+            && legacy_antigravity_worker(harness, facts.background_work_known) =>
+        {
+            Some(
+                "this legacy Antigravity worker has no native task tracking and cannot upgrade automatically",
+            )
+        }
         HarnessKind::Antigravity if facts.background_work_known == Some(false) => {
             Some("Antigravity background-task state is not synchronized")
         }
@@ -713,12 +734,18 @@ fn replacement_provider_blocker(
 pub enum MovePurpose {
     Manual,
     QuotaRetry,
+    /// Background replacement that closes an idle source worker.
+    IdleReplacement,
 }
 
 /// Shared interruption decision for Move preparation and source-lease validation.
 #[must_use]
-pub fn safe_to_move(facts: &ActivityFacts, harness: HarnessKind, _purpose: MovePurpose) -> bool {
-    safe_to_replace(facts, harness)
+pub fn safe_to_move(facts: &ActivityFacts, harness: HarnessKind, purpose: MovePurpose) -> bool {
+    let replacement = match purpose {
+        MovePurpose::Manual => WorkerReplacement::Explicit,
+        MovePurpose::QuotaRetry | MovePurpose::IdleReplacement => WorkerReplacement::Automatic,
+    };
+    safe_to_replace_for(facts, harness, replacement)
 }
 
 /// What keeps [`safe_to_replace`] false, one name per cause, so a caller that
@@ -746,7 +773,11 @@ pub fn replacement_blockers(facts: &ActivityFacts, harness: HarnessKind) -> Vec<
             blockers.push("work is in flight");
         }
     }
-    blockers.extend(replacement_provider_blocker(facts, harness));
+    blockers.extend(replacement_provider_blocker(
+        facts,
+        harness,
+        WorkerReplacement::Automatic,
+    ));
     blockers
 }
 
