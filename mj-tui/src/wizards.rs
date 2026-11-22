@@ -195,11 +195,7 @@ pub(crate) struct NewWizard {
 pub(crate) enum ProfilePickerItem {
     Auto,
     Provider(QuotaProvider),
-    Profile {
-        profile_index: usize,
-        id: String,
-        harness: HarnessKind,
-    },
+    Profile { profile_index: usize, id: String },
 }
 
 pub(crate) fn new_wizard_profile_items(
@@ -224,11 +220,10 @@ pub(crate) fn new_wizard_profile_items(
     for (provider, members) in groups {
         items.push(ProfilePickerItem::Provider(provider.clone()));
         if expanded.contains(&provider) {
-            items.extend(members.into_iter().map(|(profile_index, id, profile)| {
+            items.extend(members.into_iter().map(|(profile_index, id, _)| {
                 ProfilePickerItem::Profile {
                     profile_index,
                     id: id.to_owned(),
-                    harness: profile.kind,
                 }
             }));
         }

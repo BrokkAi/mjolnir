@@ -25,11 +25,11 @@ Background work finished
 
   ╭ × New session · 1/4 profile ─────────────────────────────────────────────╮
   │                                                                          │
-  │   PROFILE      HARNESS  WEEKLY      5H                                   │
-  │   ▸ ANTHROPIC  auto                                                      │
-  │   ▾ OPENAI     auto                                                      │
-  │     codex-1    Codex    refreshing                                       │
-  │     codex-2    Codex    refreshing                                       │
+  │   PROVIDER     PROFILE   WEEKLY      5H                                  │
+  │   ▸ ANTHROPIC  claude-1  refreshing                                      │
+  │   ▾ OPENAI     codex-1   refreshing                                      │
+  │                codex-1   refreshing                                      │
+  │                codex-2   refreshing                                      │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -97,11 +97,11 @@ Background work finished
 │ defa                                                                                             │
 ╰─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮       │
 ╭ Sess  │                                                                                  │       │
-│ Crea  │   PROFILE      HARNESS  WEEKLY      5H                                           │       │
-│hel ─  │   ▸ ANTHROPIC  auto                                                              │       │
-│› · A  │   ▾ OPENAI     auto                                                              │       │
-│  Idl  │     codex-1    Codex    refreshing                                               │       │
-│  │ N  │     codex-2    Codex    refreshing                                               │       │
+│ Crea  │   PROVIDER     PROFILE   WEEKLY      5H                                          │       │
+│hel ─  │   ▸ ANTHROPIC  claude-1  refreshing                                              │       │
+│› · A  │   ▾ OPENAI     codex-1   refreshing                                              │       │
+│  Idl  │                codex-1   refreshing                                              │       │
+│  │ N  │                codex-2   refreshing                                              │       │
 │  │    │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
@@ -184,11 +184,11 @@ Background work finished
 ╰───────────────                                                                                                       │
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
-│hel ───────────  │   PROFILE      HARNESS  WEEKLY      5H                                           │                 │
-│› · ACP pretty   │   ▸ ANTHROPIC  auto                                                              │                 │
-│  Idle  podman   │   ▾ OPENAI     auto                                                              │                 │
-│  │ No messages  │     codex-1    Codex    refreshing                                               │                 │
-│  │              │     codex-2    Codex    refreshing                                               │                 │
+│hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
+│› · ACP pretty   │   ▸ ANTHROPIC  claude-1  refreshing                                              │                 │
+│  Idle  podman   │   ▾ OPENAI     codex-1   refreshing                                              │                 │
+│  │ No messages  │                codex-1   refreshing                                              │                 │
+│  │              │                codex-2   refreshing                                              │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
@@ -297,11 +297,11 @@ Background work finished
 │  Idle  podman  codex-1                                                                                                                   │
 │  │ No messages yet        ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
-│                           │   PROFILE      HARNESS  WEEKLY      5H                                           │                           │
-│                           │   ▸ ANTHROPIC  auto                                                              │                           │
-│                           │   ▾ OPENAI     auto                                                              │                           │
-│                           │     codex-1    Codex    refreshing                                               │                           │
-│                           │     codex-2    Codex    refreshing                                               │                           │
+│                           │   PROVIDER     PROFILE   WEEKLY      5H                                          │                           │
+│                           │   ▸ ANTHROPIC  claude-1  refreshing                                              │                           │
+│                           │   ▾ OPENAI     codex-1   refreshing                                              │                           │
+│                           │                codex-1   refreshing                                              │                           │
+│                           │                codex-2   refreshing                                              │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -455,11 +455,11 @@ Background work finished
 │                                                                                                                                                                                                      │
 │                                                         ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                                                         │
 │                                                         │                                                                                  │                                                         │
-│                                                         │   PROFILE      HARNESS  WEEKLY      5H                                           │                                                         │
-│                                                         │   ▸ ANTHROPIC  auto                                                              │                                                         │
-│                                                         │   ▾ OPENAI     auto                                                              │                                                         │
-│                                                         │     codex-1    Codex    refreshing                                               │                                                         │
-│                                                         │     codex-2    Codex    refreshing                                               │  versation.                                             │
+│                                                         │   PROVIDER     PROFILE   WEEKLY      5H                                          │                                                         │
+│                                                         │   ▸ ANTHROPIC  claude-1  refreshing                                              │                                                         │
+│                                                         │   ▾ OPENAI     codex-1   refreshing                                              │                                                         │
+│                                                         │                codex-1   refreshing                                              │                                                         │
+│                                                         │                codex-2   refreshing                                              │  versation.                                             │
 │                                                         │                                                                                  │                                                         │
 │                                                         │                                                                                  │                                                         │
 │                                                         │                                                                                  │                                                         │
