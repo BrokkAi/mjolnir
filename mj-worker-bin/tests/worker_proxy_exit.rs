@@ -10,6 +10,8 @@
 
 #![cfg(unix)]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Child, Command, Stdio};

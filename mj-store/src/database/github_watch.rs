@@ -715,7 +715,7 @@ pub fn commit_github_timeline(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn load_github_session_turn_windows_from(
     path: &Path,
     session_id: &str,
@@ -930,7 +930,7 @@ fn load_github_session_creation_output_from(
     Ok(output)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn seed_github_test_turns(
     session_id: &str,
     completed_start_ms: i64,
@@ -1022,7 +1022,7 @@ pub fn load_github_watched_repositories() -> Result<Vec<(String, String)>> {
         .collect()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn seed_github_retry_due(owner: &str, repo: &str, number: i64, session_id: &str) -> Result<()> {
     let owner = owner.to_owned();
     let repo = repo.to_owned();
@@ -1034,7 +1034,7 @@ pub fn seed_github_retry_due(owner: &str, repo: &str, number: i64, session_id: &
     })
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn seed_github_repo_start(owner: &str, repo: &str, at: &str) -> Result<()> {
     let owner = owner.to_owned();
     let repo = repo.to_owned();

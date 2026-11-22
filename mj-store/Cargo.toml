@@ -13,18 +13,12 @@ name = "mj_store"
 # The crate has no doc tests; looking for them makes rustdoc compile it again.
 doctest = false
 
-[features]
-default = []
-test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks"]
-# Exposes the shared test fixtures to the tests of the crates above.
-test-support = ["mj-core/test-hooks", "mj-targets/test-support"]
-
 [lints]
 workspace = true
 
 [dependencies]
 mj-core.workspace = true
-mj-transcript = { workspace = true, features = ["github-history"] }
+mj-transcript.workspace = true
 mj-client.workspace = true
 mj-targets.workspace = true
 agent-client-protocol.workspace = true
@@ -34,17 +28,14 @@ chrono.workspace = true
 futures = "0.3"
 ring.workspace = true
 rusqlite.workspace = true
-serde = { workspace = true, features = ["rc"] }
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["full"] }
+tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
 mj-review = { path = "../mj-review", package = "brokk-mj-review" }
-mj-core = { workspace = true, features = ["test-hooks", "golden"] }
-mj-targets = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }

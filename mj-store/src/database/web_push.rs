@@ -141,7 +141,7 @@ pub fn push_ready(runtime: RuntimeProjection) -> Result<(Vec<PushDelivery>, Opti
 
 /// Reconcile the authoritative card snapshot and admit its sends in one
 /// transaction. Presence controls delivery and never changes entry identity.
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn push_reconcile(
     runtime: RuntimeProjection,
 ) -> Result<(Vec<PushDelivery>, Option<i64>, bool)> {

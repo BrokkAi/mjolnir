@@ -61,7 +61,6 @@ struct State {
     active: BTreeMap<&'static str, BTreeMap<u64, Hold>>,
     next_hold: u64,
     // Test synchronization only; never part of admission policy.
-    #[cfg(any(test, feature = "test-support"))]
     resumable_waiters: usize,
 }
 
@@ -212,7 +211,6 @@ fn format_age(age: Duration) -> String {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
 impl Blocker {
     /// The label, with the count appended when it is held more than once.
     fn counted_label(&self) -> String {
@@ -300,8 +298,8 @@ impl Gate {
             // This is the owner's existing lapse deadline, not a polling
             // interval or a bound on the resumable operation.
             let deadline = state.drain_requested.expect("draining has a request") + DRAIN_LAPSE;
-            #[cfg(any(test, feature = "test-support"))]
-            {
+            let track_waiters = cfg!(test) || mj_core::test_hooks::test_fixtures_enabled();
+            if track_waiters {
                 state.resumable_waiters += 1;
                 self.1.notify_waiters();
             }
@@ -309,8 +307,7 @@ impl Gate {
                 .2
                 .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            #[cfg(any(test, feature = "test-support"))]
-            {
+            if track_waiters {
                 state.resumable_waiters -= 1;
             }
         }
@@ -352,7 +349,7 @@ impl Gate {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub async fn wait_for_resumable_waiter_for_test(&self) {
         loop {
             let notified = self.1.notified();
@@ -365,7 +362,7 @@ impl Gate {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn expire_drain_for_test(&self) {
         self.lock().drain_requested = Some(Instant::now() - DRAIN_LAPSE);
         self.publish();
@@ -502,7 +499,7 @@ impl Gate {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn with_destroy_wait_bound(bound: Duration) -> Arc<Self> {
         let gate = Arc::new(Self::default());
         gate.lock().destroy_wait_bound = Some(bound);
@@ -532,7 +529,7 @@ impl Gate {
 
     /// The work holding admission open, sorted by label, with a count
     /// appended when a label is held more than once.
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn active_labels(&self) -> Vec<String> {
         self.blockers().iter().map(Blocker::counted_label).collect()
     }
@@ -652,7 +649,7 @@ pub fn is_draining() -> bool {
     gate().is_draining()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn active_labels() -> Vec<String> {
     gate().active_labels()
 }

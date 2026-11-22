@@ -2,7 +2,7 @@
 use super::*;
 use mj_core::event_outcome::{CommandOwner, CommandResult, CommandResultKind, OutcomeReason};
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use mj_core::elicitation::ElicitationRequest;
 
 pub fn load_api_events(

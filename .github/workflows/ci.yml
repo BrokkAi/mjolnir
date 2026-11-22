@@ -174,11 +174,9 @@ jobs:
   # four threads: 717s for the whole workspace in one job; 468s, 471s and 270s
   # for the shards below.
   #
-  # Together the shards run exactly what `cargo test` runs at the workspace
-  # root. `libraries` takes every member the other two do not name, so a new
-  # crate is tested without an edit here. Cargo resolves features for the
-  # selected packages only, so a shard must enable any feature its tests need
-  # and another shard's crate used to turn on: see `libraries`.
+  # Together the shards cover the workspace test suites. The CLI shard also
+  # enables the leaf binary's crash-boundary integration tests. The libraries
+  # shard covers new members automatically.
   #
   # The runtime suite exercises Unix target paths, directory fsync, and Git
   # worktree byte preservation. Linux executes the suite here and
@@ -213,16 +211,14 @@ jobs:
           tests: -p brokk-mj-daemon
         - name: worker-cli
           lane: tests-worker-cli
-          tests: -p brokk-mj-worker-runtime -p brokk-mj-worker -p brokk-mjolnir
-        # mj-core has tests behind `test-hooks`, which only the crates in the
-        # other shards enable.
+          tests: -p brokk-mj-worker-runtime -p brokk-mj-worker -p brokk-mjolnir --features brokk-mjolnir/test-hooks
+        # Cover the remaining library crates together.
         - name: libraries
           lane: tests-libraries
           tests: >-
             --workspace --exclude brokk-mj-controller --exclude brokk-mj-server --exclude brokk-mj-daemon
             --exclude brokk-mj-worker-runtime --exclude brokk-mj-worker
             --exclude brokk-mjolnir --exclude brokk-mj-voice-worker
-            --features brokk-mj-core/test-hooks
 
     steps:
     - uses: actions/checkout@v6

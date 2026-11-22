@@ -479,12 +479,13 @@ impl Controller {
         } else {
             None
         };
-        #[cfg(any(test, feature = "test-hooks", feature = "test-support"))]
-        mj_core::runtime::spawn_blocking(|| {
-            mj_core::test_hooks::reach_test_hook("adoption_cut_before_install")
-        })
-        .await
-        .context("adoption install hook failed")??;
+        if mj_core::test_hooks::test_hooks_enabled() {
+            mj_core::runtime::spawn_blocking(|| {
+                mj_core::test_hooks::reach_test_hook("adoption_cut_before_install")
+            })
+            .await
+            .context("adoption install hook failed")??;
+        }
         // The wait owns no handoff admission. The cut is discarded if a drain
         // or another lifecycle won before this single install decision.
         let install_owner = tokio::select! {

@@ -5,6 +5,8 @@
 //! state. `daemon status` is used because it only reads daemon metadata and
 //! never starts a daemon.
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

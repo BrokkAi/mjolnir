@@ -869,14 +869,14 @@ impl WikiIndexer {
         target
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn inert() -> Self {
         Self {
             inner: Arc::new(Indexer::default()),
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn sync_requested(&self) -> bool {
         let state = self.inner.lock();
         state.view.requested > state.view.started
@@ -2597,7 +2597,7 @@ fn archive_space_over_state(
 }
 
 /// The sizing itself, over given records and a sessions directory.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn archive_space_over(
     sessions_root: &Path,
     sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,

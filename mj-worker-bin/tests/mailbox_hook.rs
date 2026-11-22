@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::sync::{
@@ -17,6 +19,10 @@ use mj_core::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec}
 use mj_worker::relay::{DurableRelay, serve_relay_json_lines};
 
 const SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+
+fn open_test_relay(root: &std::path::Path) -> DurableRelay {
+    DurableRelay::open(root, SESSION, "test").unwrap()
+}
 
 fn run_hook(
     socket: &std::path::Path,
@@ -113,7 +119,7 @@ fn subagent_hook_input_leaves_mailbox_for_main_agent() {
     let socket = root.path().join("control.sock");
     let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
     listener.set_nonblocking(true).unwrap();
-    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let mut relay = open_test_relay(&relay_root);
     let event = MailboxEvent {
         key: "api:subagent-hook-test".into(),
         source: "api".into(),
@@ -216,7 +222,7 @@ fn real_mailbox_hook_drains_once_over_the_control_socket_with_large_stdin() {
 
     let socket = root.path().join("control.sock");
     let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
-    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let mut relay = open_test_relay(&relay_root);
     let event = MailboxEvent {
         key: "api:hook-test".into(),
         source: "api".into(),
@@ -322,7 +328,7 @@ fn a_lost_drain_response_keeps_mailbox_events_for_a_restarted_worker() {
     std::fs::create_dir_all(&config_dir).unwrap();
     let socket = root.path().join("control.sock");
     let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
-    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let mut relay = open_test_relay(&relay_root);
     let event = MailboxEvent {
         key: "api:lost-hook-response".into(),
         source: "api".into(),
@@ -406,7 +412,7 @@ fn a_lost_drain_response_keeps_mailbox_events_for_a_restarted_worker() {
     drop(relay);
 
     std::fs::remove_file(&socket).unwrap();
-    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let mut relay = open_test_relay(&relay_root);
 
     let listener = UnixListener::bind(&socket).expect("rebind the restarted worker socket");
     let server = std::thread::spawn(move || {
@@ -451,7 +457,7 @@ fn an_unacknowledged_hook_output_can_be_delivered_again_after_restart() {
     std::fs::create_dir_all(&config_dir).unwrap();
     let socket = root.path().join("control.sock");
     let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
-    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let mut relay = open_test_relay(&relay_root);
     let event = MailboxEvent {
         key: "api:lost-hook-ack".into(),
         source: "api".into(),
@@ -508,7 +514,7 @@ fn an_unacknowledged_hook_output_can_be_delivered_again_after_restart() {
     drop(relay);
 
     std::fs::remove_file(&socket).unwrap();
-    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let mut relay = open_test_relay(&relay_root);
     let listener = UnixListener::bind(&socket).expect("rebind the restarted worker socket");
     let server = std::thread::spawn(move || {
         for _ in 0..2 {
@@ -555,7 +561,7 @@ fn mailbox_post_tool_use_hook_stays_empty_and_turn_boundaries_deliver() {
     std::fs::create_dir_all(&config_dir).unwrap();
     let socket = root.path().join("control.sock");
     let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
-    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let mut relay = open_test_relay(&relay_root);
     relay.set_mailbox_delivery_mode(MailboxDeliveryMode::TurnBoundary);
     let event = MailboxEvent {
         key: "api:post-tool-use-guard".into(),
@@ -642,7 +648,7 @@ fn openai_codex_mailbox_hook_delivers_at_the_tool_boundary() {
     std::fs::create_dir_all(&config_dir).unwrap();
     let socket = root.path().join("control.sock");
     let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
-    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let mut relay = open_test_relay(&relay_root);
     relay.set_mailbox_delivery_mode(MailboxDeliveryMode::ToolBoundary);
     let event = MailboxEvent {
         key: "api:openai-post-tool-use".into(),
@@ -729,7 +735,7 @@ fn antigravity_mailbox_hook_formats_inject_steps_and_filters_conversation_id() {
     std::fs::create_dir_all(&config_dir).unwrap();
     let socket = root.path().join("control.sock");
     let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
-    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let mut relay = open_test_relay(&relay_root);
     relay.set_mailbox_delivery_mode(MailboxDeliveryMode::ToolBoundary);
     relay
         .record_observation(RelayObservation::SessionOpened {

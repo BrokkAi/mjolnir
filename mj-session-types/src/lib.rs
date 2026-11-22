@@ -8,6 +8,9 @@
 //! depend only on this crate. Put a type here when two crates that should not
 //! depend on each other both need it, and keep behaviour out: a plan is data.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::path::PathBuf;
 
 use mj_core::targets::{CommandPlan, CommandSpec, TargetRecoveryPlan};

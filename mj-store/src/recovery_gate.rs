@@ -505,7 +505,7 @@ impl RecoveryGate {
     /// `try_enter_foreground` reports daemon handoff before it looks at this
     /// session, so a test that has closed the upgrade gate cannot use that
     /// call to see whether the session admission was released.
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn foreground_reservation_labels(&self, session_id: &str) -> Vec<&'static str> {
         self.state
             .lock()

@@ -1,5 +1,8 @@
 //! Shared transcript interpretation, projection and presentation.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 pub mod handoff;
 pub mod projection;
 pub mod transcript;

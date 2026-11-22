@@ -4,6 +4,8 @@
 //! runtime, and the agent-development image. Run it through
 //! `scripts/test-import-e2e.sh` on the host.
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

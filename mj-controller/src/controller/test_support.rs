@@ -98,6 +98,7 @@ pub fn write_checkpoint_archive_with_native_state(
     )
 }
 
+#[cfg(test)]
 pub(super) fn write_network_checkpoint_archive(
     directory: &Path,
     session_id: &str,
@@ -420,8 +421,10 @@ impl crate::targets::CommandExecutor for FixtureRemoteExecutor {
 }
 
 /// Git 2.31 does not support NUL-delimited worktree lists.
+#[cfg(test)]
 pub(super) struct Git231Executor;
 
+#[cfg(test)]
 impl Git231Executor {
     fn refusal(command: &crate::targets::CommandSpec) -> Option<crate::targets::CommandOutput> {
         let has = |option: &str| command.args.iter().any(|argument| argument == option);
@@ -436,6 +439,7 @@ impl Git231Executor {
     }
 }
 
+#[cfg(test)]
 impl crate::targets::CommandExecutor for Git231Executor {
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
         mj_core::targets::DeadlinePause::none()

@@ -8,6 +8,9 @@
 //! ([`mj_core::worker_build::install`]) and library code reads it from there,
 //! which is what keeps a commit from recompiling the libraries.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 use mj_core::worker_build::BuildIdentity;
 
 /// Identity of this build: package version plus commit. It orders daemon
@@ -46,8 +49,21 @@ pub const fn identity() -> BuildIdentity {
 /// A worker stand-in carrying this build's worker stamp, for a test in which
 /// a real program verifies the worker. Built before tests start, so executing
 /// it cannot race a test's writer.
-#[cfg(all(unix, feature = "test-hooks"))]
+#[cfg(unix)]
+#[doc(hidden)]
 #[must_use]
 pub fn fake_worker_dispatcher() -> std::path::PathBuf {
     std::path::Path::new(env!("OUT_DIR")).join("fake-worker.sh")
+}
+
+#[cfg(test)]
+mod tests {
+    use mj_core::{test_hooks, worker_build};
+
+    #[test]
+    fn test_startup_enables_the_fallback_identity_without_runtime_hooks() {
+        assert!(test_hooks::test_fixtures_enabled());
+        assert!(worker_build::worker_build_id().ends_with(&format!("+{:040x}", 0)));
+        assert!(!test_hooks::test_hooks_enabled());
+    }
 }

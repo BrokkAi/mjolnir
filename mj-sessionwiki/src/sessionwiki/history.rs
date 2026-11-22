@@ -91,7 +91,7 @@ fn query(request: &HistoryRequest) -> Result<Value> {
     }))
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn query_in(connection: &rusqlite::Connection, request: &HistoryRequest) -> Result<Value> {
     query_in_with(
         connection,

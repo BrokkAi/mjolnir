@@ -4,6 +4,8 @@
 //! it exercises the transport, the role wiring, and the handshake rather than a
 //! function that stands in for them.
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::InitializeRequest;
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Client};

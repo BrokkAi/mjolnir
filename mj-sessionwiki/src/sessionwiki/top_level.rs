@@ -87,7 +87,7 @@ impl Snapshot {
         self.top_level_session_ids.contains(session_id)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(super) fn for_test_top_level(session_id: &str) -> Self {
         Self {
             top_level_session_ids: BTreeSet::from([session_id.to_owned()]),
@@ -95,7 +95,7 @@ impl Snapshot {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(super) fn for_test(child_session_ids: BTreeSet<String>) -> Self {
         Self {
             child_session_ids,

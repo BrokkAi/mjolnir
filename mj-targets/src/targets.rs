@@ -64,7 +64,7 @@ mod container_upgrade;
 mod nitro;
 pub use container::inspect_container_storage;
 use container::*;
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub use container_upgrade::container_upgrade_test_plan;
 pub use container_upgrade::{
     RetainedContainer, inspect_retained_container, recover_removed_container,
@@ -187,7 +187,6 @@ pub fn image_refresh_plan<'a>(
     plan
 }
 
-#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 /// The command an SSH remote line runs, without the macOS system PATH prefix
 /// every remote line carries.

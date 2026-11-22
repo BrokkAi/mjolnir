@@ -1,6 +1,8 @@
 //! Real worker entrypoints must clean inherited state before invoking Git.
 #![cfg(unix)]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use mj_core::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
 use mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
 use std::time::Duration;

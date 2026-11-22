@@ -125,7 +125,7 @@ impl GithubAppTokenProvider {
         Ok(provider)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     fn with_test_transport(
         config: GithubAppConfig,
         http: reqwest::Client,
