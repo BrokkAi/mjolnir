@@ -317,6 +317,10 @@ impl DashboardState {
 
     /// Matching workspace sessions not already shown by the Sessions pane.
     pub(crate) fn sessions_other_workspace_matches(&self) -> usize {
+        self.session_order().other_workspace_matches()
+    }
+
+    pub(crate) fn derive_other_workspace_matches(&self) -> usize {
         let Some(filter) = self.sessions_filter.as_ref() else {
             return 0;
         };
@@ -325,6 +329,9 @@ impl DashboardState {
         {
             return 0;
         }
+        let query = filter.query.value().trim().to_lowercase();
+        let current_answer = self.sessions_text.asked.to_lowercase() == query
+            && self.sessions_text.pending != Some(SessionsTextQuery::Typed);
         self.state
             .sessions
             .values()
@@ -332,7 +339,12 @@ impl DashboardState {
                 Some(session.workspace_id.as_str()) != self.active_workspace_id()
                     && Some(session.id.as_str()) != self.selected_session_id()
                     && self.is_openable_workspace_session(session)
-                    && self.session_matches_filter(session, filter)
+                    && filter
+                        .state
+                        .is_none_or(|state| state.admits(self.attention_level(&session.id)))
+                    && (query.is_empty()
+                        || self.session_matches_metadata(session, &query)
+                        || (current_answer && self.sessions_text.matches.contains_key(&session.id)))
             })
             .count()
     }

@@ -323,17 +323,30 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
         return;
     }
     let count = dashboard.sessions_other_workspace_matches();
-    let label = format!(" {count} more ");
+    let commands = session_actions(dashboard);
+    let regular_width = commands
+        .iter()
+        .map(|(_, label)| label.len() + 3)
+        .sum::<usize>()
+        + format!(" {count} more ").len();
+    let compact = count > 0 && usize::from(area.width) < regular_width;
+    let padding = if compact { "" } else { " " };
+    let label = format!("{padding}{count} more{padding}");
     let width = Line::raw(&label).width() as u16;
-    // Reserve the search handoff before Create and Open so it also fits in
-    // the minimized sidebar, where the filter input itself is hidden.
+    // Compact labels keep New, Open and the search handoff together in the
+    // minimized sidebar, where the filter input itself is hidden.
     let more_area = (count > 0 && area.width >= width)
         .then(|| Rect::new(area.right() - width, area.y, width, 1));
     let buttons_right = more_area.map_or(area.right(), |rect| rect.x.saturating_sub(1));
-    let commands = session_actions(dashboard);
     let mut x = area.x;
     for (id, label) in commands {
-        let width = Line::raw(label).width() as u16 + 2;
+        let label = if compact && id == CommandId::NewSessionWizard {
+            "New"
+        } else {
+            label
+        };
+        let label = format!("{padding}{label}{padding}");
+        let width = Line::raw(&label).width() as u16;
         if x.saturating_add(width) > buttons_right {
             break;
         }
@@ -355,7 +368,7 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
         } else {
             theme::muted().patch(theme::raised())
         };
-        frame.render_widget(Paragraph::new(format!(" {label} ")).style(style), rect);
+        frame.render_widget(Paragraph::new(label).style(style), rect);
         x = x.saturating_add(width + 1);
     }
     drop(form);
@@ -1443,6 +1456,23 @@ mod tests {
             (140, 40),
         );
         assert!(lines.iter().any(|line| line.contains("1 more")));
+        let derivations = cross.session_view_derivations();
+        assert_eq!(cross.sessions_other_workspace_matches(), 1);
+        assert_eq!(cross.sessions_other_workspace_matches(), 1);
+        assert_eq!(cross.session_view_derivations(), derivations);
+        cross.sessions_filter.as_mut().unwrap().query = "needlex".into();
+        assert_eq!(cross.sessions_other_workspace_matches(), 0);
+        cross.next_sessions_text_search().unwrap();
+        let lines = append_state(
+            &mut output,
+            "prefix conversation matches do not count while the longer query is pending",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(!lines.iter().any(|line| line.contains("1 more")));
+        cross.sessions_filter.as_mut().unwrap().query = "needle".into();
+        let (request_id, _) = cross.next_sessions_text_search().unwrap();
+        cross.apply_sessions_text(request_id, Ok(matches.clone()));
         cross
             .session_verdicts
             .get_mut("other-workspace")
@@ -1485,6 +1515,15 @@ mod tests {
             "minimized pane retains the more button and its search handoff",
             &mut cross,
             (140, 40),
+        );
+        let open = point(&lines, "Open");
+        assert!(matches!(
+            click(&mut cross, open),
+            DashboardAction::OpenResumeDialog
+        ));
+        assert_eq!(
+            cross.sessions_filter.as_ref().unwrap().query.value(),
+            "needle"
         );
         let position = point(&lines, "1 more");
         let action = click(&mut cross, position);

@@ -724,6 +724,48 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 
+=== prefix conversation matches do not count while the longer query is pending (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ S · /needlex · searching… × ──── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: needlex ___________││                                                                                            │
+│⠁ Syncing session index…                    ││                                                                                            │
+│Searching conversations…                    ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
+│                                            ││                             Create a session to start building.                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ No live session ───────────────────────────────────────────────────────────────────────────╮
+│                                            ││No live session in this workspace.                                                          │
+│                                            ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
+
 === transitioning match is unavailable in Open and not counted (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -813,7 +855,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default ▾      ≡ ││                                                                                                                      │
 ╰──────────────────╯│                                                                                                                      │
 ╭ S ·  × ▁   ▄   □ ╮│                                                                                                                      │
-│ Create    1 more ││                                                                                                                      │
+│New Open    1 more││                                                                                                                      │
 │⠁ Syncing session…││                                                   ✦  M J O L N I R                                                   │
 │No sessions match ││                                                                                                                      │
 │· Esc clears the  ││                                          Create a session to start building.                                         │
@@ -855,7 +897,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default ▾      ≡ ││                                                                                                                      │
 ╰──────────────────╯│                                                                                                                      │
 ╭ S ·  × ▁   ▄   □ ╮│                                                                                                                      │
-│ Create                                                                                                                                   │
+│New Open                                                                                                                                  │
 │⠁ Syncin                                                                                                                                  │
 │No sessi  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
 │· Esc cl  │                                                                                                                   │           │
