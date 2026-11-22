@@ -3656,6 +3656,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
             content: vec![serde_json::json!({"type": "text", "text": "continue"})],
             queued_at_ms: 1,
         }],
+        locked_queue: None,
         fingerprint: "fingerprint".into(),
         operation_id: "move-1".into(),
     };
@@ -3689,6 +3690,19 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     validate_action(
         &ControllerAction::Move {
             request: Box::new(request(Some(ResumeQueueDisposition::Discard), true)),
+        },
+        &snapshot,
+    )
+    .unwrap();
+    let mut locked_preparation = preparation.clone();
+    locked_preparation.locked_queue = Some(ResumeQueueDisposition::Start);
+    validate_action(
+        &ControllerAction::Move {
+            request: Box::new(MoveSessionRequest {
+                preparation: locked_preparation,
+                queue: None,
+                acknowledge_interruption: true,
+            }),
         },
         &snapshot,
     )

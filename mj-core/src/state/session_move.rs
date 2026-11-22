@@ -340,6 +340,10 @@ pub struct MovePreparation {
     pub cross_harness: bool,
     pub active: bool,
     pub queued_commands: Vec<MaterializedQueuedPrompt>,
+    /// Queue choice already locked by an earlier retry whose queue admission
+    /// started. Callers may omit `--queue` on retry and inherit this choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locked_queue: Option<ResumeQueueDisposition>,
     pub fingerprint: String,
     pub operation_id: String,
 }

@@ -350,6 +350,16 @@ fn matches_move_retry_selection(operation: &MoveOperation, requested: &MoveSelec
             })
 }
 
+fn retry_move_operation(
+    operation: &MoveOperation,
+    source: &mj_core::state::SessionRecord,
+    requested: &MoveSelection,
+) -> bool {
+    !move_needs_fresh_capture(operation, source)
+        && matches_move_retry_selection(operation, requested)
+        && operation.checkpoint_retained()
+}
+
 fn failed_move_has_only_its_source(operation: &MoveOperation) -> bool {
     !operation.in_place
         && operation.holds_source_environment()
@@ -1907,6 +1917,10 @@ impl Controller {
         } else {
             (None, Vec::new())
         };
+        let locked_queue = previous
+            .as_ref()
+            .filter(|op| retry_move_operation(op, source, &selection) && op.queue_admission_started)
+            .map(|op| op.queue);
         Ok(MovePreparation {
             container_upgrade,
             destination_checks: DestinationChecks::Checked,
@@ -1928,6 +1942,7 @@ impl Controller {
             cross_harness,
             active,
             queued_commands,
+            locked_queue,
             fingerprint,
             operation_id,
         })
@@ -2038,11 +2053,8 @@ impl Controller {
         }
         checked.stops_subagents = prepared.stops_subagents;
         let source = self.state.sessions[&id].clone();
-        let retry = crate::database::load_move_operation(&id)?.filter(|op| {
-            !move_needs_fresh_capture(op, &source)
-                && matches_move_retry_selection(op, &checked.selection)
-                && op.checkpoint_retained()
-        });
+        let retry = crate::database::load_move_operation(&id)?
+            .filter(|op| retry_move_operation(op, &source, &checked.selection));
         let locked_queue = retry
             .as_ref()
             .filter(|op| op.queue_admission_started)

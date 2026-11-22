@@ -520,6 +520,10 @@ fn retrying_partially_started_move_without_queue_preserves_original_choice() {
             .await
             .unwrap();
         assert!(preparation.queued_commands.is_empty());
+        assert_eq!(
+            preparation.locked_queue,
+            Some(ResumeQueueDisposition::Start)
+        );
 
         let rejected_accepted = std::sync::atomic::AtomicBool::new(false);
         let mismatch = controller
@@ -590,6 +594,10 @@ fn retrying_partially_started_move_without_queue_preserves_original_choice() {
             .await
             .unwrap();
         assert_eq!(preparation.queued_commands.len(), 1);
+        assert_eq!(
+            preparation.locked_queue,
+            Some(ResumeQueueDisposition::Start)
+        );
         let queued_omitted_accepted = std::sync::atomic::AtomicBool::new(false);
         let _ = controller
             .move_session_managed_controlled_with_admission(

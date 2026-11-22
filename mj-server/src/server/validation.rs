@@ -285,7 +285,10 @@ pub(super) fn validate_move_request(
             "confirm that the active turn may be interrupted",
         ));
     }
-    if !preparation.queued_commands.is_empty() && request.queue.is_none() {
+    let queue_locked = session.move_recovery.as_ref().is_some_and(|recovery| {
+        recovery.queue_admission_started && !recovery.queue_admission_finished
+    }) || preparation.locked_queue.is_some();
+    if !preparation.queued_commands.is_empty() && request.queue.is_none() && !queue_locked {
         return Err(ApiError::bad_request(
             "choose whether queued work is discarded or started after the move",
         ));
