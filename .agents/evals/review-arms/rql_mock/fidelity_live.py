@@ -9,12 +9,13 @@ from uuid import uuid4
 import brief_driver
 import driver
 
-from .engine import CONFIG, load_engine, locked
-from .engine.normalization import validate
+from .engine import CONFIG, RepairStalled, load_engine, locked, repair_answer
+from .engine.evidence import sync_directory
+from .engine.normalization import validate, validate_staged
 from .engine.prompt import TERRA_TOOLS, assert_blind, semantics_only, turn_prompt
 from .engine.runner import EngineRunner, LaunchPreflightFailure, SealedRunner
 from .engine.snapshot import blob_reader, manifest_sources, prepared_snapshot
-from .engine.validation import canonical, decode
+from .engine.validation import ValidationIssue, canonical, decode
 from .fidelity import CENSUS, ROOT, gate_report, is_repair_stall, load_inputs, measure, sample, sha, validate_decisions
 from .fidelity_symbols import touched_symbols
 
@@ -46,6 +47,13 @@ Different conditions, bindings, or guarded outcomes require different keys.
 Keep invalid rows distinct from valid rows. Give invalid candidates one key
 only if they make the same unsupported claim under the same evidence.
 """
+
+
+class TerraEvidenceError(ValueError):
+    def __init__(self, directory, errors, stage="model-answer"):
+        super().__init__(f"{directory}: invalid Terra evidence: {'; '.join(errors)}")
+        self.errors = errors
+        self.stage = stage
 
 
 def model_usage(usage, command, turn, model, claude_version, directory=None):
@@ -141,9 +149,29 @@ class LiveModels:
                                                     title, base=orphan, effort=EFFORT)
                 launched = True
                 driver.save(state, {"session_id": sid, **login})
-                output, record = self.run_turn(runner, sid, snapshot, directory, model, profile, files, prompt)
-                output_path.write_bytes(output)
-                checked = check_output(output, read)
+
+                def assess(errors):
+                    turn_prompt = partial(prompt, errors=errors) if errors else prompt
+                    output, record = self.run_turn(
+                        runner, sid, snapshot, directory, model, profile, files, turn_prompt, repair=bool(errors))
+                    output_path.write_bytes(output)
+                    if not restricted:
+                        (directory / f"turn-{record['turn']}-output.json").write_bytes(output)
+                    try:
+                        checked = check_output(output, read)
+                    except TerraEvidenceError as error:
+                        diagnostics, stage = error.errors, error.stage
+                        keys = {issue.key if isinstance(issue, ValidationIssue) else ("invalid-json",)
+                                for issue in diagnostics}
+                    else:
+                        diagnostics, keys, stage = [], set(), "normalized-answer"
+                    if not restricted:
+                        driver.save(directory / f"turn-{record['turn']}-validation.json", {"errors": diagnostics})
+                    if diagnostics:
+                        return None, diagnostics, keys, stage
+                    return (checked, record), diagnostics, keys, stage
+
+                checked, record = repair_answer(assess)
                 if restricted:
                     runner.clean_checkout(sid, orphan)
                 else:
@@ -157,7 +185,10 @@ class LiveModels:
             failed = directory / "failed.json"
             if launched and not failed.exists():
                 try:
-                    driver.save(failed, {"session_id": sid, "reason": str(error)})
+                    failure = {"session_id": sid, "reason": str(error)}
+                    if isinstance(error, RepairStalled):
+                        failure["repair_error_counts"] = {"previous": error.previous, "current": error.current}
+                    driver.save(failed, failure)
                 except OSError as save_error:
                     error.add_note(f"Could not record fidelity session {sid} failure: {save_error}")
             if launched and not retiring:
@@ -167,22 +198,23 @@ class LiveModels:
                     error.add_note(f"Could not retire fidelity session {sid}: {retirement_error}")
             raise
 
-    def run_turn(self, runner, sid, snapshot, directory, model, profile, files, prompt):
+    def run_turn(self, runner, sid, snapshot, directory, model, profile, files, prompt, *, repair=False):
         restricted = model == SONNET
-        if restricted:
-            configured = runner.prepare(sid, snapshot, directory)
-            advertised = runner.config["model_display"]
-        else:
-            session = runner.attest(sid, snapshot, directory)
-            if session["profile_id"] != profile:
-                raise ValueError("sealed fidelity session uses the wrong profile")
-            brief_driver.configure_pilot_model_ready(sid, model, EFFORT)
-            configured = driver.wait_idle(sid)
-            advertised = driver.verify_session_selection(configured, model, profile,
-                                                         self.manifest["model_versions"]["claude"])
-        driver.save(directory / "settings.json", {"options": configured["config_options"],
-                                                  "advertised_version": advertised})
-        scratch = runner.clean_checkout(sid, snapshot["orphan"] if restricted else "")
+        if not repair:
+            if restricted:
+                configured = runner.prepare(sid, snapshot, directory)
+                advertised = runner.config["model_display"]
+            else:
+                session = runner.attest(sid, snapshot, directory)
+                if session["profile_id"] != profile:
+                    raise ValueError("sealed fidelity session uses the wrong profile")
+                brief_driver.configure_pilot_model_ready(sid, model, EFFORT)
+                configured = driver.wait_idle(sid)
+                advertised = driver.verify_session_selection(configured, model, profile,
+                                                             self.manifest["model_versions"]["claude"])
+            driver.save(directory / "settings.json", {"options": configured["config_options"],
+                                                      "advertised_version": advertised})
+        scratch = runner.clean_checkout(sid, snapshot["orphan"] if restricted or repair else "")
         for name, data in files.items():
             runner.command("put-file", "--session", sid, "--path", f"{scratch}/{name}",
                            "-", data=data.encode("utf-8"))
@@ -203,6 +235,8 @@ class LiveModels:
             raise RuntimeError("fidelity session failed the pilot audit")
         usage = driver.mj("usage", "--session", sid, "--after-seq", before["latest_seq"])
         driver.save(directory / "turn-usage.json", usage)
+        if not restricted:
+            driver.save(directory / f"turn-{turn}-usage.json", usage)
         if usage.get("session_id") != sid:
             raise ValueError("usage belongs to a different fidelity session")
         resolved = model_usage(usage, command, turn, model, self.claude_version, directory)
@@ -217,20 +251,34 @@ class LiveModels:
         directory = self.directory / identity / "terra"
         files = {"catalogue.md": self.catalogue, "menu.md": self.menu}
 
-        def prompt(scratch):
-            return turn_prompt(text, f"{scratch}/output.json", f"{scratch}/catalogue.md",
-                               f"{scratch}/menu.md", (), tools=TERRA_TOOLS)
+        def prompt(scratch, errors=()):
+            rendered = turn_prompt(text, f"{scratch}/output.json", f"{scratch}/catalogue.md",
+                                   f"{scratch}/menu.md", errors, tools=TERRA_TOOLS)
+            if errors:
+                assert_blind((rendered,), self.manifest)
+            return rendered
 
         def check_output(output, read):
-            rows, coverage, errors = validate(output, read)
+            rows, coverage, errors, stage = validate_staged(output, read)
             if errors:
-                raise ValueError(f"{directory}: invalid Terra evidence: {'; '.join(errors)}")
+                raise TerraEvidenceError(directory, errors, stage)
             return rows, coverage
 
         assert_blind((*files.values(), prompt(".scratch")), self.manifest)
-        (rows, coverage), record = self.sealed_task(
-            commit, directory, TERRA, self.terra_profile, files, prompt, check_output)
-        return {"rows": rows, "coverage": coverage, "provenance": record}
+        stalled = directory.with_name("terra-stalled")
+        while True:
+            try:
+                (rows, coverage), record = self.sealed_task(
+                    commit, directory, TERRA, self.terra_profile, files, prompt, check_output)
+                return {"rows": rows, "coverage": coverage, "provenance": record}
+            except RepairStalled as error:
+                if not (directory / "destroy-receipt.json").is_file():
+                    raise
+                if stalled.exists():
+                    raise RuntimeError(f"Terra repair stalled in both sessions; see {stalled} and {directory}: "
+                                       f"{error}") from error
+                directory.rename(stalled)
+                sync_directory(directory.parent)
 
     def adjudicate(self, query, candidates):
         read = blob_reader(self.sources[query.commit], query.commit)
