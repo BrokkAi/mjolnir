@@ -579,7 +579,7 @@ fn run_microvm() -> Result<()> {
     install_stderr_logging()?;
     let arguments: Vec<_> = std::env::args_os().skip(2).collect();
     // Engine failures exit 125, as Podman's do.
-    let status = match mj_worker::microvm::main(arguments) {
+    let status = match mj_microvm::main(arguments) {
         Ok(status) => status,
         Err(error) => {
             mj_core::diagnostic_stderr!("Error: {error:#}");
@@ -909,7 +909,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         WorkerCommand::MemoryMcp {
             _root: _,
             history_socket,
-        } => mj_worker::memory_mcp::run_mcp_stdio(history_socket),
+        } => mj_worker_mcp::memory_mcp::run_mcp_stdio(history_socket),
         WorkerCommand::MailboxHook {
             socket,
             event,
@@ -933,13 +933,13 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             review_server,
         } => {
             if review_server {
-                mj_worker::subagent_mcp::run_review_mcp_stdio(&socket, harness, role)
+                mj_worker_mcp::subagent_mcp::run_review_mcp_stdio(&socket, harness, role)
             } else {
-                mj_worker::subagent_mcp::run_mcp_stdio(
+                mj_worker_mcp::subagent_mcp::run_mcp_stdio(
                     &socket,
                     harness,
                     role,
-                    mj_worker::subagent_mcp::ParentTools {
+                    mj_worker_mcp::subagent_mcp::ParentTools {
                         oracle: false,
                         agent_mailboxes_enabled,
                         subtle_subagents,

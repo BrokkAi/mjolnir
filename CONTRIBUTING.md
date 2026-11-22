@@ -110,6 +110,12 @@ it or introduce a dependency between sibling branches.
   (`mj_core::worker_build::install`). It is rebuilt after every commit, so no
   library may depend on it: that would make a commit recompile the library
   and everything above it.
+- `brokk-mj-microvm` (`mj-microvm/`, library `mj_microvm`) provides the Linux
+  Nitro Sandbox host engine and its guest agent.
+- `brokk-mj-worker-mcp` (`mj-worker-mcp/`, library `mj_worker_mcp`) serves the
+  worker's project memory, delegation, and review MCP tools.
+- `brokk-mj-worker-review` (`mj-worker-review/`, library `mj_worker_review`)
+  captures review state in Git repositories and installs the pre-push hook.
 - `brokk-mj-worker-runtime` (`mj-worker/`, library `mj_worker`) is the target
   side. It runs locally, in a container, or on an SSH/EC2 host and owns the
   harness, durable command queue, and relay journal.

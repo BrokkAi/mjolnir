@@ -24,7 +24,7 @@ BUDGET = 50_000
 OVER_BUDGET = {
     'brokk-mj-controller',
     'brokk-mj-daemon',
-    'brokk-mj-worker-runtime',
+    'brokk-mj-worker-runtime',  # Still over budget after the MicroVM, MCP and review split.
     'brokk-mj-tui',
     'brokk-mj-core',
     'brokk-mj-chat',

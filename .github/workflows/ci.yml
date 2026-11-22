@@ -132,7 +132,7 @@ jobs:
         # Assemble the file list for each published crate and confirm the
         # licence text ships with it. `--list` does not build, so a crate whose
         # path dependencies are not on the registry yet still works here.
-        for package in brokk-mj-core brokk-mj-build-id brokk-mj-review brokk-mj-transcript brokk-mj-checkpoint brokk-mj-voice-worker brokk-mj-worker-runtime brokk-mj-worker \
+        for package in brokk-mj-core brokk-mj-build-id brokk-mj-review brokk-mj-transcript brokk-mj-checkpoint brokk-mj-voice-worker brokk-mj-microvm brokk-mj-worker-mcp brokk-mj-worker-review brokk-mj-worker-runtime brokk-mj-worker \
           brokk-mj-client brokk-mj-targets brokk-mj-session-types brokk-mj-store brokk-mj-accounts brokk-mj-import brokk-mj-sessionwiki brokk-mj-build-cache brokk-mj-worker-staging brokk-mj-worker-launch brokk-mj-session-runtime brokk-mj-review-host brokk-mj-profile-catalog brokk-mj-github-relevance brokk-mj-github-watch brokk-mj-controller brokk-mj-setup brokk-mj-server brokk-mj-daemon brokk-mj-chat brokk-mj-tui brokk-mjolnir; do
           cargo package --locked --allow-dirty --list -p "$package" > "/tmp/$package-package-files.txt"
           grep -Fx LICENSE "/tmp/$package-package-files.txt"

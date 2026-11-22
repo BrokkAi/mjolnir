@@ -1,0 +1,43 @@
+[package]
+name = "brokk-mj-microvm"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+description = "Linux Nitro Sandbox microVM engine and guest agent for Mjolnir"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+[lib]
+name = "mj_microvm"
+doctest = false
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+clap.workspace = true
+getrandom.workspace = true
+hex = "0.4"
+hmac.workspace = true
+libc.workspace = true
+# Use the workspace reqwest rustls backend and ring provider.
+mbx-cache-core = { version = "0.21", default-features = false }
+mbx-cache-protocol = "0.5"
+mj-core.workspace = true
+quick-xml = { version = "0.41", features = ["serialize"] }
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+socket2 = { version = "0.6", features = ["all"] }
+tar.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true

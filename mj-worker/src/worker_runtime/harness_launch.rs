@@ -503,16 +503,16 @@ pub(super) fn prepare_review_gate(
     }
     let mut notices = Vec::new();
     if launch.review_tools() {
-        let git = crate::review::capture::BoundedGit::new(
-            crate::review::capture::WORKSPACE_STATE_TIMEOUT,
+        let git = mj_worker_review::capture::BoundedGit::new(
+            mj_worker_review::capture::WORKSPACE_STATE_TIMEOUT,
         );
         let _cancel_git = git.cancellation_guard();
         let mut roots = vec![launch.cwd.clone()];
         roots.extend(super::reviewer_workspace_directories(launch));
-        for repository in crate::review::capture::discover_repositories(&git, &roots) {
+        for repository in mj_worker_review::capture::discover_repositories(&git, &roots) {
             // Every session that may request review records where its work
             // starts, so its first review covers the commits made after it.
-            crate::review::capture::ensure_session_start_head(
+            mj_worker_review::capture::ensure_session_start_head(
                 &git,
                 &repository,
                 &launch.session_id,
@@ -521,7 +521,7 @@ pub(super) fn prepare_review_gate(
             if !launch.review_gate() {
                 continue;
             }
-            use crate::review::hook::{HookInstall, install_pre_push_hook};
+            use mj_worker_review::hook::{HookInstall, install_pre_push_hook};
             let reason = match install_pre_push_hook(&git, &repository) {
                 Ok(HookInstall::Installed | HookInstall::Rewritten) => None,
                 Ok(HookInstall::RefusedExistingBackup(path)) => {

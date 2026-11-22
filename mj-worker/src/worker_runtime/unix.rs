@@ -2571,7 +2571,7 @@ async fn prepare_and_start_harness(
                         &mut environment,
                         role,
                         policy,
-                        crate::subagent_mcp::ParentTools {
+                        mj_worker_mcp::subagent_mcp::ParentTools {
                             oracle: false,
                             agent_mailboxes_enabled: mailboxes_enabled,
                             subtle_subagents,

@@ -8,6 +8,9 @@ mj-checkpoint
 mj-core
 mj-review
 mj-transcript
+mj-microvm
+mj-worker-mcp
+mj-worker-review
 mj-worker
 mj-worker-bin
 rust-toolchain.toml

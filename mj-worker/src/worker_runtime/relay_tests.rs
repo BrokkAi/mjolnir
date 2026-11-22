@@ -10294,7 +10294,7 @@ fn a_review_enabled_child_is_pinned_at_launch_without_the_push_gate() {
     std::fs::write(repository.join("tracked.rs"), "fn main() { work(); }\n").unwrap();
     git(&repository, &["commit", "-qam", "child work"]);
     assert_eq!(
-        crate::review::capture::review_start_head(
+        mj_worker_review::capture::review_start_head(
             &mj_checkpoint::archive::SystemGit,
             &repository,
             "review-child"

@@ -19,11 +19,12 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
-      # The controller-side crates whose suites pass on Windows, including the
-      # daemon startup tests that run `mj` against isolated instances and the
-      # ConPTY smoke that renders the dashboard. The worker and checkpoint
-      # crates run only on Linux and macOS hosts. mj-controller, mj-server and
-      # mj-daemon tests that still fail on Windows are ignored there with
+      # The suites that pass on Windows include the worker MCP tests, the
+      # daemon startup tests that run `mj` against isolated instances, and the
+      # ConPTY smoke that renders the dashboard. MicroVM and worker review
+      # compile on Windows with their platform-specific tests gated out.
+      # mj-controller, mj-server and mj-daemon tests that still fail on Windows
+      # are ignored there with
       # `cfg_attr(windows, ignore = "#<issue>: ...")`; the sub-issues of #1261
       # remove those attributes as they are fixed.
       #
@@ -32,7 +33,7 @@ jobs:
       # compiles everything again: 7.9 minutes on 2026-11-19, when the compile
       # step built the whole workspace and the run step built this list.
       TEST_PACKAGES: >-
-        -p brokk-mj-core -p brokk-mj-chat -p brokk-mj-tui -p brokk-mj-client -p brokk-mj-review -p brokk-mj-transcript -p brokk-mjolnir -p brokk-mj-targets -p brokk-mj-store -p brokk-mj-accounts -p brokk-mj-import -p brokk-mj-sessionwiki -p brokk-mj-build-cache -p brokk-mj-worker-staging -p brokk-mj-worker-launch -p brokk-mj-session-runtime -p brokk-mj-review-host -p brokk-mj-profile-catalog -p brokk-mj-github-relevance -p brokk-mj-github-watch -p brokk-mj-controller -p brokk-mj-setup -p brokk-mj-server -p brokk-mj-daemon
+        -p brokk-mj-core -p brokk-mj-chat -p brokk-mj-tui -p brokk-mj-client -p brokk-mj-review -p brokk-mj-microvm -p brokk-mj-worker-mcp -p brokk-mj-worker-review -p brokk-mj-transcript -p brokk-mjolnir -p brokk-mj-targets -p brokk-mj-store -p brokk-mj-accounts -p brokk-mj-import -p brokk-mj-sessionwiki -p brokk-mj-build-cache -p brokk-mj-worker-staging -p brokk-mj-worker-launch -p brokk-mj-session-runtime -p brokk-mj-review-host -p brokk-mj-profile-catalog -p brokk-mj-github-relevance -p brokk-mj-github-watch -p brokk-mj-controller -p brokk-mj-setup -p brokk-mj-server -p brokk-mj-daemon
     steps:
     - uses: actions/checkout@v6
       with:
