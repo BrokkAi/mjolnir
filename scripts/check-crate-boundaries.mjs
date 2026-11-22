@@ -85,6 +85,7 @@ for (const pkg of metadata.packages) {
   for (const dep of pkg.dependencies.filter(d => d.kind !== 'dev')) {
     if (packages.has(dep.name)) assert(allowed[pkg.name].includes(dep.name), `${pkg.name} must not depend on ${dep.name}`);
     if (pkg.name === 'brokk-mj-core') assert(!['rusqlite', 'signal-hook'].includes(dep.name), `Controller dependency ${dep.name} leaked into core`);
+    if (pkg.name === 'brokk-mj-core') assert(!['reqwest', 'rustls'].includes(dep.name), `HTTP/TLS dependency ${dep.name} leaked into core`);
     assert(!['hel', 'hel-tui'].includes(dep.rename), `Legacy dependency alias in ${pkg.name}`);
   }
 }

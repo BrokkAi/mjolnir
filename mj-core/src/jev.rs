@@ -32,9 +32,8 @@ pub const DISABLED_ENVIRONMENT: &str = "MJ_JEV_DISABLED";
 pub const FASTINO_KEY_ENVIRONMENT: &str = "MJ_JEV_FASTINO_KEY";
 
 /// Add a key only to hosted Jev requests. Mark the header sensitive for diagnostics.
-pub fn fastino_header(key: &str) -> Result<reqwest::header::HeaderValue> {
-    let mut header =
-        reqwest::header::HeaderValue::from_str(key).context("invalid Fastino key header")?;
+pub fn fastino_header(key: &str) -> Result<http::HeaderValue> {
+    let mut header = http::HeaderValue::from_str(key).context("invalid Fastino key header")?;
     header.set_sensitive(true);
     Ok(header)
 }
@@ -80,13 +79,13 @@ pub fn current_rate_limit() -> Option<RateLimitKind> {
 /// Observe a successful HTTP response at the headers. Refusals include the
 /// body because the proxy identifies its own limit with the JSON error code.
 pub fn observe_response(
-    status: reqwest::StatusCode,
-    retry_after: Option<&reqwest::header::HeaderValue>,
+    status: http::StatusCode,
+    retry_after: Option<&http::HeaderValue>,
     refusal: &[u8],
 ) {
     if status.is_success() {
         RATE_LIMIT.send_if_modified(|limit| limit.take().is_some());
-    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+    } else if status == http::StatusCode::TOO_MANY_REQUESTS {
         use std::time::{Duration, Instant, SystemTime};
 
         let kind = if serde_json::from_slice::<Value>(refusal)
@@ -492,8 +491,7 @@ mod tests {
     use super::*;
     #[test]
     fn latest_jev_http_response_controls_rate_limit_observation() {
-        use reqwest::StatusCode;
-        use reqwest::header::HeaderValue;
+        use http::{HeaderValue, StatusCode};
 
         observe_response(
             StatusCode::TOO_MANY_REQUESTS,
