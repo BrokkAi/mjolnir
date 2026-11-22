@@ -876,11 +876,7 @@ pub fn export_checkpoint_with_native_state(
         git,
         Some(spec.session.id.as_str()),
         Some(native_snapshot.path()),
-        if spec.ignore_nested_repositories {
-            crate::archive::UntrackedFiles::IgnoreNestedRepositories
-        } else {
-            crate::archive::UntrackedFiles::Include
-        },
+        crate::archive::UntrackedFiles::Include,
         &spec.consent,
     )?;
     let repositories_ms = repositories_started.elapsed().as_millis() as u64;

@@ -1178,4 +1178,115 @@ mod tests {
         assert_eq!(fs::read(&recorded.archive_path).unwrap(), other_bytes);
         assert_eq!(directory_names(), names_before);
     }
+
+    #[test]
+    fn purges_checked_in_old_format_fixture_and_resumes_it() {
+        if enter_child("purges_checked_in_old_format_fixture_and_resumes_it") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/legacy-untracked-checkpoint.hel.zip");
+        assert!(
+            fixture_path.is_file(),
+            "checked-in fixture {} is missing",
+            fixture_path.display()
+        );
+        let session_id = "dddddddddddddddddddddddddddddddd";
+        let verified_before =
+            mj_checkpoint::archive::verify_archive_streaming(&fixture_path).unwrap();
+        assert_eq!(verified_before.manifest.schema_version, 12);
+        assert!(verified_before.manifest.repositories[0].metadata.origin_delta.is_none());
+
+        fs::create_dir_all(sessions_dir()).unwrap();
+        let managed_path = sessions_dir().join(format!("{session_id}-1-{NONCE}.hel.zip"));
+        fs::copy(&fixture_path, &managed_path).unwrap();
+        let original_size = managed_path.metadata().unwrap().len();
+        let checkpoint = CheckpointMetadata {
+            archive_path: managed_path.clone(),
+            created_at: "2026-11-21T00:00:00Z".into(),
+            event_frontier: 1,
+            sha256: verified_before.archive_sha256.clone(),
+        };
+        save(session_id, SessionState::Stopped, Some(checkpoint));
+
+        let outcome = purge_one(&session_admission(session_id), session_id, false).unwrap();
+        let PurgeSessionOutcome::Purged {
+            bytes_reclaimed, ..
+        } = outcome
+        else {
+            panic!("expected Purged outcome for checked-in legacy fixture, got {outcome:?}");
+        };
+        assert!(bytes_reclaimed > 0, "expected reclaimed on-disk bytes");
+        assert!(!managed_path.exists(), "old fixture copy should be unlinked");
+
+        let loaded = crate::database::load_state().unwrap();
+        let updated = loaded.sessions[session_id]
+            .checkpoint
+            .as_ref()
+            .expect("updated checkpoint row");
+        assert_ne!(updated.archive_path, managed_path);
+        assert!(updated.archive_path.metadata().unwrap().len() < original_size);
+        let verified_after =
+            mj_checkpoint::archive::verify_archive_streaming(&updated.archive_path).unwrap();
+        assert_eq!(verified_after.manifest.schema_version, 12);
+        assert_eq!(verified_after.archive_sha256, updated.sha256);
+
+        // Resume/restore the purged old-format archive into a fresh checkout.
+        let restore_workspace = tempfile::tempdir().unwrap();
+        let dest_repo = restore_workspace.path().join("project");
+        fs::create_dir_all(&dest_repo).unwrap();
+        let run_git_dest = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&dest_repo)
+                .env("GIT_AUTHOR_DATE", "1700000000 +0000")
+                .env("GIT_COMMITTER_DATE", "1700000000 +0000")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        run_git_dest(&["init", "-b", "main"]);
+        run_git_dest(&["config", "user.name", "Fixture"]);
+        run_git_dest(&["config", "user.email", "fixture@example.test"]);
+        fs::write(dest_repo.join("tracked.txt"), "base line\n").unwrap();
+        run_git_dest(&["add", "tracked.txt"]);
+        run_git_dest(&["commit", "-m", "initial base"]);
+        assert_eq!(
+            run_git_dest(&["rev-parse", "HEAD"]),
+            verified_after.manifest.repositories[0].metadata.base_commit
+        );
+        mj_checkpoint::checkpoint::restore_repositories(
+            &updated.archive_path,
+            restore_workspace.path(),
+            &mj_checkpoint::archive::SystemGit,
+        )
+        .unwrap();
+
+        assert_eq!(
+            run_git_dest(&["symbolic-ref", "--short", "HEAD"]),
+            "feature/legacy"
+        );
+        assert_eq!(
+            fs::read_to_string(dest_repo.join("feature.txt")).unwrap(),
+            "committed legacy feature\n"
+        );
+        assert_eq!(
+            run_git_dest(&["show", ":tracked.txt"]),
+            "staged change"
+        );
+        assert_eq!(
+            fs::read_to_string(dest_repo.join("tracked.txt")).unwrap(),
+            "unstaged change\n"
+        );
+        assert!(
+            !dest_repo.join("scratch.bin").exists(),
+            "purged untracked payload must be absent after resume"
+        );
+    }
 }

@@ -1994,10 +1994,6 @@ impl DashboardContext {
             Ok(LifecycleSuccess::Closed) => {
                 self.dashboard.set_notice(format!("Suspended {}", name));
             }
-            Ok(LifecycleSuccess::ForceStopped) => self.dashboard.set_notice(format!(
-                "Suspended {} using the confirmed recovery copy; newer changes discarded",
-                name
-            )),
             Ok(LifecycleSuccess::DestroyedStopped) => self
                 .dashboard
                 .set_notice(format!("Permanently destroyed suspended session {}", name)),

@@ -127,8 +127,6 @@ pub enum GitSnapshotProgress {
 pub enum UntrackedFiles {
     Include,
     Exclude,
-    /// Explicit user consent to omit untracked nested Git repositories.
-    IgnoreNestedRepositories,
 }
 
 pub fn collect_git_snapshot(
@@ -3464,7 +3462,7 @@ impl WorktreeTar {
 pub(super) fn build_untracked_tar(
     repository: &Path,
     nul_paths: &[u8],
-    policy: UntrackedFiles,
+    _policy: UntrackedFiles,
     linked_worktrees: &BTreeSet<PathBuf>,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<Vec<u8>> {
@@ -3495,11 +3493,6 @@ pub(super) fn build_untracked_tar(
                     &fs::canonicalize(&source)
                         .with_context(|| format!("resolve {}", source.display()))?,
                 )
-            {
-                continue;
-            }
-            if policy == UntrackedFiles::IgnoreNestedRepositories
-                && is_nested_repository(&source, &metadata)?
             {
                 continue;
             }

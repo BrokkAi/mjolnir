@@ -131,7 +131,7 @@ impl Controller {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     fn explicit_suspend_export_policy(
         &self,
         session_id: &str,

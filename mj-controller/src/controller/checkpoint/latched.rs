@@ -729,7 +729,6 @@ impl Controller {
         let exported: Result<CheckpointArtifact> = async {
             let target_files = target_files.get_or_insert_with(own_target_files);
             let spec = CheckpointExportSpec {
-                ignore_nested_repositories: false,
                 consent: consent.clone(),
                 protocol_version: CheckpointRepositoryCapture::export_protocol_version(&repositories),
                 session: session_manifest(&native_session_id),

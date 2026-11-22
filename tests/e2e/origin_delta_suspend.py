@@ -153,14 +153,14 @@ def main():
             untracked = lab.project / "untracked.txt"
             untracked.write_text("keep untracked\n")
 
-            run("suspend", "--acknowledge-unpublished-work", "--session", session)
+            run("suspend", "--session", session)
             stopped = wait_for(lambda: row if (row := record())["state"] == "stopped" else None,
                                "raw session to stop")
             assert launch_file.is_file(), f"launch record disappeared on suspend: {launch_file}"
             assert untracked.read_text() == "keep untracked\n"
             with zipfile.ZipFile(stopped["checkpoint"]["archive_path"]) as archive:
                 manifest = json.loads(archive.read("manifest.json"))
-                assert manifest["schema_version"] == 14, manifest
+                assert manifest["schema_version"] == 15, manifest
                 repository, = manifest["repositories"]
                 assert repository["origin_delta_pack_path"] in archive.namelist()
                 delta = repository["origin_delta"]
@@ -192,7 +192,7 @@ def main():
         if args.case == "untracked":
             untracked = checkout / "untracked.txt"
             untracked.write_text("keep me\n")
-            result = run("suspend", "--acknowledge-unpublished-work", "--session", session, check=False)
+            result = run("suspend", "--session", session, check=False)
             assert result.returncode != 0 and "untracked.txt" in result.stderr, result
             assert record()["state"] == "running", record()
             assert pid_path.read_text() == worker_before
@@ -201,12 +201,12 @@ def main():
             git_directory = checkout / ".git"
             with (git_directory / "info/exclude").open("a") as excludes:
                 excludes.write("\n.mj/keep/\n")
-            keep = checkout / ".mj/keep"
+            keep = checkout / ".mj/keep" / session
             keep.mkdir(parents=True, exist_ok=True)
             saved = keep / "ignored.txt"
             saved.write_text("preserve ignored keep data\n")
             git(checkout, "check-ignore", saved.relative_to(checkout))
-            result = run("suspend", "--acknowledge-unpublished-work", "--session", session, check=False)
+            result = run("suspend", "--session", session, check=False)
             assert result.returncode != 0 and "ignored.txt" in result.stderr, result
             assert record()["state"] == "running", record()
             assert pid_path.read_text() == worker_before
@@ -245,7 +245,7 @@ while True:
                     release.touch()
                     wait_for(wrote.exists, "detached writer to write tracked data")
 
-            run("suspend", "--acknowledge-unpublished-work", "--session", session)
+            run("suspend", "--session", session)
             if checkpoint_hook is not None:
                 wait_for((lab.hooks / f"{lab.hook_name}.reached").exists, "completed suspend preflight")
                 if args.case == "late-file":
@@ -302,13 +302,13 @@ while True:
             git(checkout / "vendor/module", "rev-parse", "HEAD").stdout,
         ]
 
-        run("suspend", "--acknowledge-unpublished-work", "--session", session)
+        run("suspend", "--session", session)
         stopped = wait_for(lambda: row if (row := record())["state"] == "stopped" else None,
                            "session to stop")
         assert not checkout.exists(), str(checkout)
         with zipfile.ZipFile(stopped["checkpoint"]["archive_path"]) as archive:
             manifest = json.loads(archive.read("manifest.json"))
-            assert manifest["schema_version"] == 14, manifest
+            assert manifest["schema_version"] == 15, manifest
             repository, = manifest["repositories"]
             assert repository["origin_delta_pack_path"] in archive.namelist()
             assert "untracked_tar_path" not in repository
