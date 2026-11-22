@@ -53,6 +53,12 @@ pub struct AntigravitySnapshot {
 }
 
 #[derive(Debug)]
+pub struct AntigravityRefreshCursor {
+    data_version: Option<i64>,
+    summary_row: Option<SummaryRow>,
+}
+
+#[derive(Debug)]
 pub struct AntigravityStateFollower {
     home: PathBuf,
     conversation_id: String,
@@ -62,7 +68,7 @@ pub struct AntigravityStateFollower {
     summary_row: Option<SummaryRow>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct SummaryRow {
     status: String,
     not_fully_idle: Value,
@@ -108,6 +114,15 @@ impl AntigravityStateFollower {
     }
 
     pub fn refresh(&mut self) -> Result<AntigravitySnapshot> {
+        let (snapshot, cursor) = self.refresh_pending()?;
+        self.commit_refresh(cursor);
+        Ok(snapshot)
+    }
+
+    /// Read the current database state without advancing the committed summary
+    /// cursor. Call [`Self::commit_refresh`] only after the relay accepts the
+    /// snapshot so a rejected concurrent scan cannot drop a real commit.
+    pub fn refresh_pending(&mut self) -> Result<(AntigravitySnapshot, AntigravityRefreshCursor)> {
         ensure!(
             !self.conversation_id.is_empty()
                 && !self.conversation_id.contains('/')
@@ -147,10 +162,8 @@ impl AntigravityStateFollower {
         } else {
             self.summary = None;
             self.summary_identity = None;
-            self.data_version = None;
-            self.summary_row = None;
         }
-        let (summary, summary_commit_changed) = if let Some(conn) = &self.summary {
+        let (summary, summary_commit_changed, cursor) = if let Some(conn) = &self.summary {
             let version: i64 = conn
                 .query_row("PRAGMA data_version", [], |r| r.get(0))
                 .context("read Antigravity summary data_version")?;
@@ -161,6 +174,10 @@ impl AntigravityStateFollower {
                         .map(SummaryRow::snapshot)
                         .transpose()?,
                     false,
+                    AntigravityRefreshCursor {
+                        data_version: self.data_version,
+                        summary_row: self.summary_row.clone(),
+                    },
                 )
             } else {
                 // data_version covers the entire database. A child conversation
@@ -185,19 +202,39 @@ impl AntigravityStateFollower {
                     .context("query Antigravity conversation_summaries")?;
                 let summary = row.as_ref().map(SummaryRow::snapshot).transpose()?;
                 let changed = row.is_some() && row != self.summary_row;
-                self.summary_row = row;
-                self.data_version = Some(version);
-                (summary, changed)
+                (
+                    summary,
+                    changed,
+                    AntigravityRefreshCursor {
+                        data_version: Some(version),
+                        summary_row: row,
+                    },
+                )
             }
         } else {
-            (None, false)
+            (
+                None,
+                false,
+                AntigravityRefreshCursor {
+                    data_version: None,
+                    summary_row: None,
+                },
+            )
         };
-        Ok(AntigravitySnapshot {
-            summary,
-            conversation_db_present,
-            summary_commit_changed,
-            running_tasks,
-        })
+        Ok((
+            AntigravitySnapshot {
+                summary,
+                conversation_db_present,
+                summary_commit_changed,
+                running_tasks,
+            },
+            cursor,
+        ))
+    }
+
+    pub fn commit_refresh(&mut self, cursor: AntigravityRefreshCursor) {
+        self.data_version = cursor.data_version;
+        self.summary_row = cursor.summary_row;
     }
 }
 

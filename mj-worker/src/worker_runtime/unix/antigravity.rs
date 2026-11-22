@@ -70,41 +70,38 @@ impl AntigravityTaskMonitor {
                 .antigravity_hook_epoch();
             let mut scan_follower = follower.take().expect("follower returned after scan");
             let scanned = mj_core::runtime::spawn_blocking(move || {
-                let snapshot = scan_follower.refresh();
-                (scan_follower, snapshot)
+                let result = scan_follower.refresh_pending();
+                (scan_follower, result)
             })
             .await;
             match scanned {
-                Ok((scan_follower, snapshot)) => {
-                    follower = Some(scan_follower);
-                    match snapshot {
-                        Ok(snapshot) => {
-                            self.retry_delay = ANTIGRAVITY_TASK_POLL_INTERVAL;
-                            self.retry_at = tokio::time::Instant::now() + self.retry_delay;
-                            self.last_warning = None;
-                            let applied = relay
-                                .lock()
-                                .expect("relay state lock poisoned")
-                                .antigravity_snapshot_changed(snapshot, scan_hook_epoch)?;
-                            if !applied {
-                                if attempt == 1 || !force {
-                                    self.retry_at = tokio::time::Instant::now();
-                                    self.follower = follower.take();
-                                    return Ok(());
-                                }
-                                continue;
-                            }
-                            self.follower = follower.take();
+                Ok((mut scan_follower, result)) => match result {
+                    Ok((snapshot, cursor)) => {
+                        self.retry_delay = ANTIGRAVITY_TASK_POLL_INTERVAL;
+                        self.retry_at = tokio::time::Instant::now() + self.retry_delay;
+                        self.last_warning = None;
+                        let applied = relay
+                            .lock()
+                            .expect("relay state lock poisoned")
+                            .antigravity_snapshot_changed(snapshot, scan_hook_epoch)?;
+                        if applied {
+                            scan_follower.commit_refresh(cursor);
+                            self.follower = Some(scan_follower);
                             return Ok(());
                         }
-                        Err(error) => {
-                            self.follower = follower.take();
-                            return self.record_failure(relay, error);
+                        if attempt == 1 || !force {
+                            self.retry_at = tokio::time::Instant::now();
+                            self.follower = Some(scan_follower);
+                            return Ok(());
                         }
+                        follower = Some(scan_follower);
                     }
-                }
+                    Err(error) => {
+                        self.follower = Some(scan_follower);
+                        return self.record_failure(relay, error);
+                    }
+                },
                 Err(error) => {
-                    self.follower = follower.take();
                     return self.record_failure(
                         relay,
                         anyhow::anyhow!("Antigravity background task scan stopped: {error}"),

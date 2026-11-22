@@ -448,25 +448,24 @@ async fn antigravity_stale_scan_cannot_clear_a_concurrent_stop() {
     let databases = Databases::create(temp.path());
     let relay = antigravity_relay(&temp.path().join("relay"));
     let _monitor = attach_monitor(temp.path(), &relay).await;
+    let mut follower = AntigravityStateFollower::new(temp.path().to_owned(), NATIVE.into());
+    // Establish the committed baseline cursor before the concurrent race.
+    let (baseline, cursor) = follower.refresh_pending().unwrap();
+    {
+        let mut state = relay.lock().unwrap();
+        let epoch = state.antigravity_hook_epoch();
+        assert!(state.antigravity_snapshot_changed(baseline, epoch).unwrap());
+    }
+    follower.commit_refresh(cursor);
+
     {
         let mut state = relay.lock().unwrap();
         pre_invocation(&mut state, Some(NATIVE));
     }
-    let mut follower = AntigravityStateFollower::new(temp.path().to_owned(), NATIVE.into());
     let scan_epoch = relay.lock().unwrap().antigravity_hook_epoch();
-    let old_snapshot = follower.refresh().unwrap();
-    {
-        let mut state = relay.lock().unwrap();
-        stop(&mut state, Some(NATIVE), Some(false), "NO_TOOL_CALL");
-        assert!(state.settle_pending_antigravity_harness_turn().unwrap());
-        assert!(
-            !state
-                .antigravity_snapshot_changed(old_snapshot, scan_epoch)
-                .unwrap()
-        );
-        assert!(!state.operational_state().background_commands.is_empty());
-        assert!(!reserve_idle(&mut state));
-    }
+    // Simulate a summary commit read by an in-flight scan while a Stop hook
+    // arrives concurrently: the stale scan must be rejected without consuming
+    // the follower's cursor, so the retry still observes that same commit.
     databases
         .summary
         .execute(
@@ -474,10 +473,28 @@ async fn antigravity_stale_scan_cannot_clear_a_concurrent_stop() {
             params![IDLE, NATIVE],
         )
         .unwrap();
+    let (stale_snapshot, _discarded_cursor) = follower.refresh_pending().unwrap();
+    assert!(stale_snapshot.summary_commit_changed);
+    {
+        let mut state = relay.lock().unwrap();
+        stop(&mut state, Some(NATIVE), Some(false), "NO_TOOL_CALL");
+        assert!(state.settle_pending_antigravity_harness_turn().unwrap());
+        assert!(
+            !state
+                .antigravity_snapshot_changed(stale_snapshot, scan_epoch)
+                .unwrap()
+        );
+        assert!(!state.operational_state().background_commands.is_empty());
+        assert!(!reserve_idle(&mut state));
+    }
+    // Retry with no additional DB write: because the rejected scan did not
+    // commit its cursor, the retry still observes the uncommitted idle commit.
     let epoch = relay.lock().unwrap().antigravity_hook_epoch();
-    let fresh = follower.refresh().unwrap();
+    let (fresh, fresh_cursor) = follower.refresh_pending().unwrap();
+    assert!(fresh.summary_commit_changed);
     let mut state = relay.lock().unwrap();
     assert!(state.antigravity_snapshot_changed(fresh, epoch).unwrap());
+    follower.commit_refresh(fresh_cursor);
     assert!(state.operational_state().background_commands.is_empty());
     assert!(reserve_idle(&mut state));
 }

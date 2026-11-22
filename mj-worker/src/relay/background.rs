@@ -752,16 +752,10 @@ impl DurableRelay {
             return Ok(true);
         }
         let work = &mut self.antigravity_work;
-        work.summary_commit_gen += u64::from(snapshot.summary_commit_changed);
         if scan_hook_epoch != work.hook_epoch {
-            if work.hook_not_fully_idle_gen.is_some() {
-                work.hook_not_fully_idle_gen = Some(work.summary_commit_gen);
-            }
-            if work.hook_idle_gen.is_some() {
-                work.hook_idle_gen = Some(work.summary_commit_gen);
-            }
             return Ok(false);
         }
+        work.summary_commit_gen += u64::from(snapshot.summary_commit_changed);
         let indices: BTreeSet<_> = snapshot
             .running_tasks
             .iter()
