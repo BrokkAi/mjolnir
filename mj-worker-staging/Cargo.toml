@@ -24,7 +24,6 @@ workspace = true
 
 [dependencies]
 mj-core.workspace = true
-mj-client.workspace = true
 mj-targets.workspace = true
 mj-store.workspace = true
 mj-session-types.workspace = true

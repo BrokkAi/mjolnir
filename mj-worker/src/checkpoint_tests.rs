@@ -588,8 +588,9 @@ fn worker_suspend_preflight_reports_untracked_keep_dir_and_dry_run() {
         }],
         dry_run: true,
     };
-    let result = crate::checkpoint::run_suspend_preflight(&spec, &mj_checkpoint::archive::SystemGit)
-        .unwrap();
+    let result =
+        crate::checkpoint::run_suspend_preflight(&spec, &mj_checkpoint::archive::SystemGit)
+            .unwrap();
     assert!(
         result
             .untracked
@@ -599,7 +600,10 @@ fn worker_suspend_preflight_reports_untracked_keep_dir_and_dry_run() {
         result.untracked
     );
     assert_eq!(result.keep_dir_entries.len(), 1);
-    assert_eq!(result.keep_dir_entries[0].path, PathBuf::from("evidence.txt"));
+    assert_eq!(
+        result.keep_dir_entries[0].path,
+        PathBuf::from("evidence.txt")
+    );
     assert!(result.keep_dir_bytes > 0);
     let dry_run = result.dry_run.expect("dry_run estimate");
     assert_eq!(dry_run.session_state_bytes, None);

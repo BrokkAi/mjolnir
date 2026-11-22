@@ -949,7 +949,7 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
                 created_at: child.created_at.clone(),
                 noticed_turn: None,
                 handback_tool: false,
-            supervisor: false,
+                supervisor: false,
                 reported_finish: None,
             },
         );

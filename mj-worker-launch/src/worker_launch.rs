@@ -777,8 +777,8 @@ pub fn session_launch_config(
         .for_launch(profile.kind, subagent_view.as_ref());
     // Only a delegating parent's spawn tool reads this. Other sessions keep
     // the default, so their launch files do not change.
-    launch.subtle_subagents = !launch.subagents.uses_mjolnir()
-        || config.subagents.offers_subtle(&launch.subagents);
+    launch.subtle_subagents =
+        !launch.subagents.uses_mjolnir() || config.subagents.offers_subtle(&launch.subagents);
     launch.oracle = oracle_launch_enabled(session, subagent.is_some(), &config.subagents);
     // Registration decided whether this child can be given the tool.
     launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);

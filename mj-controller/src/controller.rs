@@ -125,10 +125,10 @@ pub use worker_binary::{
 };
 
 pub use checkpoint::{
-    CheckpointArtifact, CheckpointDeferred, IdleWorkspaceLease, SessionExportLayout,
-    checkpoint_was_deferred, reconcile_managed_checkpoint_archives,
-    sweep_expired_host_snapshot_cache, sweep_local_checkpoint_leftovers,
-    HOST_SNAPSHOT_CACHE_TTL, host_snapshot_cache_wakeup,
+    CheckpointArtifact, CheckpointDeferred, HOST_SNAPSHOT_CACHE_TTL, IdleWorkspaceLease,
+    SessionExportLayout, checkpoint_was_deferred, host_snapshot_cache_wakeup,
+    reconcile_managed_checkpoint_archives, sweep_expired_host_snapshot_cache,
+    sweep_local_checkpoint_leftovers,
 };
 pub use lifecycle::{
     BeforeClose, BranchDisposition, CheckoutDisposition, DestroyOutcome, has_nothing_to_checkpoint,
@@ -1155,8 +1155,8 @@ impl Controller {
         let now = now();
         let subagents = subagents
             .unwrap_or_else(|| mj_core::subagent::SubagentPolicy::default_for(profile.kind));
-        let mut supervisors_enabled = supervisors
-            .unwrap_or_else(|| self.state.last_supervisor_choice_for(profile_id));
+        let mut supervisors_enabled =
+            supervisors.unwrap_or_else(|| self.state.last_supervisor_choice_for(profile_id));
         if supervisors_enabled && !subagents.uses_mjolnir() {
             if supervisors == Some(true) {
                 return Err(mj_core::refusal::Refusal::precondition(

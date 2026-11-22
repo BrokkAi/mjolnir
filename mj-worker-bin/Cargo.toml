@@ -43,5 +43,5 @@ mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 mj-worker = { workspace = true, features = ["test-hooks"] }
 agent-client-protocol.workspace = true
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
-mj-controller = { path = "../mj-controller", package = "brokk-mj-controller" }
+mj-targets = { path = "../mj-targets", package = "brokk-mj-targets" }
 tempfile.workspace = true

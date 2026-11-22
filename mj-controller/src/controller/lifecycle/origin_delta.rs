@@ -70,8 +70,7 @@ fn read_wire<T: serde::de::DeserializeOwned>(
         return Ok(None);
     };
     Ok(Some(
-        serde_json::from_slice(&bytes)
-            .with_context(|| format!("decode {root}/{name}"))?,
+        serde_json::from_slice(&bytes).with_context(|| format!("decode {root}/{name}"))?,
     ))
 }
 
@@ -219,7 +218,10 @@ fn checkout_has_origin_remote(
 pub(in crate::controller) fn managed_origin_override(
     worktree: &mj_core::state::ManagedWorktree,
 ) -> Option<String> {
-    if !matches!(worktree.target, mj_core::state::ManagedWorktreeTarget::Local) {
+    if !matches!(
+        worktree.target,
+        mj_core::state::ManagedWorktreeTarget::Local
+    ) {
         return None;
     }
     mj_core::runtime::off_async_worker(|| {
@@ -256,6 +258,26 @@ pub(in crate::controller) fn managed_origin_override(
             None
         }
     })
+}
+
+const ALL_SUSPEND_WIRE_FILES: &[&str] = &[
+    wire::ACCEPTED,
+    wire::REQUEST,
+    wire::RECEIPT,
+    wire::PROGRESS,
+    wire::RESTART,
+];
+
+/// Clear any OriginDelta suspend request, receipt, and progress wire files left
+/// in `backend`'s worker root for `session_id` so a subsequent Resume and later
+/// Suspend cannot mistake an abandoned Move's records for a fresh quiescence.
+pub(in crate::controller) fn clear_suspend_records_at_target(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<()> {
+    let root = targets::worker_root(backend, session_id)?;
+    remove_wire_files(backend, session_id, &root, ALL_SUSPEND_WIRE_FILES, executor)
 }
 
 impl OriginDeltaSuspend {
@@ -323,10 +345,7 @@ impl OriginDeltaSuspend {
     /// Whether the session's live worker advertises origin-delta quiescence
     /// capability (`suspend-worker.json` with a live PID in the target
     /// namespace).
-    pub(super) fn worker_capable(
-        &self,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<bool> {
+    pub(super) fn worker_capable(&self, executor: &(impl CommandExecutor + Sync)) -> Result<bool> {
         match read_wire::<wire::WorkerIdentity>(
             &self.backend,
             &self.session_id,
@@ -370,8 +389,7 @@ impl OriginDeltaSuspend {
             }
             _ => bail!("managed checkout is missing"),
         };
-        let accepted =
-            read_wire::<String>(&backend, session_id, &root, wire::ACCEPTED, executor)?;
+        let accepted = read_wire::<String>(&backend, session_id, &root, wire::ACCEPTED, executor)?;
         let request =
             read_wire::<SuspendRequest>(&backend, session_id, &root, wire::REQUEST, executor)?;
         let request_recorded = accepted.as_ref().is_some_and(|operation| {
@@ -458,13 +476,7 @@ impl OriginDeltaSuspend {
             &self.backend,
             &self.session_id,
             &self.root,
-            &[
-                wire::ACCEPTED,
-                wire::REQUEST,
-                wire::RECEIPT,
-                wire::PROGRESS,
-                wire::RESTART,
-            ],
+            ALL_SUSPEND_WIRE_FILES,
             executor,
         )
     }

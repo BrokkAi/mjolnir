@@ -1329,99 +1329,99 @@ impl ApiBackend {
                     if let Some(selection) = prepared.and_then(|p| p.spawn.clone()) {
                         (selection, None)
                     } else {
-                    let parent = self
-                        .exports
-                        .session_record(parent_session_id)
-                        .context("parent session disappeared")?;
-                    let requested_supervisor =
-                        *task_type == mj_core::subagent::SubagentTaskType::Supervisor;
-                    let parent_subagent = blocking("load parent subagent record", {
-                        let parent_id = parent_session_id.to_owned();
-                        move || mj_controller::database::load_subagent(&parent_id)
-                    })
-                    .await?;
-                    mj_core::subagent::validate_subagent_parent(
-                        parent_subagent.as_ref(),
-                        mj_core::subagent::SubagentKind::Worker,
-                        requested_supervisor,
-                    )?;
-                    if requested_supervisor {
-                        ensure!(
-                            parent.supervisors,
-                            "supervisors are not enabled for this session"
-                        );
-                        ensure!(
-                            parent
-                                .subagents
-                                .as_ref()
-                                .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir),
-                            "supervisors require Mjolnir delegation"
-                        );
-                    }
-                    let execution_policy = if self.exports.session_is_yolo_target(parent_session_id)
-                    {
-                        mj_core::config::ExecutionPolicy::Unconstrained
-                    } else {
-                        mj_core::config::ExecutionPolicy::ConfiguredApprovals
-                    };
-                    let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
-                    let selection = crate::server::api::resolve_subagent_policy_selection(
-                        &backend,
-                        &parent.last_profile,
-                        &parent.subagents.clone().unwrap_or_default(),
-                        *task_type,
-                        execution_policy,
-                    )
-                    .await
-                    .map_err(|failure| anyhow::anyhow!(failure.message))?;
-                    // Hold the atomic placement reservation until registration succeeds.
-                    let reservation = selection.reservation.clone();
-                    // This wire queue can contain requests accepted by older workers.
-                    let ranges = files
-                        .iter()
-                        .flat_map(|entry| {
-                            let file = entry.file.clone();
-                            entry.ranges.iter().map(move |range| {
-                                crate::server::api::LegacySubagentSourceRange {
-                                    file: file.clone(),
-                                    start: range.start,
-                                    end: range.end,
+                        let parent = self
+                            .exports
+                            .session_record(parent_session_id)
+                            .context("parent session disappeared")?;
+                        let requested_supervisor =
+                            *task_type == mj_core::subagent::SubagentTaskType::Supervisor;
+                        let parent_subagent = blocking("load parent subagent record", {
+                            let parent_id = parent_session_id.to_owned();
+                            move || mj_controller::database::load_subagent(&parent_id)
+                        })
+                        .await?;
+                        mj_core::subagent::validate_subagent_parent(
+                            parent_subagent.as_ref(),
+                            mj_core::subagent::SubagentKind::Worker,
+                            requested_supervisor,
+                        )?;
+                        if requested_supervisor {
+                            ensure!(
+                                parent.supervisors,
+                                "supervisors are not enabled for this session"
+                            );
+                            ensure!(
+                                parent
+                                    .subagents
+                                    .as_ref()
+                                    .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir),
+                                "supervisors require Mjolnir delegation"
+                            );
+                        }
+                        let execution_policy =
+                            if self.exports.session_is_yolo_target(parent_session_id) {
+                                mj_core::config::ExecutionPolicy::Unconstrained
+                            } else {
+                                mj_core::config::ExecutionPolicy::ConfiguredApprovals
+                            };
+                        let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
+                        let selection = crate::server::api::resolve_subagent_policy_selection(
+                            &backend,
+                            &parent.last_profile,
+                            &parent.subagents.clone().unwrap_or_default(),
+                            *task_type,
+                            execution_policy,
+                        )
+                        .await
+                        .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                        // Hold the atomic placement reservation until registration succeeds.
+                        let reservation = selection.reservation.clone();
+                        // This wire queue can contain requests accepted by older workers.
+                        let ranges = files
+                            .iter()
+                            .flat_map(|entry| {
+                                let file = entry.file.clone();
+                                entry.ranges.iter().map(move |range| {
+                                    crate::server::api::LegacySubagentSourceRange {
+                                        file: file.clone(),
+                                        start: range.start,
+                                        end: range.end,
+                                    }
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        let prompt = crate::server::api::build_legacy_subagent_prompt(
+                            &backend,
+                            parent_session_id,
+                            instructions,
+                            context.as_deref(),
+                            &ranges,
+                        )
+                        .await
+                        .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                        let selected = mj_controller::database::PreparedSpawn {
+                            profile_id: selection.profile_id,
+                            model: selection.model,
+                            effort: selection.effort,
+                            fast_mode: selection.fast_mode,
+                            prompt,
+                        };
+                        let selected = if prepared.is_some() {
+                            blocking("persist selected spawn", {
+                                let parent = parent_session_id.to_owned();
+                                let request = request.request_id.clone();
+                                move || {
+                                    mj_controller::database::prepare_delegation_spawn(
+                                        parent, request, selected,
+                                    )
                                 }
                             })
-                        })
-                        .collect::<Vec<_>>();
-                    let prompt = crate::server::api::build_legacy_subagent_prompt(
-                        &backend,
-                        parent_session_id,
-                        instructions,
-                        context.as_deref(),
-                        &ranges,
-                    )
-                    .await
-                    .map_err(|failure| anyhow::anyhow!(failure.message))?;
-                    let selected = mj_controller::database::PreparedSpawn {
-                        profile_id: selection.profile_id,
-                        model: selection.model,
-                        effort: selection.effort,
-                        fast_mode: selection.fast_mode,
-                        prompt,
+                            .await?
+                        } else {
+                            selected
+                        };
+                        (selected, Some(reservation))
                     };
-                    let selected = if prepared.is_some() {
-                        blocking("persist selected spawn", {
-                            let parent = parent_session_id.to_owned();
-                            let request = request.request_id.clone();
-                            move || {
-                                mj_controller::database::prepare_delegation_spawn(
-                                    parent, request, selected,
-                                )
-                            }
-                        })
-                        .await?
-                    } else {
-                        selected
-                    };
-                    (selected, Some(reservation))
-                };
                 let relation = self
                     .start_subagent(mj_controller::controller::RegisterSubagentRequest {
                         no_github_credentials: *no_github_credentials,

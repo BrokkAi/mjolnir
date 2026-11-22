@@ -66,10 +66,7 @@ tokio-util = { workspace = true, features = ["io"] }
 mach2 = "0.4"
 
 [dev-dependencies]
-mj-build-cache = { path = "../mj-build-cache", package = "brokk-mj-build-cache" }
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 proptest = "1"
-# Cross-runtime fixtures stay local; versionless dev dependencies are not published.
-mj-controller = { path = "../mj-controller", package = "brokk-mj-controller" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

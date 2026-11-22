@@ -180,6 +180,24 @@ pub(crate) fn target_table(rows: Vec<PickerChoice>) -> Vec<PickerChoice> {
     table
 }
 
+/// The profile table of the new-session wizard: PROVIDER, PROFILE, WEEKLY, 5H.
+pub(crate) fn new_wizard_profile_table(rows: Vec<PickerChoice>) -> Vec<PickerChoice> {
+    if rows.is_empty() {
+        return rows;
+    }
+    let style = theme::muted().add_modifier(Modifier::BOLD);
+    let mut table = Vec::with_capacity(rows.len() + 1);
+    table.push(PickerChoice::heading(vec![
+        PickerCell::blank(),
+        PickerCell::styled("PROVIDER", style),
+        PickerCell::styled("PROFILE", style),
+        PickerCell::styled("WEEKLY", style),
+        PickerCell::styled("5H", style),
+    ]));
+    table.extend(rows);
+    table
+}
+
 /// The profile tables of the new-session and resume wizards: the column
 /// headings followed by `rows`. An empty list keeps its hint instead of
 /// rendering a bare heading.
@@ -240,6 +258,17 @@ pub(crate) fn render_picker(
         );
     let list_area = Rect::new(body.x, body.y, body.width, list_height);
     let mut widths = picker_columns(&choices);
+    if navigation.control == WizardControl::ProfileList
+        && widths.len() == 5
+        && choices.first().is_some_and(|row| {
+            row.heading && row.cells.get(1).is_some_and(|cell| cell.text == "PROVIDER")
+        })
+    {
+        // Bound the Provider column so a long custom endpoint hostname never
+        // pushes the Profile and quota columns off-screen.
+        let max_provider = (usize::from(list_area.width) / 3).max(14);
+        widths[1] = widths[1].min(max_provider);
+    }
     if navigation.control == WizardControl::TargetList && widths.len() == 6 {
         widths[0] = 0;
         widths[3] = 6;

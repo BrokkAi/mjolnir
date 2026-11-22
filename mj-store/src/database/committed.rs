@@ -53,7 +53,11 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("subagent_sessions", "relation", "child_session_id"),
         ("subagent_preference", "preference", "profile_id"),
         ("oracle_preference", "oracle_preference", "profile_id"),
-        ("supervisor_preference", "supervisor_preference", "profile_id"),
+        (
+            "supervisor_preference",
+            "supervisor_preference",
+            "profile_id",
+        ),
         ("operator_away", "operator_away", "singleton"),
         ("mount_history", "mount_history", "host"),
         ("project_locations", "mount_history", "host"),

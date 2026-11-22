@@ -533,7 +533,7 @@ fn mbx_proxy_device_binding() {
 }
 
 // Run with MJ_TEST_MBX_BIN=/absolute/path/to/mbx. Use the release version in
-// mj-build-cache::mbx::MBX_VERSION (the same artifact Mjolnir stages for hosts).
+// mj_core::config::MBX_VERSION (the same artifact Mjolnir stages for hosts).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the pinned mbx client; set MJ_TEST_MBX_BIN"]
 async fn mbx_proxy_real_client() {
@@ -541,7 +541,7 @@ async fn mbx_proxy_real_client() {
         std::env::var_os("MJ_TEST_MBX_BIN").expect("set MJ_TEST_MBX_BIN to the pinned mbx binary");
     assert_eq!(
         checked(Command::new(&binary).arg("--version")).trim(),
-        format!("mbx {}", mj_build_cache::mbx::MBX_VERSION)
+        format!("mbx {}", mj_core::config::MBX_VERSION)
     );
 
     let (fake, endpoint) = upstream().await;

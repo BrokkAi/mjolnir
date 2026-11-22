@@ -2707,7 +2707,11 @@ pub(crate) fn restore_git_snapshot_for_session_with_options(
                         &git_bytes(
                             runner,
                             repository,
-                            ["rev-parse", "--verify", &format!("{checkout_target}^{{commit}}")],
+                            [
+                                "rev-parse",
+                                "--verify",
+                                &format!("{checkout_target}^{{commit}}"),
+                            ],
                             &[],
                             "resolve restored commit",
                         )

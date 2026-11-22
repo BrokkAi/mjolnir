@@ -2,7 +2,9 @@
 #![cfg(unix)]
 
 use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
+use anyhow::Context;
 use mj_core::elicitation::{ElicitationResponse, ElicitationValue};
+use mj_core::guardian::{GuardianReviewOutcome, GuardianReviewResult};
 use mj_core::relay::{
     RELAY_PROTOCOL_VERSION, RelayCommand, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
     RelayResponseEnvelope, RelayResponsePayload,
@@ -34,6 +36,47 @@ fn control_request(root: &std::path::Path, request: RelayRequest) -> Option<Rela
     let mut line = String::new();
     std::io::BufReader::new(stream).read_line(&mut line).ok()?;
     serde_json::from_str(&line).ok()
+}
+
+fn escalate_permission_review(root: &std::path::Path) -> anyhow::Result<bool> {
+    let Some(response) = control_request(root, RelayRequest::GuardianRequests) else {
+        return Ok(false);
+    };
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::GuardianRequests { requests },
+    } = response.body
+    else {
+        anyhow::bail!("unexpected guardian requests response: {:?}", response.body);
+    };
+    let Some(request) = requests
+        .into_iter()
+        .find(|request| request.tool_call_id == "call-1")
+    else {
+        return Ok(false);
+    };
+    let response = control_request(
+        root,
+        RelayRequest::CompleteGuardianRequest {
+            result: GuardianReviewResult {
+                request_id: request.request_id,
+                decision: GuardianReviewOutcome::AskPerson {
+                    reason: "the fixture requires a person's approval".into(),
+                },
+            },
+        },
+    )
+    .context("worker did not acknowledge the guardian result")?;
+    anyhow::ensure!(
+        matches!(
+            response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::GuardianRequestCompleted
+            }
+        ),
+        "unexpected guardian completion response: {:?}",
+        response.body
+    );
+    Ok(true)
 }
 
 fn pending_permission(root: &std::path::Path) -> Option<String> {
@@ -81,7 +124,8 @@ fn answer_form(root: &std::path::Path, elicitation_id: &str, choice: &str) -> bo
 /// scripted bridge asks a question and then a tool permission during one
 /// prompt, and records the answer to each. The question comes back
 /// cancelled at once, which only a worker that knows it is a managed child
-/// does. The permission waits, and only a person's answer selects "allow".
+/// does. The simulated daemon escalates the guardian review to a person,
+/// whose answer selects "allow".
 // Hard-won: #1451: the worker dropped the managed-child marker before building the ACP launch, and the parent could not grant a child's permission.
 // Hard-won: a3a103608: guessing the old permission ID left the real worker waiting forever.
 #[test]
@@ -177,7 +221,7 @@ for line in sys.stdin:
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_mj-worker"), root.join("hel")).unwrap();
     std::os::unix::fs::symlink(
         env!("CARGO_BIN_EXE_mj-worker"),
-        mj_controller::targets::control_worker_path(root.to_str().unwrap()),
+        mj_targets::targets::control_worker_path(root.to_str().unwrap()),
     )
     .unwrap();
     let mut command = CommandSpec::new(
@@ -206,20 +250,23 @@ for line in sys.stdin:
     };
     let observation = (|| -> anyhow::Result<Vec<serde_json::Value>> {
         let deadline = Instant::now() + IO_TIMEOUT;
+        let mut review_completed = false;
         let mut answered = false;
         loop {
             let seen = recorded();
             if seen.len() == 2 {
+                anyhow::ensure!(
+                    review_completed && answered,
+                    "the bridge received a permission answer before the fixture granted it: {seen:?}"
+                );
                 return Ok(seen);
             }
-            // Answer only after the question's cancellation reached the
-            // bridge, so the permission cannot have been answered by anyone
-            // but this simulated person.
-            if seen.len() == 1
-                && !answered
-                && let Some(id) = pending_permission(&root)
-            {
-                answered = answer_form(&root, &id, "allow");
+            if seen.len() == 1 {
+                if !review_completed {
+                    review_completed = escalate_permission_review(&root)?;
+                } else if !answered && let Some(id) = pending_permission(&root) {
+                    answered = answer_form(&root, &id, "allow");
+                }
             }
             anyhow::ensure!(
                 !worker.is_finished(),
@@ -232,7 +279,7 @@ for line in sys.stdin:
             std::thread::sleep(Duration::from_millis(25));
         }
     })();
-    let stop = mj_controller::targets::stop_worker_daemon_script(root.to_str().unwrap());
+    let stop = mj_targets::targets::stop_worker_daemon_script(root.to_str().unwrap());
     let stopped = BoundedProcessExecutor::new(IO_TIMEOUT)
         .execute(&CommandSpec::new("sh", ["-c", stop.unstaged_script()]));
     let owner = worker.join().expect("worker owner panicked");

@@ -598,7 +598,10 @@ fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
     })
     .unwrap();
 
-    assert!(!outcome.deferred, "a bare target needs no storage cleanup pass");
+    assert!(
+        !outcome.deferred,
+        "a bare target needs no storage cleanup pass"
+    );
     let closed = &controller.state.sessions[session_id];
     assert_eq!(closed.state, SessionState::Stopped);
     assert!(closed.target.is_none());
@@ -3147,7 +3150,12 @@ fn suspend_without_checkpoint_respects_cancellation_without_settling_stopped() {
     };
     persist_controller_fixture(&controller);
     let err = crate::controller::test_support::worker_test_scope(session_id, || {
-        controller.suspend_without_checkpoint_with(session_id, true, &CancellingFailingExecutor, |_| Ok(()))
+        controller.suspend_without_checkpoint_with(
+            session_id,
+            true,
+            &CancellingFailingExecutor,
+            |_| Ok(()),
+        )
     })
     .unwrap_err();
     assert!(format!("{err:#}").contains("cancelled cleanup"));
@@ -3299,7 +3307,10 @@ fn suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_i
     std::fs::write(source.join("tracked.txt"), "base\n").unwrap();
     run_git(&source, &["add", "tracked.txt"]);
     run_git(&source, &["commit", "-m", "initial"]);
-    run_git(&source, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    run_git(
+        &source,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
     run_git(&source, &["push", "-u", "origin", "main"]);
 
     std::fs::create_dir_all(clone_root.parent().unwrap()).unwrap();
@@ -3357,9 +3368,15 @@ fn suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_i
         .session_export_layout(session_id, &ProcessExecutor)
         .unwrap();
     let expected_repo_id = layout.repositories[0].id.as_str();
-    assert_eq!(expected_repo_id, crate::controller::checkpoint::HOST_CHECKOUT_REPOSITORY);
+    assert_eq!(
+        expected_repo_id,
+        crate::controller::checkpoint::HOST_CHECKOUT_REPOSITORY
+    );
     assert_eq!(preflight.untracked.len(), 1);
-    assert_eq!(preflight.untracked[0].checkout.repository_id, expected_repo_id);
+    assert_eq!(
+        preflight.untracked[0].checkout.repository_id,
+        expected_repo_id
+    );
     assert_eq!(preflight.keep_dir_entries.len(), 1);
     assert_eq!(
         preflight.keep_dir_entries[0].checkout.repository_id,
@@ -3556,7 +3573,10 @@ fn suspend_preflight_without_checkpoint_skips_unreachable_target() {
     let existing = preflight
         .existing_checkpoint
         .expect("existing_checkpoint summary");
-    assert!(!existing.verified, "corrupt archive must report verified=false");
+    assert!(
+        !existing.verified,
+        "corrupt archive must report verified=false"
+    );
 }
 
 #[tokio::test]
@@ -3731,8 +3751,20 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
     );
     assert!(keep_paths.contains(&std::path::Path::new("legacy.txt")));
     assert!(keep_paths.contains(&std::path::Path::new("other-session/sibling.txt")));
-    assert!(keep_paths.contains(&std::path::PathBuf::from(session_id).join("ignored.txt").as_path()));
-    assert!(keep_paths.contains(&std::path::PathBuf::from(session_id).join("sub/notes.txt").as_path()));
+    assert!(
+        keep_paths.contains(
+            &std::path::PathBuf::from(session_id)
+                .join("ignored.txt")
+                .as_path()
+        )
+    );
+    assert!(
+        keep_paths.contains(
+            &std::path::PathBuf::from(session_id)
+                .join("sub/notes.txt")
+                .as_path()
+        )
+    );
     assert!(
         preflight.untracked.is_empty(),
         "keep files must not be duplicated in untracked: {:?}",
@@ -3793,12 +3825,8 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
     .expect("capture_session_snapshot must succeed with Shown consent built from preflight");
 }
 
-
 #[cfg(unix)]
-fn init_managed_clone_with_origin(
-    temp: &std::path::Path,
-    session_id: &str,
-) -> (PathBuf, PathBuf) {
+fn init_managed_clone_with_origin(temp: &std::path::Path, session_id: &str) -> (PathBuf, PathBuf) {
     let origin = temp.join("origin.git");
     let seed = temp.join("seed");
     let clone = origin.join(".mj/clones").join(session_id);
@@ -3825,14 +3853,31 @@ fn init_managed_clone_with_origin(
             String::from_utf8_lossy(&output.stderr)
         );
     };
-    run_git(None, &["init", "--bare", "--initial-branch=main", origin.to_str().unwrap()]);
-    run_git(None, &["init", "--initial-branch=main", seed.to_str().unwrap()]);
+    run_git(
+        None,
+        &[
+            "init",
+            "--bare",
+            "--initial-branch=main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    run_git(
+        None,
+        &["init", "--initial-branch=main", seed.to_str().unwrap()],
+    );
     std::fs::write(seed.join("README.md"), "hello\n").unwrap();
     run_git(Some(&seed), &["add", "README.md"]);
     run_git(Some(&seed), &["commit", "-m", "initial"]);
-    run_git(Some(&seed), &["remote", "add", "origin", origin.to_str().unwrap()]);
+    run_git(
+        Some(&seed),
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
     run_git(Some(&seed), &["push", "origin", "main"]);
-    run_git(None, &["clone", origin.to_str().unwrap(), clone.to_str().unwrap()]);
+    run_git(
+        None,
+        &["clone", origin.to_str().unwrap(), clone.to_str().unwrap()],
+    );
     (origin, clone)
 }
 
@@ -4275,7 +4320,11 @@ async fn older_worker_swap_failure_attempts_one_in_place_recovery_before_recordi
             },
         )
         .unwrap();
-        assert!(crate::database::load_worker_restart(session_id).unwrap().is_some());
+        assert!(
+            crate::database::load_worker_restart(session_id)
+                .unwrap()
+                .is_some()
+        );
         retire_worker_restart_intent(session_id).unwrap();
         assert!(
             crate::database::load_worker_restart(session_id)
@@ -4305,10 +4354,9 @@ async fn older_worker_swap_failure_attempts_one_in_place_recovery_before_recordi
     apply_close_checkpoint_failure(&mut record_b, &previous, &unrecovered_error, now(), None);
     assert_eq!(record_b.state, SessionState::Error);
     assert!(
-        record_b
-            .last_error
-            .as_deref()
-            .is_some_and(|msg| msg.contains("--without-checkpoint") && msg.contains("without a live worker")),
+        record_b.last_error.as_deref().is_some_and(
+            |msg| msg.contains("--without-checkpoint") && msg.contains("without a live worker")
+        ),
         "expected no-worker error mentioning --without-checkpoint, got: {:?}",
         record_b.last_error
     );
@@ -4487,7 +4535,10 @@ async fn legacy_closing_with_closed_relay_finishes_from_installed_checkpoint() {
         let barrier_id = new_command_id("legacy-seal").unwrap();
         lease
             .connection_mut()
-            .submit(barrier_id.clone(), RelayCommand::BeginCheckpoint { reason: None })
+            .submit(
+                barrier_id.clone(),
+                RelayCommand::BeginCheckpoint { reason: None },
+            )
             .await
             .unwrap();
         let expected = loop {
@@ -4584,7 +4635,10 @@ async fn legacy_closing_with_closing_relay_waits_and_finishes_from_installed_che
         let barrier_id = new_command_id("legacy-seal").unwrap();
         lease
             .connection_mut()
-            .submit(barrier_id.clone(), RelayCommand::BeginCheckpoint { reason: None })
+            .submit(
+                barrier_id.clone(),
+                RelayCommand::BeginCheckpoint { reason: None },
+            )
             .await
             .unwrap();
         let expected = loop {
@@ -4652,7 +4706,8 @@ async fn legacy_closing_with_closing_relay_waits_and_finishes_from_installed_che
 #[cfg(unix)]
 #[tokio::test]
 async fn legacy_destroying_finishes_from_installed_checkpoint_without_relay_or_export() {
-    const NAME: &str = "legacy_destroying_finishes_from_installed_checkpoint_without_relay_or_export";
+    const NAME: &str =
+        "legacy_destroying_finishes_from_installed_checkpoint_without_relay_or_export";
     const CHILD: &str = "MJ_TEST_LEGACY_DESTROYING";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
@@ -4721,7 +4776,8 @@ async fn legacy_destroying_finishes_from_installed_checkpoint_without_relay_or_e
 #[cfg(unix)]
 #[tokio::test]
 async fn legacy_closing_and_destroying_subagent_routes_through_archive_free_completion() {
-    const NAME: &str = "legacy_closing_and_destroying_subagent_routes_through_archive_free_completion";
+    const NAME: &str =
+        "legacy_closing_and_destroying_subagent_routes_through_archive_free_completion";
     const CHILD: &str = "MJ_TEST_LEGACY_SUBAGENT_CLOSE";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
@@ -4782,7 +4838,10 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     }
 
     impl CommandExecutor for TargetWireFake {
-        fn execute(&self, command: &mj_core::targets::CommandSpec) -> Result<mj_core::targets::CommandOutput> {
+        fn execute(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> Result<mj_core::targets::CommandOutput> {
             self.execute_without_deadline(command)
         }
 
@@ -4806,7 +4865,11 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
                 let alive = *self.worker_alive.lock().unwrap();
                 return Ok(mj_core::targets::CommandOutput {
                     status: 0,
-                    stdout: if alive { b"alive\n".to_vec() } else { b"dead\n".to_vec() },
+                    stdout: if alive {
+                        b"alive\n".to_vec()
+                    } else {
+                        b"dead\n".to_vec()
+                    },
                     stderr: Vec::new(),
                 });
             }
@@ -4833,7 +4896,10 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
                     wire::REQUEST.to_owned(),
                     serde_json::to_vec(&SuspendRequest {
                         operation: op.clone(),
-                        worker: WorkerIdentity { pid: 4242, start: 99 },
+                        worker: WorkerIdentity {
+                            pid: 4242,
+                            start: 99,
+                        },
                         checkout: PathBuf::from(checkout),
                         child_sessions: Vec::new(),
                     })
@@ -4975,7 +5041,11 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
     *fake.worker_alive.lock().unwrap() = true;
     fake.files.lock().unwrap().insert(
         wire::CAPABILITY.to_owned(),
-        serde_json::to_vec(&WorkerIdentity { pid: 4242, start: 99 }).unwrap(),
+        serde_json::to_vec(&WorkerIdentity {
+            pid: 4242,
+            start: 99,
+        })
+        .unwrap(),
     );
 
     assert_eq!(
@@ -4985,7 +5055,8 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
         CheckpointExportPolicy::OriginDelta
     );
 
-    let mut attempt = origin_delta::OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    let mut attempt =
+        origin_delta::OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
     assert!(!attempt.accepted());
     assert!(attempt.worker_capable(&fake).unwrap());
 
@@ -5024,7 +5095,8 @@ async fn ssh_bare_origin_delta_quiescence_routes_all_wire_and_process_ops_throug
 
 #[cfg(unix)]
 #[tokio::test]
-async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_through_container_exec() {
+async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_through_container_exec()
+{
     use mj_core::worker_suspend::{self as wire, SuspendRequest, WorkerIdentity};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -5040,7 +5112,10 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     }
 
     impl CommandExecutor for ContainerWireFake {
-        fn execute(&self, command: &mj_core::targets::CommandSpec) -> Result<mj_core::targets::CommandOutput> {
+        fn execute(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> Result<mj_core::targets::CommandOutput> {
             self.execute_without_deadline(command)
         }
 
@@ -5064,7 +5139,11 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
                 let alive = *self.worker_alive.lock().unwrap();
                 return Ok(mj_core::targets::CommandOutput {
                     status: 0,
-                    stdout: if alive { b"alive\n".to_vec() } else { b"dead\n".to_vec() },
+                    stdout: if alive {
+                        b"alive\n".to_vec()
+                    } else {
+                        b"dead\n".to_vec()
+                    },
                     stderr: Vec::new(),
                 });
             }
@@ -5075,11 +5154,7 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
                     .position(|a| a == "--operation")
                     .unwrap();
                 let op = command.args[op_idx + 1].clone();
-                let checkout_idx = command
-                    .args
-                    .iter()
-                    .position(|a| a == "--checkout")
-                    .unwrap();
+                let checkout_idx = command.args.iter().position(|a| a == "--checkout").unwrap();
                 let checkout = command.args[checkout_idx + 1].clone();
                 assert_eq!(checkout, "/workspace/0123456789abcdef0123456789abcde2");
                 let mut files = self.files.lock().unwrap();
@@ -5198,9 +5273,7 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     let controller = Controller {
         config: config.clone(),
         state: State {
-            sessions: [(session_id.into(), session.clone())]
-                .into_iter()
-                .collect(),
+            sessions: [(session_id.into(), session.clone())].into_iter().collect(),
             ..State::default()
         },
     };
@@ -5219,7 +5292,8 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
         CheckpointExportPolicy::OriginDelta
     );
 
-    let mut attempt = origin_delta::OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
+    let mut attempt =
+        origin_delta::OriginDeltaSuspend::load(&controller, session_id, &fake).unwrap();
     assert!(attempt.worker_capable(&fake).unwrap());
     attempt.accept(&fake).unwrap();
     attempt.request_stop(&fake).unwrap();
@@ -5237,9 +5311,8 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
     let commands = fake.commands.lock().unwrap();
     assert!(!commands.is_empty());
     assert!(
-        commands
-            .iter()
-            .all(|(program, args)| program == "podman" && args.first().map(String::as_str) == Some("exec")),
+        commands.iter().all(|(program, args)| program == "podman"
+            && args.first().map(String::as_str) == Some("exec")),
         "expected all commands via podman exec, got: {commands:?}"
     );
     drop(commands);
@@ -5544,7 +5617,10 @@ async fn wait_for_stop_uses_uncancelled_executor_after_cancellation_on_non_local
             wire::REQUEST.to_owned(),
             serde_json::to_vec(&SuspendRequest {
                 operation: op.clone(),
-                worker: WorkerIdentity { pid: 9001, start: 77 },
+                worker: WorkerIdentity {
+                    pid: 9001,
+                    start: 77,
+                },
                 checkout: PathBuf::from("/remote/clones/cancel-test"),
                 child_sessions: Vec::new(),
             })

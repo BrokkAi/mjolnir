@@ -1438,7 +1438,10 @@ async fn move_session(args: MoveArgs) -> Result<()> {
     let selection = MoveSelection {
         subagents,
         oracle: oracle_enabled,
-        supervisors: args.supervisors.as_deref().map(|choice| choice == "enabled"),
+        supervisors: args
+            .supervisors
+            .as_deref()
+            .map(|choice| choice == "enabled"),
         oracle_choice,
         consent: mj_core::suspend_consent::SuspendConsent {
             discard_untracked: if args.discard_untracked {
@@ -1487,7 +1490,9 @@ async fn move_session(args: MoveArgs) -> Result<()> {
                 println!("Route: {}", route.label());
             }
             if !preparation.skip_keep_sizes.is_empty() {
-                println!("Skipped .mj/keep/ paths (deleted when managed source is retired; kept on raw checkout):");
+                println!(
+                    "Skipped .mj/keep/ paths (deleted when managed source is retired; kept on raw checkout):"
+                );
                 for (path, bytes) in &preparation.skip_keep_sizes {
                     println!(
                         "  {} ({})",
@@ -1540,7 +1545,9 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         eprintln!("{}", mj_core::state::EC2_MOVE_PREPARATION_NOTICE);
     }
     if !args.json && !preparation.skip_keep_sizes.is_empty() {
-        eprintln!("Skipped .mj/keep/ paths (deleted when managed source is retired; kept on raw checkout):");
+        eprintln!(
+            "Skipped .mj/keep/ paths (deleted when managed source is retired; kept on raw checkout):"
+        );
         for (path, bytes) in &preparation.skip_keep_sizes {
             eprintln!(
                 "  {} ({})",
@@ -3211,7 +3218,7 @@ mod tests {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
-            supervisors: false,
+                supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,

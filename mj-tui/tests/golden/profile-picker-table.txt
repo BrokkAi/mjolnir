@@ -5,12 +5,12 @@ action: None
 ╰───────────────                                                                                                       │
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
-│No sessions yet  │   PROFILE      HARNESS      WEEKLY      5H                                       │                 │
-│Create new work  │   ▾ ANTHROPIC  auto                                                              │                 │
-│                 │     claude-1   Claude Code  refreshing                                           │                 │
-│                 │   ▸ OPENAI     auto                                                              │                 │
-│                 │   ▾ MOONSHOT   auto                                                              │                 │
-│                 │     kimi-1     Kimi Code    refreshing                                           │                 │
+│No sessions yet  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
+│Create new work  │   ▾ ANTHROPIC  claude-1  refreshing                                              │                 │
+│                 │                claude-1  refreshing                                              │                 │
+│                 │   ▸ OPENAI     codex-1   refreshing                                              │                 │
+│                 │   ▾ MOONSHOT   kimi-1    refreshing                                              │                 │
+│                 │                kimi-1    refreshing                                              │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
 │                 │                                                                                  │                 │
@@ -37,12 +37,12 @@ action: None
 ╰───────────────                                                                                                       │
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
-│hel ───────────  │   PROFILE      HARNESS      WEEKLY      5H                                       │                 │
-│› · ACP pretty   │   ▾ ANTHROPIC  auto                                                              │                 │
-│  Idle  podman   │     claude-1   Claude Code  63%         40%                                      │                 │
-│  │ No messages  │   ▾ OPENAI     auto                                                              │                 │
-│  │              │     codex-1    Codex        refreshing                                           │                 │
-│                 │     codex-2    Codex        refreshing                                           │                 │
+│hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
+│› · ACP pretty   │   ▾ ANTHROPIC  claude-1  63%         40%                                         │                 │
+│  Idle  podman   │                claude-1  63%         40%                                         │                 │
+│  │ No messages  │   ▾ OPENAI     codex-1   refreshing                                              │                 │
+│  │              │                codex-1   refreshing                                              │                 │
+│                 │                codex-2   refreshing                                              │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
 │                 │                                                                                  │                 │
@@ -93,10 +93,10 @@ Enter open · / s                                                               
 ╰───────────────                                                                                                       │
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
-│No sessions yet  │   PROFILE      HARNESS      WEEKLY      5H                                       │                 │
-│Create new work  │   ▾ ANTHROPIC  auto                                                              │                 │
-│                 │     claude-1   Claude Code  refreshing                                           │                 │
-│                 │   ▸ OPENAI     auto                                                              │                 │
+│No sessions yet  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
+│Create new work  │   ▾ ANTHROPIC  claude-1  refreshing                                              │                 │
+│                 │                claude-1  refreshing                                              │                 │
+│                 │   ▸ OPENAI     codex-1   refreshing                                              │                 │
 │                 │                                                                                  │                 │
 │                 │ kimi-1: Kimi Code is not installed here: /profiles/kimi does not exist and       │                 │
 │                 │ `kimi` is not on PATH. Install Kimi Code, or turn the profile off in Settings    │  ───────────────╯

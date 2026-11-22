@@ -2697,8 +2697,7 @@ fn compaction_drains_all_batches_past_non_shrinking_tool_rows() {
 
     // Batch size 1 forces multiple batches and starts on a >4 KiB tool row that
     // cannot shrink; the cursor must still advance and compact both later rows.
-    let retention =
-        compact_materialized_transcript_all_in(&database, "session-1", 20, 1).unwrap();
+    let retention = compact_materialized_transcript_all_in(&database, "session-1", 20, 1).unwrap();
     assert_eq!(retention.items, 2);
     assert!(!retention.remaining);
     assert!(retention.bytes > 128 * 1024);
@@ -8259,7 +8258,7 @@ fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
 }
 
 #[test]
-fn migration_147_raises_compatibility_floor_and_persists_supervisors_preference() {
+fn supervisors_preference_survives_reopen_and_profile_rename() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("supervisors.sqlite3");
     let mut record = session("sup-parent", "project");
@@ -8271,8 +8270,11 @@ fn migration_147_raises_compatibility_floor_and_persists_supervisors_preference(
     save_new_session_to(&path, &record, None, true, false).unwrap();
     let conn = open(&path).unwrap();
     let schema = schema::read_schema_state(&conn).unwrap();
-    assert_eq!(schema.revision, 147);
-    assert_eq!(schema.minimum_compatible, Some(147));
+    assert_eq!(schema.revision, SCHEMA_VERSION);
+    assert_eq!(
+        schema.minimum_compatible,
+        Some(schema::MINIMUM_COMPATIBLE_VERSION)
+    );
     let state = load_state_from(&path).unwrap();
     assert!(state.sessions[&record.id].supervisors);
     assert_eq!(

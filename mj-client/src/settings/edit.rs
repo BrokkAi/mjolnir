@@ -305,13 +305,15 @@ pub fn add_entry(
                 collection[1].as_str(),
                 "primary" | "straightforward" | "subtle" | "oracle"
             );
-        array.push(if collection == ["review", "reviewers"] || is_subagent_list {
-            json!({"model":"", "effort":null})
-        } else if collection.last().is_some_and(|key| key == "repositories") {
-            schema::repository_default()
-        } else {
-            Value::String(String::new())
-        });
+        array.push(
+            if collection == ["review", "reviewers"] || is_subagent_list {
+                json!({"model":"", "effort":null})
+            } else if collection.last().is_some_and(|key| key == "repositories") {
+                schema::repository_default()
+            } else {
+                Value::String(String::new())
+            },
+        );
         path.push((array.len() - 1).to_string());
         if collection == ["review", "reviewers"] {
             clear_review_legacy(draft);
