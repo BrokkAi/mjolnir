@@ -1036,6 +1036,23 @@ impl Controller {
                     )
                     .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
                 }
+                let backend = super::backend_locator(source_target, &source, &self.config)?;
+                // Stop any surviving or sealed source worker so Resume can
+                // restart the harness cleanly instead of trying to reattach to
+                // a sealed relay.
+                let cleanup = crate::targets::stop_worker_plan(
+                    &backend,
+                    session_id,
+                    "stop retained Move source worker before retry",
+                )
+                .and_then(|plan| {
+                    plan.execute(
+                        &crate::targets::CancellableProcessExecutor::with_timeout(
+                            std::time::Duration::from_secs(15),
+                        ),
+                        &super::ControlWorker,
+                    )
+                });
                 let mut retained = source;
                 retained
                     .resource_allocation
@@ -1044,8 +1061,14 @@ impl Controller {
                     .additional_mounts
                     .clone_from(&current.additional_mounts);
                 retained.state = SessionState::Error;
-                retained.last_error =
-                    Some(super::lifecycle::LifecycleFailureReason::RetainedMoveSource.to_string());
+                let base_error =
+                    super::lifecycle::LifecycleFailureReason::RetainedMoveSource.to_string();
+                retained.last_error = Some(match &cleanup {
+                    Ok(_) => base_error,
+                    Err(cleanup_error) => {
+                        format!("{base_error}; stopping retained worker failed: {cleanup_error:#}")
+                    }
+                });
                 retained.updated_at = now();
                 crate::database::settle_superseded_move_source(
                     &retained,
@@ -1053,6 +1076,10 @@ impl Controller {
                     &operation.operation_id,
                 )?;
                 self.state.sessions.insert(session_id.to_owned(), retained);
+                if let Err(cleanup_error) = cleanup {
+                    release_move_queue_hold(session_id);
+                    return Err(cleanup_error).context("stop retained worker before retry");
+                }
             }
         } else {
             // The environment ledger owns both identities, even when the
@@ -1060,7 +1087,13 @@ impl Controller {
             let source_environment =
                 crate::database::move_source_environment(&operation.operation_id)?;
             let current = self.state.sessions[session_id].clone();
-            if current.target.is_some() {
+            let has_provisional_destination = crate::database::session_environment(session_id)?
+                .is_some_and(|environment| {
+                    source_environment
+                        .as_ref()
+                        .is_none_or(|source_env| environment.id != source_env.id)
+                });
+            if current.target.is_some() || has_provisional_destination {
                 super::environment::retire_session_environment_with_clone_prerequisite(
                     &current,
                     &self.config,
