@@ -99,6 +99,7 @@ fn legacy_resuming_destination_running_crash_window_finishes_forward() {
     ));
 }
 
+// Hard-won: a35beec20: a sealed source could not retry with a replacement delegation policy.
 #[test]
 fn cross_target_move_route_preview_and_commit_point_ownership() {
     let local_a = mj_core::targets::TargetLocator::LocalBare {
@@ -196,6 +197,33 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
     // Crash right before DestinationOwns: source owns and retains its environment.
     assert_eq!(classify_move_ownership(&op), MoveOwnership::Source);
     assert!(op.retains_source_environment());
+    let mut failed = op.clone();
+    failed.phase = MovePhase::Failed;
+    failed.destination_target = None;
+    failed.recovery_session = Some(sample_session_record(
+        SessionState::Closing,
+        failed.source_target.clone().unwrap(),
+    ));
+    let mut retry = failed.selection.clone();
+    retry.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: Some(Box::new(mj_core::config::SubagentChoice {
+            model: "available-model".into(),
+            effort: None,
+        })),
+        subtle: None,
+    });
+    assert!(super::matches_move_retry_selection(&failed, &retry));
+    let mut different_target = retry.clone();
+    different_target.target_template_id = Some("another-host".into());
+    assert!(!super::matches_move_retry_selection(
+        &failed,
+        &different_target
+    ));
+    failed.destination_target = op.destination_target.clone();
+    assert!(!super::matches_move_retry_selection(&failed, &retry));
+    failed.destination_target = None;
+    failed.queue_admission_started = true;
+    assert!(!super::matches_move_retry_selection(&failed, &retry));
     // Crash right after DestinationOwns: destination owns, finish forward.
     op.phase = MovePhase::DestinationOwns;
     assert_eq!(classify_move_ownership(&op), MoveOwnership::Destination);

@@ -338,6 +338,27 @@ pub fn record_finished_move_recovery(
     }
 }
 
+/// Before a destination owns any work, its delegation policy can be changed
+/// independently of the captured files and the agreed placement.
+fn matches_move_retry_selection(operation: &MoveOperation, requested: &MoveSelection) -> bool {
+    if operation.selection == *requested {
+        return true;
+    }
+    !operation.in_place
+        && operation.holds_source_environment()
+        && matches!(operation.phase, MovePhase::Failed | MovePhase::Cancelled)
+        && operation.destination_target.is_none()
+        && operation
+            .prepared_destination
+            .as_ref()
+            .is_none_or(|destination| !destination.owns_resource())
+        && operation.selection
+            == (MoveSelection {
+                subagents: operation.selection.subagents.clone(),
+                ..requested.clone()
+            })
+}
+
 /// Why a retried sealed Move's selection is refused: each part that differs
 /// from the selection the Move was sealed with, and what to send to match it.
 fn sealed_selection_difference(retained: &MoveSelection, requested: &MoveSelection) -> String {
@@ -1459,7 +1480,8 @@ impl Controller {
             // A field the request omits means the one the Move was sealed
             // with, so a surface that cannot express it (the CLI has no flag
             // for attached directories) can still retry a Move another
-            // surface sealed. An explicit value that differs still refuses.
+            // surface sealed. Only the destination's delegation policy can
+            // change on a failed pre-destination retry.
             let sealed = &retained.selection;
             if selection.additional_mounts.is_none() {
                 selection.additional_mounts = sealed.additional_mounts.clone();
@@ -1486,7 +1508,7 @@ impl Controller {
                 selection.supervisors = sealed.supervisors;
             }
             ensure!(
-                retained.selection == selection,
+                matches_move_retry_selection(retained, &selection),
                 "{}",
                 sealed_selection_difference(&retained.selection, &selection)
             );
@@ -1541,6 +1563,10 @@ impl Controller {
         if profile.kind != source.harness_kind
             || policy != source.subagents.clone().unwrap_or_default()
             || yolo_target != source_yolo
+            || previous.as_ref().is_some_and(|operation| {
+                operation.holds_source_environment()
+                    && operation.selection.subagents != selection.subagents
+            })
         {
             super::profile_config::validate_session_subagent_policy(
                 catalog,
@@ -1698,7 +1724,7 @@ impl Controller {
         let operation_id = previous
             .as_ref()
             .filter(|operation| {
-                operation.selection == selection
+                matches_move_retry_selection(operation, &selection)
                     && !operation.is_resolved()
                     && operation.checkpoint_retained()
             })
@@ -1913,10 +1939,12 @@ impl Controller {
         checked.stops_subagents = prepared.stops_subagents;
         let queue = request.queue.unwrap_or(ResumeQueueDisposition::Discard);
         let source = self.state.sessions[&id].clone();
-        let old_operation = crate::database::load_move_operation(&id)?;
-        let retry = old_operation.clone().filter(|op| {
-            op.selection == prepared.selection && op.checkpoint_retained()
+        let retry = crate::database::load_move_operation(&id)?.filter(|op| {
+            matches_move_retry_selection(op, &checked.selection) && op.checkpoint_retained()
         });
+        let updates_retry_policy = retry
+            .as_ref()
+            .is_some_and(|op| op.selection.subagents != checked.selection.subagents);
         if retry.is_none() && move_changes_nothing(&source, &checked.selection) {
             crate::database::accept_unchanged_move(&checked.selection)?;
             let latest = crate::database::load_session_record(&id)?.context("Move session disappeared")?;
@@ -1956,6 +1984,7 @@ impl Controller {
                 crate::database::clear_move_cancellation_for_retry(&id)?;
                 op.configuration_fingerprint =
                     self.move_configuration_fingerprint(&checked.selection)?;
+                op.selection.subagents = checked.selection.subagents.clone();
                 op.queue = queue;
                 op.cancellation_requested = false;
                 op.error = None;
@@ -2025,6 +2054,9 @@ impl Controller {
         operation.acknowledge_interruption = request.acknowledge_interruption;
         crate::database::accept_move_operation(&operation)?;
         on_accepted();
+        if updates_retry_policy {
+            executor.notify_notice("Retrying the sealed Move with the updated destination sub-agent policy.");
+        }
         tracing::info!(
             session_id = id,
             in_place = operation.in_place,
