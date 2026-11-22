@@ -73,9 +73,9 @@ impl TurnDiagnostic {
             });
     }
 
-    /// Only apply to trusted provider failures, never arbitrary chat or tool text.
-    pub fn is_usage_limit(&self) -> bool {
-        if matches!(
+    /// Recognize an explicit provider code for an exhausted usage limit.
+    pub fn is_typed_usage_limit_code(&self) -> bool {
+        matches!(
             self.code.as_deref(),
             Some(
                 "usage_limit"
@@ -85,7 +85,12 @@ impl TurnDiagnostic {
                     | "usageLimitExceeded"
                     | "usage_limit_exceeded"
             )
-        ) {
+        )
+    }
+
+    /// Only apply to trusted provider failures, never arbitrary chat or tool text.
+    pub fn is_usage_limit(&self) -> bool {
+        if self.is_typed_usage_limit_code() {
             return true;
         }
         // Typed non-account limits must never be reclassified from their prose.

@@ -146,6 +146,7 @@ impl DashboardState {
         let Some(go) = &self.go else {
             return action;
         };
+        let mut reveal_profile = None;
         if let crate::Mode::New(wizard) = &mut self.mode {
             // The local source is explicit. A remote bare path is requested
             // separately after target selection, never guessed from this path.
@@ -156,6 +157,8 @@ impl DashboardState {
                     .enabled_profiles()
                     .position(|(id, _)| id == recipe.profile_id)
                     .unwrap_or(0);
+                wizard.focused_provider = None;
+                reveal_profile = Some(wizard.profile);
                 wizard.target = self
                     .config
                     .targets
@@ -165,6 +168,12 @@ impl DashboardState {
                 wizard.create_managed_worktree = recipe.create_managed_worktree.unwrap_or(false);
                 wizard.resource_allocation = recipe.resource_allocation.clone();
                 wizard.mounts.mounts = recipe.additional_mounts.clone();
+            }
+        }
+        if let Some(profile_index) = reveal_profile {
+            let provider = crate::wizards::NewWizard::provider_for_profile(self, profile_index);
+            if let (Some(provider), crate::Mode::New(wizard)) = (provider, &mut self.mode) {
+                wizard.expanded_providers.insert(provider);
             }
         }
         action
@@ -185,6 +194,7 @@ impl DashboardState {
             remember_container_size: false,
             workspace_id,
             profile_id: recipe.profile_id,
+            provider: None,
             target_template_id: recipe.target_id,
             bundle_id: recipe.bundle_id.unwrap_or_else(|| {
                 raw_project_context_id(
@@ -233,6 +243,11 @@ impl DashboardState {
         else {
             return None;
         };
+        if profile_id.is_empty() {
+            // Fast-start recipes store a concrete profile id; do not overwrite
+            // them with an empty id from Auto or provider-balanced launches.
+            return None;
+        }
         let go = if self
             .go
             .as_ref()

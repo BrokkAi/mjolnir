@@ -5,6 +5,7 @@ import argparse
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import mmap
 from pathlib import Path
 import re
 import socket
@@ -52,12 +53,29 @@ def main():
     parser.add_argument("--mailbox-regression-only", action="store_true")
     parser.add_argument("--restart-regression-only", action="store_true")
     parser.add_argument("--create-restart-only", action="store_true")
-    parser.add_argument("--child-quota-only", action="store_true")
+    quota_modes = parser.add_mutually_exclusive_group()
+    quota_modes.add_argument("--child-quota-only", action="store_true")
+    quota_modes.add_argument("--top-level-quota-only", action="store_true")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named test instance")
+    if args.top_level_quota_only:
+        # The worker consumes this endpoint variable only in test-hooks builds.
+        # Check the executable before starting anything that could call GLiDE.
+        try:
+            with args.worker.open("rb") as executable, mmap.mmap(
+                executable.fileno(), 0, access=mmap.ACCESS_READ
+            ) as binary:
+                supports_glide_override = binary.find(b"MJ_TEST_GLIDE_ENDPOINT") != -1
+        except (OSError, ValueError) as error:
+            parser.error(f"cannot inspect the worker executable: {error}")
+        if not supports_glide_override:
+            parser.error("--top-level-quota-only requires mj-worker built with --features test-hooks")
     lab = reliability_lab.Lab(args.mj, "delegation", 1171)
+    quota_only = args.child_quota_only or args.top_level_quota_only
     catalog_proxy = None
+    glide_proxy = None
+    cli = None
     try:
         lab.prepare(fake_acp_prompt_delay_ms=10000)
         bridge = lab.runtime_root / "fake_acp.py"
@@ -188,7 +206,7 @@ def main():
             '                    raise RuntimeError("startup model response was not released")\n'
             '                time.sleep(0.05)\n',
         )
-        if args.child_quota_only:
+        if quota_only:
             reset = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=1)
             script = script.replace(
                 '            marker.write(text + "\\n")',
@@ -213,6 +231,27 @@ def main():
                 '        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-open.jsonl"), "a") as marker:\n'
                 '            marker.write(json.dumps([method, session_id, os.environ.get("MJ_FIXTURE_ACCOUNT", "original")]) + "\\n")',
             )
+        if quota_only:
+            # The daemon reads quota through codex app-server. Serve both
+            # accounts from the same fixture as the typed ACP prompt error.
+            script = script.replace(
+                '    elif method == "session/prompt":\n',
+                '    elif method == "account/read":\n'
+                '        result = {"account": {"type": "chatgpt", "planType": "plus"}}\n'
+                '    elif method == "account/rateLimits/read":\n'
+                '        result = {"rateLimits": {"secondary": {\n'
+                f'            "usedPercent": 100 if {args.top_level_quota_only!r} and not os.environ.get("MJ_FIXTURE_ACCOUNT") else 20,\n'
+                f'            "windowDurationMins": 10080, "resetsAt": {int(reset.timestamp())},\n'
+                '        }}}\n'
+                '    elif method == "session/prompt":\n',
+                1,
+            ).replace(
+                '        report_execution("running")\n',
+                '        log({"fixture_prompt": text, "account": os.environ.get("MJ_FIXTURE_ACCOUNT", "original")})\n'
+                '        report_execution("running")\n',
+                1,
+            )
+            (lab.runtime_root / "bin" / "codex").symlink_to(bridge)
         compile(script, str(bridge), "exec")
         bridge.write_text(script)
         if args.create_restart_only:
@@ -227,7 +266,48 @@ def main():
 
         # Keep the default fixture explicitly OpenAI-backed for its subagents.
         (lab.profile / "config.toml").write_text('model_provider = "openai"\n')
+        if quota_only:
+            (lab.profile / "auth.json").write_text(json.dumps({
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": "quota-fixture-token"},
+            }))
         config_path = lab.config / "config.toml"
+
+        def add_replacement_profile():
+            replacement_home = lab.runtime_root / "profile-replacement"
+            replacement_home.mkdir()
+            for source_file in lab.profile.iterdir():
+                if source_file.is_file():
+                    (replacement_home / source_file.name).write_bytes(source_file.read_bytes())
+            config_text = config_path.read_text()
+            profile = config_text.split("[profiles.fake]\n", 1)[1].split("\n[", 1)[0]
+            replacement = profile.replace(
+                json.dumps(str(lab.profile)), json.dumps(str(replacement_home))
+            ).replace("environment = {", 'environment = { MJ_FIXTURE_ACCOUNT = "replacement",')
+            config_path.write_text(config_text + "\n[profiles.replacement]\n" + replacement)
+
+        if args.top_level_quota_only:
+            add_replacement_profile()
+            glide_requests = []
+
+            class FailingGlideHandler(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    self.rfile.read(int(self.headers["Content-Length"]))
+                    glide_requests.append(self.path)
+                    body = b'{"error":"upstream_failure"}'
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, _format, *_args):
+                    pass
+
+            glide_proxy = ThreadingHTTPServer(("127.0.0.1", 0), FailingGlideHandler)
+            threading.Thread(target=glide_proxy.serve_forever, daemon=True).start()
+            env["MJ_TEST_GLIDE_ENDPOINT"] = f"http://127.0.0.1:{glide_proxy.server_port}"
+
         if args.mailbox_regression_only:
             class CatalogProxyHandler(BaseHTTPRequestHandler):
                 def do_GET(self):
@@ -284,7 +364,7 @@ def main():
                 + f"environment = {{ {env_toml} }}\n"
             )
 
-        def cli(*command):
+        def cli(*command, check=True):
             result = subprocess.run(
                 [str(args.mj.resolve()), "--instance", args.instance, *command],
                 env=env,
@@ -304,7 +384,7 @@ def main():
                     )
                     + "\n"
                 )
-            if result.returncode:
+            if check and result.returncode:
                 raise RuntimeError(f"{command}: {result.stderr}")
             return result.stdout
 
@@ -483,7 +563,7 @@ def main():
             raise RuntimeError(f"parent did not finish provisioning: {sessions}")
         wait_worker_ready(parent)
         config = config_path
-        if not args.child_quota_only:
+        if not quota_only:
             config.write_text(
                 config.read_text().replace(
                     "[phone]\nenabled = true", "[phone]\nenabled = false"
@@ -491,7 +571,8 @@ def main():
             )
             cli("daemon", "restart")
             assert "disabled" in cli("daemon", "status").lower()
-        tool(parent, "list_agents")
+        if not args.top_level_quota_only:
+            tool(parent, "list_agents")
 
         def listed_session_ids(*options):
             response = json.loads(cli("sessions", *options, "--json"))
@@ -804,22 +885,101 @@ def main():
             }), flush=True)
             return
 
-        if args.child_quota_only:
-            def wait_for(description, observe):
-                deadline = time.monotonic() + WAIT_SECONDS
-                while time.monotonic() < deadline:
-                    if result := observe():
-                        return result
-                    time.sleep(0.1)
-                raise RuntimeError(f"timed out waiting for {description}")
+        def wait_for(description, observe):
+            deadline = time.monotonic() + WAIT_SECONDS
+            while time.monotonic() < deadline:
+                if result := observe():
+                    return result
+                time.sleep(0.1)
+            raise RuntimeError(f"timed out waiting for {description}")
 
-            def stored(child):
+        def stored(session):
+            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as db:
+                return db.execute(
+                    "SELECT state, last_profile, native_session_id FROM sessions WHERE session_id=?",
+                    (session,),
+                ).fetchone()
+
+        def metadata():
+            reply = reliability_lab.daemon_request(lab.data, {
+                "action": "runtime_changes",
+                "arguments": {"cursor": None, "wait": False, "subagent_parents": []},
+            })
+            return reply["value"]["Snapshot"]["projection"]["metadata"]
+
+        continuation = (
+            "Continue the unfinished work already requested by the user, following their latest instructions. "
+            "This message supplies no new approval or missing information. "
+            "If a genuine decision, required approval, or external action remains necessary, explain it and stop."
+        )
+
+        # Hard-won: 2026-11-22 live GLiDE 502 outage blocked top-level typed QuotaLimit automove
+        if args.top_level_quota_only:
+            def published_quota():
+                reports = metadata()["quotas"]["reports"]
+                return all(
+                    any(
+                        window["duration_seconds"] == 7 * 24 * 60 * 60
+                        and window["remaining_percent"] == remaining
+                        and window["resets_at_epoch_seconds"] == int(reset.timestamp())
+                        for window in reports.get(profile, {}).get("windows", [])
+                    )
+                    for profile, remaining in [("fake", 0), ("replacement", 80)]
+                )
+
+            def completed_move():
                 with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as db:
-                    return db.execute(
-                        "SELECT state, last_profile, native_session_id FROM sessions WHERE session_id=?",
-                        (child,),
+                    row = db.execute(
+                        "SELECT operation_json FROM session_moves WHERE session_id=?", (parent,)
                     ).fetchone()
+                return (move if row and (move := json.loads(row[0]))["phase"] == "completed" else None)
 
+            wait_for("both weekly quota readings", published_quota)
+            cli("set-config", "--session", parent, "--key", "model", "--value", "tiny")
+            before = wait_for("the worker to accept the selected model", lambda: (
+                status if (status := worker_status(parent))["config"].get("model") == "tiny" else None
+            ))
+            _, profile, native = stored(parent)
+            assert profile == "fake" and native, stored(parent)
+            prompt = "Exhaust fixture quota in a top-level session."
+            cli("message", "--session", parent, "--command-id", "top-level-quota", "--json", prompt)
+            release(parent, prompt)
+            wait_prompt(parent, continuation)
+            moving = wait_for("the completed in-place quota Move", completed_move)
+            assert moving["in_place"] and moving["queue_admission_finished"], moving
+            assert stored(parent) == ("running", "replacement", native), stored(parent)
+            assert not glide_requests, glide_requests
+
+            during = worker_status(parent)
+            assert during["store_id"] == before["store_id"], during
+            command = during["active_prompt"]["command_id"]
+            assert command.startswith("quota-retry-"), command
+            release(parent, continuation)
+
+            def completed_continuation():
+                status = worker_status(parent)
+                assessment = status.get("assessment", {})
+                if assessment.get("turn_id") == command and assessment["reason"] == "request_failed":
+                    assert status["continuation"]["completed_command_id"] == command, status
+                    assert not status.get("active_prompt"), status
+                    assert assessment["completion"]["stop_reason"] == "EndTurn", assessment
+                    return assessment
+
+            wait_for("the completed continuation to receive GLiDE's 502", completed_continuation)
+            assert glide_requests == ["/v1/glide-turn-verdict"], glide_requests
+            prompt_log = [
+                (event["account"], event["fixture_prompt"])
+                for line in (lab.runtime_root / "fake-acp.log").read_text().splitlines()
+                if "fixture_prompt" in (event := json.loads(line))
+            ]
+            assert prompt_log == [("original", prompt), ("replacement", continuation)], prompt_log
+            print(json.dumps({"instance": args.instance, "artifacts": str(lab.root),
+                              "result": "passed", "continuations": 1,
+                              "typed_stop_glide_requests": 0, "continuation_glide_requests": 1}),
+                  flush=True)
+            return
+
+        if args.child_quota_only:
             def assigned_turn(child):
                 with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as db:
                     row = db.execute(
@@ -870,26 +1030,12 @@ def main():
             assert "Start a new sub-agent" in refusal["output"], refusal
             wait_report(parent, miss, refusal["output"])
 
-            replacement_home = lab.runtime_root / "profile-replacement"
-            replacement_home.mkdir()
-            for source_file in lab.profile.iterdir():
-                if source_file.is_file():
-                    (replacement_home / source_file.name).write_bytes(source_file.read_bytes())
-            config_text = config.read_text()
-            profile = config_text.split("[profiles.fake]\n", 1)[1].split("\n[", 1)[0]
-            replacement = profile.replace(
-                json.dumps(str(lab.profile)), json.dumps(str(replacement_home))
-            ).replace("environment = {", 'environment = { MJ_FIXTURE_ACCOUNT = "replacement",')
-            config.write_text(config_text + "\n[profiles.replacement]\n" + replacement)
+            add_replacement_profile()
 
             def published_replacement():
-                reply = reliability_lab.daemon_request(lab.data, {
-                    "action": "runtime_changes",
-                    "arguments": {"cursor": None, "wait": False, "subagent_parents": []},
-                })
-                metadata = reply["value"]["Snapshot"]["projection"]["metadata"]
+                metadata_snapshot = metadata()
                 ready = [
-                    profile for profile in metadata["profile_capabilities"]["profiles"].values()
+                    profile for profile in metadata_snapshot["profile_capabilities"]["profiles"].values()
                     if profile["choices"]["status"] == "ready"
                     and profile["choices"]["value"].get("model") == "tiny"
                 ]
@@ -909,11 +1055,6 @@ def main():
                 opens = log.read_text().splitlines() if log.exists() else []
                 return ["session/load", native, "replacement"] in [json.loads(line) for line in opens]
 
-            continuation = (
-                "Continue the unfinished work already requested by the user, following their latest instructions. "
-                "This message supplies no new approval or missing information. "
-                "If a genuine decision, required approval, or external action remains necessary, explain it and stop."
-            )
             result = "Continued on the replacement fixture profile."
             turn = wait_for("the original assignment receipt", lambda: assigned_turn(recovering))
             with subprocess.Popen(
@@ -942,7 +1083,6 @@ def main():
             wait_report(parent, recovering, result)
             assert stored(recovering)[1:] == ("replacement", native), stored(recovering)
             assert all(report["state"] != "failed" for report in reports(recovering)), reports(recovering)
-            cli("daemon", "stop")
             print(json.dumps({"instance": args.instance, "artifacts": str(lab.root),
                               "result": "passed", "quota_children": 3}), flush=True)
             return
@@ -1431,10 +1571,17 @@ def main():
             flush=True,
         )
     finally:
-        if catalog_proxy is not None:
-            catalog_proxy.shutdown()
-            catalog_proxy.server_close()
-        lab.cleanup_owned()
+        try:
+            if quota_only and cli is not None:
+                cli("daemon", "stop", check=False)
+        finally:
+            for server in (catalog_proxy, glide_proxy):
+                if server is not None:
+                    server.shutdown()
+                    server.server_close()
+            lab.cleanup_owned()
+        if quota_only:
+            assert not (leak := lab.leak_report()), leak
 
 
 if __name__ == "__main__":

@@ -2,10 +2,33 @@ use super::*;
 use crate::acp::verdict_client::{VerdictClient, VerdictSource};
 use crate::test_support::{scoped_log_capture_sees_every_callsite, wait_for};
 use mj_core::activity::ActivityState;
+use mj_core::assessment::{Action, Status};
+use mj_core::diagnostic::{QUOTA_STOP_REASON, TurnDiagnostic};
+use mj_core::relay::RelayCursor;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::AsyncReadExt;
+use tokio::net::TcpStream;
 use tracing::instrument::WithSubscriber;
 
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+
+async fn read_glide_request(stream: &mut TcpStream) -> serde_json::Value {
+    let mut stream = BufReader::new(stream);
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+            length = value.trim().parse::<usize>().unwrap();
+        }
+    }
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
 
 #[derive(Clone, Copy)]
 enum WhileClassifying {
@@ -42,22 +65,8 @@ async fn completed_turn_response(
     let (requested_tx, mut requested_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let server = mj_core::runtime::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut stream = BufReader::new(stream);
-        let mut length = 0;
-        loop {
-            let mut line = String::new();
-            stream.read_line(&mut line).await.unwrap();
-            if line == "\r\n" {
-                break;
-            }
-            if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
-                length = value.trim().parse::<usize>().unwrap();
-            }
-        }
-        let mut body = vec![0; length];
-        stream.read_exact(&mut body).await.unwrap();
-        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_glide_request(&mut stream).await;
         assert_eq!(request["phase"], "replied");
         assert_eq!(
             request["assistant_text_tail"],
@@ -490,6 +499,277 @@ async fn uncertain_verdicts_are_cached_and_transport_failures_back_off() {
         503,
     )
     .await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuotaCase {
+    UntimedRecovery,
+    FailedBackoff,
+    ProseOnly,
+    PausedGoal,
+}
+
+async fn completed_quota_turn(case: QuotaCase) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(AtomicUsize::new(0));
+    let request_count = requests.clone();
+    let server = mj_core::runtime::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_glide_request(&mut stream).await;
+            request_count.fetch_add(1, Ordering::Relaxed);
+            stream
+                .write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let diagnostic = if case == QuotaCase::ProseOnly {
+        serde_json::json!({"message": "RPM quota exceeded"})
+    } else {
+        serde_json::json!({"message": "Plan usage exhausted", "code": "usageLimitExceeded"})
+    };
+    let diagnostic = TurnDiagnostic::from_provider(&diagnostic).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "test").unwrap();
+    let submit = |relay: &mut DurableRelay, id: &str, command| {
+        let response = relay.handle(RelayRequestEnvelope {
+            request_id: format!("submit-{id}"),
+            protocol_version: crate::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::Submit {
+                command_id: id.into(),
+                command,
+            },
+        });
+        assert!(
+            matches!(response.body, RelayResponseBody::Ok { .. }),
+            "{response:?}"
+        );
+    };
+    submit(
+        &mut durable,
+        "prompt-1",
+        RelayCommand::Prompt {
+            prompt: mj_core::continuation::prompt_blocks(),
+        },
+    );
+    let failed = if case == QuotaCase::FailedBackoff {
+        // Write and reopen the durable state left by a worker that asked GLiDE.
+        // Install the harness on the reopened relay so only it settles locally.
+        durable
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        assert_eq!(durable.claim_pending_commands(true).unwrap().len(), 1);
+        durable
+            .record_command_completed(
+                "prompt-1",
+                RelayCommandOutcome::Prompt {
+                    work_facts: None,
+                    stop_reason: QUOTA_STOP_REASON.into(),
+                    usage: None,
+                    diagnostic: Some(diagnostic.clone()),
+                },
+            )
+            .unwrap();
+        let pending = durable.operational_state().assessment.unwrap();
+        durable
+            .fail_turn_assessment(pending.revision, "classifier_failed")
+            .unwrap();
+        drop(durable);
+        durable = DurableRelay::open(temp.path(), SESSION_ID, "test").unwrap();
+        let failed = durable.operational_state().assessment.unwrap();
+        assert_eq!(failed.status, Status::Failed);
+        assert!(failed.retry_at_ms.unwrap() > mj_core::clock::epoch_millis());
+        Some(failed)
+    } else {
+        None
+    };
+    durable.set_turn_verdict_harness(HarnessKind::Codex);
+    if case == QuotaCase::UntimedRecovery {
+        durable.set_background_work_policy(crate::relay::BackgroundWorkPolicy::AirTasks);
+        durable
+            .set_air_tasks(vec![crate::relay::AirTaskFixture {
+                task_id: "background-task".into(),
+                description: "Waiting for a build".into(),
+            }])
+            .unwrap();
+    }
+    let relay = Arc::new(crate::relay::RelayCell::new(durable));
+    let (events_tx, events_rx) = mpsc::channel(4);
+    let (wakes_tx, wakes_rx) = mpsc::channel(1);
+    let (commands_tx, mut commands_rx) = mpsc::channel(4);
+    let user_shells = crate::user_shell::UserShellRegistry::new(
+        temp.path().to_owned(),
+        BTreeMap::new(),
+        events_tx.clone(),
+    );
+    let client = VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap();
+    let coordinator = mj_core::runtime::spawn(run_relay_coordinator_with_verdict(
+        relay.clone(),
+        events_rx,
+        wakes_rx,
+        commands_tx,
+        user_shells,
+        None,
+        Some(client),
+        None,
+    ));
+    if failed.is_none() {
+        events_tx
+            .send(RuntimeEvent::SessionConfigured {
+                config_options: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            wait_for("the prompt dispatch", commands_rx.recv())
+                .await
+                .unwrap(),
+            CommandRequest::Prompt { .. }
+        ));
+        if case == QuotaCase::PausedGoal {
+            events_tx
+                .send(RuntimeEvent::SessionUpdate {
+                    update: serde_json::json!({
+                        "sessionUpdate": "session_info_update",
+                        "_meta": {"goal": {"objective": "Build it", "createdAt": 1, "status": "paused"}}
+                    }),
+                })
+                .await
+                .unwrap();
+        }
+        events_tx
+            .send(RuntimeEvent::PromptFinished {
+                request_id: "prompt-1".into(),
+                // The harness can use QuotaLimit even for a prose-only diagnosis.
+                stop_reason: QUOTA_STOP_REASON.into(),
+                usage: None,
+                diagnostic: Some(diagnostic),
+            })
+            .await
+            .unwrap();
+    }
+    let expected_status = match case {
+        QuotaCase::ProseOnly => Status::Failed,
+        QuotaCase::PausedGoal => Status::Superseded,
+        _ => Status::Deferred,
+    };
+    let settled = wait_for("the completed quota turn assessment", async {
+        loop {
+            let state = relay.lock().unwrap().operational_state();
+            if let Some(a) = state.assessment.filter(|a| a.status == expected_status)
+                && (case != QuotaCase::ProseOnly || requests.load(Ordering::Relaxed) == 1)
+            {
+                break a;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if case == QuotaCase::ProseOnly {
+        assert_eq!(settled.action, None);
+    } else {
+        assert_eq!(settled.action, Some(Action::RecoverQuota));
+        assert!(settled.verdict.is_none());
+        assert!(settled.glide.is_none());
+        assert_eq!(settled.retry_at_ms, None);
+        assert_eq!(
+            settled.reason,
+            if case == QuotaCase::PausedGoal {
+                "automatic_action_suppressed"
+            } else {
+                "quota_resolution_required"
+            }
+        );
+    }
+    if let Some(failed) = failed {
+        assert_eq!(settled.turn_id, failed.turn_id);
+        assert_eq!(settled.completed_ordinal, failed.completed_ordinal);
+        assert_eq!(settled.revision, failed.revision);
+        assert_eq!(settled.completion, failed.completion);
+        assert_eq!(settled.failures, failed.failures);
+    }
+    if case == QuotaCase::UntimedRecovery {
+        {
+            let mut relay = relay.lock().unwrap();
+            let state = relay.operational_state();
+            assert_eq!(state.background_commands.len(), 1);
+            submit(
+                &mut relay,
+                "record-quota-recovery",
+                RelayCommand::SetQuotaRecovery {
+                    expected: RelayCursor {
+                        ordinal: state.latest_ordinal,
+                        digest: state.latest_digest,
+                    },
+                    recovery: Some(Box::new(mj_core::continuation::QuotaRecovery {
+                        user_command_id: "prompt-1".into(),
+                        completed_command_id: "prompt-1".into(),
+                        profile_id: "isolated-quota-test".into(),
+                        reset_at_ms: None,
+                        retry_at_ms: None,
+                        notice: "Quota deadline unavailable".into(),
+                        submitted: false,
+                    })),
+                },
+            );
+        }
+        // With a one-slot wake channel, the third send proves the coordinator
+        // returned to its assessment loop after processing the first wake.
+        for _ in 0..3 {
+            wait_for("the coordinator to process recovery", wakes_tx.send(()))
+                .await
+                .unwrap();
+        }
+        let recovered = relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .assessment
+            .unwrap();
+        assert_eq!(recovered.status, Status::Assessed);
+        assert_eq!(recovered.action, Some(Action::RecoverQuota));
+        assert_eq!(recovered.reason, "quota_deadline_unavailable");
+        assert_eq!(recovered.revision, settled.revision);
+        assert!(recovered.glide.is_none());
+    }
+    events_tx.send(RuntimeEvent::Stopped).await.unwrap();
+    wait_for("quota coordinator shutdown", coordinator)
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        requests.load(Ordering::Relaxed),
+        usize::from(case == QuotaCase::ProseOnly)
+    );
+}
+
+// Hard-won: 2026-11-22 live GLiDE 502 outage blocked top-level typed QuotaLimit automove
+#[tokio::test]
+async fn typed_quota_settles_locally_and_untimed_recovery_does_not_reask_glide() {
+    completed_quota_turn(QuotaCase::UntimedRecovery).await;
+}
+
+#[tokio::test]
+async fn typed_quota_settles_during_a_persisted_glide_backoff() {
+    completed_quota_turn(QuotaCase::FailedBackoff).await;
+}
+
+#[tokio::test]
+async fn prose_only_quota_still_asks_glide() {
+    completed_quota_turn(QuotaCase::ProseOnly).await;
+}
+
+#[tokio::test]
+async fn typed_quota_respects_a_paused_goal_without_asking_glide() {
+    completed_quota_turn(QuotaCase::PausedGoal).await;
 }
 
 /// Sends one classification to a closed port, logging through whatever

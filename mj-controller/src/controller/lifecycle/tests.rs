@@ -3950,6 +3950,103 @@ impl CommandExecutor for NoExportExecutor {
     }
 }
 
+// Hard-won: d64ca35d9: cross-target Move held the source relay while OriginDelta tried to lease it again.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
+    use crate::controller::checkpoint::tests::{LATCH_RELAY_SESSION, close_cut_controller_with};
+    use crate::controller::move_session::MoveSourceRelay;
+    use mj_core::worker_suspend::{self as wire, WorkerIdentity};
+    use std::os::unix::fs::PermissionsExt;
+
+    const NAME: &str = "origin_delta_move_reuses_the_source_lease_until_quiescence";
+    const CHILD: &str = "MJ_TEST_ORIGIN_DELTA_MOVE_LEASE";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            NAME,
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "origin-delta-move-lease")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let data = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
+    let (origin, clone) = init_managed_clone_with_origin(&data, LATCH_RELAY_SESSION);
+    let (mut controller, channels, handle) =
+        close_cut_controller_with(SessionState::Running, false).await;
+    let session = controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    let Some(TargetLocator::LocalBare { worker_root }) = session.target.as_deref() else {
+        panic!("expected a local worker");
+    };
+    let worker_root = worker_root.clone();
+    attach_local_managed_clone(session, clone, origin);
+    persist_controller_fixture(&controller);
+
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+    let start = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap();
+    wire::write(
+        &worker_root,
+        wire::CAPABILITY,
+        &WorkerIdentity {
+            pid: std::process::id(),
+            start: start.parse().unwrap(),
+        },
+    )
+    .unwrap();
+    let worker = worker_root.join("hel");
+    std::fs::write(&worker, "#!/bin/sh\n[ \"$1 $2\" = 'worker quiesce' ] || exit 2\necho 'injected quiescence refusal' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let admission = crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+    let mut source_relay =
+        MoveSourceRelay::lease(&admission, &channels.control, LATCH_RELAY_SESSION)
+            .await
+            .unwrap();
+    let held_relay = source_relay.take().expect("Move holds the live relay");
+    let error = controller
+        .suspend_session_controlled_with_manager(
+            &admission,
+            LATCH_RELAY_SESSION,
+            &ProcessExecutor,
+            Some(&channels.control),
+            None,
+            SourceTargetDisposition::RetainForInPlaceSwap,
+            CheckpointExportPolicy::OriginDelta,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            None,
+            Some(held_relay),
+            LatchExclusivity::HoldThroughClose,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("injected quiescence refusal"),
+        "{error:#}"
+    );
+    assert_eq!(
+        controller.state.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Running
+    );
+    handle.lease_connection(&admission).await.unwrap().release();
+    channels.shutdown.shutdown().await.unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn older_worker_suspend_preflight_refuses_before_touching_worker() {

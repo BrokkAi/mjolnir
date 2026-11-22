@@ -518,7 +518,12 @@ fn bootstrap_login_environment(
         // environment-isolating re-exec. Carry only those feature-gated test
         // controls across; ordinary launcher variables must stay excluded.
         #[cfg(feature = "test-hooks")]
-        for name in ["MJ_CHAOS_ISOLATED", "MJ_TEST_HOOK", "MJ_TEST_HOOK_DIR"] {
+        for name in [
+            "MJ_CHAOS_ISOLATED",
+            "MJ_TEST_HOOK",
+            "MJ_TEST_HOOK_DIR",
+            "MJ_TEST_GLIDE_ENDPOINT",
+        ] {
             if let Ok(value) = std::env::var(name) {
                 environment.insert(name.to_owned(), value);
             }

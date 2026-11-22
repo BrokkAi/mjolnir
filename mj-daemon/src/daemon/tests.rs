@@ -7248,6 +7248,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             initial_prompt: None,
             workspace_id: workspace.id.clone(),
             profile_id: "codex".into(),
+            provider: None,
             bundle_id: "project".into(),
             project_directory: Some(project.clone()),
             target_template_id: "localhost".into(),

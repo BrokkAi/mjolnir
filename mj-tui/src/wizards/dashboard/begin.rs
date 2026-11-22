@@ -135,6 +135,10 @@ impl DashboardState {
             self.state.last_oracle_choice_for(profile_id),
             self.state.last_supervisor_choice_for(profile_id),
         );
+        let mut expanded_providers = std::collections::BTreeSet::new();
+        if let Some(provider) = NewWizard::provider_for_profile(self, profile) {
+            expanded_providers.insert(provider);
+        }
         self.mode = Mode::New(NewWizard {
             subagents: Box::new(delegation),
             worktree_options: None,
@@ -143,6 +147,8 @@ impl DashboardState {
             step: WizardStep::Profile,
 
             profile,
+            expanded_providers,
+            focused_provider: None,
             bundle,
             target,
             target_step_skipped: false,
@@ -181,6 +187,15 @@ impl DashboardState {
     /// this for a failed but checkpointed session; the resume dialog reaches it
     /// for a stopped one.
     pub fn begin_resume_for(&mut self, session_id: &str) -> DashboardAction {
+        let workspace_id = self.active_workspace_id.clone().unwrap_or_default();
+        self.begin_resume_in_workspace(session_id, workspace_id)
+    }
+
+    pub(crate) fn begin_resume_in_workspace(
+        &mut self,
+        session_id: &str,
+        workspace_id: String,
+    ) -> DashboardAction {
         let Some(session) = self.session_record(session_id).cloned() else {
             return DashboardAction::None;
         };
@@ -236,7 +251,7 @@ impl DashboardState {
             session_id: session.id.clone(),
             source: ResumeSource::Session,
             title: session.listed_title().to_owned(),
-            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
+            workspace_id,
             moving: false,
             preparation: None,
             preparing: false,

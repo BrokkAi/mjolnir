@@ -104,6 +104,24 @@ pub fn serve_latch_relay() {
                 );
             }
         }
+        if std::env::var_os("MJ_TEST_RECORD_IN_PLACE_MOVE_REQUESTS").is_some()
+            && matches!(
+                &request.request,
+                mj_core::relay::RelayRequest::HoldInPlaceMoveDispatch { .. }
+                    | mj_core::relay::RelayRequest::RestartHarnessInPlace { .. }
+                    | mj_core::relay::RelayRequest::DiscardHeldMoveCommands { .. }
+                    | mj_core::relay::RelayRequest::SubmitFront { .. }
+                    | mj_core::relay::RelayRequest::ReleaseInPlaceMoveDispatch { .. }
+            )
+        {
+            use std::io::Write as _;
+            let mut log = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(Path::new(&root).join("in-place-move-requests.log"))
+                .unwrap();
+            writeln!(log, "{}", request.request.method_name()).unwrap();
+        }
         let payload = match &request.request {
             mj_core::relay::RelayRequest::Hello { supported, .. } => {
                 let negotiated = max_protocol
