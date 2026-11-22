@@ -70,9 +70,9 @@ fn validate_ed25519_pubkey(public_key: &str) -> Result<String> {
         "expected ssh-ed25519 public key, got {key_type}"
     );
     ensure!(
-        key_data.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='
-        }),
+        key_data
+            .bytes()
+            .all(|b| { b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' }),
         "public_key contains invalid base64 characters"
     );
     Ok(format!("{key_type} {key_data}"))
@@ -244,8 +244,7 @@ fn with_locked_authorized_keys(
 }
 
 fn create_ssh_dir(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir)
-        .with_context(|| format!("create ssh directory {}", dir.display()))?;
+    fs::create_dir_all(dir).with_context(|| format!("create ssh directory {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -342,8 +341,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&auth_keys, fs::Permissions::from_mode(0o600))
-                .expect("chmod 0600");
+            fs::set_permissions(&auth_keys, fs::Permissions::from_mode(0o600)).expect("chmod 0600");
         }
 
         // Pre-install 8 keys that will be removed concurrently while 8 new keys
@@ -464,16 +462,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            install_key(
-                &auth_keys,
-                "op 1",
-                "10.0.0.1",
-                "mj-worker",
-                SAMPLE_PUBKEY,
-            )
-            .is_err()
-        );
+        assert!(install_key(&auth_keys, "op 1", "10.0.0.1", "mj-worker", SAMPLE_PUBKEY,).is_err());
     }
 
     #[test]
@@ -489,7 +478,10 @@ mod tests {
         // Install, remove, and reconcile for `op1` must never touch `unrelated`.
         install_key(&auth_keys, "op1", "10.0.0.1", "mj-worker", SAMPLE_PUBKEY).expect("install");
         assert!(remove_key(&auth_keys, "op1").expect("remove"));
-        assert_eq!(reconcile_keys(&auth_keys, &BTreeSet::new()).expect("reconcile"), 0);
+        assert_eq!(
+            reconcile_keys(&auth_keys, &BTreeSet::new()).expect("reconcile"),
+            0
+        );
 
         let contents = fs::read_to_string(&auth_keys).expect("read final");
         assert_eq!(contents.trim(), unrelated);

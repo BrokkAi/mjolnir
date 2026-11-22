@@ -2530,7 +2530,10 @@ pub(crate) fn purge_untracked_lines(response: &PurgeUntrackedResponse) -> Vec<St
     for session in &response.sessions {
         lines.push(match session.status {
             PurgeUntrackedStatus::Purged => {
-                format!("{}: {} reclaimed", session.session_id, session.bytes_reclaimed)
+                format!(
+                    "{}: {} reclaimed",
+                    session.session_id, session.bytes_reclaimed
+                )
             }
             PurgeUntrackedStatus::DryRun => {
                 format!(
@@ -2611,11 +2614,7 @@ pub(crate) fn format_suspend_dry_run(
                 let _ = writeln!(out, "session state: unavailable");
             }
         }
-        let _ = writeln!(
-            out,
-            ".mj/keep/: {}",
-            format_human_bytes(est.keep_dir_bytes)
-        );
+        let _ = writeln!(out, ".mj/keep/: {}", format_human_bytes(est.keep_dir_bytes));
         if let Some(route) = &est.transfer_route {
             let _ = writeln!(out, "transfer route: {route}");
         }
@@ -5285,7 +5284,9 @@ mod tests {
             panic!("expected the destroy subcommand");
         };
         assert_eq!(args.session, "s1");
-        assert!(Cli::try_parse_from(["mj", "destroy", "--session", "s1", "--delete-branch"]).is_err());
+        assert!(
+            Cli::try_parse_from(["mj", "destroy", "--session", "s1", "--delete-branch"]).is_err()
+        );
 
         let cli = Cli::try_parse_from(["mj", "suspend", "--session", "s1"]).unwrap();
         let Some(Command::Suspend(args)) = cli.command else {
@@ -6088,17 +6089,16 @@ mod tests {
         let output = format!(
             "=== untracked refusal ===\n{refusal}\n\n=== dry run ===\n{dry_run_clean}\n=== dry run during rebase ===\n{dry_run_rebase}"
         );
-        mj_core::golden::assert_golden(
-            env!("CARGO_MANIFEST_DIR"),
-            "api-suspend-consent",
-            &output,
-        );
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-suspend-consent", &output);
     }
 
     #[test]
     fn suspend_preflight_query_includes_without_checkpoint() {
         assert_eq!(ApiClient::suspend_preflight_query(false, false), "");
-        assert_eq!(ApiClient::suspend_preflight_query(true, false), "?dry_run=true");
+        assert_eq!(
+            ApiClient::suspend_preflight_query(true, false),
+            "?dry_run=true"
+        );
         assert_eq!(
             ApiClient::suspend_preflight_query(false, true),
             "?without_checkpoint=true"
@@ -6200,14 +6200,16 @@ mod tests {
 }"#
         );
         let mut failed = response.clone();
-        failed.sessions.push(mj_daemon::server::api::PurgeUntrackedSession {
-            session_id: "cccccccccccccccccccccccccccccccc".into(),
-            status: PurgeUntrackedStatus::Failed,
-            bytes_reclaimed: 0,
-            reason: Some("checkpoint archive is missing".into()),
-            stash_untracked_notes: Vec::new(),
-            warnings: Vec::new(),
-        });
+        failed
+            .sessions
+            .push(mj_daemon::server::api::PurgeUntrackedSession {
+                session_id: "cccccccccccccccccccccccccccccccc".into(),
+                status: PurgeUntrackedStatus::Failed,
+                bytes_reclaimed: 0,
+                reason: Some("checkpoint archive is missing".into()),
+                stash_untracked_notes: Vec::new(),
+                warnings: Vec::new(),
+            });
         let lines = purge_untracked_lines(&failed);
         assert_eq!(
             lines[lines.len() - 2],
@@ -6229,19 +6231,23 @@ mod tests {
         assert!(!args.json);
 
         let mut response = sample_purge_report(false);
-        response.sessions.push(mj_daemon::server::api::PurgeUntrackedSession {
-            session_id: "cccccccccccccccccccccccccccccccc".into(),
-            status: PurgeUntrackedStatus::Failed,
-            bytes_reclaimed: 0,
-            reason: Some("checkpoint archive is missing".into()),
-            stash_untracked_notes: Vec::new(),
-            warnings: Vec::new(),
-        });
+        response
+            .sessions
+            .push(mj_daemon::server::api::PurgeUntrackedSession {
+                session_id: "cccccccccccccccccccccccccccccccc".into(),
+                status: PurgeUntrackedStatus::Failed,
+                bytes_reclaimed: 0,
+                reason: Some("checkpoint archive is missing".into()),
+                stash_untracked_notes: Vec::new(),
+                warnings: Vec::new(),
+            });
         let (report, status) = purge_untracked_conclusion(&response, false);
         assert!(report.contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: 4096 reclaimed"));
-        assert!(report.contains(
-            "cccccccccccccccccccccccccccccccc: failed (checkpoint archive is missing)"
-        ));
+        assert!(
+            report.contains(
+                "cccccccccccccccccccccccccccccccc: failed (checkpoint archive is missing)"
+            )
+        );
         assert!(report.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: skipped"));
         assert!(report.ends_with("Total: 4096 reclaimed"));
         let error = status.expect_err("a failed session fails the command");
@@ -6256,7 +6262,9 @@ mod tests {
         assert!(json.contains("checkpoint archive is missing"));
         assert!(json.contains("\"bytes_reclaimed\": 4096"));
         assert_eq!(
-            status.expect_err("json still fails after the report").to_string(),
+            status
+                .expect_err("json still fails after the report")
+                .to_string(),
             "1 session(s) failed to purge untracked payloads"
         );
 

@@ -2470,7 +2470,9 @@ def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq, claude_c
     # A Read of the session's own saved tool output, or a Grep whose explicit
     # path is exactly that one file, reads only an earlier audited call's result.
     # A search of the tool-results directory itself still needs inspection.
-    if ((name == "Read" and raw.keys() <= {"file_path", "offset", "limit", "pages"}
+    # allow_large only lifts Read's size limit on that same file.
+    if ((name == "Read" and raw.keys() <= {"file_path", "offset", "limit", "pages", "allow_large"}
+            and isinstance(raw.get("allow_large", False), bool)
             or name == "Grep" and isinstance(raw.get("path"), str))
             and all(path == paths[0] for path in paths)
             and engine_saved_result(paths[0], own_workspace, audited_calls, seq)):

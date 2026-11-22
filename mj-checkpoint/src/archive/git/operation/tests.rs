@@ -419,8 +419,7 @@ fn a_clone_stopped_in_a_conflicted_merge_drops_operation_and_preserves_conflicte
     step_stops(&lab.source, &["merge", "--autostash", "side"]);
     partly_resolve(&lab.source);
 
-    let (restored, _) =
-        round_trip_dropped_operation(&lab, "merge", &["a.txt", "link", "m.txt"]);
+    let (restored, _) = round_trip_dropped_operation(&lab, "merge", &["a.txt", "link", "m.txt"]);
     assert_eq!(git_line(&restored, &["rev-parse", "HEAD"]), diverged.main);
 }
 
@@ -449,8 +448,7 @@ fn a_clone_stopped_in_a_conflicted_revert_drops_operation_and_preserves_conflict
     step_stops(&lab.source, &["revert", &reverted]);
     partly_resolve(&lab.source);
 
-    let (restored, _) =
-        round_trip_dropped_operation(&lab, "revert", &["a.txt", "link", "m.txt"]);
+    let (restored, _) = round_trip_dropped_operation(&lab, "revert", &["a.txt", "link", "m.txt"]);
     assert_eq!(git_line(&restored, &["rev-parse", "HEAD"]), later);
 }
 

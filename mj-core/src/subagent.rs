@@ -2358,16 +2358,25 @@ mod tests {
                 default_effort.clone(),
                 SubagentPolicy::None,
             ] {
-                assert_eq!(policy.for_launch(harness, Some(&worker)), SubagentPolicy::None);
+                assert_eq!(
+                    policy.for_launch(harness, Some(&worker)),
+                    SubagentPolicy::None
+                );
                 assert_eq!(policy.for_launch(harness, Some(&supervisor)), policy);
                 assert_eq!(policy.for_launch(harness, None), policy);
             }
             // Depth-2 invariant: top-level -> supervisor ok; supervisor -> worker ok;
             // supervisor -> supervisor/oracle refused; worker -> worker refused.
             assert!(validate_subagent_parent(None, SubagentKind::Worker, true).is_ok());
-            assert!(validate_subagent_parent(Some(&supervisor), SubagentKind::Worker, false).is_ok());
-            assert!(validate_subagent_parent(Some(&supervisor), SubagentKind::Worker, true).is_err());
-            assert!(validate_subagent_parent(Some(&supervisor), SubagentKind::Oracle, false).is_err());
+            assert!(
+                validate_subagent_parent(Some(&supervisor), SubagentKind::Worker, false).is_ok()
+            );
+            assert!(
+                validate_subagent_parent(Some(&supervisor), SubagentKind::Worker, true).is_err()
+            );
+            assert!(
+                validate_subagent_parent(Some(&supervisor), SubagentKind::Oracle, false).is_err()
+            );
             assert!(validate_subagent_parent(Some(&worker), SubagentKind::Worker, false).is_err());
             assert!(validate_subagent_parent(Some(&worker), SubagentKind::Reviewer, false).is_ok());
             // Keep existing serde round-trip check below for completeness.

@@ -1,7 +1,9 @@
 //! Move intent uses the same guarded writer as session lifecycle transitions.
 
 use super::*;
-use mj_core::state::{LegacyMoveOperation, MoveOperation, MovePhase, MoveSelection, StoredMoveOperation};
+use mj_core::state::{
+    LegacyMoveOperation, MoveOperation, MovePhase, MoveSelection, StoredMoveOperation,
+};
 
 pub fn retained_move_sources(
     session_id: &str,
@@ -61,9 +63,7 @@ pub fn remove_revoked_move_granted_keys(
             return Ok(());
         };
         let before = current.granted_keys.len();
-        current
-            .granted_keys
-            .retain(|key| !revoked.contains(key));
+        current.granted_keys.retain(|key| !revoked.contains(key));
         if current.granted_keys.len() != before {
             current.updated_at = updated_at;
             tx.execute(
@@ -137,12 +137,22 @@ pub fn adopt_move_destination(operation: &MoveOperation, session: &SessionRecord
 }
 
 /// Publish a Move result and its session message as one committed outcome.
-/// Update only the message fields; other owners may have changed the session.
-pub fn save_move_outcome(operation: &MoveOperation, last_error: Option<&str>) -> Result<()> {
+/// A failed rollback can settle its own Closing record as retryable Error.
+/// Other session fields retain the values written by their own owners.
+pub fn save_move_outcome(
+    operation: &MoveOperation,
+    last_error: Option<&str>,
+    fail_closing_source: bool,
+) -> Result<()> {
     let operation = operation.clone();
     let last_error = last_error.map(str::to_owned);
     submit_database_write("save_move_outcome", move |connection| {
-        save_move_outcome_with(connection, &operation, last_error.as_deref())
+        save_move_outcome_with(
+            connection,
+            &operation,
+            last_error.as_deref(),
+            fail_closing_source,
+        )
     })
 }
 
@@ -150,6 +160,7 @@ fn save_move_outcome_with(
     connection: &mut Connection,
     operation: &MoveOperation,
     last_error: Option<&str>,
+    fail_closing_source: bool,
 ) -> Result<()> {
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     save_move_operation_with(&tx, operation)?;
@@ -158,10 +169,16 @@ fn save_move_outcome_with(
         params![
             operation.selection.session_id,
             last_error,
-            operation.updated_at
+            operation.updated_at,
         ],
     )?;
     anyhow::ensure!(updated == 1, "Move outcome session is missing");
+    if fail_closing_source {
+        tx.execute(
+            "UPDATE sessions SET state='error' WHERE session_id=?1 AND state='closing'",
+            [&operation.selection.session_id],
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -297,9 +314,8 @@ pub fn load_move_operations() -> Result<Vec<MoveOperation>> {
 /// destination-owned moves.
 pub fn load_legacy_move_operations() -> Result<Vec<(String, LegacyMoveOperation)>> {
     let connection = open_reader(&database_path())?;
-    let mut statement = connection.prepare(
-        "SELECT session_id, operation_json FROM session_moves ORDER BY session_id",
-    )?;
+    let mut statement = connection
+        .prepare("SELECT session_id, operation_json FROM session_moves ORDER BY session_id")?;
     let rows = statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
@@ -663,6 +679,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("controller.sqlite");
         let mut session = super::super::tests::session("moving", "project");
+        session.state = SessionState::Closing;
         session.draft_input = "a concurrent draft".into();
         save_session_to(&path, &session).unwrap();
         let mut connection = open(&path).unwrap();
@@ -676,7 +693,9 @@ mod tests {
             .unwrap();
         intent.phase = MovePhase::Failed;
         intent.error = Some("private diagnostic".into());
-        assert!(save_move_outcome_with(&mut connection, &intent, Some("public message")).is_err());
+        assert!(
+            save_move_outcome_with(&mut connection, &intent, Some("public message"), true).is_err()
+        );
         assert_eq!(
             load_move_operation_with(&connection, &session.id)
                 .unwrap()
@@ -684,16 +703,19 @@ mod tests {
                 .phase,
             MovePhase::Capturing
         );
+        let failed_write = load_state_from(&path).unwrap();
+        assert_eq!(failed_write.sessions[&session.id].last_error, None);
         assert_eq!(
-            load_state_from(&path).unwrap().sessions[&session.id].last_error,
-            None
+            failed_write.sessions[&session.id].state,
+            SessionState::Closing
         );
         connection
             .execute_batch("DROP TRIGGER refuse_move_message")
             .unwrap();
-        save_move_outcome_with(&mut connection, &intent, Some("public message")).unwrap();
+        save_move_outcome_with(&mut connection, &intent, Some("public message"), true).unwrap();
         drop(connection);
         let restored = load_state_from(&path).unwrap();
+        assert_eq!(restored.sessions[&session.id].state, SessionState::Error);
         assert_eq!(
             restored.sessions[&session.id].last_error.as_deref(),
             Some("public message")
@@ -981,13 +1003,7 @@ mod tests {
             ),
             ("cancelled-gone", MovePhase::Cancelled, false, false, false),
             ("failed-gone", MovePhase::Failed, false, false, true),
-            (
-                "running-gone",
-                MovePhase::Restoring,
-                false,
-                false,
-                true,
-            ),
+            ("running-gone", MovePhase::Restoring, false, false, true),
         ];
         for (session_id, phase, archive_present, mid_admission, _) in cases {
             let session = super::super::tests::session(session_id, "project");

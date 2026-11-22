@@ -113,9 +113,11 @@ pub fn list_overdue_host_snapshot_cache_entries(
 pub fn earliest_host_snapshot_cache_written_at() -> Result<Option<String>> {
     let connection = open_reader(&database_path())?;
     connection
-        .query_row("SELECT MIN(written_at) FROM host_snapshot_cache", [], |row| {
-            row.get::<_, Option<String>>(0)
-        })
+        .query_row(
+            "SELECT MIN(written_at) FROM host_snapshot_cache",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
         .context("query earliest host_snapshot_cache written_at")
 }
 

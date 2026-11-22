@@ -841,6 +841,10 @@ fn spawn_with_gate(
                                 }
                                 Outcome::QuotaPrepared(result) => {
                                     match result {
+                                        Ok(recovery) if matches!(recovery.as_ref(), quota::Plan::Obsolete) => {
+                                            retry_after.remove(&id);
+                                            publish(&tx, &environment, id, p.view, false);
+                                        }
                                         Ok(recovery) if matches!(recovery.as_ref(), quota::Plan::Pending(_)) => {
                                             let quota::Plan::Pending(wait) = *recovery else { unreachable!() };
                                             // The turn is durable and will be reconsidered after

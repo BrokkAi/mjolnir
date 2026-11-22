@@ -1403,25 +1403,31 @@ impl DashboardState {
         preflight: mj_core::suspend_consent::SuspendPreflight,
     ) -> DashboardAction {
         let should_quick_suspend = match &mut self.mode {
-            Mode::Confirm(dialog) => match &mut dialog.confirmation {
-                Confirmation::SuspendSession {
-                    session_id,
-                    children_not_handed_back,
-                    interrupting,
-                    preflight: slot,
-                    checking,
-                    ..
-                } if *session_id == preflight.session_id => {
-                    let quick = !preflight.has_blockers()
-                        && !preflight.has_warnings()
-                        && !*interrupting
-                        && children_not_handed_back.is_empty();
-                    *slot = Some(preflight.clone());
-                    *checking = false;
-                    quick
+            Mode::Confirm(dialog) => {
+                let (matched, quick) = match &mut dialog.confirmation {
+                    Confirmation::SuspendSession {
+                        session_id,
+                        children_not_handed_back,
+                        interrupting,
+                        preflight: slot,
+                        checking,
+                        ..
+                    } if *session_id == preflight.session_id => {
+                        let quick = !preflight.has_blockers()
+                            && !preflight.has_warnings()
+                            && !*interrupting
+                            && children_not_handed_back.is_empty();
+                        *slot = Some(preflight.clone());
+                        *checking = false;
+                        (true, quick)
+                    }
+                    _ => (false, false),
+                };
+                if matched && !quick {
+                    dialog.refresh_form();
                 }
-                _ => false,
-            },
+                quick
+            }
             _ => false,
         };
         if should_quick_suspend {

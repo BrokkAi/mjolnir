@@ -1068,7 +1068,11 @@ pub(super) fn plan_raw_to_workspace_from_origin_delta(
     };
     let retire = match session.managed_worktree.as_ref() {
         Some(worktree)
-            if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? =>
+            if path_exists_on_managed_target(
+                executor,
+                &worktree.target,
+                &worktree.worktree_root,
+            )? =>
         {
             Some((**worktree).clone())
         }
@@ -2941,7 +2945,11 @@ pub(super) fn restore_legacy_worktree_as_managed_clone(
                     SshTrafficClass::Control,
                     &checkout.target,
                     &staging,
-                    ["for-each-ref", "--format=%(refname)", "refs/mj-legacy-source/"],
+                    [
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        "refs/mj-legacy-source/",
+                    ],
                     "list temporary legacy source refs",
                 )) && refs.status == 0
                 {
@@ -3335,13 +3343,27 @@ fn remove_managed_worktree_checkout(
     };
     if worktree.kind == ManagedCheckoutKind::Clone {
         if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? {
+            // Unlinking files requires write permission on their parent.
+            // A stopped clone can contain owner-read-only directories. Make
+            // those directories writable, without following symlinks or
+            // changing file modes, before removing the owned tree.
+            const REMOVE_CLONE: &str = r#"
+owner=$(id -u) || exit
+find -P "$1" -type d -user "$owner" ! -perm -0200 -exec chmod -- u+w {} + &&
+    exec rm -rf -- "$1"
+"#;
             execute_checked(
                 executor,
                 managed_target_command(
                     SshTrafficClass::Control,
                     &worktree.target,
-                    "rm",
-                    ["-rf", "--", &worktree.worktree_root.to_string_lossy()],
+                    "sh",
+                    [
+                        "-c",
+                        REMOVE_CLONE,
+                        "mj-remove-clone",
+                        &worktree.worktree_root.to_string_lossy(),
+                    ],
                 )
                 .purpose("remove managed clone after its worker stopped"),
             )?;
@@ -3427,9 +3449,9 @@ fn remove_missing_linked_worktree_admin(
                 return Ok(());
             }
             let target_root = canonicalize_missing_path(&worktree.worktree_root);
-            for entry in std::fs::read_dir(&worktrees_dir).with_context(|| {
-                format!("read worktrees directory {}", worktrees_dir.display())
-            })? {
+            for entry in std::fs::read_dir(&worktrees_dir)
+                .with_context(|| format!("read worktrees directory {}", worktrees_dir.display()))?
+            {
                 let entry = entry?;
                 let admin_dir = entry.path();
                 if !admin_dir.is_dir() {

@@ -3946,8 +3946,8 @@ fn purge_reports_on_disk_bytes_for_a_compressible_untracked_payload() {
     assert!(uncompressed > 60_000);
     assert!(removed < uncompressed);
 
-    let dry = purge_untracked_from_archive(&source, &directory.path().join("dry.hel.zip"), true)
-        .unwrap();
+    let dry =
+        purge_untracked_from_archive(&source, &directory.path().join("dry.hel.zip"), true).unwrap();
     assert!(matches!(dry.kind, ArchiveUntrackedPurgeKind::DryRun));
     assert!(dry.bytes_reclaimed > 0);
     assert!(dry.bytes_reclaimed <= removed);
@@ -4045,12 +4045,9 @@ fn purge_keeps_schema_3_when_only_the_untracked_tar_was_sharded() {
     let old_len = fs::metadata(&source).unwrap().len();
     let uncompressed = uncompressed_untracked_excess(&before.manifest);
     let removed = compressed_untracked_entries(&source);
-    let dry = purge_untracked_from_archive(
-        &source,
-        &directory.path().join("sharded-dry.hel.zip"),
-        true,
-    )
-    .unwrap();
+    let dry =
+        purge_untracked_from_archive(&source, &directory.path().join("sharded-dry.hel.zip"), true)
+            .unwrap();
     assert!(matches!(dry.kind, ArchiveUntrackedPurgeKind::DryRun));
     assert!(dry.bytes_reclaimed > 0);
     assert!(dry.bytes_reclaimed <= removed);

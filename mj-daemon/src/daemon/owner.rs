@@ -453,10 +453,7 @@ impl RuntimeStateOwner {
             return;
         }
         active.phase = LifecyclePhase::Completed(result);
-        if matches!(
-            active.kind,
-            LifecycleKind::Suspend
-        ) {
+        if matches!(active.kind, LifecycleKind::Suspend) {
             self.close_requested.remove(session_id);
         }
         active._move_guard.take();
