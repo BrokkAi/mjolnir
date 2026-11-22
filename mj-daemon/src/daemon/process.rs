@@ -1,6 +1,43 @@
 use super::diagnostics::ServingPhase;
 use super::*;
-use std::time::Instant;
+use mj_controller::session_manager::{GuardianStage1, GuardianStage1Verdict};
+use mj_core::guardian::GuardianReviewRequest;
+use mj_github_relevance::guardian_classifier::{GuardianClassifier, GuardianStage1Result};
+use std::{future::Future, pin::Pin, time::Instant};
+
+struct WolfGuardianStage1(Arc<GuardianClassifier>);
+
+impl GuardianStage1 for WolfGuardianStage1 {
+    fn classify<'a>(
+        &'a self,
+        request: &'a GuardianReviewRequest,
+    ) -> Pin<Box<dyn Future<Output = GuardianStage1Verdict> + Send + 'a>> {
+        Box::pin(async move {
+            match self.0.classify(request).await {
+                GuardianStage1Result::Scored {
+                    unsafe_prob,
+                    tokens,
+                    elapsed_ms,
+                } => GuardianStage1Verdict::Scored {
+                    unsafe_prob,
+                    tokens,
+                    elapsed_ms,
+                },
+                GuardianStage1Result::EscalatedActionTooLong => {
+                    GuardianStage1Verdict::EscalatedActionTooLong
+                }
+                GuardianStage1Result::Overflow { tokens } => {
+                    GuardianStage1Verdict::Overflow { tokens }
+                }
+                GuardianStage1Result::Unavailable { reason } => {
+                    GuardianStage1Verdict::Unavailable {
+                        reason: reason.into(),
+                    }
+                }
+            }
+        })
+    }
+}
 
 /// PID of the process this daemon must not outlive, if one was requested.
 ///
@@ -207,6 +244,12 @@ pub(super) async fn run_daemon_runtime(
             runtime.fail_unready_session(id, failure).await
         })
     }));
+    let guardian_classifier = Arc::new(GuardianClassifier::new(
+        mj_core::config::data_dir(),
+        controller.config.github.watch.use_gpu,
+    ));
+    manager_control
+        .install_guardian_stage1(Arc::new(WolfGuardianStage1(guardian_classifier.clone())));
     // Install the bounded failure recorder before worker observations start.
     manager_targets.send_replace(dashboard_worker_targets(&controller));
     log_relay_actors_launched(&manager_targets.borrow());
@@ -979,6 +1022,11 @@ pub(super) async fn run_daemon_runtime(
                 .context("mailbox outbox service failed")
                 .and_then(|result| result),
         },
+    );
+    epilogue.record(
+        &mut outcome,
+        "shut down Wolf Guardian classifier",
+        guardian_classifier.shutdown().await,
     );
     epilogue.record(
         &mut outcome,

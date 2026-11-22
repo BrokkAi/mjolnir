@@ -17,7 +17,7 @@
 
 use super::*;
 use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
-use mj_core::guardian::GuardianReviewOutcome;
+use mj_core::guardian::{GuardianReviewOutcome, collect_project_instructions};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
@@ -67,6 +67,7 @@ impl Guardian {
         input: Option<&serde_json::Value>,
         native_child: bool,
     ) -> GuardianDecision {
+        let deadline = tokio::time::Instant::now() + GUARDIAN_REVIEW_TIMEOUT;
         if self.spec.turn_context.guardian_tripped() {
             tracing::info!(
                 target: "mj_guardian",
@@ -85,8 +86,38 @@ impl Guardian {
             native_child,
         );
         let tool_call_id = request.tool_call.tool_call_id.to_string();
+        let cwd = self.spec.cwd.clone();
+        let project_instructions = match tokio::time::timeout_at(
+            deadline,
+            mj_core::runtime::spawn_blocking(move || collect_project_instructions(&cwd)),
+        )
+        .await
+        {
+            Ok(Ok(instructions)) => instructions,
+            Ok(Err(error)) => {
+                tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "could not collect project instructions");
+                return GuardianDecision::AskPerson {
+                    reason: format!("it could not collect project instructions: {error}"),
+                };
+            }
+            Err(_) => {
+                tracing::warn!(target: "mj_guardian", %tool_call_id, "collecting project instructions timed out");
+                return GuardianDecision::AskPerson {
+                    reason: "collecting project instructions timed out".into(),
+                };
+            }
+        };
         if let Some(endpoint) = &self.endpoint {
-            match self.review_remotely(endpoint, &tool_call_id, &action).await {
+            match self
+                .review_remotely(
+                    endpoint,
+                    &tool_call_id,
+                    &action,
+                    project_instructions.as_deref(),
+                    deadline,
+                )
+                .await
+            {
                 Ok(GuardianReviewOutcome::UseAcpFallback { .. }) => {}
                 Ok(GuardianReviewOutcome::Allow { .. }) => return self.record_verdict(None),
                 Ok(GuardianReviewOutcome::Deny { rationale, .. }) => {
@@ -103,7 +134,8 @@ impl Guardian {
                 }
             }
         }
-        self.review_over_acp(&tool_call_id, &action).await
+        self.review_over_acp(&tool_call_id, &action, project_instructions.as_deref())
+            .await
     }
 
     async fn review_remotely(
@@ -111,9 +143,10 @@ impl Guardian {
         endpoint: &GuardianEndpoint,
         tool_call_id: &str,
         action: &serde_json::Value,
+        project_instructions: Option<&str>,
+        deadline: tokio::time::Instant,
     ) -> Result<GuardianReviewOutcome> {
-        let deadline = tokio::time::Instant::now() + GUARDIAN_REVIEW_TIMEOUT;
-        let mut evidence = self.collect_evidence(tool_call_id, action);
+        let mut evidence = self.collect_evidence(tool_call_id, action, project_instructions);
         loop {
             let result = endpoint.review(evidence.request.clone(), deadline).await?;
             if matches!(
@@ -122,7 +155,7 @@ impl Guardian {
             ) {
                 return Ok(result.decision);
             }
-            let current = self.collect_evidence(tool_call_id, action);
+            let current = self.collect_evidence(tool_call_id, action, project_instructions);
             if !current.person_wrote_since(&evidence) {
                 return Ok(result.decision);
             }
@@ -135,13 +168,14 @@ impl Guardian {
         &self,
         tool_call_id: &str,
         action: &serde_json::Value,
+        project_instructions: Option<&str>,
     ) -> GuardianDecision {
         let slot = self.host.lock().await;
         // Time spent waiting for the shared reviewer is outside the review deadline.
         let started = std::time::Instant::now();
         let assessment = match tokio::time::timeout(
             GUARDIAN_REVIEW_TIMEOUT,
-            self.decide(slot, tool_call_id, action),
+            self.decide(slot, tool_call_id, action, project_instructions),
         )
         .await
         {
@@ -207,12 +241,18 @@ impl Guardian {
         GuardianDecision::Deny { rationale }
     }
 
-    fn collect_evidence(&self, tool_call_id: &str, action: &serde_json::Value) -> ReviewEvidence {
+    fn collect_evidence(
+        &self,
+        tool_call_id: &str,
+        action: &serde_json::Value,
+        project_instructions: Option<&str>,
+    ) -> ReviewEvidence {
         ReviewEvidence::collect(
             self.spec.harness,
             &self.spec.turn_context,
             tool_call_id,
             action,
+            project_instructions.map(str::to_owned),
         )
     }
 
@@ -226,17 +266,18 @@ impl Guardian {
         first: HostSlot<'_>,
         tool_call_id: &str,
         action: &serde_json::Value,
+        project_instructions: Option<&str>,
     ) -> Result<Assessment> {
         let mut slot = Some(first);
         let mut attempts = 0;
         loop {
-            let evidence = self.collect_evidence(tool_call_id, action);
+            let evidence = self.collect_evidence(tool_call_id, action, project_instructions);
             let prompt = vec![
                 ContentBlock::Text(TextContent::new(reviewer_instructions_acp())),
                 ContentBlock::Text(TextContent::new(evidence.request.request_text())),
             ];
             let assessment = self.assess(&mut slot, &prompt, &mut attempts).await?;
-            let current = self.collect_evidence(tool_call_id, action);
+            let current = self.collect_evidence(tool_call_id, action, project_instructions);
             if !current.person_wrote_since(&evidence) {
                 return Ok(assessment);
             }

@@ -82,6 +82,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
         session_gate: Arc::default(),
         credential_wakes: Arc::default(),
         harness_failure: Default::default(),
+        guardian_stage1: Default::default(),
         model_policies: watch::channel(BTreeMap::new()).0,
         commands,
         launches: mpsc::unbounded_channel().0,
@@ -1582,13 +1583,46 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn guardian_actor_delivers_fallback_for_a_request_added_after_attachment() {
-    use mj_core::guardian::{GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult};
+async fn guardian_actor_cascades_requests_added_after_attachment() {
+    use mj_core::guardian::{
+        GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
+        WOLF_STAGE1_ALLOW_THRESHOLD,
+    };
+
+    struct FakeStage1;
+    impl GuardianStage1 for FakeStage1 {
+        fn classify<'a>(
+            &'a self,
+            request: &'a GuardianReviewRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = GuardianStage1Verdict> + Send + 'a>>
+        {
+            let verdict = match request.request_id.as_str() {
+                "low" => GuardianStage1Verdict::Scored {
+                    unsafe_prob: WOLF_STAGE1_ALLOW_THRESHOLD,
+                    tokens: 15,
+                    elapsed_ms: 1,
+                },
+                "high" => GuardianStage1Verdict::Scored {
+                    unsafe_prob: 0.9,
+                    tokens: 15,
+                    elapsed_ms: 1,
+                },
+                "overflow" => GuardianStage1Verdict::Overflow { tokens: 6145 },
+                "long" => GuardianStage1Verdict::EscalatedActionTooLong,
+                "unavailable" => GuardianStage1Verdict::Unavailable {
+                    reason: "loading".into(),
+                },
+                id => panic!("unexpected test request {id}"),
+            };
+            Box::pin(std::future::ready(verdict))
+        }
+    }
+
     const CHILD: &str = "MJ_TEST_GUARDIAN_POLL_CHILD";
     if std::env::var_os(CHILD).is_none() {
         run_in_isolated_child(
             CHILD,
-            "guardian_actor_delivers_fallback_for_a_request_added_after_attachment",
+            "guardian_actor_cascades_requests_added_after_attachment",
         );
         return;
     }
@@ -1610,40 +1644,79 @@ async fn guardian_actor_delivers_fallback_for_a_request_added_after_attachment()
     session.sync_now().await.unwrap();
     assert!(session.view().connected);
 
-    mj_core::config::atomic_write(
-        &relay_root.path().join("guardian-request.json"),
-        &serde_json::to_vec(&GuardianReviewRequest {
-            request_id: "permission-1".into(),
-            harness: mj_core::config::HarnessKind::Codex,
-            session_id: LEASED_RELAY_SESSION.into(),
-            tool_call_id: "call".into(),
-            action: serde_json::json!({"input": {"command": "cargo test"}}),
-            user_instructions: vec!["Run the tests.".into()],
-            user_instructions_omitted: false,
-            transcript: String::new(),
-        })
-        .unwrap(),
-    )
-    .unwrap();
+    let queue = relay_root.path().join("guardian-request.json");
     let response = relay_root.path().join("guardian-result.json");
-    let result: GuardianReviewResult = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match std::fs::read(&response) {
-                Ok(bytes) => break serde_json::from_slice(&bytes).unwrap(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    tokio::time::sleep(Duration::from_millis(10)).await
-                }
-                Err(error) => panic!("{error}"),
-            }
+    let config_path = mj_core::config::config_path();
+    let valid_config = std::fs::read(&config_path).unwrap();
+    for (id, expected) in [
+        (
+            "no-classifier",
+            GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+        ),
+        (
+            "low",
+            GuardianReviewOutcome::Allow {
+                stage: "stage1_wolf".into(),
+                stage1_score: Some(WOLF_STAGE1_ALLOW_THRESHOLD),
+            },
+        ),
+        (
+            "high",
+            GuardianReviewOutcome::UseAcpFallback {
+                stage1_score: Some(0.9),
+            },
+        ),
+        (
+            "overflow",
+            GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+        ),
+        (
+            "long",
+            GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+        ),
+        (
+            "unavailable",
+            GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+        ),
+    ] {
+        if id == "low" {
+            control.install_guardian_stage1(Arc::new(FakeStage1));
+            // The fast path must succeed even when Stage 2 cannot load its configuration.
+            mj_core::config::atomic_write(&config_path, b"invalid TOML").unwrap();
+        } else if id == "high" {
+            mj_core::config::atomic_write(&config_path, &valid_config).unwrap();
         }
-    })
-    .await
-    .unwrap();
-    assert_eq!(result.request_id, "permission-1");
-    assert_eq!(
-        result.decision,
-        GuardianReviewOutcome::UseAcpFallback { stage1_score: None }
-    );
+        mj_core::config::atomic_write(
+            &queue,
+            &serde_json::to_vec(&GuardianReviewRequest {
+                request_id: id.into(),
+                harness: mj_core::config::HarnessKind::Codex,
+                session_id: LEASED_RELAY_SESSION.into(),
+                tool_call_id: "call".into(),
+                action: serde_json::json!({"input": {"command": "cargo test"}}),
+                user_instructions: vec!["Run the tests.".into()],
+                user_instructions_omitted: false,
+                project_instructions: None,
+                transcript: String::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !queue.exists() {
+                    let result: GuardianReviewResult =
+                        serde_json::from_slice(&std::fs::read(&response).unwrap()).unwrap();
+                    break result;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out awaiting {id}"));
+        assert_eq!(result.request_id, id);
+        assert_eq!(result.decision, expected, "{id}");
+    }
     shutdown.shutdown().await.unwrap();
 }
 
