@@ -49,13 +49,45 @@ fn global_subagent_search_targets_inline_controls_and_hides_unavailable_effort()
     let mut configured = dashboard_with_session(stopped_session());
     configured.begin_setup();
     setup_dialog_mut(&mut configured.mode).unwrap().draft["subagents"]["straightforward"] =
-        json!([{ "model": "model-x", "effort": null }]);
+        json!([{ "model": "", "effort": null }]);
     search(&mut configured, "effort");
     let paths = result_paths(&mut configured);
     assert!(
-        paths
+        !paths
             .iter()
-            .any(|path| path == &["subagents", "straightforward", "0", "effort"])
+            .any(|path| path == &["subagents", "straightforward", "0", "effort"]),
+        "effort stays hidden while the row has no model"
+    );
+    configured.handle_key(key(KeyCode::Esc));
+
+    setup_dialog_mut(&mut configured.mode).unwrap().draft["subagents"]["straightforward"] =
+        json!([{ "model": "model-x", "effort": null }]);
+    search(&mut configured, "effort");
+    let paths = result_paths(&mut configured);
+    let effort_index = paths
+        .iter()
+        .position(|path| path == &["subagents", "straightforward", "0", "effort"])
+        .expect("effort appears once model is chosen");
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path == &["subagents", "straightforward", "0"]),
+        "no Item N subpage is indexed"
+    );
+    for _ in 0..effort_index {
+        configured.handle_key(key(KeyCode::Down));
+    }
+    configured.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut configured.mode).unwrap();
+    assert_eq!(dialog.path, category);
+    assert_eq!(
+        dialog.focused_path(),
+        Some(vec![
+            "subagents".into(),
+            "straightforward".into(),
+            "0".into(),
+            "effort".into(),
+        ])
     );
 }
 

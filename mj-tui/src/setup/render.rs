@@ -189,7 +189,14 @@ pub(crate) fn render_setup(
             .descriptors
             .iter()
             .find(|c| c.kind != SettingKind::ReadOnly)
-            .map_or(Save, |c| c.id)
+            .map_or(
+                if is_subagent_category_page(&dialog.path) {
+                    Add
+                } else {
+                    Save
+                },
+                |c| c.id,
+            )
     };
     if dialog.combo.open_id().is_some() {
         Dialog::render_actions_stacked_inert(
@@ -288,6 +295,9 @@ fn render_controls(
     dialog: &SetupDialog,
     form: &mut Dialog<SetupControl>,
 ) -> (Option<Rect>, Option<(SetupControl, Rect)>) {
+    if is_subagent_category_page(&dialog.path) {
+        return render_subagent_controls(frame, bounds, body, dialog, form);
+    }
     let mut expanded = None;
     let mut path_popup = None;
     // Layout entries refer to descriptors; no separate interactive row identity exists.
@@ -519,6 +529,9 @@ fn render_controls(
             }
 
             SettingKind::ManagedHarness(_) => unreachable!("managed chooser renders separately"),
+            SettingKind::RemoveEntry => {
+                unreachable!("subagent remove renders in render_subagent_controls")
+            }
             SettingKind::ReadOnly => {
                 frame.render_widget(Line::styled(label, theme::muted()), label_area);
                 let summary = dialog
@@ -535,6 +548,342 @@ fn render_controls(
         frame.render_widget(note.style(theme::muted()), viewport.row(at + i as u16, 1));
     }
     (expanded, path_popup)
+}
+
+struct SubagentRowControls<'a> {
+    index: usize,
+    model: &'a SettingControl,
+    effort: Option<&'a SettingControl>,
+    remove: &'a SettingControl,
+}
+
+fn render_subagent_value(
+    frame: &mut Frame,
+    bounds: Rect,
+    field_area: Rect,
+    control: &SettingControl,
+    dialog: &SetupDialog,
+    form: &mut Dialog<SetupControl>,
+    expanded: &mut Option<Rect>,
+) {
+    let enabled = dialog.combo.open_id().is_none_or(|id| id == control.id);
+    match &control.kind {
+        SettingKind::Choices(_) => {
+            render_combo(frame, bounds, field_area, control, dialog, form, false);
+            if dialog.combo.is_open(control.id) {
+                *expanded = Some(field_area);
+            }
+        }
+        SettingKind::Field => {
+            let input = &dialog.fields[&control.path].input;
+            if !enabled {
+                frame.render_widget(Line::raw(input.to_string()), field_area);
+            } else {
+                match input {
+                    EditorInput::Text(input) => {
+                        TextField::render(frame, field_area, input, form, control.id)
+                    }
+                    EditorInput::Path(input) => {
+                        PathField::render_within(frame, bounds, field_area, input, form, control.id)
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn render_subagent_controls(
+    frame: &mut Frame,
+    bounds: Rect,
+    body: Rect,
+    dialog: &SetupDialog,
+    form: &mut Dialog<SetupControl>,
+) -> (Option<Rect>, Option<(SetupControl, Rect)>) {
+    let count = dialog.current().as_array().map_or(0, Vec::len);
+    if count == 0 {
+        frame.render_widget(
+            Paragraph::new("  No agents configured. Choose Add to add one.")
+                .wrap(Wrap { trim: false })
+                .style(theme::muted()),
+            body,
+        );
+        return (None, None);
+    }
+    let mut rows = Vec::with_capacity(count);
+    for index in 0..count {
+        let mut model = None;
+        let mut effort = None;
+        let mut remove = None;
+        for control in &dialog.descriptors {
+            if subagent_row_index(&control.path) != Some(index) {
+                continue;
+            }
+            if control.kind == SettingKind::RemoveEntry {
+                remove = Some(control);
+            } else if control.path.last().is_some_and(|key| key == "model") {
+                model = Some(control);
+            } else if control.path.last().is_some_and(|key| key == "effort") {
+                effort = Some(control);
+            }
+        }
+        if let (Some(model), Some(remove)) = (model, remove) {
+            rows.push(SubagentRowControls {
+                index,
+                model,
+                effort,
+                remove,
+            });
+        }
+    }
+    let focused = form.focused();
+    let combo_open = dialog.combo.open_id().is_some();
+    let mut expanded = None;
+    let inline = body.width >= 60;
+    if inline {
+        let index_width: u16 = 4;
+        let remove_width: u16 = 10;
+        let effort_width: u16 = 28;
+        let gap: u16 = 1;
+        let model_width = body
+            .width
+            .saturating_sub(index_width + effort_width + remove_width + gap * 2);
+        let mut blocks = Vec::with_capacity(rows.len());
+        let mut at = 1u16; // line 0 is the column header
+        for entry in &rows {
+            let mut notes = Vec::new();
+            for path in [&entry.model.path]
+                .into_iter()
+                .chain(entry.effort.iter().map(|c| &c.path))
+            {
+                if let Some(error) = dialog.fields.get(path).and_then(|f| f.error.as_ref()) {
+                    notes.extend(mj_chat::components::wrap_lines(
+                        [Line::styled(
+                            error.clone(),
+                            ratatui::style::Style::default().fg(theme::palette().warning),
+                        )],
+                        body.width,
+                    ));
+                }
+            }
+            let height = 1 + notes.len() as u16;
+            blocks.push((at, height, entry, notes));
+            at += height;
+        }
+        let focused_block = blocks.iter().find_map(|(start, height, entry, _)| {
+            let hit = focused == Some(entry.model.id)
+                || entry.effort.is_some_and(|c| focused == Some(c.id))
+                || focused == Some(entry.remove.id);
+            hit.then_some(*start..*start + *height)
+        });
+        let viewport = form.viewport(body, at, focused_block);
+        let header = viewport.row(0, 1);
+        let header_style = theme::muted().add_modifier(Modifier::BOLD);
+        frame.render_widget(
+            Line::styled("Model", header_style),
+            Rect::new(
+                header.x + index_width,
+                header.y,
+                model_width.min(header.width.saturating_sub(index_width)),
+                header.height,
+            ),
+        );
+        let effort_x = header.x + index_width + model_width + gap;
+        frame.render_widget(
+            Line::styled("Effort", header_style),
+            Rect::new(
+                effort_x,
+                header.y,
+                effort_width.min(header.right().saturating_sub(effort_x)),
+                header.height,
+            ),
+        );
+        for (start, _, entry, notes) in blocks {
+            let row = viewport.row(start, 1);
+            let index_area = Rect::new(row.x, row.y, index_width.min(row.width), row.height);
+            let model_area = Rect::new(
+                row.x + index_area.width,
+                row.y,
+                model_width.min(row.width.saturating_sub(index_area.width)),
+                row.height,
+            );
+            let effort_x = model_area.right() + gap;
+            let effort_area = Rect::new(
+                effort_x,
+                row.y,
+                effort_width.min(row.right().saturating_sub(effort_x)),
+                row.height,
+            );
+            let remove_x = effort_area.right() + gap;
+            let remove_area = Rect::new(
+                remove_x,
+                row.y,
+                remove_width.min(row.right().saturating_sub(remove_x)),
+                row.height,
+            );
+            frame.render_widget(
+                Line::styled(format!("{:>3} ", entry.index + 1), theme::muted()),
+                index_area,
+            );
+            render_subagent_value(
+                frame,
+                bounds,
+                model_area,
+                entry.model,
+                dialog,
+                form,
+                &mut expanded,
+            );
+            if let Some(effort) = entry.effort {
+                render_subagent_value(
+                    frame,
+                    bounds,
+                    effort_area,
+                    effort,
+                    dialog,
+                    form,
+                    &mut expanded,
+                );
+            } else {
+                frame.render_widget(Line::styled("—", theme::muted()), effort_area);
+            }
+            if combo_open {
+                Dialog::render_actions_inert(
+                    frame,
+                    remove_area,
+                    &[(entry.remove.id, "Remove", false)],
+                    form,
+                );
+            } else {
+                Dialog::render_actions(
+                    frame,
+                    remove_area,
+                    &[(entry.remove.id, "Remove", true)],
+                    form,
+                );
+            }
+            for (i, note) in notes.into_iter().enumerate() {
+                frame.render_widget(note, viewport.row(start + 1 + i as u16, 1));
+            }
+        }
+    } else {
+        let mut blocks = Vec::with_capacity(rows.len());
+        let mut at = 0u16;
+        for (pos, entry) in rows.iter().enumerate() {
+            let mut notes = Vec::new();
+            if let Some(error) = dialog
+                .fields
+                .get(&entry.model.path)
+                .and_then(|f| f.error.as_ref())
+            {
+                notes.extend(mj_chat::components::wrap_lines(
+                    [Line::styled(
+                        error.clone(),
+                        ratatui::style::Style::default().fg(theme::palette().warning),
+                    )],
+                    body.width,
+                ));
+            }
+            let model_row = at;
+            at += 1 + notes.len() as u16;
+            let effort_row = entry.effort.map(|_| {
+                let r = at;
+                at += 1;
+                r
+            });
+            let remove_row = at;
+            at += 1;
+            if pos + 1 < rows.len() {
+                at += 1;
+            }
+            blocks.push((model_row, effort_row, remove_row, entry, notes));
+        }
+        let focused_block =
+            blocks
+                .iter()
+                .find_map(|(model_row, effort_row, remove_row, entry, _)| {
+                    if focused == Some(entry.model.id) {
+                        Some(*model_row..*model_row + 1)
+                    } else if let (Some(effort), Some(r)) = (entry.effort, *effort_row)
+                        && focused == Some(effort.id)
+                    {
+                        Some(r..r + 1)
+                    } else if focused == Some(entry.remove.id) {
+                        Some(*remove_row..*remove_row + 1)
+                    } else {
+                        None
+                    }
+                });
+        let viewport = form.viewport(body, at, focused_block);
+        let label_width = 12u16.min(body.width);
+        for (model_row, effort_row, remove_row, entry, notes) in blocks {
+            let row = viewport.row(model_row, 1);
+            let label_area = Rect::new(row.x, row.y, label_width.min(row.width), row.height);
+            let field_area = Rect::new(
+                row.x + label_area.width,
+                row.y,
+                row.width.saturating_sub(label_area.width),
+                row.height,
+            );
+            frame.render_widget(
+                Line::raw(format!("  {} model", entry.index + 1)),
+                label_area,
+            );
+            render_subagent_value(
+                frame,
+                bounds,
+                field_area,
+                entry.model,
+                dialog,
+                form,
+                &mut expanded,
+            );
+            for (i, note) in notes.into_iter().enumerate() {
+                frame.render_widget(note, viewport.row(model_row + 1 + i as u16, 1));
+            }
+            if let (Some(effort), Some(r)) = (entry.effort, effort_row) {
+                let row = viewport.row(r, 1);
+                let label_area = Rect::new(row.x, row.y, label_width.min(row.width), row.height);
+                let field_area = Rect::new(
+                    row.x + label_area.width,
+                    row.y,
+                    row.width.saturating_sub(label_area.width),
+                    row.height,
+                );
+                frame.render_widget(
+                    Line::raw(format!("  {} effort", entry.index + 1)),
+                    label_area,
+                );
+                render_subagent_value(
+                    frame,
+                    bounds,
+                    field_area,
+                    effort,
+                    dialog,
+                    form,
+                    &mut expanded,
+                );
+            }
+            let remove_label = format!("Remove {}", entry.index + 1);
+            let remove_area = viewport.row(remove_row, 1);
+            if combo_open {
+                Dialog::render_actions_inert(
+                    frame,
+                    remove_area,
+                    &[(entry.remove.id, remove_label.as_str(), false)],
+                    form,
+                );
+            } else {
+                Dialog::render_actions(
+                    frame,
+                    remove_area,
+                    &[(entry.remove.id, remove_label.as_str(), true)],
+                    form,
+                );
+            }
+        }
+    }
+    (expanded, None)
 }
 
 fn render_search(frame: &mut Frame, popup: Rect, inner: Rect, dialog: &SetupDialog) {

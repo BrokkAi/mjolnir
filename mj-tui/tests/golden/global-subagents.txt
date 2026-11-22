@@ -40,18 +40,60 @@
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 
+=== partly configured row rejected (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰───────────────────                                                                                                                       │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Sub-agents › Straightforward                                                      │                     │
+│hel ───────────────  │ Work with a clear method. Add one or more (model, effort) pairs.                             │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
+│  Stopped  podman    │                                                                                              │                     │
+│  │ No messages yet  │     Model                                   Effort                                     Add   │                     │
+│  │                  │   1 Select a model ▾                        —                              Remove            │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ───────────────────╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │ Choose a model for Straightforward entry 1, or remove it.                                    │                     │
+│                     │   Back     Save and Close                                                                    │                     │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
+│                                                                                                                       ──────────── ▁   ▄ ╮
+│                                                                                                                                          │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
+
 === straightforward (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents › Straightforward › Item 1                                             │                     │
-│hel ───────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
+│ Create   Open   Fi  │ Settings › Sub-agents › Straightforward                                                      │                     │
+│hel ───────────────  │ Work with a clear method. Add one or more (model, effort) pairs.                             │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Model                             shared ▾                                          Remove   │                     │
-│  │                  │ Effort                            high ▾                                                     │                     │
-│                     │                                                                                              │                     │
+│  │ No messages yet  │     Model                                   Effort                                     Add   │                     │
+│  │                  │   1 shared ▾                                high ▾                         Remove            │                     │
+│                     │   2 smarter ▾                               Default (Harness default) ▾    Remove            │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -87,12 +129,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents › Subtle › Item 1                                                      │                     │
-│hel ───────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
+│ Create   Open   Fi  │ Settings › Sub-agents › Subtle                                                               │                     │
+│hel ───────────────  │ Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.  │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Model                             smarter ▾                                         Remove   │                     │
-│  │                  │ Effort                            high ▾                                                     │                     │
+│  │ No messages yet  │     Model                                   Effort                                     Add   │                     │
+│  │                  │   1 smarter ▾                               high ▾                         Remove            │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -129,12 +171,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents › Oracle › Item 1                                                      │                     │
-│hel ───────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
+│ Create   Open   Fi  │ Settings › Sub-agents › Oracle                                                               │                     │
+│hel ───────────────  │ For read-only tricky questions that the primary agent isn't sure about.                      │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Model                             smarter ▾                                         Remove   │                     │
-│  │                  │ Effort                            high ▾                                                     │                     │
+│  │ No messages yet  │     Model                                   Effort                                     Add   │                     │
+│  │                  │   1 smarter ▾                               high ▾                         Remove            │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -175,11 +217,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ───────────────  │ Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir   │                     │
 │› ■ ACP pretty name  │ sub-agents.                                                                                  │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Model                             smarter ▾                                                  │                     │
-│  │                  │ Effort                            high ▾                                                     │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
+│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
+│  │                  │   Primary and supervisor          0 entries  ›                                               │                     │
+│                     │   Straightforward                 0 entries  ›                                               │                     │
+│                     │   Subtle                          1 entry  ›                                                 │                     │
+│                     │   Oracle                          1 entry  ›                                                 │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
