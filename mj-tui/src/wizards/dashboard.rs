@@ -67,8 +67,7 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
         }
         WizardStep::Bundle
         | WizardStep::NewBundle
-        | WizardStep::ProjectDirectory
-        | WizardStep::MoveFiles => wizard.declare_extra_step(dashboard, &mut form),
+        | WizardStep::ProjectDirectory => wizard.declare_extra_step(dashboard, &mut form),
     }
     form.end_frame(initial);
 }

@@ -701,7 +701,7 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
         let event_frontier = spec.canonical_session.event_frontier;
         let event_frontier_digest = spec.canonical_session.event_frontier_digest.clone();
         let archive_started = std::time::Instant::now();
-        let sha256 = write_archive_hashed(
+        let (sha256, archive_manifest) = write_archive_hashed_with_manifest(
             &output_path,
             &ArchiveInput {
                 session: manifest.session,
@@ -724,6 +724,7 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
                 archive_ms,
                 total_ms: started.elapsed().as_millis() as u64,
             }),
+            manifest: Some(archive_manifest),
         })
     })();
     if let Err(cleanup_error) = fs::remove_dir_all(&stage_path)
@@ -888,7 +889,7 @@ pub fn export_checkpoint_with_native_state(
     // `CheckpointTransfer::execute` checks the controller's copy against this
     // digest; resume/import performs full structural verification when read.
     let archive_started = std::time::Instant::now();
-    let sha256 = write_archive_hashed_borrowed(
+    let (sha256, archive_manifest) = write_archive_hashed_borrowed_with_manifest(
         &output_path,
         &spec.session,
         &spec.target,
@@ -909,6 +910,7 @@ pub fn export_checkpoint_with_native_state(
             archive_ms,
             total_ms: started.elapsed().as_millis() as u64,
         }),
+        manifest: Some(archive_manifest),
     })
 }
 

@@ -1159,9 +1159,24 @@ fn raise_open_file_limit_impl() -> std::io::Result<()> {
 /// useful to the caller than a generic I/O error, so the output is still
 /// returned.
 pub fn run_with_input(command: &mut Command, input: &[u8]) -> Result<Output> {
+    run_with_input_stdio(command, input, Stdio::piped())
+}
+
+/// Run a child with stdin fed concurrently with stderr draining, writing
+/// stdout directly to `output` without buffering it in memory. BrokenPipe on
+/// stdin is handled the same way as [`run_with_input`].
+pub fn run_with_input_to_file(
+    command: &mut Command,
+    input: &[u8],
+    output: std::fs::File,
+) -> Result<Output> {
+    run_with_input_stdio(command, input, Stdio::from(output))
+}
+
+fn run_with_input_stdio(command: &mut Command, input: &[u8], stdout: Stdio) -> Result<Output> {
     command
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+        .stdout(stdout)
         .stderr(Stdio::piped());
     let mut child = spawn_child(command).context("spawn child process")?;
 
@@ -1797,6 +1812,30 @@ mod tests {
 
         assert!(output.status.success());
         assert_eq!(output.stdout, input);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_with_input_to_file_drains_stderr_while_feeding_stdin() {
+        // Feed >64KB on stdin while the child writes >64KB to stderr before
+        // reading stdin, ensuring stdin writes and stderr draining run
+        // concurrently while stdout streams directly to the file.
+        let input = vec![b'x'; 512 * 1024];
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("stdout");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("dd if=/dev/zero bs=1024 count=128 2>/dev/null | tr '\\0' 'e' >&2; cat");
+
+        let output = run_with_input_to_file(&mut command, &input, file)
+            .expect("run with file stdout while draining stderr");
+
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, vec![b'e'; 128 * 1024]);
+        assert_eq!(std::fs::read(path).unwrap(), input);
     }
 
     #[cfg(unix)]

@@ -1934,25 +1934,61 @@ async fn reopen_subagent_admission_after_move(
 
     let id = target.session_id.clone();
     let query_owner = owner.clone();
-    let (queue_enabled, move_active) = mj_core::runtime::spawn_blocking(move || {
-        query_owner.scope_blocking(|| -> Result<_> {
-            let Some(session) = crate::database::load_session_record(&id)? else {
-                return Ok((false, false));
-            };
-            let subagent = crate::database::load_subagent(&id)?;
-            let queue_enabled =
-                crate::session_manager::move_ownership::worker_subagent_queue_enabled(
-                    &session.subagents.clone().unwrap_or_default(),
-                    session.harness_kind,
-                    subagent.as_ref().map(|child| child.handback_tool),
-                    true,
-                );
-            let move_active = crate::database::has_active_in_place_move(&id)?;
-            Ok((queue_enabled, move_active))
+    let active_hold = connection.operational().in_place_move_hold.clone();
+    let live_store_id = connection.operational().store_id.clone();
+    let (queue_enabled, move_active, release_orphaned_hold) =
+        mj_core::runtime::spawn_blocking(move || {
+            query_owner.scope_blocking(|| -> Result<_> {
+                let current_move = crate::database::load_move_operation(&id)?;
+                let release_orphaned_hold = active_hold.as_ref().and_then(|hold| {
+                    let owned_by_active_move = current_move.as_ref().is_some_and(|op| {
+                        op.in_place
+                            && op.operation_id == hold.operation_id
+                            && op.is_active()
+                            && op.phase != mj_core::state::MovePhase::DispatchReleased
+                    });
+                    (!owned_by_active_move).then(|| hold.operation_id.clone())
+                });
+                let Some(session) = crate::database::load_session_record(&id)? else {
+                    return Ok((false, false, release_orphaned_hold));
+                };
+                let subagent = crate::database::load_subagent(&id)?;
+                let queue_enabled =
+                    crate::session_manager::move_ownership::worker_subagent_queue_enabled(
+                        &session.subagents.clone().unwrap_or_default(),
+                        session.harness_kind,
+                        subagent.as_ref().map(|child| child.handback_tool),
+                        true,
+                    );
+                let move_active = current_move
+                    .as_ref()
+                    .is_some_and(|op| op.in_place && op.is_active());
+                Ok((queue_enabled, move_active, release_orphaned_hold))
+            })
         })
-    })
-    .await
-    .context("inspect sub-agent admission ownership")??;
+        .await
+        .context("inspect sub-agent admission ownership")??;
+    if let (Some(orphaned_op_id), Some(store_id)) = (release_orphaned_hold, live_store_id)
+        && connection.protocol_version() >= mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL
+    {
+        tracing::info!(
+            session_id = target.session_id,
+            operation_id = orphaned_op_id,
+            "releasing orphaned in-place Move dispatch hold with no active intent"
+        );
+        if let Err(error) = connection
+            .client
+            .release_in_place_move_dispatch(&orphaned_op_id, &store_id)
+            .await
+        {
+            tracing::warn!(
+                session_id = target.session_id,
+                operation_id = orphaned_op_id,
+                error = %error,
+                "could not release orphaned in-place Move dispatch hold on reconnect"
+            );
+        }
+    }
     if !queue_enabled || move_active {
         return Ok(());
     }

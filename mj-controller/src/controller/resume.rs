@@ -627,6 +627,19 @@ pub(super) enum WorkerRootReset {
     },
 }
 
+/// Direct target-to-target Move transfer context passed into
+/// `restore_into_target` so the Move archive and `.mj/keep/<session-id>/`
+/// stream straight from source target to destination target without staging on
+/// daemon disk.
+pub(super) struct MoveDirectTransfer<'a> {
+    pub operation: &'a mut mj_core::state::MoveOperation,
+    pub source_backend: targets::TargetLocator,
+    pub source_worker_root: String,
+    pub source_keep_dir: Option<PathBuf>,
+    pub dest_keep_dir: Option<PathBuf>,
+    pub already_transferred: bool,
+}
+
 /// Everything the restore tail of a resume needs, once the destination target
 /// is ready and the session record already describes the destination.
 ///
@@ -646,6 +659,11 @@ pub(super) struct RestoreIntoTarget<'a> {
     pub discard_queued_prompts: bool,
     /// Whether the archived queue is resubmitted to a fresh native session.
     pub replay_queue: bool,
+    /// `Import` for Resume, `Suppress` for cross-target Move (which admits or
+    /// discards queued prompts and mail after `DestinationOwns` commits).
+    pub queue_policy_override: QueuePolicy,
+    /// Direct source-to-destination transfer for cross-target Move.
+    pub move_transfer: Option<MoveDirectTransfer<'a>>,
     /// The compacted handoff a cross-harness restore installs as its first
     /// prompt context. Required whenever `native_continuity` is false.
     pub utility_handoff: Option<String>,
@@ -669,6 +687,16 @@ pub(super) struct RestoreIntoTarget<'a> {
 /// its source, which still holds the same queue and mail. A fresh native
 /// session admits them after its handoff context is installed, which a turn
 /// started by a waking message would refuse.
+/// Controls whether shared restore imports the archived queue into the
+/// destination relay (`Import` for Resume) or leaves the destination relay's
+/// queue empty (`Suppress` for Move, which admits or discards the queue in its
+/// own post-commit admission step).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuePolicy {
+    Import,
+    Suppress,
+}
+
 fn restore_queue_policy(
     move_queue: Option<mj_core::state::ResumeQueueDisposition>,
     native_continuity: bool,
@@ -695,9 +723,14 @@ fn restore_queue_policy(
 pub(super) fn deferred_mail_commands(
     canonical: &mj_core::archive::CanonicalSessionSnapshot,
 ) -> Vec<(String, RelayCommand)> {
-    canonical
-        .mailbox
-        .iter()
+    deferred_mail_commands_from_mailbox(canonical.mailbox.as_ref())
+}
+
+pub(super) fn deferred_mail_commands_from_mailbox(
+    mailbox: Option<&mj_core::archive::CanonicalMailbox>,
+) -> Vec<(String, RelayCommand)> {
+    mailbox
+        .into_iter()
         .flat_map(|mailbox| &mailbox.pending_events)
         .map(|event| {
             (
@@ -730,6 +763,8 @@ impl Controller {
                 native_continuity,
                 discard_queued_prompts,
                 replay_queue,
+                queue_policy_override,
+                mut move_transfer,
                 utility_handoff,
                 projection_build,
                 mut resume_notices,
@@ -803,11 +838,26 @@ impl Controller {
             let remote_spec = format!("{worker_root}/restore-spec.json");
             let move_destination =
                 crate::database::load_move_operation(session_id)?.filter(|operation| {
-                    operation.phase == mj_core::state::MovePhase::ResumingDestination
-                        && !operation.queue_admission_started
+                    matches!(
+                        operation.phase,
+                        mj_core::state::MovePhase::Capturing
+                            | mj_core::state::MovePhase::Transferring
+                            | mj_core::state::MovePhase::Restoring
+                            | mj_core::state::MovePhase::DestinationStarting
+                    ) && !operation.queue_admission_started
                 });
+            let suppress_move_queue = match queue_policy_override {
+                QueuePolicy::Suppress => Some(
+                    move_transfer
+                        .as_ref()
+                        .map(|t| t.operation.queue)
+                        .or_else(|| move_destination.as_ref().map(|op| op.queue))
+                        .unwrap_or(mj_core::state::ResumeQueueDisposition::Discard),
+                ),
+                QueuePolicy::Import => move_destination.as_ref().map(|operation| operation.queue),
+            };
             let queue_policy = restore_queue_policy(
-                move_destination.as_ref().map(|operation| operation.queue),
+                suppress_move_queue,
                 native_continuity,
                 discard_queued_prompts,
                 replay_queue,
@@ -818,11 +868,11 @@ impl Controller {
             );
             let restore = CheckpointRestoreSpec {
                 report_root: Some(target_path(&report_root.to_string_lossy())),
-                archive_path: restore_archive_path(
-                    &backend,
-                    restored_archive,
-                    &target_path(&remote_archive),
-                ),
+                archive_path: if move_transfer.is_some() {
+                    target_path(&remote_archive)
+                } else {
+                    restore_archive_path(&backend, restored_archive, &target_path(&remote_archive))
+                },
                 workspace_root: target_path(&workspace_root),
                 relay_root: target_path(&worker_root),
                 harness_home: target_path(&harness_home),
@@ -931,31 +981,16 @@ impl Controller {
                 let staging = tempfile::tempdir().context("create restore staging")?;
                 let local_spec = staging.path().join("restore-spec.json");
                 std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
-                // Two independent lanes into the target. The checkpoint transfer
-                // needs nothing from the worker install, and the worker install
-                // is independent of archive upload, so both run concurrently.
                 let controller = &*self;
                 let backend_ref = &backend;
                 let worker_root_ref = worker_root.as_str();
                 let local_spec_ref = local_spec.as_path();
-                // The archive lands in the worker root and unpacks into the
-                // workspace and the harness home; each filesystem needs room.
-                crate::target_storage::ensure_room_for(
-                    &backend,
-                    [
-                        worker_root.as_str(),
-                        workspace_root.as_str(),
-                        harness_home.as_str(),
-                    ],
-                    || {
-                        Ok(std::fs::metadata(restored_archive)
-                            .with_context(|| format!("measure {}", restored_archive.display()))?
-                            .len())
-                    },
-                    "restore the checkpoint",
-                )?;
-                execute_concurrent_lanes(
-                    || {
+                if let Some(transfer) = move_transfer.as_mut() {
+                    // Direct cross-target Move: install destination worker
+                    // binary first so `receive-move-stream` is available, then
+                    // stream archive + `.mj/keep/` directly from source target
+                    // to destination target without touching daemon disk.
+                    {
                         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
                         controller.prepare_worker_files(
                             session_id,
@@ -969,56 +1004,153 @@ impl Controller {
                             backend_ref,
                             session_id,
                         )?;
-                        Ok(())
-                    },
-                    || {
+                    }
+                    if !transfer.already_transferred {
+                        transfer.operation.phase = mj_core::state::MovePhase::Transferring;
+                        transfer.operation.updated_at = now();
+                        crate::database::save_move_operation(transfer.operation)?;
                         let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                        if should_upload_restore_archive(&backend) {
-                            let reused = mj_checkpoint::checkpoint::checkpoint_sha256(
-                                restored_archive,
-                            )
-                            .ok()
-                            .and_then(|sha256| {
-                                super::checkpoint::try_stage_host_snapshot_cache(
-                                    restoring,
-                                    backend_ref,
-                                    session_id,
-                                    &sha256,
-                                    &remote_archive,
+                        let computed_dest_keep = transfer.dest_keep_dir.clone().or_else(|| {
+                            let repo_root = resumed_project_directory.clone().unwrap_or_else(|| {
+                                self.state.sessions[session_id]
+                                    .project_bundle(&self.config)
+                                    .and_then(|bundle| bundle.primary())
+                                    .map(|primary| {
+                                        PathBuf::from(&workspace_root).join(&primary.destination)
+                                    })
+                                    .unwrap_or_else(|| PathBuf::from(&workspace_root))
+                            });
+                            Some(mj_checkpoint::checkpoint::session_keep_dir(
+                                &repo_root, session_id,
+                            ))
+                        });
+                        super::move_session::transfer_move_snapshot_to_destination(
+                            transfer.operation,
+                            &transfer.source_backend,
+                            &transfer.source_worker_root,
+                            backend_ref,
+                            worker_root_ref,
+                            Path::new(&remote_archive),
+                            transfer.source_keep_dir.as_deref(),
+                            computed_dest_keep.as_deref(),
+                            restoring,
+                        )?;
+                        transfer.already_transferred = true;
+                    }
+                    transfer.operation.phase = mj_core::state::MovePhase::Restoring;
+                    transfer.operation.updated_at = now();
+                    crate::database::save_move_operation(transfer.operation)?;
+                    let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
+                    upload_checkpoint_spec(
+                        restoring,
+                        backend_ref,
+                        session_id,
+                        local_spec_ref,
+                        &remote_spec,
+                    )?;
+                } else {
+                    // Two independent lanes into the target. The checkpoint transfer
+                    // needs nothing from the worker install, and the worker install
+                    // is independent of archive upload, so both run concurrently.
+                    // The archive lands in the worker root and unpacks into the
+                    // workspace and the harness home; each filesystem needs room.
+                    crate::target_storage::ensure_room_for(
+                        &backend,
+                        [
+                            worker_root.as_str(),
+                            workspace_root.as_str(),
+                            harness_home.as_str(),
+                        ],
+                        || {
+                            Ok(std::fs::metadata(restored_archive)
+                                .with_context(|| {
+                                    format!("measure {}", restored_archive.display())
+                                })?
+                                .len())
+                        },
+                        "restore the checkpoint",
+                    )?;
+                    execute_concurrent_lanes(
+                        || {
+                            let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                            controller.prepare_worker_files(
+                                session_id,
+                                backend_ref,
+                                worker_root_ref,
+                                syncing,
+                                super::worker_binary::LaunchHistory::Restored(canonical_session),
+                            )?;
+                            super::provisioning::install_inherited_git_settings(
+                                syncing,
+                                backend_ref,
+                                session_id,
+                            )?;
+                            Ok(())
+                        },
+                        || {
+                            let restoring =
+                                &StagedExecutor::new(executor, ProvisionStage::Restoring);
+                            if should_upload_restore_archive(&backend) {
+                                let reused = mj_checkpoint::checkpoint::checkpoint_sha256(
+                                    restored_archive,
                                 )
                                 .ok()
-                            })
-                            .unwrap_or(false);
-                            if !reused {
-                                upload_checkpoint_spec(
-                                    restoring,
-                                    backend_ref,
-                                    session_id,
-                                    restored_archive,
-                                    &remote_archive,
-                                )?;
+                                .and_then(|sha256| {
+                                    super::checkpoint::try_stage_host_snapshot_cache(
+                                        restoring,
+                                        backend_ref,
+                                        session_id,
+                                        &sha256,
+                                        &remote_archive,
+                                    )
+                                    .ok()
+                                })
+                                .unwrap_or(false);
+                                if !reused {
+                                    upload_checkpoint_spec(
+                                        restoring,
+                                        backend_ref,
+                                        session_id,
+                                        restored_archive,
+                                        &remote_archive,
+                                    )?;
+                                }
                             }
-                        }
-                        upload_checkpoint_spec(
-                            restoring,
-                            backend_ref,
-                            session_id,
-                            local_spec_ref,
-                            &remote_spec,
-                        )
-                    },
-                )?;
+                            upload_checkpoint_spec(
+                                restoring,
+                                backend_ref,
+                                session_id,
+                                local_spec_ref,
+                                &remote_spec,
+                            )
+                        },
+                    )?;
+                }
                 {
                     let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
                     let output = execute_checked(
                         restoring,
                         restore_command(&backend, session_id, &remote_spec)?,
                     )?;
-                    super::checkpoint::load_snapshot_pack_into_clone_cache_best_effort(
-                        &backend,
-                        restored_archive,
-                        restoring,
-                    );
+                    if move_transfer.is_some() {
+                        // Remove the transferred Move archive from the
+                        // destination worker root once restore has unpacked it.
+                        if let Ok(rm_cmd) = targets::command_on_locator(
+                            SshTrafficClass::Control,
+                            &backend,
+                            session_id,
+                            vec!["rm".into(), "-f".into(), "--".into(), remote_archive.clone()],
+                            "remove consumed Move restore archive",
+                        ) {
+                            let _ = executor.execute_cleanup(&rm_cmd);
+                        }
+                    } else {
+                        super::checkpoint::load_snapshot_pack_into_clone_cache_best_effort(
+                            &backend,
+                            restored_archive,
+                            restoring,
+                        );
+                    }
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let trimmed = stdout.trim();
                     if !trimmed.is_empty() {
@@ -1031,6 +1163,11 @@ impl Controller {
                             resume_notices.extend(parsed.notices);
                         }
                     }
+                }
+                if let Some(transfer) = move_transfer.as_mut() {
+                    transfer.operation.phase = mj_core::state::MovePhase::DestinationStarting;
+                    transfer.operation.updated_at = now();
+                    crate::database::save_move_operation(transfer.operation)?;
                 }
                 if should_install_attached_resources {
                     let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
@@ -1182,7 +1319,7 @@ impl Controller {
                 // Mail waited for the handoff too, and joins the queue behind
                 // what was already queued. A Move admits it with its queue once
                 // it owns the destination.
-                if move_destination.is_none() {
+                if queue_policy_override == QueuePolicy::Import && move_destination.is_none() {
                     for (command_id, command) in deferred_mail_commands(canonical_session) {
                         relay.submit(command_id, command).await?;
                     }
@@ -1680,26 +1817,29 @@ impl Controller {
         .await
     }
 
-    pub(in crate::controller) async fn resume_session_for_move(
+    pub(super) async fn resume_session_for_cross_target_move(
         &mut self,
-        operation: &mj_core::state::MoveOperation,
+        operation: &mut mj_core::state::MoveOperation,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
+        let session_id = operation.selection.session_id.clone();
+        let profile_id = operation
+            .selection
+            .profile_id
+            .clone()
+            .context("move profile is unresolved")?;
+        let target_id = operation
+            .selection
+            .target_template_id
+            .clone()
+            .context("move target is unresolved")?;
         self.resume_session_with_origin(
-            &operation.selection.session_id,
-            operation
-                .selection
-                .profile_id
-                .as_deref()
-                .context("Move profile missing")?,
-            operation
-                .selection
-                .target_template_id
-                .as_deref()
-                .context("Move target missing")?,
+            &session_id,
+            &profile_id,
+            &target_id,
             SessionResumeOptions {
-                additional_mounts: operation.selection.additional_mounts.clone(),
-                resource_allocation: operation.selection.resource_allocation.clone(),
+                additional_mounts: None,
+                resource_allocation: None,
                 discard_queue: true,
             },
             None,
@@ -1718,7 +1858,7 @@ impl Controller {
         target_id: &str,
         options: SessionResumeOptions,
         repository_preflight: Option<ResumeRepositorySourceReceipt>,
-        move_operation: Option<&mj_core::state::MoveOperation>,
+        mut move_operation: Option<&mut mj_core::state::MoveOperation>,
         executor: &(impl CommandExecutor + Sync),
         on_accepted: impl FnOnce() + Send,
     ) -> Result<MaterializedSession> {
@@ -1806,46 +1946,106 @@ impl Controller {
                 },
             }
         }
-        let checkpoint = move_operation
-            .and_then(|op| op.handoff.as_ref())
-            .or(previous.checkpoint.as_deref())
-            .context("session has no checkpoint")?;
-        // A receipt for an isolated destination says nothing about a host
-        // checkout. Explicit moves to raw execution must check that source.
-        let moving_to_raw = previous_project_directory.is_none()
-            && self
-                .config
-                .targets
-                .get(target_id)
-                .is_some_and(mj_core::config::is_bare_project_target);
-        if !transferring_workspace
-            && (moving_to_raw
-                || !repository_preflight.as_ref().is_some_and(|receipt| {
-                    self.repository_source_receipt_is_current(session_id, receipt)
-                }))
+        // For a direct cross-target Move whose archive remains on the source
+        // target, capture source placement & keep directory BEFORE the session
+        // record is updated for the destination.
+        let direct_move_source = if let Some(operation) = move_operation.as_deref()
+            && operation.source_snapshot.is_some()
         {
-            let _phase = ResumePhaseTimer::new(session_id, "preflight repository sources");
-            if let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) =
-                self.preflight_repository_sources(
+            let source_locator = previous
+                .target
+                .as_deref()
+                .or(operation.source_target.as_ref())
+                .context("cross-target Move source target is missing")?;
+            let source_backend = backend_locator(source_locator, &previous, &self.config)?;
+            let source_worker_root = targets::worker_root(&source_backend, session_id)?;
+            let source_keep_dir = if let Some(worktree) = previous_managed_worktree.as_ref() {
+                Some(mj_checkpoint::checkpoint::session_keep_dir(
+                    &worktree.worktree_root,
                     session_id,
-                    target_id,
-                    false,
-                    self.github_token_for_repository_preflight(session_id)
-                        .await?
-                        .as_deref(),
-                    executor,
-                )?
-            {
-                bail!(
-                    "checkpoint base commit {} is missing from configured source {:?} for repository {:?}; the repository may have moved (archived origin: {:?})",
-                    mismatch.missing_commit,
-                    mismatch.configured_origin,
-                    mismatch.repository_id,
-                    mismatch.archived_origin,
-                );
+                ))
+            } else if let Some(dir) = previous_project_directory.as_deref() {
+                Some(mj_checkpoint::checkpoint::session_keep_dir(dir, session_id))
+            } else {
+                let source_ws = PathBuf::from(super::network_git::workspace_root(
+                    &source_backend,
+                    previous.container_workspace.as_deref(),
+                ));
+                let repo_root = previous
+                    .project_bundle(&self.config)
+                    .and_then(|bundle| bundle.primary())
+                    .map(|primary| source_ws.join(&primary.destination))
+                    .unwrap_or(source_ws);
+                Some(mj_checkpoint::checkpoint::session_keep_dir(
+                    &repo_root, session_id,
+                ))
+            };
+            Some((source_backend, source_worker_root, source_keep_dir))
+        } else {
+            None
+        };
+        let verified_archive = if let Some(snapshot) = move_operation
+            .as_deref()
+            .and_then(|op| op.source_snapshot.as_deref())
+        {
+            let manifest = snapshot
+                .manifest
+                .clone()
+                .context("cross-target Move snapshot is missing its archive manifest")?;
+            let materialized = crate::database::load_materialized_session(session_id)?
+                .context("cross-target Move session projection is missing")?;
+            let mut canonical =
+                mj_transcript::projection::canonical_session_from_materialized_owned(materialized)?;
+            canonical.queued_prompts = snapshot.queued_prompts.clone();
+            canonical.mailbox = snapshot.mailbox.clone();
+            VerifiedResumeArchive {
+                archive_path: snapshot.archive_path.clone(),
+                manifest,
+                canonical_session: Arc::new(canonical),
             }
-        }
-        let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
+        } else {
+            let checkpoint = move_operation
+                .as_deref()
+                .and_then(|op| op.checkpoint.as_ref())
+                .or(previous.checkpoint.as_deref())
+                .context("session has no checkpoint")?;
+            // A receipt for an isolated destination says nothing about a host
+            // checkout. Explicit moves to raw execution must check that source.
+            let moving_to_raw = previous_project_directory.is_none()
+                && self
+                    .config
+                    .targets
+                    .get(target_id)
+                    .is_some_and(mj_core::config::is_bare_project_target);
+            if !transferring_workspace
+                && (moving_to_raw
+                    || !repository_preflight.as_ref().is_some_and(|receipt| {
+                        self.repository_source_receipt_is_current(session_id, receipt)
+                    }))
+            {
+                let _phase = ResumePhaseTimer::new(session_id, "preflight repository sources");
+                if let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) =
+                    self.preflight_repository_sources(
+                        session_id,
+                        target_id,
+                        false,
+                        self.github_token_for_repository_preflight(session_id)
+                            .await?
+                            .as_deref(),
+                        executor,
+                    )?
+                {
+                    bail!(
+                        "checkpoint base commit {} is missing from configured source {:?} for repository {:?}; the repository may have moved (archived origin: {:?})",
+                        mismatch.missing_commit,
+                        mismatch.configured_origin,
+                        mismatch.repository_id,
+                        mismatch.archived_origin,
+                    );
+                }
+            }
+            verify_resume_checkpoint(session_id, checkpoint)?
+        };
         let archive_path = verified_archive.archive_path.clone();
         let archive_manifest = &verified_archive.manifest;
         let canonical_session = Arc::clone(&verified_archive.canonical_session);
@@ -1874,41 +2074,33 @@ impl Controller {
             .repositories
             .iter()
             .any(|repository| repository.metadata.origin_delta.is_some());
-        if origin_delta {
-            if transferring_workspace {
+        if origin_delta && plan != ResumePlan::InPlace {
+            let originless = archive_manifest.repositories.iter().any(|repository| {
+                repository
+                    .metadata
+                    .origin_delta
+                    .as_ref()
+                    .is_some_and(|delta| !delta.history_cutoff && delta.origin_url.is_none())
+            });
+            if originless {
                 return Err(mj_core::refusal::Refusal::precondition(
-                    "This session's checkpoint can be resumed only on its original target for now. Resume it there; it can then be moved.",
+                    "This raw session has no Git origin remote and can only be resumed on its original target.",
                 )
                 .into());
             }
-            if plan != ResumePlan::InPlace {
-                let originless = archive_manifest.repositories.iter().any(|repository| {
-                    repository
-                        .metadata
-                        .origin_delta
-                        .as_ref()
-                        .is_some_and(|delta| !delta.history_cutoff && delta.origin_url.is_none())
-                });
-                if originless {
-                    return Err(mj_core::refusal::Refusal::precondition(
-                        "This raw session has no Git origin remote and can only be resumed on its original target.",
-                    )
-                    .into());
-                }
-                if is_history_cutoff_origin_delta && plan == ResumePlan::WorkspaceToRaw {
-                    return Err(mj_core::refusal::Refusal::precondition(
-                        "A history-cutoff session cannot be resumed into a bare checkout.",
-                    )
-                    .into());
-                }
-                if plan == ResumePlan::WorkspaceToRaw
-                    && !matches!(target_template, mj_core::config::TargetTemplate::LocalBare)
-                {
-                    return Err(mj_core::refusal::Refusal::precondition(
-                        "Resuming an OriginDelta checkpoint onto an SSH bare target is not supported yet; resume on a local bare or container target.",
-                    )
-                    .into());
-                }
+            if is_history_cutoff_origin_delta && plan == ResumePlan::WorkspaceToRaw {
+                return Err(mj_core::refusal::Refusal::precondition(
+                    "A history-cutoff session cannot be resumed into a bare checkout.",
+                )
+                .into());
+            }
+            if plan == ResumePlan::WorkspaceToRaw
+                && !matches!(target_template, mj_core::config::TargetTemplate::LocalBare)
+            {
+                return Err(mj_core::refusal::Refusal::precondition(
+                    "Resuming an OriginDelta checkpoint onto an SSH bare target is not supported yet; resume on a local bare or container target.",
+                )
+                .into());
             }
         }
         if !origin_delta
@@ -1974,7 +2166,6 @@ impl Controller {
         // one. Every other isolated resume clones what its stored archive names.
         if !mj_core::config::is_bare_project_target(&target_template)
             && plan != ResumePlan::RawToWorkspace
-            && !transferring_workspace
             && !is_history_cutoff_origin_delta
         {
             super::network_git::bundle_from_manifest_for_session(
@@ -1993,7 +2184,7 @@ impl Controller {
         let conversion = match plan {
             ResumePlan::InPlace => None,
             ResumePlan::RawToWorkspace => Some(ResumeConversion::RawToWorkspace(Box::new(
-                if origin_delta && !transferring_workspace {
+                if origin_delta {
                     plan_raw_to_workspace_from_origin_delta(
                         &previous,
                         archive_manifest,
@@ -2108,7 +2299,7 @@ impl Controller {
         // provisioning below. Clone only the configuration it reads so the
         // controller can continue owning and mutating its session record.
         let utility_config = (!native_continuity).then(|| self.config.clone());
-        let native_prior = if utility_config.is_some() {
+        let native_prior = if utility_config.is_some() && direct_move_source.is_none() {
             native_prior_while_cancellable(session_id, &verified_archive, executor).await?
         } else {
             None
@@ -2255,9 +2446,9 @@ impl Controller {
         // raw-to-workspace conversion (deleted when this resume finishes; never
         // replaces `record.checkpoint`).
         let mut ephemeral_conversion_archive: Option<(tempfile::TempDir, PathBuf)> = None;
+        let mut direct_already_transferred = false;
         let result = async {
             if origin_delta {
-                ensure!(!transferring_workspace, "origin delta live move is unavailable");
                 if is_history_cutoff_origin_delta || plan == ResumePlan::RawToWorkspace {
                     // Provisioning clones from the origin/bundle; restore_into_target
                     // then applies the origin-delta snapshot into the workspace.
@@ -2328,11 +2519,62 @@ impl Controller {
                 .as_ref()
                 .and_then(ResumeConversion::workspace_to_raw)
             {
-                if origin_delta && !transferring_workspace {
+                if origin_delta {
+                    let local_restore_archive = if let (
+                        Some(operation),
+                        Some((source_backend, source_worker_root, source_keep_dir)),
+                    ) = (move_operation.as_deref_mut(), direct_move_source.as_ref())
+                    {
+                        // Moving into LocalBare: stream the archive + `.mj/keep/`
+                        // straight into the local destination worker root first so
+                        // `restore_managed_clone_origin_delta` reads it locally.
+                        let local_worker_root =
+                            mj_core::config::data_dir().join("workers").join(session_id);
+                        std::fs::create_dir_all(&local_worker_root).with_context(|| {
+                            format!(
+                                "create local destination worker root {}",
+                                local_worker_root.display()
+                            )
+                        })?;
+                        let local_dest_locator = targets::TargetLocator::LocalBare {
+                            worker_root: local_worker_root.to_string_lossy().into_owned(),
+                        };
+                        let local_worker_root_str = local_worker_root.to_string_lossy().into_owned();
+                        self.prepare_worker_files(
+                            session_id,
+                            &local_dest_locator,
+                            &local_worker_root_str,
+                            executor,
+                            super::worker_binary::LaunchHistory::Restored(&canonical_session),
+                        )?;
+                        let local_archive = local_worker_root.join("restore.hel.zip");
+                        let dest_keep_dir = mj_checkpoint::checkpoint::session_keep_dir(
+                            &conversion.worktree.worktree_root,
+                            session_id,
+                        );
+                        operation.phase = mj_core::state::MovePhase::Transferring;
+                        operation.updated_at = now();
+                        crate::database::save_move_operation(operation)?;
+                        super::move_session::transfer_move_snapshot_to_destination(
+                            operation,
+                            source_backend,
+                            source_worker_root,
+                            &local_dest_locator,
+                            &local_worker_root_str,
+                            &local_archive,
+                            source_keep_dir.as_deref(),
+                            Some(&dest_keep_dir),
+                            executor,
+                        )?;
+                        direct_already_transferred = true;
+                        local_archive
+                    } else {
+                        archive_path.clone()
+                    };
                     resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
                         executor,
                         &conversion.worktree,
-                        &archive_path,
+                        &local_restore_archive,
                         archive_manifest,
                     )?);
                 } else {
@@ -2458,20 +2700,15 @@ impl Controller {
                 self.state.sessions.get_mut(session_id).unwrap().checkpoint =
                     previous.checkpoint.clone();
             }
-            if transferring_workspace {
-                self.restore_move_workspace(session_id, executor)?;
-            }
             let restore_repositories = if origin_delta {
-                !transferring_workspace
-                    && (is_history_cutoff_origin_delta
-                        || plan == ResumePlan::RawToWorkspace
-                        || (plan == ResumePlan::InPlace
-                            && resumed_project_directory.is_none()
-                            && previous_managed_worktree.is_none()
-                            && !is_attached_checkout))
+                is_history_cutoff_origin_delta
+                    || plan == ResumePlan::RawToWorkspace
+                    || (plan == ResumePlan::InPlace
+                        && resumed_project_directory.is_none()
+                        && previous_managed_worktree.is_none()
+                        && !is_attached_checkout)
             } else {
-                !transferring_workspace
-                    && upgraded_legacy_worktree.is_none()
+                upgraded_legacy_worktree.is_none()
                     && ((resumed_project_directory.is_none() && conversion.is_none())
                         || plan == ResumePlan::RawToWorkspace
                         || (recreated_managed_worktree && plan == ResumePlan::InPlace))
@@ -2481,6 +2718,31 @@ impl Controller {
             let restored_archive = ephemeral_conversion_archive
                 .as_ref()
                 .map_or(archive_path.as_path(), |(_, path)| path.as_path());
+            let move_transfer = if let (
+                Some(operation),
+                Some((source_backend, source_worker_root, source_keep_dir)),
+            ) = (move_operation.as_deref_mut(), direct_move_source)
+            {
+                let dest_keep_dir = conversion
+                    .as_ref()
+                    .and_then(ResumeConversion::workspace_to_raw)
+                    .map(|conv| {
+                        mj_checkpoint::checkpoint::session_keep_dir(
+                            &conv.worktree.worktree_root,
+                            session_id,
+                        )
+                    });
+                Some(MoveDirectTransfer {
+                    operation,
+                    source_backend,
+                    source_worker_root,
+                    source_keep_dir,
+                    dest_keep_dir,
+                    already_transferred: direct_already_transferred,
+                })
+            } else {
+                None
+            };
             self.restore_into_target(
                 session_id,
                 RestoreIntoTarget {
@@ -2493,6 +2755,12 @@ impl Controller {
                     native_continuity,
                     discard_queued_prompts,
                     replay_queue: !discard_queue,
+                    queue_policy_override: if transferring_workspace {
+                        QueuePolicy::Suppress
+                    } else {
+                        QueuePolicy::Import
+                    },
+                    move_transfer,
                     utility_handoff,
                     projection_build,
                     resume_notices,
@@ -2541,7 +2809,9 @@ impl Controller {
                     discard_queued_prompts,
                 );
                 if let Some(operation) = move_operation {
-                    return Err(self.rollback_move_destination(operation, error, executor)?);
+                    super::move_session::recovery::cleanup_local_move_key_files(
+                        &operation.granted_keys,
+                    );
                 }
                 Err(self.rollback_failed_resume(
                     session_id,
@@ -2759,8 +3029,16 @@ fn apply_failed_resume_rollback_with_ownership(
     match cleanup_error {
         None => {
             *current = previous.clone();
-            current.state = SessionState::Stopped;
-            current.target = None;
+            if previous.state == SessionState::Closing && previous.target.is_some() {
+                // Cross-target Move retained the source environment across
+                // destination provisioning: preserve `Closing` + source target
+                // so the Move failure handler can restart the source agent in
+                // place.
+                current.state = SessionState::Closing;
+            } else {
+                current.state = SessionState::Stopped;
+                current.target = None;
+            }
             current.updated_at = now();
             current.last_error = Some(format!("resume failed: {original_error}"));
             anyhow::anyhow!(original_error.to_owned())
@@ -3329,7 +3607,7 @@ async fn native_prior_while_cancellable(
 /// Discover a utility model and compact the cross-harness handoff while still
 /// watching for cancellation. Discovery and compaction can both make several
 /// network requests, so a cancelled resume must not wait them out.
-async fn utility_handoff_while_cancellable(
+pub(in crate::controller) async fn utility_handoff_while_cancellable(
     session_id: &str,
     config: &Config,
     snapshot: &CanonicalSessionSnapshot,

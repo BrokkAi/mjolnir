@@ -2454,6 +2454,8 @@ exit 0
                 native_continuity: true,
                 discard_queued_prompts: false,
                 replay_queue: true,
+                queue_policy_override: QueuePolicy::Import,
+                move_transfer: None,
                 utility_handoff: None,
                 projection_build: None,
                 resume_notices: Vec::new(),

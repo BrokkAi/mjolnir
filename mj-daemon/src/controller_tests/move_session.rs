@@ -121,7 +121,7 @@ fn move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry()
             .unwrap();
     assert_eq!(recovery.destination_resource_allocation, requested_size);
     assert_eq!(recovery.destination_additional_mounts, requested_mounts);
-    operation.phase = MovePhase::ClosingSource;
+    operation.phase = MovePhase::Capturing;
     let outcome = controller
         .finish_move_result(
             &mut operation,
@@ -139,7 +139,7 @@ fn move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry()
     let public = crate::server::api::ApiSession::from(&snapshot.sessions[0]);
     assert!(public.has_error);
     let message = public.error.unwrap();
-    assert!(message.contains("checkpointing and suspending the source"));
+    assert!(message.contains("capturing the source snapshot"));
     assert!(message.contains(&operation.operation_id));
     assert!(message.contains(outcome.recovery.as_deref().unwrap()));
     assert!(!message.contains("private-token"));
@@ -204,6 +204,10 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
                 .env(
                     mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_JOURNALS_BEFORE_CLOSE,
                     mj_controller::controller::checkpoint::stand_in::LATE_HARNESS_NOTIFICATION,
+                )
+                .env(
+                    mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_MAX_PROTOCOL,
+                    mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL.to_string(),
                 )
                 .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
                 .isolated_store(directory.path())
@@ -273,7 +277,7 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
             "an idle goal alone does not require interruption"
         );
         assert!(manual.in_place);
-        assert!(manual.workspace.is_none());
+        assert!(manual.route_preview.is_none());
         assert!(!manual.stops_subagents);
         let request = state
             .prepare_quota_move(LATCH_RELAY_SESSION, IN_PLACE_DESTINATION_PROFILE)
@@ -389,19 +393,18 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
             .unwrap()
             .unwrap();
         assert!(moved.in_place);
-        assert!(moved.workspace_transfer.is_none());
-        let archive = moved.restore_artifact().unwrap();
-        let verified =
-            mj_checkpoint::archive::verify_archive_streaming(&archive.archive_path).unwrap();
+        assert!(moved.transfer_route.is_none());
+        assert!(moved.restore_artifact().is_none());
+        assert!(moved.in_place_harness_restarted);
+        let live_relay =
+            DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+        let live_state = live_relay.operational_state();
+        assert!(live_state.in_place_move_hold.is_none());
+        assert!(live_state.goal.active());
         assert!(
-            verified
-                .canonical_session
-                .session
-                .configuration
-                .goal
-                .as_ref()
+            fs::read_to_string(fixture.worker_root.join("profile/settings.json"))
                 .unwrap()
-                .active()
+                .contains("\"destination\"")
         );
     });
 }
@@ -428,6 +431,10 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
                 .env(
                     mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_JOURNALS_BEFORE_CLOSE,
                     mj_controller::controller::checkpoint::stand_in::LATE_HARNESS_NOTIFICATION,
+                )
+                .env(
+                    mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_MAX_PROTOCOL,
+                    mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL.to_string(),
                 )
                 .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
                 .isolated_store(directory.path())
@@ -661,7 +668,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
                 let outcome = controller.finish_move_result(&mut operation, Err(error), &executor).unwrap();
                 assert_eq!(outcome.outcome, "interrupted");
                 let durable = mj_controller::database::load_move_operation(LATCH_RELAY_SESSION).unwrap().unwrap();
-                assert_eq!(durable.phase, MovePhase::ClosingSource);
+                assert_eq!(durable.phase, MovePhase::Capturing);
                 assert!(!durable.cancellation_requested, "handoff must not become a user cancellation");
             } else {
                 assert!(format!("{error:#}").contains("Move cancelled"), "{error:#}");

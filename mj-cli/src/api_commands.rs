@@ -2748,6 +2748,18 @@ pub(crate) async fn interrupt_turn(args: SessionArgs) -> Result<()> {
     }
 }
 
+pub(crate) async fn restart_session(args: SessionArgs) -> Result<()> {
+    let client = ApiClient::connect().await?;
+    let payload = client.restart_session(&args.session).await?;
+    match args.json {
+        true => print_json(&payload),
+        false => {
+            println!("restarting agent for {}", args.session);
+            Ok(())
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct ReviewArgs {
     #[command(subcommand)]
@@ -5156,6 +5168,41 @@ mod tests {
             panic!("expected the resume subcommand");
         };
         assert_eq!(args.session.as_deref(), Some("s1"));
+
+        {
+            let cli = Cli::try_parse_from(["mj", "restart", "--session", "s1"]).unwrap();
+            let Some(Command::Restart(args)) = cli.command else {
+                panic!("expected the restart subcommand");
+            };
+            assert_eq!(args.session, "s1");
+
+            let cli = Cli::try_parse_from([
+                "mj",
+                "move",
+                "--session",
+                "s1",
+                "--target",
+                "remote",
+                "--skip",
+                "cache/big.bin",
+                "--dry-run",
+            ])
+            .unwrap();
+            let Some(Command::Move(args)) = cli.command else {
+                panic!("expected the move subcommand");
+            };
+            assert_eq!(args.skip_keep_paths, vec![PathBuf::from("cache/big.bin")]);
+            assert!(args.dry_run);
+            assert!(Cli::try_parse_from(["mj", "move", "--session", "s1", "--prepare"]).is_err());
+            assert!(
+                Cli::try_parse_from(["mj", "move", "--session", "s1", "--allow-large-transfer"])
+                    .is_err()
+            );
+            assert!(
+                Cli::try_parse_from(["mj", "move", "--session", "s1", "--exclude", "repo:a"])
+                    .is_err()
+            );
+        }
         assert_eq!(args.profile, None);
         assert_eq!(args.target, None);
         assert_eq!(args.queue, None);

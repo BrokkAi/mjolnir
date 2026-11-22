@@ -37,7 +37,6 @@ struct InPlaceRestorePlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InPlaceRestoreMode {
-    Move,
     Restart,
     LegacyRecovery { restore_repositories: bool },
 }
@@ -87,38 +86,6 @@ impl std::error::Error for InPlaceRestartError {
 }
 
 impl Controller {
-    /// Replace the harness of a sealed session without rebuilding its target.
-    ///
-    /// The session must be the one [`Controller::suspend_session_for_move`] left
-    /// behind for an in-place swap: `Closing`, with its verified checkpoint and
-    /// its target still on the record, or, on a retry, the `Error` record a
-    /// failed attempt retained. On success the session is `Running` on
-    /// `profile_id` in the same environment, recorded under
-    /// `target_template_id`. Every failure stops only the worker and leaves
-    /// the record `Error`, keeping the environment and checkpoint for an
-    /// explicit retry.
-    pub(in crate::controller) async fn restore_session_in_place(
-        &mut self,
-        session_id: &str,
-        profile_id: &str,
-        target_template_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<MaterializedSession> {
-        match self
-            .restore_session_in_place_with_mode(
-                session_id,
-                profile_id,
-                target_template_id,
-                executor,
-                InPlaceRestoreMode::Move,
-            )
-            .await?
-        {
-            Ok(session) => Ok(session),
-            Err(error) => Err(anyhow::Error::msg(error)),
-        }
-    }
-
     pub async fn restore_session_in_place_for_restart(
         &mut self,
         session_id: &str,
@@ -181,10 +148,7 @@ impl Controller {
             if let Err(error) = crate::worker_lifecycle::require(session_id)
                 .and_then(|owner| owner.verify_cached_target(&self.state))
             {
-                if mode != InPlaceRestoreMode::Move {
-                    return Ok(Err(InPlaceRestartError::Preflight(error)));
-                }
-                return Err(error);
+                return Ok(Err(InPlaceRestartError::Preflight(error)));
             }
             let previous = self
                 .state
@@ -197,31 +161,18 @@ impl Controller {
                 .checkout(session_id)?
                 .project_directory()
                 .map(|path| path.to_path_buf());
-            let move_operation = if mode == InPlaceRestoreMode::Move {
-                crate::database::load_move_operation(session_id)?
-            } else {
-                None
-            };
-            // A first attempt finds the source sealed (`Closing`); a retry finds
-            // the environment its failed attempt retained (`Error`).
-            let retained_state = previous.state == SessionState::Closing
-                || (mode != InPlaceRestoreMode::Move
-                    && matches!(
-                        previous.state,
-                        SessionState::Error | SessionState::Stopped | SessionState::Provisioning
-                    ))
-                || (previous.state == SessionState::Error
-                    && move_operation
-                        .as_ref()
-                        .is_some_and(mj_core::state::MoveOperation::holds_source_environment));
+            let retained_state = matches!(
+                previous.state,
+                SessionState::Closing
+                    | SessionState::Error
+                    | SessionState::Stopped
+                    | SessionState::Provisioning
+            );
             if !retained_state || previous.target.is_none() {
                 let error = anyhow::anyhow!(
                     "session {session_id} is not ready for an in-place harness replacement"
                 );
-                if mode != InPlaceRestoreMode::Move {
-                    return Ok(Err(InPlaceRestartError::Preflight(error)));
-                }
-                return Err(error);
+                return Ok(Err(InPlaceRestartError::Preflight(error)));
             }
             // From here the environment belongs to this swap. Every failure,
             // before or after the record transition below, stops only the worker
@@ -229,7 +180,6 @@ impl Controller {
             // failure can leave the session suspending without an owner.
             let plan = match self.plan_in_place_restore(
                 &previous,
-                move_operation.as_ref(),
                 profile_id,
                 target_template_id,
                 executor,
@@ -237,10 +187,7 @@ impl Controller {
             ) {
                 Ok(plan) => plan,
                 Err(error) => {
-                    if mode != InPlaceRestoreMode::Move {
-                        return Ok(Err(InPlaceRestartError::Preflight(error)));
-                    }
-                    return Err(self.retain_failed_in_place_move(session_id, &previous, error)?);
+                    return Ok(Err(InPlaceRestartError::Preflight(error)));
                 }
             };
             let InPlaceRestorePlan {
@@ -253,17 +200,8 @@ impl Controller {
             } = plan;
 
             let canonical_session = std::sync::Arc::clone(&verified_archive.canonical_session);
-            let include_in_place_subagents = mode == InPlaceRestoreMode::Move
-                && previous
-                    .subagents
-                    .clone()
-                    .unwrap_or_default()
-                    .for_launch(profile.kind, false)
-                    .parent_role()
-                    .is_some();
+            let include_in_place_subagents = false;
             let (discard_queued_prompts, replay_queue) = match mode {
-                // A move admits its queue only after destination readiness.
-                InPlaceRestoreMode::Move => (true, false),
                 // Restart follows ordinary same-harness resume semantics.
                 InPlaceRestoreMode::Restart | InPlaceRestoreMode::LegacyRecovery { .. } => {
                     (false, true)
@@ -300,7 +238,7 @@ impl Controller {
                 })
             });
 
-            if mode != InPlaceRestoreMode::Move && executor.cancellation_requested() {
+            if executor.cancellation_requested() {
                 return Ok(Err(InPlaceRestartError::Cancelled(anyhow::anyhow!(
                     "restart cancelled before the worker reset"
                 ))));
@@ -317,17 +255,13 @@ impl Controller {
                 // Another bare target on the same machine is the same environment;
                 // the record only names it differently afterwards.
                 record.target_template_id = target_template_id.to_string();
-                let mut runtime = if mode == InPlaceRestoreMode::Move {
-                    mj_core::state::TargetRuntimeSettings::from(&target_template)
-                } else {
-                    record
-                        .target_runtime
-                        .as_deref()
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            mj_core::state::TargetRuntimeSettings::from(&target_template)
-                        })
-                };
+                let mut runtime = record
+                    .target_runtime
+                    .as_deref()
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        mj_core::state::TargetRuntimeSettings::from(&target_template)
+                    });
                 runtime.tool_cache = record
                     .target_runtime
                     .as_ref()
@@ -390,6 +324,8 @@ impl Controller {
                         native_continuity,
                         discard_queued_prompts,
                         replay_queue,
+                        queue_policy_override: super::QueuePolicy::Import,
+                        move_transfer: None,
                         utility_handoff,
                         projection_build,
                         resume_notices: Vec::new(),
@@ -418,8 +354,7 @@ impl Controller {
             match result {
                 Ok(materialized) => Ok(Ok(materialized)),
                 Err(error) => {
-                    if mode != InPlaceRestoreMode::Move
-                        && executor.shutdown_interrupted()
+                    if executor.shutdown_interrupted()
                         && crate::database::worker_restart_phase(session_id)?
                             == Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
                     {
@@ -434,13 +369,9 @@ impl Controller {
                         &canonical_session,
                         discard_queued_prompts,
                     );
-                    if mode != InPlaceRestoreMode::Move {
-                        let error =
-                            self.retain_failed_in_place_restart(session_id, &previous, error)?;
-                        Ok(Err(InPlaceRestartError::Restore(error)))
-                    } else {
-                        Err(self.retain_failed_in_place_move(session_id, &previous, error)?)
-                    }
+                    let error =
+                        self.retain_failed_in_place_restart(session_id, &previous, error)?;
+                    Ok(Err(InPlaceRestartError::Restore(error)))
                 }
             }
         })
@@ -452,7 +383,6 @@ impl Controller {
     fn plan_in_place_restore(
         &self,
         previous: &mj_core::state::SessionRecord,
-        move_operation: Option<&mj_core::state::MoveOperation>,
         profile_id: &str,
         target_template_id: &str,
         executor: &(impl CommandExecutor + Sync),
@@ -468,11 +398,9 @@ impl Controller {
         } else {
             None
         };
-        let checkpoint = move_operation
-            .and_then(|op| op.handoff.as_ref())
-            .or(restart_intent
-                .as_ref()
-                .and_then(|intent| intent.handoff.as_ref()))
+        let checkpoint = restart_intent
+            .as_ref()
+            .and_then(|intent| intent.handoff.as_ref())
             .or(previous.checkpoint.as_deref())
             .context("session has no checkpoint")?;
         let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
@@ -499,7 +427,7 @@ impl Controller {
         )?;
         // A failed/older swap may already have removed native files. Explicit
         // recovery reconstructs them; a freshly sealed source still owns them.
-        let retain_native = matches!(mode, InPlaceRestoreMode::Move | InPlaceRestoreMode::Restart)
+        let retain_native = mode == InPlaceRestoreMode::Restart
             && native_continuity
             && previous.state == SessionState::Closing
             && super::super::local_profile_homes::session_has_a_staged_home_of_its_own(previous);

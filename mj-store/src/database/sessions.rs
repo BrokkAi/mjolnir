@@ -1972,7 +1972,11 @@ pub(super) fn save_session_with_container_size_to(
     let mut session = session.clone();
     let moving: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM session_moves WHERE session_id=?1
-         AND json_extract(operation_json, '$.phase') IN ('preparing','closing_source','resuming_destination','starting_queue'))",
+         AND json_extract(operation_json, '$.phase') IN (
+             'capturing','transferring','restoring','destination_starting',
+             'destination_owns','source_retired','queue_admitted','dispatch_released',
+             'preparing','closing_source','resuming_destination','starting_queue'
+         ))",
         [&session.id], |row| row.get(0),
     )?;
     if moving {
