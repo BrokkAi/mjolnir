@@ -88,7 +88,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
     let output = worker_root.join("source.hel.zip");
     (
         CheckpointExportSpec {
-            ignore_nested_repositories: false,
+            consent: Default::default(),
             report_directories: None,
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
             session: SessionManifest {
@@ -125,6 +125,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                 command_ledger: None,
                 assessment_state: None,
                 notification_stack: None,
+                native_use_evidence: None,
                 event_frontier: 1,
                 event_frontier_digest: "a".repeat(64),
                 session: CanonicalSessionState {

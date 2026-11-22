@@ -672,7 +672,7 @@ impl RuntimeState {
                     },
                 );
                 if mode == AdmissionMode::FreshRequest
-                    && matches!(kind, LifecycleKind::Suspend | LifecycleKind::ForceStop)
+                    && matches!(kind, LifecycleKind::Suspend)
                 {
                     lifecycle_owner.close_requested.insert(session_id.clone());
                 }
@@ -928,17 +928,30 @@ impl RuntimeState {
                     // answered and the CLI has already printed `closing <id>`
                     // and exited. A failure puts the record back in the state
                     // it had, so without this the person is never told (#1081).
+                    // When the request was refused synchronously BEFORE
+                    // acceptance (e.g. suspend preflight refusing untracked
+                    // files or an unconfirmed `--without-checkpoint`), the
+                    // caller already received the refusal and the session was
+                    // never touched, so do not stamp `last_error` onto the
+                    // live session.
+                    let lifecycle_was_accepted = state
+                        .owner()
+                        .lifecycle
+                        .get(&operation_session_id)
+                        .is_none_or(|active| {
+                            matches!(active.acceptance.borrow().as_ref(), Some(Ok(())))
+                        });
                     if let Err(failure) = &result
                         && !handed_off_lifecycle
+                        && lifecycle_was_accepted
                         && matches!(
                             kind,
                             LifecycleKind::Suspend
-                                | LifecycleKind::ForceStop
                                 | LifecycleKind::Restart
                                 | LifecycleKind::UpgradeContainer
                         )
                     {
-                        if matches!(kind, LifecycleKind::Suspend | LifecycleKind::ForceStop) {
+                        if matches!(kind, LifecycleKind::Suspend) {
                             state
                                 .record_failed_close(
                                     &operation_session_id,

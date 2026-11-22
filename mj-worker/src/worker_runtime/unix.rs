@@ -522,11 +522,12 @@ fn start_bridge(
         subagents,
         shell_cleanup: Some(shell_cleanup),
     };
-    started.acp_task = Some(runtime.spawn(acp::run_with_shutdown(
+    started.acp_task = Some(runtime.spawn(acp::run_with_guardian(
         acp_spec,
         commands_rx,
         events_tx,
         acp_shutdown,
+        Some(relay.guardian.clone()),
     )));
     started.event_task = Some(runtime.spawn(run_relay_coordinator_with_shells(
         relay,
@@ -612,10 +613,12 @@ pub(crate) async fn wait_for_change(
     preparation: Option<&watch::Receiver<PreparationSnapshot>>,
     subagents: Option<&super::subagents::SubagentEndpoint>,
     feed: &super::subagents::SubagentFeed,
+    guardian_generation: &mut u64,
     after_ordinal: u64,
     state_digest: Option<&str>,
 ) -> Result<RelayResponseBody> {
     let mut releases = Some(relay.releases());
+    let mut guardian = relay.guardian.changes();
     let mut jev = mj_core::jev::rate_limit_changes();
     let mut preparation = preparation.cloned();
     // A finished preparation closes its channel but keeps its last value,
@@ -645,7 +648,11 @@ pub(crate) async fn wait_for_change(
         let latest_ordinal = state.latest_ordinal;
         let digest = mj_core::relay::relay_state_digest(&state)?;
         let subagent_queue_changed = subagents.is_some_and(|endpoint| feed.has_unpolled(endpoint));
-        let changed = latest_ordinal != after_ordinal
+        let generation = *guardian.borrow_and_update();
+        let guardian_queue_changed = generation != *guardian_generation;
+        *guardian_generation = generation;
+        let changed = guardian_queue_changed
+            || latest_ordinal != after_ordinal
             || state_digest != Some(digest.as_str())
             || subagent_queue_changed;
         let observed = RelayResponseBody::Ok {
@@ -653,6 +660,7 @@ pub(crate) async fn wait_for_change(
                 latest_ordinal,
                 state_digest: digest,
                 subagent_queue_changed,
+                guardian_queue_changed,
             },
         };
         if changed {
@@ -680,6 +688,7 @@ pub(crate) async fn wait_for_change(
                 }
             } => if !changed { preparation_open = false },
             _ = jev.changed() => {}
+            _ = guardian.changed() => {}
             () = tokio::time::sleep_until(deadline) => return Ok(observed),
         }
     }
@@ -700,6 +709,290 @@ fn unavailable_request(envelope: RelayRequestEnvelope, message: String) -> Relay
         request_id: envelope.request_id,
         protocol_version: envelope.protocol_version,
         body: compaction_error(RelayErrorCode::InvalidState, &message),
+    }
+}
+
+struct InPlaceHarnessRestartGuard {
+    relay: Arc<RelayCell>,
+    operation_id: String,
+    expected_store_id: String,
+    completed: bool,
+}
+
+impl InPlaceHarnessRestartGuard {
+    fn complete(mut self) -> Result<()> {
+        let result = self
+            .relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .mark_in_place_harness_restarted(&self.operation_id, &self.expected_store_id);
+        if result.is_ok() {
+            self.completed = true;
+        }
+        result
+    }
+}
+
+impl Drop for InPlaceHarnessRestartGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .cancel_in_place_harness_restart(&self.operation_id);
+        }
+    }
+}
+
+async fn restart_harness_in_place_response(
+    envelope: RelayRequestEnvelope,
+    commands: Option<&mpsc::Sender<CommandRequest>>,
+    relay: &Arc<RelayCell>,
+    relay_root: &std::path::Path,
+) -> RelayResponseEnvelope {
+    if let Some(body) = mj_core::relay::protocol::relay_protocol_rejection(&envelope) {
+        return RelayResponseEnvelope {
+            request_id: envelope.request_id,
+            protocol_version: envelope.protocol_version,
+            body,
+        };
+    }
+    let protocol_version = envelope.protocol_version;
+    let request_id = envelope.request_id;
+    let RelayRequest::RestartHarnessInPlace {
+        operation_id,
+        expected_store_id,
+        launch_config,
+    } = envelope.request
+    else {
+        unreachable!("restart_harness_in_place_response only serves RestartHarnessInPlace")
+    };
+    let decision = relay
+        .lock()
+        .expect("relay state lock poisoned")
+        .admit_in_place_harness_restart(&operation_id, &expected_store_id);
+    let restart_guard = match decision {
+        Err(error) => {
+            return RelayResponseEnvelope {
+                request_id,
+                protocol_version,
+                body: RelayResponseBody::Error { error: *error },
+            };
+        }
+        Ok(crate::relay::InPlaceHarnessRestartDecision::AlreadyRestarted) => {
+            return RelayResponseEnvelope {
+                request_id,
+                protocol_version,
+                body: RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::HarnessRestartedInPlace,
+                },
+            };
+        }
+        Ok(crate::relay::InPlaceHarnessRestartDecision::Proceed) => InPlaceHarnessRestartGuard {
+            relay: relay.clone(),
+            operation_id,
+            expected_store_id,
+            completed: false,
+        },
+    };
+    let Some(commands) = commands else {
+        return RelayResponseEnvelope {
+            request_id,
+            protocol_version,
+            body: compaction_error(
+                RelayErrorCode::InvalidState,
+                "session is closed; no ACP runtime can restart the harness in place",
+            ),
+        };
+    };
+    let mut launch_config = launch_config;
+    let persisted_launch_config = launch_config.clone();
+    // Apply the same target_environment merge, policy enforcement, staged-home
+    // env, and $MJ_KEEP_DIR setup as initial startup (`run_daemon_owned` /
+    // `prepare_managed_harness`) so managed harness discovery sees the target's
+    // XDG_CACHE_HOME/PATH and the restarted bridge keeps $MJ_KEEP_DIR.
+    let mut merged_environment = launch_config.target_environment.clone();
+    merged_environment.remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV);
+    merged_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
+    merged_environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
+    merged_environment.extend(launch_config.environment.clone());
+    merged_environment.remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV);
+    merged_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
+    merged_environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
+    launch_config.environment = merged_environment;
+    if let Ok(startup_directory) = std::env::current_dir() {
+        super::resolve_relative_harness_home(&mut launch_config, &startup_directory);
+    }
+    if launch_config.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(
+            &mut launch_config.environment,
+        );
+        mj_core::credentials::remove_github_authentication_environment(
+            &mut launch_config.target_environment,
+        );
+    }
+    if let Err(error) = super::enforce_execution_policy(&mut launch_config) {
+        return RelayResponseEnvelope {
+            request_id,
+            protocol_version,
+            body: compaction_error(
+                RelayErrorCode::InvalidState,
+                &format!("enforce execution policy for in-place harness restart: {error:#}"),
+            ),
+        };
+    }
+    if launch_config.harness == HarnessKind::OpenCode
+        && let Ok(endpoint) = super::credential_endpoint(&launch_config)
+    {
+        launch_config
+            .harness
+            .configure_staged_home_environment(&endpoint.home, &mut launch_config.environment);
+    }
+    let keep_cwd = launch_config.cwd.clone();
+    let keep_session_id = launch_config.session_id.clone();
+    let mut keep_environment = launch_config.environment.clone();
+    match tokio::time::timeout(
+        LOCAL_PREPARATION_STEP_TIMEOUT,
+        mj_core::runtime::spawn_blocking(move || {
+            let result = mj_core::session_keep::install_session_keep_dir(
+                &keep_cwd,
+                &keep_session_id,
+                &mut keep_environment,
+            );
+            (result, keep_environment)
+        }),
+    )
+    .await
+    {
+        Ok(Ok((Ok(_), updated_environment))) => {
+            launch_config.environment = updated_environment;
+        }
+        Ok(Ok((Err(error), _))) => {
+            tracing::warn!(
+                session_id = %launch_config.session_id,
+                cwd = %launch_config.cwd.display(),
+                error = format!("{error:#}"),
+                "could not prepare the session keep directory during in-place harness restart"
+            );
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                session_id = %launch_config.session_id,
+                cwd = %launch_config.cwd.display(),
+                error = %error,
+                "session keep directory preparation task failed during in-place harness restart"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %launch_config.session_id,
+                cwd = %launch_config.cwd.display(),
+                timeout = ?LOCAL_PREPARATION_STEP_TIMEOUT,
+                "session keep directory preparation timed out during in-place harness restart"
+            );
+        }
+    }
+    let supervisor_path = relay_root.join("acp-supervisor.json");
+    let mut prepared = match super::prepare_harness_launch(
+        launch_config.harness,
+        launch_config.harness_runtime,
+        launch_config.execution_policy,
+        super::harness_launch::primary_supervisor_spec(&launch_config),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return RelayResponseEnvelope {
+                request_id,
+                protocol_version,
+                body: compaction_error(
+                    RelayErrorCode::Internal,
+                    &format!("prepare updated harness launch: {error:#}"),
+                ),
+            };
+        }
+    };
+    if let Err(error) =
+        super::harness_launch::freeze_node_entrypoints(relay_root, &mut prepared).await
+    {
+        return RelayResponseEnvelope {
+            request_id,
+            protocol_version,
+            body: compaction_error(
+                RelayErrorCode::Internal,
+                &format!("freeze updated harness entrypoints: {error:#}"),
+            ),
+        };
+    }
+    let mut additional_directories = acp_additional_directories(&launch_config);
+    super::tool_cache::extend_writable_directories(
+        launch_config.harness,
+        &prepared.environment,
+        &mut additional_directories,
+    );
+    prepared
+        .environment
+        .remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
+    prepared
+        .environment
+        .remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
+    prepared
+        .environment
+        .remove(mj_core::worker_launch::SESSION_RAW_LAUNCH_RECORD_ENV);
+    prepared
+        .environment
+        .remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
+    prepared
+        .environment
+        .remove(mj_core::worker_launch::SESSION_PROJECT_TOOLS_ROOTS);
+    let (resolved, resolution) = tokio::sync::oneshot::channel();
+    let body = match commands
+        .send(CommandRequest::ReloadLaunchConfig {
+            launch_config,
+            environment: prepared.environment,
+            command: None,
+            args: None,
+            additional_directories,
+            supervisor_spec: Some(Box::new((supervisor_path, prepared.spec))),
+            leases: Some(Box::new((prepared.managed, prepared.managed_node))),
+            resolved,
+        })
+        .await
+    {
+        Ok(()) => match resolution.await {
+            Ok(Ok(())) => {
+                if let Err(error) = persisted_launch_config.write(&relay_root.join("launch.json")) {
+                    compaction_error(
+                        RelayErrorCode::Internal,
+                        &format!("persist updated launch.json: {error:#}"),
+                    )
+                } else if let Err(error) = restart_guard.complete() {
+                    compaction_error(
+                        RelayErrorCode::Internal,
+                        &format!("persist in-place harness restart state: {error:#}"),
+                    )
+                } else {
+                    RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::HarnessRestartedInPlace,
+                    }
+                }
+            }
+            Ok(Err(message)) => compaction_error(RelayErrorCode::InvalidState, &message),
+            Err(_) => compaction_error(
+                RelayErrorCode::InvalidState,
+                "ACP runtime stopped before completing in-place harness restart",
+            ),
+        },
+        Err(_) => compaction_error(
+            RelayErrorCode::InvalidState,
+            "ACP runtime is unavailable for in-place harness restart",
+        ),
+    };
+    RelayResponseEnvelope {
+        request_id,
+        protocol_version,
+        body,
     }
 }
 
@@ -729,6 +1022,32 @@ mod history_tests {
     use super::*;
     use mj_core::history::{HistoryQuery, HistoryResult};
     use mj_core::relay::RELAY_PROTOCOL_VERSION;
+
+    async fn send(connection: &mut BufReader<UnixStream>, request: RelayRequest) {
+        let mut bytes = serde_json::to_vec(&RelayRequestEnvelope {
+            request_id: "request".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request,
+        })
+        .unwrap();
+        bytes.push(b'\n');
+        connection.get_mut().write_all(&bytes).await.unwrap();
+    }
+    async fn receive(connection: &mut BufReader<UnixStream>) -> RelayResponsePayload {
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connection.read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+        match response.body {
+            RelayResponseBody::Ok { payload } => payload,
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn history_round_trips_large_replies_without_delegation_or_durable_events() {
@@ -762,31 +1081,6 @@ mod history_tests {
                 fatal.clone(),
             )));
             connections.push(BufReader::new(client));
-        }
-        async fn send(connection: &mut BufReader<UnixStream>, request: RelayRequest) {
-            let mut bytes = serde_json::to_vec(&RelayRequestEnvelope {
-                request_id: "request".into(),
-                protocol_version: RELAY_PROTOCOL_VERSION,
-                request,
-            })
-            .unwrap();
-            bytes.push(b'\n');
-            connection.get_mut().write_all(&bytes).await.unwrap();
-        }
-        async fn receive(connection: &mut BufReader<UnixStream>) -> RelayResponsePayload {
-            let mut line = String::new();
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                connection.read_line(&mut line),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
-            match response.body {
-                RelayResponseBody::Ok { payload } => payload,
-                other => panic!("{other:?}"),
-            }
         }
         send(
             &mut connections[0],
@@ -857,6 +1151,155 @@ mod history_tests {
         assert_eq!(
             relay.lock().unwrap().operational_state().session_id,
             "history-test"
+        );
+    }
+    #[tokio::test]
+    async fn guardian_relay_wakes_and_preserves_pending_requests_across_disconnect() {
+        use mj_core::guardian::{
+            GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult, RiskLevel,
+            UserAuthorization,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(temp.path(), "guardian-test", "1.0.0").unwrap(),
+        ));
+        let (wake, _received) = mpsc::channel(1);
+        let (fatal, _errors) = mpsc::channel(1);
+        let connect = || {
+            let (server, client) = UnixStream::pair().unwrap();
+            let task = mj_core::runtime::spawn(serve_client_with_memory(
+                server,
+                Arc::clone(&relay),
+                wake.clone(),
+                Err("no credentials".into()),
+                ConnectionRuntime::default(),
+                fatal.clone(),
+            ));
+            (BufReader::new(client), task)
+        };
+        let (mut connection, server) = connect();
+        let state = relay.observe().unwrap().operational_state();
+        send(
+            &mut connection,
+            RelayRequest::WaitForChange {
+                after_ordinal: state.latest_ordinal,
+                state_digest: Some(mj_core::relay::relay_state_digest(&state).unwrap()),
+            },
+        )
+        .await;
+
+        // Exercise a real reply larger than a pipe buffer, and all four
+        // decisions the daemon can make.
+        let request = GuardianReviewRequest {
+            request_id: String::new(),
+            harness: HarnessKind::Claude,
+            session_id: "guardian-test".into(),
+            tool_call_id: "call".into(),
+            action: serde_json::json!({"input": "x".repeat(70_000)}),
+            user_instructions: vec![],
+            user_instructions_omitted: false,
+            project_instructions: None,
+            transcript: String::new(),
+        };
+        let pending = || {
+            let endpoint = relay.guardian.clone();
+            let request = request.clone();
+            mj_core::runtime::spawn(async move {
+                endpoint
+                    .review(
+                        request,
+                        tokio::time::Instant::now() + mj_core::guardian::GUARDIAN_REVIEW_TIMEOUT,
+                    )
+                    .await
+                    .unwrap()
+            })
+        };
+        let first = pending();
+        assert!(matches!(
+            receive(&mut connection).await,
+            RelayResponsePayload::ChangeObserved {
+                guardian_queue_changed: true,
+                ..
+            },
+        ));
+        send(&mut connection, RelayRequest::GuardianRequests).await;
+        let RelayResponsePayload::GuardianRequests { requests } = receive(&mut connection).await
+        else {
+            panic!("guardian requests")
+        };
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].action, request.action);
+        let request_id = requests[0].request_id.clone();
+        drop(connection);
+        server.await.unwrap().unwrap();
+        assert!(!first.is_finished());
+
+        let (mut replacement, server) = connect();
+        let decisions = [
+            GuardianReviewOutcome::Allow {
+                stage: "utility_llm".into(),
+                stage1_score: None,
+            },
+            GuardianReviewOutcome::Deny {
+                rationale: "risk".into(),
+                risk_level: RiskLevel::High,
+                user_authorization: UserAuthorization::Low,
+                stage: "utility_llm".into(),
+                stage1_score: None,
+            },
+            GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+            GuardianReviewOutcome::AskPerson {
+                reason: "missing evidence".into(),
+            },
+        ];
+        let mut first = Some(first);
+        for decision in decisions {
+            let reconnecting = first.is_some();
+            let task = first.take().unwrap_or_else(pending);
+            let requests = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    send(&mut replacement, RelayRequest::GuardianRequests).await;
+                    let RelayResponsePayload::GuardianRequests { requests } =
+                        receive(&mut replacement).await
+                    else {
+                        panic!("guardian requests")
+                    };
+                    if !requests.is_empty() {
+                        break requests;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(requests.len(), 1);
+            let pending_id = requests[0].request_id.clone();
+            if reconnecting {
+                assert_eq!(request_id, pending_id);
+            }
+            let result = GuardianReviewResult {
+                request_id: pending_id,
+                decision,
+            };
+            send(
+                &mut replacement,
+                RelayRequest::CompleteGuardianRequest {
+                    result: result.clone(),
+                },
+            )
+            .await;
+            assert!(matches!(
+                receive(&mut replacement).await,
+                RelayResponsePayload::GuardianRequestCompleted
+            ));
+            assert_eq!(task.await.unwrap(), result);
+        }
+        drop(replacement);
+        server.await.unwrap().unwrap();
+        assert!(relay.guardian.requests().is_empty());
+        assert_eq!(
+            relay.observe().unwrap().operational_state().latest_ordinal,
+            state.latest_ordinal
         );
     }
 }
@@ -2073,8 +2516,8 @@ async fn prepare_and_start_harness(
             .await?;
     }
 
-    let mut claude_mailbox_hook_available = false;
-    let mut codex_mailbox_delivery = None;
+    let mut boundary_mailbox_hook_available = false;
+    let mut mailbox_delivery_mode = None;
     let profile_registration = match config.harness {
         HarnessKind::Codex => {
             let budget = preparation_step(
@@ -2130,7 +2573,7 @@ async fn prepare_and_start_harness(
                 })
                 .await?;
             config.environment = environment;
-            codex_mailbox_delivery = Some(mode);
+            mailbox_delivery_mode = Some(mode);
             registered
         }
         HarnessKind::Claude => {
@@ -2210,8 +2653,40 @@ async fn prepare_and_start_harness(
                     Ok((registered, mailbox_hook_available))
                 })
                 .await?;
-            claude_mailbox_hook_available = mailbox_hook_available;
+            boundary_mailbox_hook_available = mailbox_hook_available;
             registered
+        }
+        HarnessKind::Antigravity => {
+            let budget = preparation_step(
+                root,
+                status,
+                "harness-profile",
+                LOCAL_PREPARATION_STEP_TIMEOUT,
+                cancel,
+            )
+            .await?;
+            let home = credentials
+                .as_ref()
+                .map_err(|message| anyhow::anyhow!("{message}"))?
+                .home
+                .clone();
+            let root = root.to_owned();
+            let session_id = config.session_id.clone();
+            let mailbox_hook_available =
+                bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+                    if step_cancel.is_cancelled() {
+                        bail!("preparation cancelled before configuring the Antigravity profile");
+                    }
+                    super::subagents::configure_antigravity_mailbox_hook(&root, &session_id, &home)
+                })
+                .await?;
+            boundary_mailbox_hook_available = mailbox_hook_available;
+            mailbox_delivery_mode = Some(if mailbox_hook_available {
+                mj_core::mailbox::MailboxDeliveryMode::ToolBoundary
+            } else {
+                mj_core::mailbox::MailboxDeliveryMode::TurnBoundary
+            });
+            false // Antigravity receives its MCP servers through ACP.
         }
         HarnessKind::OpenCode => {
             let budget = preparation_step(
@@ -2289,9 +2764,9 @@ async fn prepare_and_start_harness(
     };
     {
         let mut relay = relay.lock().expect("relay state lock poisoned");
-        relay.set_steering_delivery_mode(config.harness, claude_mailbox_hook_available);
+        relay.set_steering_delivery_mode(config.harness, boundary_mailbox_hook_available);
         // Resolved before the harness starts, so no hook can drain earlier.
-        if let Some(mode) = codex_mailbox_delivery {
+        if let Some(mode) = mailbox_delivery_mode {
             relay.set_mailbox_delivery_mode(mode);
         }
     }
@@ -2327,6 +2802,40 @@ async fn prepare_and_start_harness(
         }
         None => (false, None),
     };
+
+    let keep_budget = preparation_step(
+        root,
+        status,
+        "session-keep",
+        LOCAL_PREPARATION_STEP_TIMEOUT,
+        cancel,
+    )
+    .await?;
+    let keep_cwd = config.cwd.clone();
+    let keep_session_id = config.session_id.clone();
+    let mut keep_environment = config.environment.clone();
+    config.environment =
+        bounded_blocking_preparation_step(&keep_budget, cancel, move |step_cancel| {
+            if step_cancel.is_cancelled() {
+                bail!("preparation cancelled before preparing the session keep directory");
+            }
+            if let Err(error) = mj_core::session_keep::install_session_keep_dir(
+                &keep_cwd,
+                &keep_session_id,
+                &mut keep_environment,
+            ) {
+                // A read-only checkout, or a symlinked `.mj` path, must not
+                // block the session. The harness then has no `MJ_KEEP_DIR`.
+                tracing::warn!(
+                    session_id = %keep_session_id,
+                    cwd = %keep_cwd.display(),
+                    error = format!("{error:#}"),
+                    "could not prepare the session keep directory; continuing without MJ_KEEP_DIR"
+                );
+            }
+            Ok(keep_environment)
+        })
+        .await?;
 
     let harness_budget = preparation_step(
         root,
@@ -2601,6 +3110,7 @@ pub(super) async fn serve_client_with_memory(
     let mut reader = BufReader::new(reader);
     let mut checkpoint_barriers = BTreeSet::new();
     let mut subagent_feed = super::subagents::SubagentFeed::default();
+    let mut guardian_generation = 0;
     let mut project_memory_transfer = ConnectionProjectMemoryTransfer::default();
     let mut live_baseline_download = None;
     let serving_result = async {
@@ -2669,6 +3179,7 @@ pub(super) async fn serve_client_with_memory(
                     preparation.as_ref(),
                     request_subagents.as_ref(),
                     &subagent_feed,
+                    &mut guardian_generation,
                     *after_ordinal,
                     state_digest.as_deref(),
                 )
@@ -2915,6 +3426,22 @@ pub(super) async fn serve_client_with_memory(
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;
             }
+            let guardian_payload = match &envelope.request {
+                RelayRequest::GuardianRequests => Some(RelayResponsePayload::GuardianRequests {
+                    requests: relay.guardian.requests(),
+                }),
+                RelayRequest::CompleteGuardianRequest { result } => {
+                    relay.guardian.complete(result.clone());
+                    Some(RelayResponsePayload::GuardianRequestCompleted)
+                }
+                _ => None,
+            };
+            if let Some(payload) = guardian_payload {
+                let operation = envelope.request.method_name();
+                let body = RelayResponseBody::Ok { payload };
+                write_logged_response(&mut writer, &RelayResponseEnvelope { request_id: envelope.request_id, protocol_version: envelope.protocol_version, body }, &session_id, operation).await?;
+                continue;
+            }
             if matches!(&envelope.request, RelayRequest::HistoryQuery { .. } | RelayRequest::HistoryRequests | RelayRequest::CompleteHistoryRequest { .. }) {
                 let operation = envelope.request.method_name();
                 let result: Result<RelayResponsePayload> = match envelope.request {
@@ -3077,9 +3604,34 @@ pub(super) async fn serve_client_with_memory(
                     .await?;
                 continue;
             }
+            if let RelayRequest::RestartHarnessInPlace { .. } = &envelope.request {
+                let response = if let Some(message) =
+                    preparation_error(&prep_snapshot, "in-place harness restart")
+                {
+                    unavailable_request(envelope, message)
+                } else {
+                    restart_harness_in_place_response(
+                        envelope,
+                        request_commands.as_ref(),
+                        &relay,
+                        &relay_root,
+                    )
+                    .await
+                };
+                write_logged_response(
+                    &mut writer,
+                    &response,
+                    &session_id,
+                    "restart_harness_in_place",
+                )
+                .await?;
+                continue;
+            }
             let wakes_dispatch = matches!(
                 &envelope.request,
-                RelayRequest::Submit { .. } | RelayRequest::ReserveIdle { .. }
+                RelayRequest::Submit { .. }
+                    | RelayRequest::ReserveIdle { .. }
+                    | RelayRequest::ReleaseInPlaceMoveDispatch { .. }
             );
             let mailbox_lease_changed = matches!(
                 &envelope.request,
@@ -3532,7 +4084,7 @@ mod preparation_tests {
             .await;
         let mut journal = relay.lock().unwrap();
         let mj_core::relay::RelayResponsePayload::MailboxDrained { text, count, .. } =
-            journal.drain_mailbox("PostToolBatch").unwrap()
+            journal.drain_mailbox("PostToolBatch", None).unwrap()
         else {
             panic!("drain returned another payload")
         };
@@ -4158,5 +4710,262 @@ mod preparation_tests {
         drop(dispatch_wakes);
         writer.shutdown().await.unwrap();
         accept.abort();
+    }
+
+    #[tokio::test]
+    async fn restart_harness_in_place_does_not_overwrite_supervisor_spec_when_rejected() {
+        let _ = mj_core::login_environment::initialize_from_parent();
+        let root = tempfile::tempdir().unwrap();
+        let supervisor_path = root.path().join("acp-supervisor.json");
+        let launch_path = root.path().join("launch.json");
+        std::fs::write(&supervisor_path, "original-supervisor-spec").unwrap();
+        std::fs::write(&launch_path, "original-launch-json").unwrap();
+
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap(),
+        ));
+        let store_id = relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .store_id
+            .clone()
+            .expect("store_id");
+
+        // No hold active -> rejected without touching acp-supervisor.json.
+        let launch_config = super::super::relay_tests::launch_config(root.path().to_str().unwrap());
+        let (commands_tx, mut commands_rx) = mpsc::channel(4);
+        let response = restart_harness_in_place_response(
+            RelayRequestEnvelope {
+                request_id: "r-restart-unheld".into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::RestartHarnessInPlace {
+                    operation_id: "move-op-1".into(),
+                    expected_store_id: store_id.clone(),
+                    launch_config: Box::new(launch_config.clone()),
+                },
+            },
+            Some(&commands_tx),
+            &relay,
+            root.path(),
+        )
+        .await;
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Error {
+                error: mj_core::relay::RelayProtocolError {
+                    code: RelayErrorCode::InvalidState,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&supervisor_path).unwrap(),
+            "original-supervisor-spec"
+        );
+        assert!(commands_rx.try_recv().is_err());
+
+        // Hold active, but ACP rejects the reload -> still does not overwrite acp-supervisor.json.
+        let _ = relay.lock().unwrap().handle(RelayRequestEnvelope {
+            request_id: "r-hold".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move-op-1".into(),
+                expected_store_id: store_id.clone(),
+            },
+        });
+        let rejector = mj_core::runtime::spawn(async move {
+            if let Some(CommandRequest::ReloadLaunchConfig { resolved, .. }) =
+                commands_rx.recv().await
+            {
+                let _ = resolved.send(Err("turn active".into()));
+            }
+        });
+        let response = restart_harness_in_place_response(
+            RelayRequestEnvelope {
+                request_id: "r-restart-rejected".into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::RestartHarnessInPlace {
+                    operation_id: "move-op-1".into(),
+                    expected_store_id: store_id.clone(),
+                    launch_config: Box::new(launch_config),
+                },
+            },
+            Some(&commands_tx),
+            &relay,
+            root.path(),
+        )
+        .await;
+        drop(commands_tx);
+        rejector.await.unwrap();
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Error {
+                error: mj_core::relay::RelayProtocolError {
+                    code: RelayErrorCode::InvalidState,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&supervisor_path).unwrap(),
+            "original-supervisor-spec"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&launch_path).unwrap(),
+            "original-launch-json"
+        );
+        // When ACP accepts the reload, launch.json IS updated and harness_restarted is marked,
+        // and the reloaded environment merges target_environment + MJ_KEEP_DIR while excluding
+        // disallowed keys and preserving the raw launch.json payload.
+        let (ok_tx, mut ok_rx) = mpsc::channel(4);
+        let acceptor = mj_core::runtime::spawn(async move {
+            match ok_rx.recv().await {
+                Some(CommandRequest::ReloadLaunchConfig {
+                    environment,
+                    supervisor_spec,
+                    resolved,
+                    ..
+                }) => {
+                    let _ = resolved.send(Ok(()));
+                    Some((environment, supervisor_spec))
+                }
+                _ => None,
+            }
+        });
+        let mut updated_launch =
+            super::super::relay_tests::launch_config(root.path().to_str().unwrap());
+        updated_launch.session_id = "session-1".into();
+        updated_launch.cwd = root.path().to_path_buf();
+        updated_launch.initial_model = Some("reloaded-model".into());
+        updated_launch
+            .target_environment
+            .insert("MJ_TARGET_MARKER".into(), "from-target".into());
+        updated_launch.target_environment.insert(
+            mj_core::jev::FASTINO_KEY_ENVIRONMENT.into(),
+            "secret-fastino".into(),
+        );
+        updated_launch
+            .excluded_environment
+            .push("EXCLUDED_SECRET".into());
+        updated_launch
+            .environment
+            .insert("EXCLUDED_SECRET".into(), "must-strip".into());
+        let ok_response = restart_harness_in_place_response(
+            RelayRequestEnvelope {
+                request_id: "r-restart-ok".into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::RestartHarnessInPlace {
+                    operation_id: "move-op-1".into(),
+                    expected_store_id: store_id,
+                    launch_config: Box::new(updated_launch),
+                },
+            },
+            Some(&ok_tx),
+            &relay,
+            root.path(),
+        )
+        .await;
+        drop(ok_tx);
+        let (reloaded_env, reloaded_supervisor) = acceptor
+            .await
+            .unwrap()
+            .expect("ReloadLaunchConfig delivered");
+        assert!(matches!(
+            ok_response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::HarnessRestartedInPlace
+            }
+        ));
+        assert_eq!(
+            reloaded_env.get("MJ_TARGET_MARKER").map(String::as_str),
+            Some("from-target")
+        );
+        assert!(
+            !reloaded_env.contains_key(mj_core::jev::FASTINO_KEY_ENVIRONMENT),
+            "FASTINO_KEY must be stripped from reloaded environment"
+        );
+        let expected_keep = mj_core::session_keep::snapshot_keep_dir(
+            &std::fs::canonicalize(root.path()).unwrap(),
+            Some("session-1"),
+        )
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+        assert_eq!(
+            reloaded_env
+                .get(mj_core::worker_launch::SESSION_KEEP_DIR_ENV)
+                .map(String::as_str),
+            Some(expected_keep.as_str())
+        );
+        let (_, spec) = *reloaded_supervisor.expect("supervisor spec sent");
+        assert_eq!(
+            spec.environment.get("MJ_TARGET_MARKER").map(String::as_str),
+            Some("from-target")
+        );
+        assert_eq!(
+            spec.environment
+                .get(mj_core::worker_launch::SESSION_KEEP_DIR_ENV)
+                .map(String::as_str),
+            Some(expected_keep.as_str())
+        );
+        assert!(
+            !spec.environment.contains_key("EXCLUDED_SECRET"),
+            "excluded environment variable must be stripped from supervisor spec"
+        );
+        let persisted: mj_core::worker_launch::WorkerLaunchConfig =
+            serde_json::from_str(&std::fs::read_to_string(&launch_path).unwrap()).unwrap();
+        assert_eq!(persisted.initial_model.as_deref(), Some("reloaded-model"));
+        assert!(
+            !persisted.environment.contains_key("MJ_TARGET_MARKER"),
+            "persisted launch.json must keep target_environment separate from environment"
+        );
+    }
+
+    #[test]
+    fn in_place_harness_restart_guard_clears_reservation_when_complete_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap(),
+        ));
+        let store_id = relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .store_id
+            .clone()
+            .expect("store_id");
+        let _ = relay.lock().unwrap().handle(RelayRequestEnvelope {
+            request_id: "r-hold".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move-op-1".into(),
+                expected_store_id: store_id.clone(),
+            },
+        });
+        assert_eq!(
+            relay
+                .lock()
+                .unwrap()
+                .admit_in_place_harness_restart("move-op-1", &store_id)
+                .unwrap(),
+            crate::relay::InPlaceHarnessRestartDecision::Proceed
+        );
+        let guard = InPlaceHarnessRestartGuard {
+            relay: relay.clone(),
+            operation_id: "move-op-1".into(),
+            expected_store_id: "mismatched-store-id".into(),
+            completed: false,
+        };
+        assert!(guard.complete().is_err());
+        // Drop must have cleared in_place_harness_restart_in_flight so a retry can proceed.
+        assert_eq!(
+            relay
+                .lock()
+                .unwrap()
+                .admit_in_place_harness_restart("move-op-1", &store_id)
+                .unwrap(),
+            crate::relay::InPlaceHarnessRestartDecision::Proceed
+        );
     }
 }

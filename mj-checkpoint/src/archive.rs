@@ -24,7 +24,7 @@ pub use mj_core::archive::*;
 #[cfg(test)]
 use mj_core::config::HarnessKind;
 
-const MANIFEST_PATH: &str = "manifest.json";
+pub(super) const MANIFEST_PATH: &str = "manifest.json";
 const CANONICAL_SESSION_PATH: &str = "canonical/session.json";
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 /// Compressible payloads larger than this are split into parts of this size.
@@ -304,6 +304,13 @@ pub fn write_archive_hashed(path: &Path, input: &ArchiveInput) -> Result<String>
     write_archive_hashed_view(path, input.into())
 }
 
+pub fn write_archive_hashed_with_manifest(
+    path: &Path,
+    input: &ArchiveInput,
+) -> Result<(String, ArchiveManifest)> {
+    write_archive_hashed_view_with_manifest(path, input.into())
+}
+
 pub fn write_archive_hashed_borrowed(
     path: &Path,
     session: &SessionManifest,
@@ -313,7 +320,28 @@ pub fn write_archive_hashed_borrowed(
     native_artifacts: &[NativeArtifact],
     repositories: &[RepositorySnapshot],
 ) -> Result<String> {
-    write_archive_hashed_view(
+    Ok(write_archive_hashed_borrowed_with_manifest(
+        path,
+        session,
+        target,
+        bundle,
+        canonical_session,
+        native_artifacts,
+        repositories,
+    )?
+    .0)
+}
+
+pub fn write_archive_hashed_borrowed_with_manifest(
+    path: &Path,
+    session: &SessionManifest,
+    target: &TargetManifest,
+    bundle: &BundleManifest,
+    canonical_session: &CanonicalSessionSnapshot,
+    native_artifacts: &[NativeArtifact],
+    repositories: &[RepositorySnapshot],
+) -> Result<(String, ArchiveManifest)> {
+    write_archive_hashed_view_with_manifest(
         path,
         ArchiveInputView {
             session,
@@ -327,10 +355,18 @@ pub fn write_archive_hashed_borrowed(
 }
 
 fn write_archive_hashed_view(path: &Path, input: ArchiveInputView<'_>) -> Result<String> {
-    write_archive_installed_view(path, input, PAYLOAD_PART_BYTES)?;
+    Ok(write_archive_hashed_view_with_manifest(path, input)?.0)
+}
+
+fn write_archive_hashed_view_with_manifest(
+    path: &Path,
+    input: ArchiveInputView<'_>,
+) -> Result<(String, ArchiveManifest)> {
+    let manifest = write_archive_installed_view(path, input, PAYLOAD_PART_BYTES)?;
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    digest_reader(&mut file)
-        .with_context(|| format!("hash newly written archive {}", path.display()))
+    let sha256 = digest_reader(&mut file)
+        .with_context(|| format!("hash newly written archive {}", path.display()))?;
+    Ok((sha256, manifest))
 }
 
 fn write_archive_installed(path: &Path, input: &ArchiveInput) -> Result<()> {
@@ -342,14 +378,15 @@ fn write_archive_installed_with_part_size(
     input: &ArchiveInput,
     part_bytes: usize,
 ) -> Result<()> {
-    write_archive_installed_view(path, input.into(), part_bytes)
+    write_archive_installed_view(path, input.into(), part_bytes)?;
+    Ok(())
 }
 
 fn write_archive_installed_view(
     path: &Path,
     input: ArchiveInputView<'_>,
     part_bytes: usize,
-) -> Result<()> {
+) -> Result<ArchiveManifest> {
     let (manifest, payloads) = prepare_archive_view_with_part_size(input, part_bytes)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)
@@ -370,8 +407,7 @@ fn write_archive_installed_view(
     restrict_archive_permissions(path)?;
     mj_core::config::sync_directory(parent)?;
     drop(payloads);
-    drop(manifest);
-    Ok(())
+    Ok(manifest)
 }
 
 pub fn checkpoint_for_close(path: &Path, input: &ArchiveInput) -> CloseVerification {
@@ -480,6 +516,35 @@ fn copy_payload_from_archive(
     Ok(())
 }
 
+/// Shared probe for a legacy untracked purge.
+///
+/// Returning true stops verification and rewriting. The daemon's probe is
+/// true when the HTTP client has disconnected or the upgrade gate has closed.
+pub type ArchivePurgeCancel = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// A read stopped because [`ArchivePurgeCancel`] asked it to.
+#[derive(Debug)]
+pub struct ArchiveReadCancelled;
+
+impl std::fmt::Display for ArchiveReadCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("archive verification cancelled")
+    }
+}
+
+impl std::error::Error for ArchiveReadCancelled {}
+
+/// Whether `error` is a read that [`ArchiveReadCancelled`] stopped.
+pub fn archive_verification_cancelled(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<ArchiveReadCancelled>().is_some()
+            || cause
+                .downcast_ref::<std::io::Error>()
+                .and_then(|io| io.get_ref())
+                .is_some_and(|inner| inner.downcast_ref::<ArchiveReadCancelled>().is_some())
+    })
+}
+
 /// Verify an archive without materializing repository or native payloads.
 /// Every ZIP entry is still fully read, hashed, and checked; the Git tar
 /// payloads (untracked files, and an unfinished operation's files) are parsed
@@ -500,10 +565,30 @@ pub fn verify_archive_streaming_cancellable(
     path: &Path,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<VerifiedArchiveMetadata> {
+    verify_archive_streaming_probed(path, Some(cancelled), None)
+}
+
+/// Like [`verify_archive_streaming`], stopping when `cancelled` returns true.
+///
+/// The probe runs on every physical archive read, including parallel payload
+/// readers.
+pub fn verify_archive_streaming_unless(
+    path: &Path,
+    cancelled: &ArchivePurgeCancel,
+) -> Result<VerifiedArchiveMetadata> {
+    verify_archive_streaming_probed(path, None, Some(std::sync::Arc::clone(cancelled)))
+}
+
+fn verify_archive_streaming_probed(
+    path: &Path,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    probe: Option<ArchivePurgeCancel>,
+) -> Result<VerifiedArchiveMetadata> {
     let contents = read_verified_zip_cancellable(
         path,
         PayloadRetention::CanonicalOnly,
-        Some(cancelled.clone()),
+        cancelled.clone(),
+        probe.clone(),
     )?;
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut reader = ArchiveFile {
@@ -511,7 +596,8 @@ pub fn verify_archive_streaming_cancellable(
         file: std::sync::Arc::new(file),
         position: 0,
         start: 0,
-        cancelled: Some(cancelled),
+        cancelled,
+        probe,
     };
     Ok(VerifiedArchiveMetadata {
         manifest: contents.manifest,
@@ -612,6 +698,15 @@ pub fn read_checkpoint_repository_bundles(path: &Path) -> Result<Vec<CheckpointR
 pub fn read_checkpoint_manifest(path: &Path) -> Result<ArchiveManifest> {
     let mut archive = open_archive(path)?;
     read_checkpoint_manifest_from(&mut archive)
+}
+
+/// Whether the archive manifest records any `OriginDelta` repository snapshot.
+pub fn checkpoint_archive_uses_origin_delta(path: &Path) -> Result<bool> {
+    let manifest = read_checkpoint_manifest(path)?;
+    Ok(manifest
+        .repositories
+        .iter()
+        .any(|repository| repository.metadata.origin_delta.is_some()))
 }
 
 /// Read one payload from an archive whose manifest was already verified.
@@ -1164,7 +1259,9 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if carries_origin_delta(&repositories) {
+        schema_version: if input.canonical_session.native_use_evidence.is_some() {
+            ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+        } else if carries_origin_delta(&repositories) {
             ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
         } else if input.canonical_session.mailbox.is_some() {
             ARCHIVE_SCHEMA_VERSION_MAILBOX
@@ -1278,7 +1375,7 @@ fn tar_payload_validator(role: &PayloadRole) -> Option<fn(&mut dyn Read) -> Resu
     }
 }
 
-fn payload_part_path(path: &str, index: usize) -> String {
+pub(super) fn payload_part_path(path: &str, index: usize) -> String {
     format!("{path}{PAYLOAD_PART_SUFFIX}{index:05}")
 }
 
@@ -1488,7 +1585,7 @@ fn write_payload_entry(
     Ok(())
 }
 
-fn write_stream_entry(
+pub(super) fn write_stream_entry(
     writer: &mut zip::ZipWriter<&mut File>,
     name: &str,
     mode: u32,
@@ -1562,12 +1659,17 @@ type Archive = zip::ZipArchive<ArchiveFile>;
 /// its own read position, not its own parse: clone the opened [`Archive`],
 /// which shares the parsed directory and this file.
 fn open_archive(path: &Path) -> Result<Archive> {
-    open_archive_cancellable(path, None)
+    open_archive_cancellable(path, None, None)
+}
+
+fn open_archive_probed(path: &Path, probe: &ArchivePurgeCancel) -> Result<Archive> {
+    open_archive_cancellable(path, None, Some(std::sync::Arc::clone(probe)))
 }
 
 fn open_archive_cancellable(
     path: &Path,
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    probe: Option<ArchivePurgeCancel>,
 ) -> Result<Archive> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let len = file
@@ -1580,6 +1682,7 @@ fn open_archive_cancellable(
         position: 0,
         start: 0,
         cancelled,
+        probe,
     })
     .context("open Mjolnir archive ZIP")
 }
@@ -1589,6 +1692,7 @@ fn open_archive_cancellable(
 #[derive(Clone)]
 struct ArchiveFile {
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    probe: Option<ArchivePurgeCancel>,
     file: std::sync::Arc<File>,
     len: u64,
     position: u64,
@@ -1601,8 +1705,9 @@ impl Read for ArchiveFile {
             .cancelled
             .as_ref()
             .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+            || self.probe.as_ref().is_some_and(|probe| probe())
         {
-            return Err(std::io::Error::other("archive verification cancelled"));
+            return Err(std::io::Error::other(ArchiveReadCancelled));
         }
         let count = usize::try_from(self.len.saturating_sub(self.position))
             .unwrap_or(usize::MAX)
@@ -1672,15 +1777,16 @@ fn retains_parts(retention: PayloadRetention, role: &PayloadRole) -> bool {
 }
 
 fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<VerifiedZipContents> {
-    read_verified_zip_cancellable(path, retention, None)
+    read_verified_zip_cancellable(path, retention, None, None)
 }
 
 fn read_verified_zip_cancellable(
     path: &Path,
     retention: PayloadRetention,
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    probe: Option<ArchivePurgeCancel>,
 ) -> Result<VerifiedZipContents> {
-    let mut archive = open_archive_cancellable(path, cancelled)?;
+    let mut archive = open_archive_cancellable(path, cancelled, probe)?;
     let mut entries = Vec::with_capacity(archive.len());
     let mut actual_paths = BTreeSet::<String>::new();
     let mut manifest_count = 0_usize;
@@ -1838,6 +1944,18 @@ fn read_verified_zip_cancellable(
                     || snapshot.mailbox.is_none(),
                 "archived mailbox requires archive schema {}",
                 ARCHIVE_SCHEMA_VERSION_MAILBOX
+            );
+            ensure!(
+                manifest.schema_version >= ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+                    || snapshot.native_use_evidence.is_none(),
+                "native-session-use evidence requires archive schema {}",
+                ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+            );
+            ensure!(
+                manifest.schema_version != ARCHIVE_SCHEMA_VERSION_NATIVE_USE
+                    || snapshot.native_use_evidence.is_some(),
+                "archive schema {} requires native-session-use evidence",
+                ARCHIVE_SCHEMA_VERSION_NATIVE_USE
             );
             ensure!(
                 canonical_session.replace(snapshot).is_none(),
@@ -2022,7 +2140,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_MAILBOX
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_NATIVE_USE,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -2090,13 +2209,17 @@ fn carries_origin_delta(repositories: &[RepositoryManifest]) -> bool {
 }
 
 fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
+    let has_origin_delta = carries_origin_delta(&manifest.repositories);
     ensure!(
-        (manifest.schema_version == ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA)
-            == carries_origin_delta(&manifest.repositories),
+        if has_origin_delta {
+            manifest.schema_version >= ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
+        } else {
+            manifest.schema_version != ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
+        },
         "origin delta repository metadata and archive schema disagree"
     );
     let expected_schema =
-        if carries_origin_delta(&manifest.repositories) {
+        if has_origin_delta {
             ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA
         } else if carries_linked_worktrees(&manifest.repositories) {
             ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
@@ -2115,6 +2238,7 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         };
     ensure!(
         manifest.schema_version == expected_schema
+            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_NATIVE_USE
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_MAILBOX
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
@@ -2617,7 +2741,7 @@ fn normalized_mode(mode: u32) -> Result<u32> {
     Ok(mode & 0o0777)
 }
 
-fn digest_bytes(bytes: &[u8]) -> String {
+pub(super) fn digest_bytes(bytes: &[u8]) -> String {
     lower_hex(Sha256::digest(bytes))
 }
 
@@ -2635,14 +2759,14 @@ fn digest_reader(reader: &mut impl Read) -> Result<String> {
 }
 
 #[cfg(unix)]
-fn restrict_archive_permissions(path: &Path) -> Result<()> {
+pub(super) fn restrict_archive_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("set 0600 permissions on {}", path.display()))
 }
 
 #[cfg(not(unix))]
-fn restrict_archive_permissions(_path: &Path) -> Result<()> {
+pub(super) fn restrict_archive_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -2815,13 +2939,23 @@ pub use git::{
     restore_git_snapshot, session_diff, session_diff_details, session_start_scope,
     tree_without_paths, validate_symlink_target,
 };
+pub(crate) use git::{
+    LegacyRestoreOptions, ensure_no_symlink_ancestors, restore_git_snapshot_for_session,
+    restore_git_snapshot_for_session_with_options,
+};
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};
-pub(crate) use git::{ensure_no_symlink_ancestors, restore_git_snapshot_for_session};
 use git::{
     validate_conflicted_worktree_tar, validate_conflicted_worktree_tar_reader,
     validate_operation_state_tar, validate_operation_state_tar_reader, validate_untracked_tar,
     validate_untracked_tar_reader,
+};
+
+mod purge;
+pub use purge::{
+    ArchiveUntrackedPurgeKind, ArchiveUntrackedPurgeReport, PreparedUntrackedPurge,
+    StagedUntrackedPurge, StashUntrackedNote, archive_purge_not_cancelled,
+    prepare_untracked_purge, purge_untracked_from_archive, purge_was_cancelled,
 };
 
 #[cfg(test)]

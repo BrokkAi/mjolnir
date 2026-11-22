@@ -291,6 +291,7 @@ pub fn stage_worker_files_for(
         storage.managed_temporary_volume,
         &storage.attachments,
     )?;
+    append_session_state_instructions(profile.kind, &profile_stage)?;
     append_subagent_policy(
         profile.kind,
         &profile_stage,
@@ -925,8 +926,10 @@ pub fn worker_launch_config_for_move(
             && operation.destination_target.is_none()
             && matches!(
                 operation.phase,
-                mj_core::state::MovePhase::Preparing
-                    | mj_core::state::MovePhase::ClosingSource
+                mj_core::state::MovePhase::Capturing
+                    | mj_core::state::MovePhase::Transferring
+                    | mj_core::state::MovePhase::Restoring
+                    | mj_core::state::MovePhase::DestinationStarting
                     | mj_core::state::MovePhase::Failed
                     | mj_core::state::MovePhase::Cancelled
             )

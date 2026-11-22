@@ -285,7 +285,8 @@ CREATE TABLE sessions (
     create_managed_worktree INTEGER
         CHECK(create_managed_worktree IN (0, 1)),
     mjolnir_subagents INTEGER
-        CHECK(mjolnir_subagents IN (0, 1))
+        CHECK(mjolnir_subagents IN (0, 1)),
+    closing_consent TEXT CHECK(closing_consent IS NULL OR json_valid(closing_consent))
 ) STRICT;
 
 CREATE TABLE "hidden_native_sessions" (
@@ -334,6 +335,42 @@ CREATE INDEX subagent_sessions_parent
 ON subagent_sessions(parent_session_id, child_session_id);
 
 CREATE INDEX api_events_session ON api_events(session_id, seq);
+
+CREATE TABLE host_snapshot_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    host TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    path TEXT NOT NULL,
+    written_at TEXT NOT NULL
+);
+
+CREATE INDEX host_snapshot_cache_host_sha256
+ON host_snapshot_cache(host, sha256);
+
+CREATE INDEX host_snapshot_cache_session
+ON host_snapshot_cache(session_id);
+
+CREATE INDEX host_snapshot_cache_written_at
+ON host_snapshot_cache(written_at);
+
+CREATE TABLE ec2_move_grants (
+    security_group_id TEXT NOT NULL,
+    cidr_ip TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    users_json TEXT NOT NULL CHECK(json_valid(users_json)),
+    absent_checks INTEGER NOT NULL DEFAULT 0,
+    attempt_id INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (security_group_id, cidr_ip, port)
+);
+
+CREATE TABLE daemon_instance_metadata (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    instance_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 
 CREATE TRIGGER session_contexts_workspace_insert
 BEFORE INSERT ON session_contexts

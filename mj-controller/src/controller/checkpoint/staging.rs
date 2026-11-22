@@ -605,6 +605,12 @@ pub(super) fn reusable_installed_checkpoint(
         metadata: installed.clone(),
         native_session_id: native_session_id.to_owned(),
         event_frontier_digest: verified.canonical_session.event_frontier_digest,
+        on_source_target: false,
+        manifest: Some(verified.manifest),
+        captured_queue: Some((
+            verified.canonical_session.queued_prompts,
+            verified.canonical_session.mailbox,
+        )),
     })
 }
 
@@ -636,7 +642,7 @@ pub(in crate::controller) fn release_projection_behind_checkpoint(
     session_id: &str,
     current: &CheckpointMetadata,
 ) {
-    match crate::database::compact_materialized_transcript_through(
+    match crate::database::compact_materialized_transcript_all_through(
         session_id,
         current.event_frontier,
     ) {

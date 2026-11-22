@@ -102,6 +102,8 @@ fn is_served_relay_method(method: &str) -> bool {
             | "history_query"
             | "history_requests"
             | "complete_history_request"
+            | "guardian_requests"
+            | "complete_guardian_request"
             | "compact"
             | "respond_elicitation"
     )

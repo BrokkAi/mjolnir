@@ -3,13 +3,23 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use mj_checkpoint::checkpoint::CHECKPOINT_CAPTURE_TEMPORARY_PREFIX;
 
+use crate::database::{delete_host_snapshot_cache_entry, list_overdue_host_snapshot_cache_entries};
 use crate::session_manager::new_command_id;
 use crate::targets::CommandExecutor;
+
+use super::host_cache::{
+    SNAPSHOT_CACHE_TEMP_PREFIX, local_snapshot_cache_dir, parse_host_cache_key,
+    remove_host_cache_file,
+};
+
+/// How long a host-side snapshot archive copy is retained before expiry sweep.
+pub const HOST_SNAPSHOT_CACHE_TTL: Duration = Duration::from_secs(48 * 3600);
 
 const OPERATION_PREFIX: &str = "checkpoint";
 
@@ -203,6 +213,141 @@ fn checkpoint_command_running(root: &Path, running: &[String]) -> bool {
     })
 }
 
+/// Remove overdue `host_snapshot_cache` copies whose `written_at + 48h <= now`,
+/// plus any orphaned temporary publish files older than `HOST_SNAPSHOT_CACHE_TTL`
+/// in the local snapshot cache directory.
+///
+/// Each DB row is deleted ONLY after its file is confirmed removed (or already
+/// absent). If a host is unreachable, its row stays in SQLite for the next sweep.
+pub fn sweep_expired_host_snapshot_cache(
+    executor: &impl CommandExecutor,
+    now: DateTime<Utc>,
+    stop: &dyn Fn() -> bool,
+) -> CheckpointLeftovers {
+    let mut swept = CheckpointLeftovers::default();
+    let cutoff = now - chrono::Duration::seconds(HOST_SNAPSHOT_CACHE_TTL.as_secs() as i64);
+    let entries = match list_overdue_host_snapshot_cache_entries(&cutoff.to_rfc3339()) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "could not query overdue host_snapshot_cache entries"
+            );
+            return swept;
+        }
+    };
+    for entry in entries {
+        if stop() {
+            return swept;
+        }
+        let host = match parse_host_cache_key(&entry.host) {
+            Ok(host) => host,
+            Err(error) => {
+                tracing::warn!(
+                    row_id = entry.id,
+                    host = %entry.host,
+                    error = %format!("{error:#}"),
+                    "skipping overdue host_snapshot_cache row with invalid host key"
+                );
+                continue;
+            }
+        };
+        match remove_host_cache_file(&host, &entry.path, executor) {
+            Ok(bytes) => {
+                if let Err(error) = delete_host_snapshot_cache_entry(entry.id) {
+                    tracing::warn!(
+                        row_id = entry.id,
+                        error = %format!("{error:#}"),
+                        "could not delete expired host_snapshot_cache row after removing file"
+                    );
+                } else {
+                    swept.count += 1;
+                    swept.bytes = swept.bytes.saturating_add(bytes);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    row_id = entry.id,
+                    host = %entry.host,
+                    path = %entry.path,
+                    error = %format!("{error:#}"),
+                    "could not remove overdue host snapshot cache file; keeping row for retry"
+                );
+            }
+        }
+    }
+    // Also sweep orphaned temp files in the local snapshot cache directory
+    // (both top-level and inside per-copy subdirectories).
+    let local_dir = local_snapshot_cache_dir();
+    if let Ok(entries) = std::fs::read_dir(&local_dir) {
+        let cutoff_sys = SystemTime::now()
+            .checked_sub(HOST_SNAPSHOT_CACHE_TTL)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        for entry in entries.flatten() {
+            if stop() {
+                return swept;
+            }
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                    for sub in sub_entries.flatten() {
+                        if stop() {
+                            return swept;
+                        }
+                        let Some(name) = sub.file_name().to_str().map(ToOwned::to_owned) else {
+                            continue;
+                        };
+                        if !name.starts_with(SNAPSHOT_CACHE_TEMP_PREFIX) {
+                            continue;
+                        }
+                        let sub_path = sub.path();
+                        let Ok(sub_meta) = std::fs::symlink_metadata(&sub_path) else {
+                            continue;
+                        };
+                        if !sub_meta.is_file()
+                            || !sub_meta.modified().is_ok_and(|m| m <= cutoff_sys)
+                        {
+                            continue;
+                        }
+                        if std::fs::remove_file(&sub_path).is_ok() {
+                            swept.count += 1;
+                            swept.bytes = swept.bytes.saturating_add(sub_meta.len());
+                        }
+                    }
+                }
+                if meta.modified().is_ok_and(|m| m <= cutoff_sys) {
+                    let _ = std::fs::remove_dir(&path);
+                }
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+                continue;
+            };
+            if !name.starts_with(SNAPSHOT_CACHE_TEMP_PREFIX) {
+                continue;
+            }
+            if !meta.is_file() || !meta.modified().is_ok_and(|m| m <= cutoff_sys) {
+                continue;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                swept.count += 1;
+                swept.bytes = swept.bytes.saturating_add(meta.len());
+            }
+        }
+    }
+    if swept.count > 0 {
+        tracing::info!(
+            count = swept.count,
+            bytes = swept.bytes,
+            "removed expired host snapshot cache archives"
+        );
+    }
+    swept
+}
+
 /// The bytes the regular files under `path` hold, without following links.
 fn tree_bytes(path: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(path) else {
@@ -327,5 +472,67 @@ mod tests {
             assert!(path.exists(), "{} was removed", path.display());
         }
         assert!(std::fs::symlink_metadata(&link).is_ok());
+    }
+
+    #[test]
+    fn expired_host_snapshot_cache_sweep_deletes_overdue_and_keeps_fresh() {
+        const CHILD: &str = "MJ_HOST_CACHE_SWEEP_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                "controller::checkpoint::leftovers::tests::expired_host_snapshot_cache_sweep_deletes_overdue_and_keeps_fresh",
+            )
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let dir = local_snapshot_cache_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let overdue_path = dir.join("overdue.hel.zip");
+        let fresh_path = dir.join("fresh.hel.zip");
+        std::fs::write(&overdue_path, b"old archive").unwrap();
+        std::fs::write(&fresh_path, b"new archive").unwrap();
+
+        let now = Utc::now();
+        let overdue_at = (now - chrono::Duration::hours(49)).to_rfc3339();
+        let fresh_at = (now - chrono::Duration::hours(1)).to_rfc3339();
+
+        crate::database::record_host_snapshot_cache_entry(
+            "sess-old",
+            "local",
+            "sha-old",
+            &overdue_path.to_string_lossy(),
+            &overdue_at,
+        )
+        .unwrap();
+        crate::database::record_host_snapshot_cache_entry(
+            "sess-new",
+            "local",
+            "sha-new",
+            &fresh_path.to_string_lossy(),
+            &fresh_at,
+        )
+        .unwrap();
+
+        let swept =
+            sweep_expired_host_snapshot_cache(&crate::targets::ProcessExecutor, now, &|| false);
+        assert_eq!(swept.count, 1);
+        assert_eq!(swept.bytes, b"old archive".len() as u64);
+        assert!(!overdue_path.exists(), "overdue file must be deleted");
+        assert!(fresh_path.exists(), "fresh file must be kept");
+        assert!(
+            crate::database::list_host_snapshot_cache_entries_for_session("sess-old")
+                .unwrap()
+                .is_empty(),
+            "overdue DB row must be deleted"
+        );
+        assert_eq!(
+            crate::database::list_host_snapshot_cache_entries_for_session("sess-new")
+                .unwrap()
+                .len(),
+            1,
+            "fresh DB row must be kept"
+        );
     }
 }

@@ -27,6 +27,7 @@ pub mod go;
 pub mod goal;
 #[cfg(feature = "golden")]
 pub mod golden;
+pub mod guardian;
 #[cfg(unix)]
 pub mod harness_install;
 pub mod harness_runtime;
@@ -59,6 +60,7 @@ pub mod retry_after;
 pub mod review;
 pub mod runtime;
 pub mod session_instructions;
+pub mod session_keep;
 pub mod skills;
 pub mod slopcop;
 pub mod snapshot_map;
@@ -66,6 +68,7 @@ pub mod state;
 pub mod storage;
 pub mod subagent;
 pub mod subprocess;
+pub mod suspend_consent;
 pub mod target_path;
 pub mod targets;
 pub mod test_hooks;

@@ -75,11 +75,10 @@ pub(crate) fn copied_session_id_notice(session_id: &str) -> String {
     format!("Copied session ID {}", short_id(session_id))
 }
 
-fn start_suspension(
+pub(super) fn start_suspension(
     context: &mut DashboardContext,
     session_id: String,
-    acknowledge_unpublished_work: bool,
-    ignore_nested_repositories: bool,
+    consent: mj_core::suspend_consent::SuspendConsent,
 ) {
     context.dashboard.set_notice(format!(
         "Suspending {}…",
@@ -98,8 +97,10 @@ fn start_suspension(
                         &mut client,
                         daemon::SessionLifecycleRequest::Suspend {
                             session_id,
-                            acknowledge_unpublished_work,
-                            ignore_nested_repositories,
+                            discard_untracked: consent.discard_untracked,
+                            abort_operations: consent.abort_operations,
+                            without_checkpoint: consent.without_checkpoint,
+                            confirm_no_checkpoint: consent.confirm_no_checkpoint,
                         },
                     )
                     .await?;
@@ -1638,13 +1639,28 @@ pub(crate) async fn apply_dashboard_action(
             };
             start_session_launch(context, action);
         }
+        DashboardAction::SuspendPreflight { session_id } => {
+            let updates = context.dashboard_io_tx.clone();
+            mj_core::runtime::spawn(async move {
+                let result = async {
+                    daemon::connect_or_start()
+                        .await?
+                        .suspend_preflight(session_id.clone(), false, false)
+                        .await
+                }
+                .await
+                .map_err(|error: anyhow::Error| format!("{error:#}"));
+                report(
+                    "checking workspace before suspend",
+                    &updates,
+                    DashboardIoUpdate::SuspendPreflight { session_id, result },
+                );
+            });
+        }
         DashboardAction::Suspend {
             session_id,
-            acknowledge_unpublished_work,
-        } => start_suspension(context, session_id, acknowledge_unpublished_work, false),
-        DashboardAction::IgnoreNestedRepositoriesAndSuspend { session_id } => {
-            start_suspension(context, session_id, true, true);
-        }
+            consent,
+        } => start_suspension(context, session_id, consent),
 
         DashboardAction::CreateBundle { sources } => {
             context.dashboard.set_notice("Preparing project…");
@@ -1661,38 +1677,7 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             );
         }
-        DashboardAction::DiscardSinceCheckpoint {
-            session_id,
-            checkpoint,
-        } => {
-            let request =
-                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Suspending);
-            mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
-            spawn_lifecycle_operation(
-                request,
-                context.critical_operations.clone(),
-                move |_cancelled, admission| {
-                    mj_core::runtime::block_on(async {
-                        let mut daemon = daemon::connect_or_start().await?;
-                        let receipt = admission
-                            .submit(
-                                &mut daemon,
-                                daemon::SessionLifecycleRequest::Discard {
-                                    session_id,
-                                    checkpoint,
-                                },
-                            )
-                            .await?;
-                        daemon.wait_session_lifecycle(receipt).await
-                    })??;
-                    Ok(LifecycleSuccess::ForceStopped)
-                },
-            );
-        }
-        DashboardAction::DestroyStopped {
-            session_id,
-            delete_branch,
-        } => {
+        DashboardAction::DestroyStopped { session_id } => {
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Destroying);
             mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
@@ -1705,10 +1690,7 @@ pub(crate) async fn apply_dashboard_action(
                         let receipt = admission
                             .submit(
                                 &mut daemon,
-                                daemon::SessionLifecycleRequest::DestroyStopped {
-                                    session_id,
-                                    delete_branch,
-                                },
+                                daemon::SessionLifecycleRequest::DestroyStopped { session_id },
                             )
                             .await?;
                         daemon.wait_session_lifecycle(receipt).await
@@ -1717,10 +1699,7 @@ pub(crate) async fn apply_dashboard_action(
                 },
             );
         }
-        DashboardAction::ForceDestroy {
-            session_id,
-            delete_branch,
-        } => {
+        DashboardAction::ForceDestroy { session_id } => {
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Destroying);
             mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
@@ -1733,10 +1712,7 @@ pub(crate) async fn apply_dashboard_action(
                         let receipt = admission
                             .submit(
                                 &mut daemon,
-                                daemon::SessionLifecycleRequest::ForceDestroy {
-                                    session_id,
-                                    delete_branch,
-                                },
+                                daemon::SessionLifecycleRequest::ForceDestroy { session_id },
                             )
                             .await?;
                         daemon.wait_session_lifecycle(receipt).await
@@ -1786,7 +1762,8 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
         oracle,
         supervisors,
         oracle_choice,
-        workspace_selection,
+        consent,
+        skip_keep_paths,
         session_id,
         profile_id,
         target_template_id,
@@ -1809,7 +1786,8 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
                     supervisors,
                     oracle_choice,
                     subagents,
-                    workspace: workspace_selection,
+                    consent,
+                    skip_keep_paths,
                     session_id: session_id.clone(),
                     profile_id: Some(profile_id),
                     target_template_id: Some(target_template_id),

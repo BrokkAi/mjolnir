@@ -295,26 +295,28 @@ pub(super) async fn apply_phone_action(
         }
         ControllerAction::Suspend {
             session_id,
-            acknowledge_unpublished_work,
+            discard_untracked,
+            abort_operations,
+            without_checkpoint,
+            confirm_no_checkpoint,
         } => {
             services
                 .daemon_runtime
-                .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
+                .suspend_session_with_consent(
+                    session_id,
+                    mj_core::suspend_consent::SuspendConsent {
+                        discard_untracked,
+                        abort_operations,
+                        without_checkpoint,
+                        confirm_no_checkpoint,
+                    },
+                )
                 .await
         }
-        ControllerAction::Destroy {
-            session_id,
-            delete_branch,
-        } => {
-            // The branch stays unless the request explicitly asked for it.
-            let branch = if delete_branch {
-                BranchDisposition::Delete
-            } else {
-                BranchDisposition::Keep
-            };
+        ControllerAction::Destroy { session_id } => {
             services
                 .daemon_runtime
-                .force_destroy_session(session_id, branch)
+                .force_destroy_session(session_id, BranchDisposition::Keep)
                 .await
         }
         ControllerAction::Resume { .. } => {

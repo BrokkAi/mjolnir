@@ -51,6 +51,7 @@ fn hidden_handoff_state_survives_prompt_delivery_and_canonical_export() {
                 text: marked.clone(),
             },
             created_at_ms: 100,
+            insert_at_front: false,
         },
     );
     assert!(session.transcript.is_empty());
@@ -63,6 +64,7 @@ fn hidden_handoff_state_survives_prompt_delivery_and_canonical_export() {
                 prompt: vec![ContentBlock::Text(TextContent::new("continue work"))],
             },
             created_at_ms: 200,
+            insert_at_front: false,
         },
     );
     apply_observation(
@@ -98,6 +100,7 @@ fn hidden_handoff_state_survives_prompt_delivery_and_canonical_export() {
                 prompt: vec![ContentBlock::Text(TextContent::new(marked))],
             },
             created_at_ms: 100,
+            insert_at_front: false,
         },
     );
     assert!(!pasted.configuration.values.contains_key(HANDOFF_STATE_KEY));
@@ -398,6 +401,7 @@ fn golden_session_title_projection() {
                 ))],
             },
             created_at_ms: 100,
+            insert_at_front: false,
         },
     );
     append_transcript_state(
@@ -419,6 +423,7 @@ fn golden_session_title_projection() {
                     prompt: vec![ContentBlock::Text(TextContent::new(text))],
                 },
                 created_at_ms,
+                insert_at_front: false,
             },
         );
     }
@@ -459,6 +464,7 @@ fn golden_session_title_projection() {
                 prompt: vec![ContentBlock::Text(TextContent::new("follow-up task"))],
             },
             created_at_ms: 200,
+            insert_at_front: false,
         },
     );
     append_transcript_state(
@@ -510,6 +516,7 @@ fn golden_session_title_projection() {
                     command: command.into(),
                 },
                 created_at_ms: 300,
+                insert_at_front: false,
             },
         );
         apply_observation(
@@ -570,6 +577,7 @@ fn golden_mailbox_delivery_transcript() {
                 event: github_event.clone(),
             },
             created_at_ms: 100,
+            insert_at_front: false,
         },
     );
     apply_observation(
@@ -602,6 +610,7 @@ fn golden_mailbox_delivery_transcript() {
                 event: parent_event.clone(),
             },
             created_at_ms: 300,
+            insert_at_front: false,
         },
     );
     apply_observation(
@@ -824,6 +833,7 @@ fn golden_mailbox_delivery_transcript() {
                     event: mailbox_event.clone(),
                 },
                 created_at_ms: mailbox_event.created_at_ms as i64,
+                insert_at_front: false,
             },
         );
     }
@@ -833,6 +843,7 @@ fn golden_mailbox_delivery_transcript() {
             command_id: "mixed-event-wake".into(),
             command: RelayCommand::MailboxWake { events },
             created_at_ms: 600,
+            insert_at_front: false,
         },
     );
 
@@ -1025,6 +1036,7 @@ fn mailbox_deliveries_reference_their_external_events_row() {
                     events: vec![message.clone(), github.clone()],
                 },
                 created_at_ms: 3,
+                insert_at_front: false,
             },
             true,
         ),
@@ -1038,6 +1050,7 @@ fn mailbox_deliveries_reference_their_external_events_row() {
                     event: github.clone(),
                 },
                 created_at_ms: 4,
+                insert_at_front: false,
             },
             false,
         ),
@@ -1058,6 +1071,7 @@ fn mailbox_deliveries_reference_their_external_events_row() {
             command_id: "queued".into(),
             command: RelayCommand::DeliverMailboxEvent { event: github },
             created_at_ms: 4,
+            insert_at_front: false,
         },
     );
     assert!(queued_only.transcript.is_empty());
@@ -1245,6 +1259,7 @@ fn start_prompt_and_queue_a_steer(session: &mut MaterializedSession) -> (u64, u6
                     prompt: vec![ContentBlock::from(id)],
                 },
                 created_at_ms: 10,
+                insert_at_front: false,
             },
         );
         session.applied_event_ordinal
@@ -1267,6 +1282,7 @@ fn start_prompt_and_queue_a_steer(session: &mut MaterializedSession) -> (u64, u6
                 queued_prompt_id: "prompt-2".into(),
             },
             created_at_ms: 30,
+            insert_at_front: false,
         },
     );
     (first, second)
@@ -1304,6 +1320,7 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
                 prompt: vec![ContentBlock::from("third")],
             },
             created_at_ms: 31,
+            insert_at_front: false,
         },
     );
     let third = session.applied_event_ordinal;
@@ -1381,6 +1398,7 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
                 value: "gpt-9".into(),
             },
             created_at_ms: 40,
+            insert_at_front: false,
         },
     );
     apply_observation(
@@ -1391,6 +1409,7 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
                 prompt: vec![ContentBlock::from("removed")],
             },
             created_at_ms: 41,
+            insert_at_front: false,
         },
     );
     let removed = session.applied_event_ordinal;
@@ -1547,6 +1566,7 @@ fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start(
                 prompt: vec![ContentBlock::from("run")],
             },
             created_at_ms: 1,
+            insert_at_front: false,
         },
     );
     let running = session.applied_event_ordinal;
@@ -1566,6 +1586,7 @@ fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start(
                 prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from("go")],
             },
             created_at_ms: 10,
+            insert_at_front: false,
         },
     );
     let accepted = session.applied_event_ordinal;
@@ -1656,6 +1677,7 @@ fn queued_prompts_keep_their_own_acceptance_ordinals_through_their_turns() {
                     prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from("go")],
                 },
                 created_at_ms: 10,
+                insert_at_front: false,
             },
         );
         accepted.push(session.applied_event_ordinal);
@@ -1879,6 +1901,7 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
                 prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from("go")],
             },
             created_at_ms: 10,
+            insert_at_front: false,
         },
     );
     apply_observation(
@@ -2011,6 +2034,7 @@ fn cancelling_a_codex_native_tail_preserves_the_prompt_outcome() {
                 prompt: vec![ContentBlock::from("go")],
             },
             created_at_ms: 2,
+            insert_at_front: false,
         },
     );
     apply_observation(
@@ -2116,6 +2140,7 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
                 prompt: vec![agent_client_protocol::v1::schema::ContentBlock::from("go")],
             },
             created_at_ms: 10,
+            insert_at_front: false,
         },
     );
     apply_observation(
@@ -2180,6 +2205,7 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
                         prompt: vec![ContentBlock::from(original)],
                     },
                     created_at_ms: 10,
+                    insert_at_front: false,
                 },
             );
             apply_observation(
@@ -2284,6 +2310,7 @@ fn interrupted_mailbox_wake_with_continuation_returns_to_idle() {
                 }],
             },
             created_at_ms: 10,
+            insert_at_front: false,
         },
     );
     apply_observation(
@@ -2328,6 +2355,7 @@ fn a_cancelled_turn_ends_with_an_interrupted_row() {
                     prompt: vec![ContentBlock::from("write a story")],
                 },
                 created_at_ms: 10,
+                insert_at_front: false,
             },
         );
         apply_observation(
@@ -2374,6 +2402,7 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
                 command_id: command_id.into(),
                 command: RelayCommand::CancelTurn,
                 created_at_ms: 40,
+                insert_at_front: false,
             },
         );
         apply_observation(
@@ -2461,6 +2490,7 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
                 prompt: vec![ContentBlock::from("write a story")],
             },
             created_at_ms: 10,
+            insert_at_front: false,
         },
     );
     apply_observation(
@@ -3320,6 +3350,7 @@ fn session_info_update_without_title_preserves_the_provisional_title() {
                 prompt: vec![ContentBlock::Text(TextContent::new("first prompt"))],
             },
             created_at_ms: 100,
+            insert_at_front: false,
         },
     );
 
@@ -3347,6 +3378,7 @@ fn explicit_session_title_clear_restores_the_prompt_fallback() {
                 prompt: vec![ContentBlock::Text(TextContent::new("first prompt"))],
             },
             created_at_ms: 100,
+            insert_at_front: false,
         },
     );
 
@@ -3382,6 +3414,7 @@ fn queue_changes_project_only_from_their_completion_events() {
                 queued_command_id: "queued-1".into(),
             },
             created_at_ms: 100,
+            insert_at_front: false,
         },
     );
     assert_eq!(session.queued_prompts.len(), 1);
@@ -3421,6 +3454,7 @@ fn queue_changes_project_only_from_their_completion_events() {
             command_id: "clear-1".into(),
             command: RelayCommand::ClearQueuedPrompts,
             created_at_ms: 200,
+            insert_at_front: false,
         },
     );
     assert_eq!(session.queued_prompts.len(), 2);
@@ -3454,6 +3488,7 @@ fn rejected_close_rolls_closing_projection_back_to_idle() {
                 },
             },
             created_at_ms: 100,
+            insert_at_front: false,
         },
     );
     assert_eq!(session.execution, MaterializedExecutionState::Closing);
@@ -3645,6 +3680,7 @@ fn clear_preserves_history_and_adds_one_durable_context_boundary() {
             command_id: "clear-request".into(),
             command: RelayCommand::ClearContext,
             created_at_ms: 200,
+            insert_at_front: false,
         },
     );
     assert!(matches!(
@@ -3703,6 +3739,7 @@ fn windowed_current_turn_keeps_streaming_and_tool_updates_identical_to_full_hist
                     prompt: vec![ContentBlock::from("continue")],
                 },
                 created_at_ms: 0,
+                insert_at_front: false,
             },
         );
         apply_observation(
@@ -3830,6 +3867,7 @@ fn a_handback_reminder_is_shown_as_the_prompt_that_started_its_turn() {
                 running: Vec::new(),
             },
             created_at_ms: 10,
+            insert_at_front: false,
         },
     );
     apply_observation(
@@ -4109,6 +4147,7 @@ fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
                         }],
                     },
                     created_at_ms: 10,
+                    insert_at_front: false,
                 },
             );
             apply_observation(

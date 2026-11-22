@@ -614,83 +614,19 @@ fn todo_commits(contents: &[u8]) -> Vec<String> {
     commits
 }
 
-/// Fails unless every object the operation names is in the restored clone.
-/// The bundle was imported just before, so a missing object means the
-/// archive cannot give the operation back.
-pub(super) fn verify_objects(
-    runner: &dyn GitCommandRunner,
-    repository: &Path,
-    operation: &SavedGitOperation,
-) -> Result<()> {
-    if operation.objects.is_empty() {
-        return Ok(());
-    }
-    let input = operation
-        .objects
-        .iter()
-        .map(|object| format!("{object}\n"))
-        .collect::<String>();
-    let output = git_bytes(
-        runner,
-        repository,
-        ["cat-file", "--batch-check=%(objectname)"],
-        input.as_bytes(),
-        "verify the Git operation's objects",
-    )?;
-    let output = std::str::from_utf8(&output).context("decode git cat-file --batch-check")?;
-    let answers = output.lines().collect::<Vec<_>>();
-    ensure!(
-        answers.len() == operation.objects.len(),
-        "git cat-file answered {} of {} Git operation objects",
-        answers.len(),
-        operation.objects.len()
-    );
-    for (object, answer) in operation.objects.iter().zip(answers) {
-        ensure!(
-            answer.eq_ignore_ascii_case(object),
-            "restore Git operation: object {object} is missing from the restored clone"
-        );
-    }
-    Ok(())
-}
-
-/// Writes the operation back into a clone whose commits, index and working
-/// tree are otherwise restored: the unmerged index entries, the files of the
-/// unmerged paths, and the state files.
+/// Preserves the working files of unmerged paths from a legacy archive as
+/// ordinary unstaged edits, drops the saved in-progress Git operation state
+/// (without recreating index conflict stages or `.git/MERGE_HEAD` /
+/// `rebase-merge` / etc.), and returns a resume notice describing what was
+/// dropped and which conflicted working files were preserved.
 pub(super) fn restore(
-    runner: &dyn GitCommandRunner,
     repository: &Path,
     operation: &SavedGitOperation,
     payloads: &GitOperationPayloads,
-) -> Result<()> {
+) -> Result<String> {
     let paths = unique_paths(&operation.unmerged);
-    if !paths.is_empty() {
-        // A mode-0 record removes every stage of its path, which is how Git
-        // asks for a path's stage-0 entry to give way to its conflict stages.
-        let mut records = Vec::new();
-        let mut started = BTreeSet::new();
-        for entry in &operation.unmerged {
-            let path = entry.path.as_os_str().as_encoded_bytes();
-            if started.insert(entry.path.as_path()) {
-                records.extend(format!("0 {}\t", "0".repeat(entry.object.len())).into_bytes());
-                records.extend_from_slice(path);
-                records.push(0);
-            }
-            records
-                .extend(format!("{} {} {}\t", entry.mode, entry.object, entry.stage).into_bytes());
-            records.extend_from_slice(path);
-            records.push(0);
-        }
-        git_bytes(
-            runner,
-            repository,
-            ["update-index", "-z", "--index-info"],
-            &records,
-            "restore the unmerged index entries",
-        )?;
-    }
-
     let unmerged = paths.iter().map(PathBuf::as_path).collect::<BTreeSet<_>>();
+    let mut preserved_paths = BTreeSet::new();
     let mut archive = tar::Archive::new(Cursor::new(&payloads.conflicted_worktree_tar));
     for entry in archive.entries().context("read conflicted-file tar")? {
         let entry = entry.context("read conflicted-file tar entry")?;
@@ -700,6 +636,7 @@ pub(super) fn restore(
             "conflicted-file tar holds '{}', which is not unmerged",
             path.display()
         );
+        preserved_paths.insert(path.display().to_string());
     }
     restore_worktree_tar(
         repository,
@@ -714,76 +651,45 @@ pub(super) fn restore(
         );
         ensure_no_symlink_ancestors(repository, path)?;
         remove_worktree_file(&repository.join(path))?;
+        preserved_paths.insert(path.display().to_string());
     }
-    restore_state(runner, repository, &payloads.state_tar)
+    let kind = detect_operation_kind(&payloads.state_tar)?;
+    if preserved_paths.is_empty() {
+        Ok(format!(
+            "Dropped saved in-progress {kind} state from this legacy archive."
+        ))
+    } else {
+        let list = preserved_paths.into_iter().collect::<Vec<_>>().join(", ");
+        Ok(format!(
+            "Dropped saved in-progress {kind} state from this legacy archive; preserved conflicted working files as unstaged edits: {list}"
+        ))
+    }
 }
 
-fn restore_state(runner: &dyn GitCommandRunner, repository: &Path, bytes: &[u8]) -> Result<()> {
+fn detect_operation_kind(bytes: &[u8]) -> Result<&'static str> {
     validate_operation_state_tar(bytes)?;
     let mut archive = tar::Archive::new(Cursor::new(bytes));
-    let mut entries = Vec::new();
+    let mut names = BTreeSet::new();
     for entry in archive.entries().context("read Git operation state tar")? {
-        let mut entry = entry.context("read Git operation state tar entry")?;
-        let path = entry.path()?.into_owned();
-        let directory = entry.header().entry_type().is_dir();
-        let mode = entry.header().mode().unwrap_or(0o644);
-        let mut contents = Vec::new();
-        entry
-            .read_to_end(&mut contents)
-            .with_context(|| format!("read Git operation state {}", path.display()))?;
-        entries.push((path, directory, mode, contents));
+        let entry = entry.context("read Git operation state tar entry")?;
+        let path = entry.path().context("read Git operation state tar path")?;
+        if let Some(name) = top_level_state_name(&path) {
+            names.insert(name);
+        }
     }
-    let names = entries
-        .iter()
-        .filter_map(|(path, ..)| top_level_state_name(path))
-        .collect::<BTreeSet<_>>();
-    let locations = git_paths(runner, repository, names.into_iter())?
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
-    for (path, directory, mode, contents) in entries {
-        let name = top_level_state_name(&path).context("Git operation state entry has no name")?;
-        let mut destination = locations[name].clone();
-        destination.extend(path.components().skip(1));
-        if directory {
-            fs::create_dir_all(&destination)
-                .with_context(|| format!("create {}", destination.display()))?;
-            continue;
-        }
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-        let mut file = match OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&destination)
-        {
-            Ok(file) => file,
-            // A recorded resolution the clone already has is as good as the
-            // archived one, and the cache is shared by the repository's
-            // worktrees.
-            Err(error)
-                if error.kind() == std::io::ErrorKind::AlreadyExists && name == RERERE_CACHE =>
-            {
-                continue;
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("write Git operation state {}", destination.display())
-                });
-            }
-        };
-        file.write_all(&contents)
-            .and_then(|()| file.sync_all())
-            .with_context(|| format!("write Git operation state {}", destination.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&destination, fs::Permissions::from_mode(mode & 0o777))?;
-        }
-        #[cfg(not(unix))]
-        let _ = mode;
+    if names.contains("MERGE_HEAD") {
+        Ok("merge")
+    } else if names.contains("rebase-merge") || names.contains("rebase-apply") {
+        Ok("rebase")
+    } else if names.contains("CHERRY_PICK_HEAD") {
+        Ok("cherry-pick")
+    } else if names.contains("REVERT_HEAD") {
+        Ok("revert")
+    } else if names.contains("BISECT_LOG") || names.contains("BISECT_START") {
+        Ok("bisect")
+    } else {
+        Ok("Git operation")
     }
-    Ok(())
 }
 
 /// The state entry an archived path belongs to: its first component, when

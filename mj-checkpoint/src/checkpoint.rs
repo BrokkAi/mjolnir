@@ -36,9 +36,11 @@ use crate::archive::{
     GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, NativeArtifact, PayloadRole,
     RepositorySnapshot, SessionManifest, SystemGit, TargetManifest, collect_git_metadata_snapshot,
     collect_plain_directory_snapshot, ensure_no_symlink_ancestors, has_origin_refs,
-    remote_workspace_base, validate_component, verify_archive_streaming, write_archive_hashed,
-    write_archive_hashed_borrowed,
+    remote_workspace_base, validate_component, verify_archive_streaming,
+    write_archive_hashed_borrowed_with_manifest, write_archive_hashed_with_manifest,
 };
+#[cfg(test)]
+use crate::archive::{write_archive_hashed, write_archive_hashed_borrowed};
 use mj_core::config::HarnessKind;
 /// Native state whose storage format is owned by the target runtime.
 /// Shared archive algorithms never open a provider's database themselves.
@@ -129,9 +131,9 @@ pub enum CheckpointRepositoryCapture {
 #[serde(deny_unknown_fields)]
 pub struct CheckpointExportSpec {
     pub protocol_version: u32,
-    /// One suspension's explicit consent; ordinary checkpoints remain strict.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub ignore_nested_repositories: bool,
+    /// Typed consent for untracked files, keep-dir files, and in-progress operations.
+    #[serde(default)]
+    pub consent: mj_core::suspend_consent::CaptureConsent,
     pub session: SessionManifest,
     pub target: TargetManifest,
     pub bundle: BundleManifest,
@@ -279,6 +281,10 @@ pub struct TargetCheckpoint {
     /// simply omits it, so the controller must treat it as optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timings: Option<CheckpointExportTimings>,
+    /// Archive manifest written into the archive. Allows cross-target Move to
+    /// inspect repository metadata without downloading the archive to daemon disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<crate::archive::ArchiveManifest>,
 }
 
 /// Wall-clock cost of each target-side checkpoint phase, in milliseconds.
@@ -412,19 +418,42 @@ pub fn repair_origin_refs(git: &dyn GitCommandRunner, path: &Path, id: &str) -> 
     )
 }
 
-/// Whether the native session the checkpoint continues ever received a
-/// prompt. `/clear` replaces the native session, so only the conversation
-/// after the newest context boundary belongs to the current one. Codex writes
-/// a rollout, and Claude Code a transcript, only when a turn runs, so a
-/// session with no prompt here has no native history to lose.
+/// Whether the native session the checkpoint continues is proven unused.
+///
+/// When the archive carries worker-owned `native_use_evidence` (schema >= 15),
+/// that proof is authoritative: only `NativeSessionUse::Unused` (matching the
+/// expected native session ID when supplied) authorizes treating the session as
+/// unused. Both `Used` and `Unknown` return `false`.
+///
+/// Legacy archives (schema <= 14) lack `native_use_evidence` and fall back to
+/// the transcript-based `current_native_session_received_prompt` predicate.
+pub fn current_native_session_is_unused(
+    snapshot: &CanonicalSessionSnapshot,
+    expected_native_session_id: Option<&str>,
+) -> bool {
+    if let Some(evidence) = &snapshot.native_use_evidence {
+        return evidence.version == 1
+            && evidence.usage == mj_core::relay::NativeSessionUse::Unused
+            && expected_native_session_id.is_none_or(|id| evidence.native_session_id == id);
+    }
+    !current_native_session_received_prompt(snapshot)
+}
+
+/// Legacy-archive fallback (schema <= 14) for whether the native session the
+/// checkpoint continues ever received a prompt. New archives carry worker-owned
+/// `native_use_evidence` (schema 15) and consult `current_native_session_is_unused`.
+///
+/// `/clear` replaces the native session, so only the conversation after the
+/// newest context boundary belongs to the current one. Codex writes a rollout,
+/// and Claude Code a transcript, only when a turn runs, so a session with no
+/// prompt here has no native history to lose.
 pub fn current_native_session_received_prompt(snapshot: &CanonicalSessionSnapshot) -> bool {
     let start = snapshot.current_context_start();
     snapshot.transcript.iter().any(|item| {
         item.position >= start
             && (matches!(&item.body, CanonicalTranscriptBody::User { .. })
-                // The shipped canonical format rejects unknown fields. Keep
-                // adoption conservative until its native-use proof can be
-                // carried by the planned archive schema revision.
+                // Legacy schema <= 14 adoption archives lacked native_use_evidence;
+                // keep treating the conservative adoption marker as prompted.
                 || item.stable_id == mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID)
     })
 }

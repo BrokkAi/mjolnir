@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use axum::body::Body;
-use axum::http::Request;
 use axum::http::header::{CONTENT_TYPE, COOKIE, SET_COOKIE};
+use axum::http::Request;
 use http_body_util::BodyExt as _;
 use mj_client::session::{
     ManagedSessionView, PendingRelaySubmit, PendingRelaySync, SessionHandleBackend,
@@ -14,8 +14,8 @@ use tokio::sync::{mpsc, watch};
 use tower::ServiceExt as _;
 
 use super::super::{
-    ControllerRequest, ServerOptions, ServerRequests, ViewerOperation, ViewerOperationKind,
-    ViewerProfile, ViewerSnapshot, router, tests::sample_config_state,
+    router, tests::sample_config_state, ControllerRequest, ServerOptions, ServerRequests,
+    ViewerOperation, ViewerOperationKind, ViewerProfile, ViewerSnapshot,
 };
 
 const MAILBOX_EVENT_RETRY_CHILD: &str = "MJ_API_MAILBOX_EVENT_RETRY_CHILD";
@@ -80,12 +80,10 @@ async fn wiki_backend_failures_are_not_retryable_shutdowns() {
             StatusCode::INTERNAL_SERVER_ERROR,
             "{path}"
         );
-        assert!(
-            response
-                .headers()
-                .get(crate::server::UPGRADE_HEADER)
-                .is_none()
-        );
+        assert!(response
+            .headers()
+            .get(crate::server::UPGRADE_HEADER)
+            .is_none());
         assert_eq!(
             json_body(response).await,
             serde_json::json!({"error": expected})
@@ -169,11 +167,9 @@ async fn refused_profile_login_errors_are_authenticated_and_projected_into_sessi
             assert_eq!(value["claude"], failure);
         } else if let Some(sessions) = value["sessions"].as_array() {
             assert!(!sessions.is_empty());
-            assert!(
-                sessions
-                    .iter()
-                    .all(|session| session["profile_login_error"] == failure)
-            );
+            assert!(sessions
+                .iter()
+                .all(|session| session["profile_login_error"] == failure));
         } else {
             assert_eq!(value["profile_login_error"], failure);
         }
@@ -672,16 +668,14 @@ async fn external_event_same_key_retries_ignore_creation_time() {
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }
     let original = serde_json::from_str::<serde_json::Value>(&first_row.event_json).unwrap();
-    assert!(
-        mj_controller::database::enqueue_mailbox_event(
-            event_key,
-            "session-2",
-            &original.to_string(),
-            false,
-            false,
-        )
-        .is_err()
-    );
+    assert!(mj_controller::database::enqueue_mailbox_event(
+        event_key,
+        "session-2",
+        &original.to_string(),
+        false,
+        false,
+    )
+    .is_err());
 
     writer.shutdown().unwrap();
 }
@@ -716,17 +710,15 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
         "text":"A comment from an older daemon.",
         "created_at_ms":42
     });
-    assert!(
-        mj_controller::database::enqueue_mailbox_event(
-            "github:acme/repo#12:comment:3",
-            "session-1",
-            &legacy.to_string(),
-            true,
-            false,
-        )
-        .unwrap()
-        .inserted()
-    );
+    assert!(mj_controller::database::enqueue_mailbox_event(
+        "github:acme/repo#12:comment:3",
+        "session-1",
+        &legacy.to_string(),
+        true,
+        false,
+    )
+    .unwrap()
+    .inserted());
     let row = mj_controller::database::pending_mailbox_events(10)
         .unwrap()
         .into_iter()
@@ -739,17 +731,15 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
             text: "A comment from an older daemon.".into()
         }
     );
-    assert!(
-        !mj_controller::database::enqueue_mailbox_event(
-            &event.key,
-            &row.target_session_id,
-            &serde_json::to_string(&event).unwrap(),
-            true,
-            false,
-        )
-        .unwrap()
-        .inserted()
-    );
+    assert!(!mj_controller::database::enqueue_mailbox_event(
+        &event.key,
+        &row.target_session_id,
+        &serde_json::to_string(&event).unwrap(),
+        true,
+        false,
+    )
+    .unwrap()
+    .inserted());
     writer.shutdown().unwrap();
 }
 
@@ -1002,11 +992,9 @@ async fn event_stream_replays_then_follows_live_events_with_version_and_ids() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(
-        std::str::from_utf8(frame.data_ref().unwrap())
-            .unwrap()
-            .contains("id: 3")
-    );
+    assert!(std::str::from_utf8(frame.data_ref().unwrap())
+        .unwrap()
+        .contains("id: 3"));
     snapshots.send_modify(|snapshot| {
         snapshot
             .sessions
@@ -1175,11 +1163,9 @@ async fn event_stream_without_cursor_starts_at_the_current_frontier() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(
-        std::str::from_utf8(frame.data_ref().unwrap())
-            .unwrap()
-            .contains("id: 2")
-    );
+    assert!(std::str::from_utf8(frame.data_ref().unwrap())
+        .unwrap()
+        .contains("id: 2"));
 }
 
 #[tokio::test]
@@ -2103,6 +2089,23 @@ fn api_app_with_worker_check(
     watch::Sender<ViewerSnapshot>,
     mpsc::Receiver<super::super::BundleRequest>,
 ) {
+    let (app, actions, snapshot, bundles, _client_state) =
+        api_app_with_client_state(backend, adjust, preferences_path, worker_check);
+    (app, actions, snapshot, bundles)
+}
+
+fn api_app_with_client_state(
+    backend: Arc<FakeBackend>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    preferences_path: PathBuf,
+    worker_check: Option<crate::server::WorkerSourceCheck>,
+) -> (
+    axum::Router,
+    mpsc::Receiver<ControllerRequest>,
+    watch::Sender<ViewerSnapshot>,
+    mpsc::Receiver<super::super::BundleRequest>,
+    mpsc::Receiver<super::super::ClientStateRequest>,
+) {
     let (config, state) = sample_config_state();
     // The sample record carries a recorded error. It is left in place: a
     // session-scoped error must not answer a wait about one turn, so every
@@ -2119,7 +2122,7 @@ fn api_app_with_worker_check(
     let (receipt_tx, _receipt_rx) = mpsc::channel(8);
     let (preflight_tx, _preflight_rx) = mpsc::channel(8);
     let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
-    let (client_state_tx, _client_state_rx) = mpsc::channel(8);
+    let (client_state_tx, client_state_rx) = mpsc::channel(8);
     let browser = super::super::tests::test_browser_source(snapshot_rx.clone());
     let mut options = ServerOptions::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -2144,7 +2147,13 @@ fn api_app_with_worker_check(
     if let Some(check) = worker_check {
         options.set_worker_source_check(check);
     }
-    (router(options), action_rx, snapshot_tx, bundle_rx)
+    (
+        router(options),
+        action_rx,
+        snapshot_tx,
+        bundle_rx,
+        client_state_rx,
+    )
 }
 
 fn bearer(request: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -3908,32 +3917,19 @@ async fn a_session_with_no_projection_row_has_no_transcript() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-// Hard-won: #1448: publication preflight refused child close although it preserves the shared checkout.
 #[tokio::test]
-async fn suspend_requires_publication_ack_only_for_owned_clones() {
+async fn suspend_forwards_typed_consent_without_publication_409() {
     let (app, mut actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].publication_state =
                 Some(mj_core::state::PublicationState::Unknown);
         });
 
-    let response = app
-        .clone()
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert!(actions.try_recv().is_err());
-
     let response = mj_core::runtime::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/suspend"))
                 .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"acknowledge_unpublished_work":true}"#))
+                .body(Body::from(r#"{"discard_untracked":"Any"}"#))
                 .unwrap(),
         ),
     );
@@ -3942,7 +3938,10 @@ async fn suspend_requires_publication_ack_only_for_owned_clones() {
         request.action,
         ControllerAction::Suspend {
             session_id: "session-1".into(),
-            acknowledge_unpublished_work: true,
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
+            abort_operations: mj_core::suspend_consent::OperationConsent::None,
+            without_checkpoint: false,
+            confirm_no_checkpoint: false,
         }
     );
     request
@@ -3970,7 +3969,10 @@ async fn suspend_requires_publication_ack_only_for_owned_clones() {
         request.action,
         ControllerAction::Suspend {
             session_id: "session-1".into(),
-            acknowledge_unpublished_work: false,
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
+            abort_operations: mj_core::suspend_consent::OperationConsent::None,
+            without_checkpoint: false,
+            confirm_no_checkpoint: false,
         }
     );
     request
@@ -4012,7 +4014,6 @@ async fn a_forced_close_ignores_active_subagents() {
         request.action,
         ControllerAction::Destroy {
             session_id: "session-1".into(),
-            delete_branch: false,
         }
     );
     request
@@ -4023,38 +4024,19 @@ async fn a_forced_close_ignores_active_subagents() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
-// Hard-won: 472aff0b: destroy deleted user branches without a way to keep them.
 #[tokio::test]
-async fn a_forced_close_asks_to_delete_the_branch_only_when_the_body_does() {
-    let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |_| {});
-
-    for (body, delete_branch) in [(r#"{}"#, false), (r#"{"delete_branch":true}"#, true)] {
-        let response = mj_core::runtime::spawn(
-            app.clone().oneshot(
-                bearer(Request::post("/api/v1/sessions/session-1/destroy"))
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            ),
-        );
-        let request = actions.recv().await.unwrap();
-        assert_eq!(
-            request.action,
-            ControllerAction::Destroy {
-                session_id: "session-1".into(),
-                delete_branch,
-            }
-        );
-        request
-            .reply
-            .send(super::super::ActionOutcome::accepted())
-            .unwrap();
-        assert_eq!(
-            response.await.unwrap().unwrap().status(),
-            StatusCode::ACCEPTED
-        );
-    }
+async fn a_forced_close_rejects_removed_delete_branch_field() {
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/destroy"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"delete_branch":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[test]
@@ -4174,16 +4156,12 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     assert_eq!(body["diagnostic"]["reset_at"], "23:00 UTC");
     assert_eq!(body["session"]["last_turn_diagnostic"], body["diagnostic"]);
     assert!(body["capacity_retry"].is_null());
-    assert!(
-        body["session"]["last_turn_outcome"]
-            .get("answered_through")
-            .is_none()
-    );
-    assert!(
-        body["session"]["last_turn_outcome"]
-            .get("diagnostic")
-            .is_none()
-    );
+    assert!(body["session"]["last_turn_outcome"]
+        .get("answered_through")
+        .is_none());
+    assert!(body["session"]["last_turn_outcome"]
+        .get("diagnostic")
+        .is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -4356,11 +4334,9 @@ async fn an_event_stream_ended_by_a_handoff_names_the_cursor_to_resume_from() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(
-        std::str::from_utf8(frame.data_ref().unwrap())
-            .unwrap()
-            .contains("id: 4")
-    );
+    assert!(std::str::from_utf8(frame.data_ref().unwrap())
+        .unwrap()
+        .contains("id: 4"));
     assert!(backend.upgrade_gate.try_close());
     backend.shutdown.cancel();
     let rest = tokio::time::timeout(Duration::from_secs(2), body.collect())
@@ -4778,7 +4754,7 @@ fn projection_with(outcome: MaterializedTurnOutcome) -> mj_core::state::Material
 // Hard-won: #1304: a stored expect-continuation verdict held every wait on an idle session open.
 #[test]
 fn a_stored_expect_continuation_verdict_holds_no_wait_on_an_idle_session() {
-    use mj_core::activity::{ActivityState, verdict};
+    use mj_core::activity::{verdict, ActivityState};
     use mj_core::assessment::{Action, Status};
     let turn = MaterializedTurnOutcome {
         work_facts: None,
@@ -5544,11 +5520,9 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
         response.headers()[axum::http::header::CONTENT_ENCODING],
         "gzip"
     );
-    assert!(
-        !response
-            .headers()
-            .contains_key(axum::http::header::CONTENT_LENGTH)
-    );
+    assert!(!response
+        .headers()
+        .contains_key(axum::http::header::CONTENT_LENGTH));
     let mut body = response.into_body().into_data_stream();
     use futures::StreamExt as _;
     let first = body.next().await.unwrap().unwrap();
@@ -6623,16 +6597,14 @@ async fn only_the_session_wait_follows_the_quota_check() {
             .outcome,
         WaitOutcome::QuotaLimit,
     );
-    assert!(
-        resolve_wait(
-            &WaitObservation {
-                subagent: true,
-                ..queued
-            },
-            &request,
-        )
-        .is_none()
-    );
+    assert!(resolve_wait(
+        &WaitObservation {
+            subagent: true,
+            ..queued
+        },
+        &request,
+    )
+    .is_none());
 
     let response = finish_wait(
         &backend,
@@ -6943,12 +6915,10 @@ async fn options_publish_the_daemon_verdicts_without_classifying_host_capacity()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(
-        json_body(response)
-            .await
-            .to_string()
-            .contains("Docker is not installed on this host")
-    );
+    assert!(json_body(response)
+        .await
+        .to_string()
+        .contains("Docker is not installed on this host"));
 }
 
 /// A target the daemon has no worker binary for is refused at admission with
@@ -8340,24 +8310,229 @@ fn queued_rejection_does_not_finish_the_running_prompt_wait() {
         message: "transport failed".into(),
     };
     let observation = idle(Some(outcome));
-    assert!(
-        resolve_wait(
-            &observation,
-            &WaitRequest {
-                turn_id: Some(5),
-                ..Default::default()
-            }
-        )
-        .is_none()
+    assert!(resolve_wait(
+        &observation,
+        &WaitRequest {
+            turn_id: Some(5),
+            ..Default::default()
+        }
+    )
+    .is_none());
+    assert!(resolve_wait(
+        &observation,
+        &WaitRequest {
+            turn_id: Some(7),
+            ..Default::default()
+        }
+    )
+    .is_some());
+}
+
+#[tokio::test]
+async fn purge_untracked_validates_the_selector_and_returns_the_daemon_report() {
+    let (app, _actions, _snapshot_tx, _bundles, mut client_state) = api_app_with_client_state(
+        Arc::new(FakeBackend::default()),
+        |_| {},
+        absent_preferences_path(),
+        None,
     );
-    assert!(
-        resolve_wait(
-            &observation,
-            &WaitRequest {
-                turn_id: Some(7),
-                ..Default::default()
-            }
+
+    async fn post(app: axum::Router, body: serde_json::Value) -> Response {
+        app.oneshot(
+            bearer(Request::post("/api/v1/checkpoints/purge-untracked"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
         )
-        .is_some()
+        .await
+        .unwrap()
+    }
+
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({"all": false}),
+        serde_json::json!({"session_id": "session-1", "all": true}),
+        serde_json::json!({"session_id": ""}),
+        serde_json::json!({"session_id": "", "all": true}),
+    ] {
+        let response = post(app.clone(), body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = json_body(response).await["error"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            error.contains("name exactly one of session_id or all"),
+            "{error}"
+        );
+    }
+
+    let invalid = post(app.clone(), serde_json::json!({"session_id": "bad id"})).await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert!(json_body(invalid).await["error"]
+        .as_str()
+        .unwrap()
+        .contains("session ID must be 8-128"),);
+
+    let unknown_field = post(
+        app.clone(),
+        serde_json::json!({"session_id": "session-1", "extra": true}),
+    )
+    .await;
+    assert_eq!(unknown_field.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let anonymous = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/checkpoints/purge-untracked")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"all":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+    async fn round_trip(
+        app: axum::Router,
+        client_state: &mut mpsc::Receiver<super::super::ClientStateRequest>,
+        body: serde_json::Value,
+        expected: PurgeUntrackedRequest,
+        answer: Result<PurgeUntrackedResponse, PurgeUntrackedFailure>,
+    ) -> Response {
+        let pending = mj_core::runtime::spawn(post(app, body));
+        let request = client_state.recv().await.expect("purge request");
+        let super::super::ClientStateRequest::PurgeUntracked { request, reply } = request else {
+            panic!("expected a purge-untracked client-state request");
+        };
+        assert_eq!(request, expected);
+        reply.send(answer).expect("the handler is still waiting");
+        pending.await.unwrap()
+    }
+
+    let dry = PurgeUntrackedResponse {
+        sessions: vec![PurgeUntrackedSession {
+            session_id: "session-1".into(),
+            status: PurgeUntrackedStatus::DryRun,
+            bytes_reclaimed: 4096,
+            reason: None,
+            stash_untracked_notes: vec![PurgeUntrackedStashNote {
+                repository_id: "project".into(),
+                commit: "abcdef".into(),
+                message: "WIP notes".into(),
+            }],
+            warnings: vec!["could not read one stash".into()],
+        }],
+        total_bytes_reclaimed: 4096,
+        dry_run: true,
+    };
+    let response = round_trip(
+        app.clone(),
+        &mut client_state,
+        serde_json::json!({"session_id": "session-1", "dry_run": true}),
+        PurgeUntrackedRequest {
+            session_id: Some("session-1".into()),
+            all: false,
+            dry_run: true,
+        },
+        Ok(dry.clone()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(response).await,
+        serde_json::to_value(&dry).unwrap()
+    );
+
+    let live = PurgeUntrackedResponse {
+        sessions: vec![
+            PurgeUntrackedSession {
+                session_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                status: PurgeUntrackedStatus::Purged,
+                bytes_reclaimed: 4096,
+                reason: None,
+                stash_untracked_notes: Vec::new(),
+                warnings: Vec::new(),
+            },
+            PurgeUntrackedSession {
+                session_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                status: PurgeUntrackedStatus::Skipped,
+                bytes_reclaimed: 0,
+                reason: Some("lifecycle operation in progress".into()),
+                stash_untracked_notes: Vec::new(),
+                warnings: Vec::new(),
+            },
+        ],
+        total_bytes_reclaimed: 4096,
+        dry_run: false,
+    };
+    let response = round_trip(
+        app.clone(),
+        &mut client_state,
+        serde_json::json!({"all": true}),
+        PurgeUntrackedRequest {
+            session_id: None,
+            all: true,
+            dry_run: false,
+        },
+        Ok(live.clone()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(response).await,
+        serde_json::to_value(&live).unwrap()
+    );
+
+    let missing = round_trip(
+        app.clone(),
+        &mut client_state,
+        serde_json::json!({"session_id": "missing01"}),
+        PurgeUntrackedRequest {
+            session_id: Some("missing01".into()),
+            all: false,
+            dry_run: false,
+        },
+        Err(PurgeUntrackedFailure::NotFound(
+            "unknown session missing01".into(),
+        )),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert!(json_body(missing).await["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown session missing01"));
+
+    let busy = round_trip(
+        app.clone(),
+        &mut client_state,
+        serde_json::json!({"session_id": "busybusy"}),
+        PurgeUntrackedRequest {
+            session_id: Some("busybusy".into()),
+            all: false,
+            dry_run: false,
+        },
+        Err(PurgeUntrackedFailure::Conflict(
+            "lifecycle operation in progress for session busybusy".into(),
+        )),
+    )
+    .await;
+    assert_eq!(busy.status(), StatusCode::CONFLICT);
+    assert!(json_body(busy).await["error"]
+        .as_str()
+        .unwrap()
+        .contains("lifecycle operation in progress"));
+
+    let dropped = mj_core::runtime::spawn(post(
+        app.clone(),
+        serde_json::json!({"session_id": "session-1"}),
+    ));
+    drop(client_state.recv().await.expect("purge request"));
+    let dropped = dropped.await.unwrap();
+    assert_eq!(dropped.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json_body(dropped).await["error"].as_str().unwrap(),
+        "the controller is unavailable"
     );
 }

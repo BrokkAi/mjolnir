@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args, ValueEnum};
 use mj_daemon::server::api::{
-    ApiSession, ExportKind, ExportRequest, MailboxEventRequest, RelayState, ResumeSessionRequest,
+    ApiSession, ExportKind, ExportRequest, MailboxEventRequest, PurgeUntrackedRequest,
+    PurgeUntrackedResponse, PurgeUntrackedStatus, RelayState, ResumeSessionRequest,
     StartSessionRequest, WaitOutcome, WaitRequest, WaitResponse,
 };
 
@@ -938,6 +939,10 @@ async fn stop_tasks(client: &ApiClient, args: &StopTaskArgs) -> Result<StopTaskR
     Ok(report)
 }
 
+/// Suspend a session, keeping only its Git state (branches, tags, stashes, commits,
+/// staged and unstaged changes to tracked files, and linked worktrees inside the checkout).
+/// Untracked files are lost unless you `git add` them first; Git-ignored files are never kept.
+/// Scratch in `$MJ_KEEP_DIR` travels with Move but is not saved when the session is suspended.
 #[derive(Debug, Args)]
 pub(crate) struct SuspendArgs {
     /// Session id, as `mj sessions` lists it.
@@ -949,9 +954,21 @@ pub(crate) struct SuspendArgs {
     /// the person guessing which option it wanted.
     #[arg(value_name = "SESSION", hide = true)]
     misplaced_session: Option<String>,
-    /// Confirm releasing a clone whose saved Git work is not verified as pushed.
+    /// Discard untracked files, nested repositories, untracked stashes, and `.mj/keep/` contents.
     #[arg(long)]
-    acknowledge_unpublished_work: bool,
+    discard_untracked: bool,
+    /// Abort any in-progress Git operation (merge, rebase, cherry-pick, revert, am, bisect).
+    #[arg(long)]
+    abort_operation: bool,
+    /// Stop the session without taking a fresh checkpoint.
+    #[arg(long)]
+    without_checkpoint: bool,
+    /// Confirm `--without-checkpoint` when no verified checkpoint exists to resume from.
+    #[arg(long)]
+    yes: bool,
+    /// Inspect what would be saved and what would be lost without changing anything.
+    #[arg(long)]
+    dry_run: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -963,9 +980,6 @@ pub(crate) struct DestroyArgs {
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
-    /// Also delete the managed branch. Work held only in the environment is lost either way.
-    #[arg(long)]
-    delete_branch: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -2376,9 +2390,45 @@ fn wiki_session_lines(info: &mj_client::daemon::WikiSessionInfo) -> Vec<String> 
 /// Save a recovery copy and release the environment. Acceptance is not completion.
 pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     let session = suspend_session_id(&args)?;
-    let accepted = ApiClient::connect()
-        .await?
-        .suspend(session, args.acknowledge_unpublished_work)
+    let client = ApiClient::connect().await?;
+    if args.dry_run {
+        let preflight = client
+            .suspend_preflight(session, true, args.without_checkpoint)
+            .await?;
+        if args.json {
+            return print_json(&preflight);
+        }
+        print!("{}", format_suspend_dry_run(&preflight));
+        return Ok(());
+    }
+    if args.without_checkpoint {
+        let preflight = client.suspend_preflight(session, false, true).await?;
+        let has_verified = preflight
+            .existing_checkpoint
+            .as_ref()
+            .is_some_and(|cp| cp.verified);
+        if !has_verified && !args.yes {
+            bail!(
+                "Session {session} has no verified checkpoint, so suspending without a checkpoint cannot be resumed. The session is still running; pass `--yes` to confirm stopping {session} with no resumable checkpoint."
+            );
+        }
+    }
+    let consent = mj_core::suspend_consent::SuspendConsent {
+        discard_untracked: if args.discard_untracked {
+            mj_core::suspend_consent::UntrackedConsent::Any
+        } else {
+            mj_core::suspend_consent::UntrackedConsent::None
+        },
+        abort_operations: if args.abort_operation {
+            mj_core::suspend_consent::OperationConsent::Any
+        } else {
+            mj_core::suspend_consent::OperationConsent::None
+        },
+        without_checkpoint: args.without_checkpoint,
+        confirm_no_checkpoint: args.yes,
+    };
+    let accepted = client
+        .suspend(session, &consent)
         .await
         .map_err(name_suspend_flags)?;
     if args.json {
@@ -2400,12 +2450,201 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     }
 }
 
+/// Remove legacy untracked checkpoint payloads from stopped sessions.
+#[derive(Debug, Args)]
+pub(crate) struct PurgeUntrackedArgs {
+    /// Session whose legacy untracked checkpoint payloads should be removed.
+    #[arg(long, required_unless_present = "all", conflicts_with = "all")]
+    session: Option<String>,
+    /// Purge every session the daemon holds.
+    #[arg(long)]
+    all: bool,
+    /// Report on-disk bytes that would be reclaimed without rewriting archives.
+    #[arg(long)]
+    dry_run: bool,
+    /// Print the response as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+pub(crate) async fn purge_untracked(args: PurgeUntrackedArgs) -> Result<()> {
+    let response = ApiClient::connect()
+        .await?
+        .purge_untracked(&PurgeUntrackedRequest {
+            session_id: args.session,
+            all: args.all,
+            dry_run: args.dry_run,
+        })
+        .await?;
+    let (report, status) = purge_untracked_conclusion(&response, args.json);
+    if !report.is_empty() {
+        if args.json {
+            println!("{report}");
+        } else {
+            print_lines(report.lines().map(str::to_owned));
+        }
+    }
+    status
+}
+
+/// The text or JSON of a purge report, and whether the process should fail.
+///
+/// A batch that rewrote some sessions and failed others still produces the
+/// whole report. The error comes after that report so a script sees every
+/// row and a non-zero status.
+fn purge_untracked_conclusion(
+    response: &PurgeUntrackedResponse,
+    json: bool,
+) -> (String, Result<()>) {
+    let report = if json {
+        match serde_json::to_string_pretty(response) {
+            Ok(text) => text,
+            Err(error) => {
+                return (
+                    String::new(),
+                    Err(error).context("serialize the API response"),
+                );
+            }
+        }
+    } else {
+        purge_untracked_lines(response).join("\n")
+    };
+    (report, refuse_failed_purge(response))
+}
+
+fn refuse_failed_purge(response: &PurgeUntrackedResponse) -> Result<()> {
+    let failed = response
+        .sessions
+        .iter()
+        .filter(|session| session.status == PurgeUntrackedStatus::Failed)
+        .count();
+    if failed > 0 {
+        bail!("{failed} session(s) failed to purge untracked payloads");
+    }
+    Ok(())
+}
+
+/// One line per session, then the total. A dry run says what it would reclaim.
+pub(crate) fn purge_untracked_lines(response: &PurgeUntrackedResponse) -> Vec<String> {
+    let mut lines = Vec::new();
+    for session in &response.sessions {
+        lines.push(match session.status {
+            PurgeUntrackedStatus::Purged => {
+                format!("{}: {} reclaimed", session.session_id, session.bytes_reclaimed)
+            }
+            PurgeUntrackedStatus::DryRun => {
+                format!(
+                    "{}: would reclaim {}",
+                    session.session_id, session.bytes_reclaimed
+                )
+            }
+            PurgeUntrackedStatus::Skipped => format!(
+                "{}: skipped ({})",
+                session.session_id,
+                session.reason.as_deref().unwrap_or("skipped")
+            ),
+            PurgeUntrackedStatus::Failed => format!(
+                "{}: failed ({})",
+                session.session_id,
+                session.reason.as_deref().unwrap_or("failed")
+            ),
+        });
+        for note in &session.stash_untracked_notes {
+            lines.push(format!(
+                "  stash {} {} ({})",
+                note.repository_id, note.commit, note.message
+            ));
+        }
+        for warning in &session.warnings {
+            lines.push(format!("  warning: {warning}"));
+        }
+    }
+    lines.push(if response.dry_run {
+        format!(
+            "Total: {} would be reclaimed",
+            response.total_bytes_reclaimed
+        )
+    } else {
+        format!("Total: {} reclaimed", response.total_bytes_reclaimed)
+    });
+    lines
+}
+
+fn format_human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+pub(crate) fn format_suspend_dry_run(
+    preflight: &mj_core::suspend_consent::SuspendPreflight,
+) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(out, "dry run for session {}", preflight.session_id);
+    if let Some(est) = &preflight.dry_run {
+        match (est.git_delta_bytes, &est.git_delta_unavailable_reason) {
+            (Some(bytes), _) => {
+                let _ = writeln!(out, "git delta: {}", format_human_bytes(bytes));
+            }
+            (None, Some(reason)) => {
+                let _ = writeln!(out, "git delta: {reason}");
+            }
+            (None, None) => {
+                let _ = writeln!(out, "git delta: unavailable");
+            }
+        }
+        match est.session_state_bytes {
+            Some(bytes) => {
+                let _ = writeln!(out, "session state: {}", format_human_bytes(bytes));
+            }
+            None => {
+                let _ = writeln!(out, "session state: unavailable");
+            }
+        }
+        let _ = writeln!(
+            out,
+            ".mj/keep/: {}",
+            format_human_bytes(est.keep_dir_bytes)
+        );
+        if let Some(route) = &est.transfer_route {
+            let _ = writeln!(out, "transfer route: {route}");
+        }
+    }
+    if !preflight.blockers.is_empty() {
+        let _ = writeln!(out, "blockers:");
+        for b in &preflight.blockers {
+            let _ = writeln!(out, "  - {}: {}", b.kind, b.remedy);
+        }
+    }
+    if !preflight.operations.is_empty() {
+        let _ = writeln!(out, "in-progress operations (would be aborted):");
+        for op in &preflight.operations {
+            let _ = writeln!(out, "  - {} ({})", op.kind, op.checkout.repository_id);
+        }
+    }
+    let lost = preflight.untracked_display_paths();
+    if !lost.is_empty() {
+        let _ = writeln!(out, "would be lost (ignored files are never kept):");
+        for path in &lost {
+            let _ = writeln!(out, "  - {path}");
+        }
+    }
+    out
+}
+
 /// Permanently destroy the session, environment, and recovery archive.
 pub(crate) async fn destroy(args: DestroyArgs) -> Result<()> {
-    ApiClient::connect()
-        .await?
-        .destroy(&args.session, args.delete_branch)
-        .await?;
+    ApiClient::connect().await?.destroy(&args.session).await?;
     if args.json {
         print_json(
             &serde_json::json!({"session_id": args.session, "accepted": true, "operation": "destroy", "notices_url": format!("/api/v1/sessions/{}/notices", args.session)}),
@@ -2636,6 +2875,18 @@ pub(crate) async fn interrupt_turn(args: SessionArgs) -> Result<()> {
         true => print_json(&serde_json::json!({ "session_id": args.session, "accepted": true })),
         false => {
             println!("cancelling the turn on {}", args.session);
+            Ok(())
+        }
+    }
+}
+
+pub(crate) async fn restart_session(args: SessionArgs) -> Result<()> {
+    let client = ApiClient::connect().await?;
+    let payload = client.restart_session(&args.session).await?;
+    match args.json {
+        true => print_json(&payload),
+        false => {
+            println!("restarting agent for {}", args.session);
             Ok(())
         }
     }
@@ -5029,12 +5280,12 @@ mod tests {
         };
         assert_eq!(args.kind, ExportKindArg::Patch);
 
-        let cli =
-            Cli::try_parse_from(["mj", "destroy", "--session", "s1", "--delete-branch"]).unwrap();
+        let cli = Cli::try_parse_from(["mj", "destroy", "--session", "s1"]).unwrap();
         let Some(Command::Destroy(args)) = cli.command else {
             panic!("expected the destroy subcommand");
         };
-        assert!(args.delete_branch);
+        assert_eq!(args.session, "s1");
+        assert!(Cli::try_parse_from(["mj", "destroy", "--session", "s1", "--delete-branch"]).is_err());
 
         let cli = Cli::try_parse_from(["mj", "suspend", "--session", "s1"]).unwrap();
         let Some(Command::Suspend(args)) = cli.command else {
@@ -5050,6 +5301,41 @@ mod tests {
             panic!("expected the resume subcommand");
         };
         assert_eq!(args.session.as_deref(), Some("s1"));
+
+        {
+            let cli = Cli::try_parse_from(["mj", "restart", "--session", "s1"]).unwrap();
+            let Some(Command::Restart(args)) = cli.command else {
+                panic!("expected the restart subcommand");
+            };
+            assert_eq!(args.session, "s1");
+
+            let cli = Cli::try_parse_from([
+                "mj",
+                "move",
+                "--session",
+                "s1",
+                "--target",
+                "remote",
+                "--skip",
+                "cache/big.bin",
+                "--dry-run",
+            ])
+            .unwrap();
+            let Some(Command::Move(args)) = cli.command else {
+                panic!("expected the move subcommand");
+            };
+            assert_eq!(args.skip_keep_paths, vec![PathBuf::from("cache/big.bin")]);
+            assert!(args.dry_run);
+            assert!(Cli::try_parse_from(["mj", "move", "--session", "s1", "--prepare"]).is_err());
+            assert!(
+                Cli::try_parse_from(["mj", "move", "--session", "s1", "--allow-large-transfer"])
+                    .is_err()
+            );
+            assert!(
+                Cli::try_parse_from(["mj", "move", "--session", "s1", "--exclude", "repo:a"])
+                    .is_err()
+            );
+        }
         assert_eq!(args.profile, None);
         assert_eq!(args.target, None);
         assert_eq!(args.queue, None);
@@ -5749,5 +6035,268 @@ mod tests {
                 .to_string(),
         );
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-hosts", &output);
+    }
+
+    #[test]
+    fn golden_suspend_refusal_and_dry_run_output() {
+        let refusal = mj_core::suspend_consent::format_untracked_refusal(
+            6,
+            &[
+                "a.txt".into(),
+                "b.txt".into(),
+                "c.txt".into(),
+                "d.txt".into(),
+                "e.txt".into(),
+                "f.txt".into(),
+            ],
+        );
+        let dry_run_clean = format_suspend_dry_run(&mj_core::suspend_consent::SuspendPreflight {
+            session_id: "session-1".into(),
+            untracked: vec![mj_core::suspend_consent::UntrackedPath {
+                checkout: mj_core::suspend_consent::CheckoutKey::default(),
+                path: std::path::PathBuf::from("scratch.txt"),
+                bytes: 512,
+                identity: mj_core::suspend_consent::FileIdentity::new("abc".into()),
+            }],
+            keep_dir_bytes: 2048,
+            dry_run: Some(mj_core::suspend_consent::DryRunEstimate {
+                git_delta_bytes: Some(1024 * 64),
+                git_delta_unavailable_reason: None,
+                session_state_bytes: Some(4096),
+                keep_dir_bytes: 2048,
+                transfer_route: None,
+            }),
+            ..Default::default()
+        });
+        let dry_run_rebase = format_suspend_dry_run(&mj_core::suspend_consent::SuspendPreflight {
+            session_id: "session-2".into(),
+            operations: vec![mj_core::suspend_consent::ShownOperation {
+                checkout: mj_core::suspend_consent::CheckoutKey::default(),
+                kind: mj_core::suspend_consent::GitOperationKind::Rebase,
+            }],
+            dry_run: Some(mj_core::suspend_consent::DryRunEstimate {
+                git_delta_bytes: None,
+                git_delta_unavailable_reason: Some(
+                    "Git size estimate unavailable during rebase".into(),
+                ),
+                session_state_bytes: None,
+                keep_dir_bytes: 0,
+                transfer_route: None,
+            }),
+            ..Default::default()
+        });
+        let output = format!(
+            "=== untracked refusal ===\n{refusal}\n\n=== dry run ===\n{dry_run_clean}\n=== dry run during rebase ===\n{dry_run_rebase}"
+        );
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "api-suspend-consent",
+            &output,
+        );
+    }
+
+    #[test]
+    fn suspend_preflight_query_includes_without_checkpoint() {
+        assert_eq!(ApiClient::suspend_preflight_query(false, false), "");
+        assert_eq!(ApiClient::suspend_preflight_query(true, false), "?dry_run=true");
+        assert_eq!(
+            ApiClient::suspend_preflight_query(false, true),
+            "?without_checkpoint=true"
+        );
+        assert_eq!(
+            ApiClient::suspend_preflight_query(true, true),
+            "?dry_run=true&without_checkpoint=true"
+        );
+    }
+
+    #[test]
+    fn purge_untracked_parses_its_selector_and_renders_each_session() {
+        let parsed = Cli::try_parse_from([
+            "mj",
+            "purge-untracked",
+            "--session",
+            "session-1",
+            "--dry-run",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::PurgeUntracked(args)) = parsed.command else {
+            panic!("expected purge-untracked");
+        };
+        assert_eq!(args.session.as_deref(), Some("session-1"));
+        assert!(!args.all);
+        assert!(args.dry_run);
+        assert!(args.json);
+
+        let parsed = Cli::try_parse_from(["mj", "purge-untracked", "--all"]).unwrap();
+        let Some(Command::PurgeUntracked(args)) = parsed.command else {
+            panic!("expected purge-untracked");
+        };
+        assert!(args.session.is_none());
+        assert!(args.all);
+        assert!(!args.dry_run);
+        assert!(!args.json);
+
+        assert!(Cli::try_parse_from(["mj", "purge-untracked"]).is_err());
+        assert!(
+            Cli::try_parse_from(["mj", "purge-untracked", "--session", "session-1", "--all"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["mj", "purge-untracked", "--dry-run"]).is_err());
+
+        let response = sample_purge_report(false);
+        assert_eq!(
+            purge_untracked_lines(&response),
+            [
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: 4096 reclaimed",
+                "  stash project abcdef (WIP notes)",
+                "  warning: could not read one stash",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: skipped (lifecycle operation in progress)",
+                "Total: 4096 reclaimed",
+            ]
+        );
+        let dry = sample_purge_report(true);
+        assert_eq!(
+            purge_untracked_lines(&dry),
+            [
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: would reclaim 4096",
+                "  stash project abcdef (WIP notes)",
+                "  warning: could not read one stash",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: skipped (lifecycle operation in progress)",
+                "Total: 4096 would be reclaimed",
+            ]
+        );
+        assert_eq!(
+            serde_json::to_string_pretty(&response).unwrap(),
+            r#"{
+  "sessions": [
+    {
+      "session_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "status": "purged",
+      "bytes_reclaimed": 4096,
+      "reason": null,
+      "stash_untracked_notes": [
+        {
+          "repository_id": "project",
+          "commit": "abcdef",
+          "message": "WIP notes"
+        }
+      ],
+      "warnings": [
+        "could not read one stash"
+      ]
+    },
+    {
+      "session_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "skipped",
+      "bytes_reclaimed": 0,
+      "reason": "lifecycle operation in progress",
+      "stash_untracked_notes": [],
+      "warnings": []
+    }
+  ],
+  "total_bytes_reclaimed": 4096,
+  "dry_run": false
+}"#
+        );
+        let mut failed = response.clone();
+        failed.sessions.push(mj_daemon::server::api::PurgeUntrackedSession {
+            session_id: "cccccccccccccccccccccccccccccccc".into(),
+            status: PurgeUntrackedStatus::Failed,
+            bytes_reclaimed: 0,
+            reason: Some("checkpoint archive is missing".into()),
+            stash_untracked_notes: Vec::new(),
+            warnings: Vec::new(),
+        });
+        let lines = purge_untracked_lines(&failed);
+        assert_eq!(
+            lines[lines.len() - 2],
+            "cccccccccccccccccccccccccccccccc: failed (checkpoint archive is missing)"
+        );
+        assert!(lines.last().unwrap().ends_with("4096 reclaimed"));
+        let json = serde_json::to_string_pretty(&failed).unwrap();
+        assert!(json.contains("\"status\": \"failed\""));
+        assert!(json.contains("checkpoint archive is missing"));
+    }
+
+    #[test]
+    fn purge_untracked_all_prints_the_full_report_and_fails_when_a_session_failed() {
+        let parsed = Cli::try_parse_from(["mj", "purge-untracked", "--all"]).unwrap();
+        let Some(Command::PurgeUntracked(args)) = parsed.command else {
+            panic!("expected purge-untracked");
+        };
+        assert!(args.all);
+        assert!(!args.json);
+
+        let mut response = sample_purge_report(false);
+        response.sessions.push(mj_daemon::server::api::PurgeUntrackedSession {
+            session_id: "cccccccccccccccccccccccccccccccc".into(),
+            status: PurgeUntrackedStatus::Failed,
+            bytes_reclaimed: 0,
+            reason: Some("checkpoint archive is missing".into()),
+            stash_untracked_notes: Vec::new(),
+            warnings: Vec::new(),
+        });
+        let (report, status) = purge_untracked_conclusion(&response, false);
+        assert!(report.contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: 4096 reclaimed"));
+        assert!(report.contains(
+            "cccccccccccccccccccccccccccccccc: failed (checkpoint archive is missing)"
+        ));
+        assert!(report.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: skipped"));
+        assert!(report.ends_with("Total: 4096 reclaimed"));
+        let error = status.expect_err("a failed session fails the command");
+        assert_eq!(
+            error.to_string(),
+            "1 session(s) failed to purge untracked payloads"
+        );
+
+        let (json, status) = purge_untracked_conclusion(&response, true);
+        assert!(json.contains("\"status\": \"purged\""));
+        assert!(json.contains("\"status\": \"failed\""));
+        assert!(json.contains("checkpoint archive is missing"));
+        assert!(json.contains("\"bytes_reclaimed\": 4096"));
+        assert_eq!(
+            status.expect_err("json still fails after the report").to_string(),
+            "1 session(s) failed to purge untracked payloads"
+        );
+
+        let (clean, status) = purge_untracked_conclusion(&sample_purge_report(false), false);
+        assert!(clean.contains("4096 reclaimed"));
+        assert!(status.is_ok());
+    }
+
+    fn sample_purge_report(dry_run: bool) -> PurgeUntrackedResponse {
+        use mj_daemon::server::api::PurgeUntrackedSession;
+        use mj_daemon::server::api::PurgeUntrackedStashNote;
+        PurgeUntrackedResponse {
+            sessions: vec![
+                PurgeUntrackedSession {
+                    session_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    status: if dry_run {
+                        PurgeUntrackedStatus::DryRun
+                    } else {
+                        PurgeUntrackedStatus::Purged
+                    },
+                    bytes_reclaimed: 4096,
+                    reason: None,
+                    stash_untracked_notes: vec![PurgeUntrackedStashNote {
+                        repository_id: "project".into(),
+                        commit: "abcdef".into(),
+                        message: "WIP notes".into(),
+                    }],
+                    warnings: vec!["could not read one stash".into()],
+                },
+                PurgeUntrackedSession {
+                    session_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    status: PurgeUntrackedStatus::Skipped,
+                    bytes_reclaimed: 0,
+                    reason: Some("lifecycle operation in progress".into()),
+                    stash_untracked_notes: Vec::new(),
+                    warnings: Vec::new(),
+                },
+            ],
+            total_bytes_reclaimed: 4096,
+            dry_run,
+        }
     }
 }

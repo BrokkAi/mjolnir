@@ -869,7 +869,8 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
              project_json = coalesce(?16,project_json),
              oracle = ?17,
              oracle_choice = ?18,
-             supervisors = ?19
+             supervisors = ?19,
+             closing_consent = CASE WHEN ?6 = 'closing' THEN closing_consent ELSE NULL END
          WHERE session_id = ?1",
         params![
             id,

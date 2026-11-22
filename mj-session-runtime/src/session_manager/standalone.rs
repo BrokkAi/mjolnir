@@ -1,4 +1,33 @@
 use super::*;
+use mj_core::guardian::{
+    GUARDIAN_REVIEW_TIMEOUT, GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
+    MAX_PENDING_GUARDIAN_REVIEWS, Outcome, WOLF_STAGE1_ALLOW_THRESHOLD,
+};
+use mj_import::utility_llm::{GuardianUtilityOutcome, review_guardian_with_utility};
+use std::{future::Future, pin::Pin};
+use tokio::task::JoinError;
+
+pub enum GuardianStage1Verdict {
+    Scored {
+        unsafe_prob: f64,
+        tokens: usize,
+        elapsed_ms: u64,
+    },
+    EscalatedActionTooLong,
+    Overflow {
+        tokens: usize,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+pub trait GuardianStage1: Send + Sync {
+    fn classify<'a>(
+        &'a self,
+        request: &'a GuardianReviewRequest,
+    ) -> Pin<Box<dyn Future<Output = GuardianStage1Verdict> + Send + 'a>>;
+}
 
 pub struct StandaloneSession {
     pub client: RelayClient,
@@ -16,6 +45,13 @@ pub struct StandaloneSession {
     history_jobs: tokio::task::JoinSet<mj_core::history::HistoryResult>,
     operator_presence_revision: Option<u64>,
     history_active: std::collections::BTreeSet<String>,
+    guardian_jobs: tokio::task::JoinSet<GuardianReviewResult>,
+    guardian_active: std::collections::BTreeSet<String>,
+}
+
+pub(super) enum ConnectionActivity {
+    RelayChanged { guardian: bool },
+    GuardianCompleted(std::result::Result<GuardianReviewResult, JoinError>),
 }
 
 impl StandaloneSession {
@@ -66,6 +102,8 @@ impl StandaloneSession {
             history_jobs: tokio::task::JoinSet::new(),
             operator_presence_revision: None,
             history_active: Default::default(),
+            guardian_jobs: Default::default(),
+            guardian_active: Default::default(),
         };
         if let Some(baseline) = baseline {
             ensure!(
@@ -345,12 +383,17 @@ impl StandaloneSession {
             .is_some_and(|queue| queue.waits_for_changes())
     }
 
-    /// Resolves when the worker reported a relay change, the delegation queue
-    /// changed, or its change waits failed and the session must be polled.
-    pub async fn relay_changed(&mut self) {
-        match self.subagent_queue.as_mut() {
-            Some(queue) => queue.relay_changed().await,
-            None => std::future::pending().await,
+    /// Wait for relay observations or a completed review without borrowing
+    /// the control client.
+    pub(super) async fn wait_for_activity(&mut self) -> ConnectionActivity {
+        tokio::select! {
+            Some(result) = self.guardian_jobs.join_next(), if !self.guardian_jobs.is_empty() => ConnectionActivity::GuardianCompleted(result),
+            guardian = async {
+                match self.subagent_queue.as_mut() {
+                    Some(queue) => queue.relay_changed().await,
+                    None => std::future::pending().await,
+                }
+            } => ConnectionActivity::RelayChanged { guardian },
         }
     }
 
@@ -378,6 +421,7 @@ impl StandaloneSession {
     /// Join cancellation before granting the lifecycle lease: its owner may
     /// stop or replace the worker as soon as it receives the connection.
     pub async fn stop_observing(&mut self) {
+        self.cancel_guardian_jobs();
         if let Some(queue) = self.subagent_queue.take() {
             queue.stop().await;
         }
@@ -387,6 +431,7 @@ impl StandaloneSession {
         const FRESH_CLASSIFICATION_MS: i64 = 60_000;
         let now = mj_core::clock::epoch_millis();
         !self.history_active.is_empty()
+            || !self.guardian_active.is_empty()
             || self.operational.has_work_in_flight()
             || self
                 .operational
@@ -529,6 +574,47 @@ impl StandaloneSession {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn cancel_guardian_jobs(&mut self) {
+        // Dropping the JoinSet aborts the tasks without waiting for a model.
+        self.guardian_jobs = Default::default();
+        self.guardian_active.clear();
+    }
+
+    /// Called only by the relay actor. Lifecycle connections leave pending
+    /// reviews with the worker until an actor takes ownership.
+    pub(super) async fn sync_guardian(
+        &mut self,
+        classifier: Option<&Arc<dyn GuardianStage1>>,
+    ) -> Result<()> {
+        for request in self.client.guardian_requests().await? {
+            if self.guardian_active.len() >= MAX_PENDING_GUARDIAN_REVIEWS {
+                break;
+            }
+            if self.guardian_active.insert(request.request_id.clone()) {
+                self.guardian_jobs
+                    .spawn(execute_guardian_review(request, classifier.cloned()));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn deliver_guardian_review(
+        &mut self,
+        result: std::result::Result<GuardianReviewResult, JoinError>,
+    ) -> Result<()> {
+        match result {
+            Ok(result) => {
+                self.guardian_active.remove(&result.request_id);
+                self.client.complete_guardian_request(result).await
+            }
+            Err(error) => {
+                tracing::error!(%error, "guardian review task failed; pending requests will retry");
+                self.cancel_guardian_jobs();
+                Ok(())
+            }
+        }
     }
 
     /// Apply relay pages through the exact frontier captured by the first
@@ -741,6 +827,17 @@ impl StandaloneSession {
     ) -> Result<mj_core::archive::CanonicalMailbox> {
         self.client
             .read_checkpoint_mailbox(barrier_command_id, cut)
+            .await
+    }
+
+    /// The worker-owned native-session-use evidence at a ready checkpoint barrier's cut.
+    pub async fn read_checkpoint_native_use(
+        &mut self,
+        barrier_command_id: String,
+        cut: RelayCursor,
+    ) -> Result<Option<mj_core::relay::NativeSessionUseEvidence>> {
+        self.client
+            .read_checkpoint_native_use(barrier_command_id, cut)
             .await
     }
 
@@ -1172,4 +1269,93 @@ pub fn projection_integrity_failure(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.downcast_ref::<ProjectionIntegrityError>().is_some())
+}
+
+async fn execute_guardian_review(
+    request: GuardianReviewRequest,
+    classifier: Option<Arc<dyn GuardianStage1>>,
+) -> GuardianReviewResult {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    let decision = tokio::time::timeout(GUARDIAN_REVIEW_TIMEOUT, async {
+        let mut stage1_score = None;
+        if let Some(classifier) = classifier {
+            match classifier.classify(&request).await {
+                GuardianStage1Verdict::Scored { unsafe_prob, tokens, elapsed_ms } => {
+                    let local_allow = (0.0..=WOLF_STAGE1_ALLOW_THRESHOLD).contains(&unsafe_prob);
+                    tracing::info!(
+                        target: "mj_guardian",
+                        stage = "stage1_wolf",
+                        unsafe_prob,
+                        threshold = WOLF_STAGE1_ALLOW_THRESHOLD,
+                        tokens,
+                        elapsed_ms,
+                        local_allow,
+                        "Wolf Defender Jev scored a permission request"
+                    );
+                    stage1_score = Some(unsafe_prob);
+                    if local_allow {
+                        return GuardianReviewOutcome::Allow {
+                            stage: "stage1_wolf".into(),
+                            stage1_score,
+                        };
+                    }
+                }
+                GuardianStage1Verdict::EscalatedActionTooLong => {
+                    tracing::debug!(target: "mj_guardian", "Wolf action length exceeded");
+                }
+                GuardianStage1Verdict::Overflow { tokens } => {
+                    tracing::debug!(target: "mj_guardian", tokens, "Wolf case token limit exceeded");
+                }
+                GuardianStage1Verdict::Unavailable { reason } => {
+                    tracing::debug!(target: "mj_guardian", %reason, "Wolf classifier unavailable");
+                }
+            }
+        }
+        let config = match mj_core::runtime::spawn_blocking(mj_core::config::Config::load).await {
+            Ok(Ok(config)) => config,
+            Ok(Err(error)) => {
+                return GuardianReviewOutcome::AskPerson {
+                    reason: format!("could not load the utility model configuration: {error:#}"),
+                };
+            }
+            Err(error) => {
+                return GuardianReviewOutcome::AskPerson {
+                    reason: format!("could not read the utility model configuration: {error}"),
+                };
+            }
+        };
+        match review_guardian_with_utility(&config, &request, cancel).await {
+            GuardianUtilityOutcome::Reviewed { assessment, .. } => {
+                let stage = "utility_llm".into();
+                match assessment.enforced_outcome() {
+                    Outcome::Allow => GuardianReviewOutcome::Allow {
+                        stage,
+                        stage1_score,
+                    },
+                    Outcome::Deny => GuardianReviewOutcome::Deny {
+                        rationale: assessment.rationale,
+                        risk_level: assessment.risk_level,
+                        user_authorization: assessment.user_authorization,
+                        stage,
+                        stage1_score,
+                    },
+                }
+            }
+            GuardianUtilityOutcome::NoUtilityModel { .. } => {
+                GuardianReviewOutcome::UseAcpFallback { stage1_score }
+            }
+            GuardianUtilityOutcome::Failed { error } => {
+                GuardianReviewOutcome::AskPerson { reason: error }
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| GuardianReviewOutcome::AskPerson {
+        reason: "its daemon review timed out".into(),
+    });
+    GuardianReviewResult {
+        request_id: request.request_id,
+        decision,
+    }
 }

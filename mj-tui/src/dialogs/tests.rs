@@ -699,7 +699,7 @@ fn deleting_a_session_keeps_its_branch_unless_asked() {
     };
     assert_eq!(
         confirmation_buttons(&dialog.confirmation),
-        &["Cancel", "Destroy session", "Destroy and delete branch"]
+        vec!["Cancel", "Destroy session"]
     );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Char('c'))),
@@ -711,57 +711,15 @@ fn deleting_a_session_keeps_its_branch_unless_asked() {
         dashboard.handle_key(key(KeyCode::Char('d'))),
         DashboardAction::ForceDestroy {
             session_id: "session-1".into(),
-            delete_branch: false,
         }
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
-fn deleting_a_session_takes_its_branch_from_the_last_button() {
-    let mut dashboard = dashboard_with_session(legacy_managed_session(running_session()));
-    dashboard.focus_sessions();
-    dashboard.dispatch_command(crate::actions::CommandId::DestroySession);
-    dashboard.handle_key(key(KeyCode::Right));
-    dashboard.handle_key(key(KeyCode::Right));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::ForceDestroy {
-            session_id: "session-1".into(),
-            delete_branch: true,
-        }
-    );
-}
-
-#[test]
-fn failed_suspension_requires_a_separate_checkpoint_discard_confirmation() {
+fn failed_suspension_offers_retry_and_suspend_without_checkpoint() {
     let mut session = stopped_session();
     session.state = SessionState::Running;
-    let checkpoint = session.checkpoint.clone().expect("recovery fixture");
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.show_close_failure("session-1".into(), "archive unavailable");
-    dashboard.handle_key(key(KeyCode::Right));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert!(
-        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::DiscardSinceCheckpoint { checkpoint: selected, .. } if *selected == *checkpoint))
-    );
-    dashboard.handle_key(key(KeyCode::Right));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::DiscardSinceCheckpoint {
-            session_id: "session-1".into(),
-            checkpoint: *checkpoint
-        }
-    );
-}
-
-#[test]
-fn failed_suspension_without_a_checkpoint_offers_only_retry() {
-    let mut session = stopped_session();
-    session.checkpoint = None;
     let mut dashboard = dashboard_with_session(session);
     dashboard.show_close_failure("session-1".into(), "archive unavailable");
     let Mode::Confirm(dialog) = &dashboard.mode else {
@@ -769,14 +727,28 @@ fn failed_suspension_without_a_checkpoint_offers_only_retry() {
     };
     assert_eq!(
         confirmation_buttons(&dialog.confirmation),
-        &["Cancel", "Retry suspension"]
+        vec!["Cancel", "Retry suspension", "Suspend without checkpoint…"]
     );
     dashboard.handle_key(key(KeyCode::Right));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::Suspend {
             session_id: "session-1".into(),
-            acknowledge_unpublished_work: true,
+            consent: mj_core::suspend_consent::SuspendConsent::default(),
+        }
+    );
+    dashboard.show_close_failure("session-1".into(), "archive unavailable");
+    dashboard.handle_key(key(KeyCode::Right));
+    dashboard.handle_key(key(KeyCode::Right));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::Suspend {
+            session_id: "session-1".into(),
+            consent: mj_core::suspend_consent::SuspendConsent {
+                without_checkpoint: true,
+                confirm_no_checkpoint: true,
+                ..Default::default()
+            },
         }
     );
 }
@@ -786,17 +758,14 @@ fn button_confirmations_keep_their_button_row_visible() {
     let confirmations = [
         Confirmation::DestroyStopped {
             session_id: "session-1".into(),
-            delete_branch_available: false,
             reopen: None,
         },
         Confirmation::CloseFailed {
             session_id: "session-1".into(),
             error: "archive unavailable".into(),
-            can_discard: true,
         },
         Confirmation::ForceDestroy {
             session_id: "session-1".into(),
-            delete_branch_available: false,
         },
     ];
     for confirmation in confirmations {
@@ -829,7 +798,7 @@ fn destroy_stopped_confirmation_destroys_from_its_primary_button() {
     };
     assert_eq!(
         confirmation_buttons(&dialog.confirmation),
-        &["Cancel", "Destroy session"]
+        vec!["Cancel", "Destroy session"]
     );
     assert_eq!(
         dialog.form.borrow().focused(),
@@ -840,7 +809,6 @@ fn destroy_stopped_confirmation_destroys_from_its_primary_button() {
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::DestroyStopped {
             session_id: "session-1".into(),
-            delete_branch: false,
         }
     );
     // Destroying from the dialog leaves the user in the dialog.
@@ -896,32 +864,70 @@ fn golden_dashboard_dialogs() {
 
     let mut output = String::new();
 
-    for checkpoint in [false, true] {
-        let mut session = stopped_session();
-        if !checkpoint {
-            session.checkpoint = None;
-        }
-        let mut dashboard = dashboard_with_session(session);
-        dashboard.show_close_failure(
-            "session-1".into(),
-            "export target checkpoint failed with status 1: repository 'bifrost': cannot checkpoint nested Git repository directory at /workspace/bifrost/.scratch/s47-landing/master-check/: for a disposable scratch worktree, exclude this path using the outer repository's .git/info/exclude; otherwise preserve its work separately",
-        );
+    {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.show_close_failure("session-1".into(), "archive unavailable");
         let lines = drawn(&mut dashboard, 100, 28);
-        append_dialog_render(
-            &mut output,
-            &format!("nested repository failure, checkpoint={checkpoint}"),
-            100,
-            28,
-            &lines,
-        );
-        let action = dashboard.handle_key(key(KeyCode::Char('i')));
+        append_dialog_render(&mut output, "close failure", 100, 28, &lines);
+        let action = dashboard.handle_key(key(KeyCode::Char('r')));
         assert_eq!(
             action,
-            DashboardAction::IgnoreNestedRepositoriesAndSuspend {
-                session_id: "session-1".into()
+            DashboardAction::Suspend {
+                session_id: "session-1".into(),
+                consent: mj_core::suspend_consent::SuspendConsent::default(),
             }
         );
         writeln!(output, "action: {action:?}").unwrap();
+    }
+
+    // Suspend dialog with untracked files, in-progress operation, and raw checkout.
+    for (label, preflight) in [
+        (
+            "suspend dialog with untracked files",
+            mj_core::suspend_consent::SuspendPreflight {
+                session_id: "session-1".into(),
+                untracked: (1..=7)
+                    .map(|i| mj_core::suspend_consent::UntrackedPath {
+                        checkout: mj_core::suspend_consent::CheckoutKey::default(),
+                        path: std::path::PathBuf::from(format!("scratch-{i}.txt")),
+                        bytes: 128,
+                        identity: mj_core::suspend_consent::FileIdentity::new(format!("id-{i}")),
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        ),
+        (
+            "suspend dialog with in-progress operation",
+            mj_core::suspend_consent::SuspendPreflight {
+                session_id: "session-1".into(),
+                operations: vec![mj_core::suspend_consent::ShownOperation {
+                    checkout: mj_core::suspend_consent::CheckoutKey::default(),
+                    kind: mj_core::suspend_consent::GitOperationKind::Rebase,
+                }],
+                ..Default::default()
+            },
+        ),
+        (
+            "suspend dialog with raw checkout",
+            mj_core::suspend_consent::SuspendPreflight {
+                session_id: "session-1".into(),
+                raw: true,
+                ..Default::default()
+            },
+        ),
+    ] {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
+            session_id: "session-1".into(),
+            children_not_handed_back: Vec::new(),
+            interrupting: false,
+            preflight: Some(preflight),
+            checking: false,
+            viewing_all_untracked: false,
+        }));
+        let lines = drawn(&mut dashboard, 100, 28);
+        append_dialog_render(&mut output, label, 100, 28, &lines);
     }
 
     let mut targets = dashboard_with_session(running_session());

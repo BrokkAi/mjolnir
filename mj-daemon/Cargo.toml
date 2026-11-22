@@ -64,6 +64,7 @@ mj-controller = { workspace = true, features = ["test-support"] }
 mj-server = { workspace = true, features = ["test-support"] }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
 mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime", features = ["test-hooks"] }
+tar.workspace = true
 http-body-util = "0.1"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

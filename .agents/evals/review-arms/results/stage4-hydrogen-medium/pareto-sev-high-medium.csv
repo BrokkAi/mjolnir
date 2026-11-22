@@ -1,0 +1,289 @@
+option,reviewers,findings,findings_per_diff,median_latency_s,tokens_per_diff,cost_per_diff_usd,frontier,cost_frontier,bootstrap_frontier_share
+Terra/high,1,86.92,1.242,43.1,244964,0.044,True,True,1.0
+Sol/medium,1,46.5,0.664,46.2,235047,0.1,False,False,0.06
+2× Terra/high,2,108.5,1.55,47.3,489928,0.087,True,True,1.0
+3× Terra/high,3,120.25,1.718,51.7,734891,0.131,True,False,1.0
+Sol/medium + Terra/high,2,98.71,1.41,52.1,480011,0.143,False,False,0.003
+2× Sol/medium,2,60.0,0.857,53.0,470095,0.2,False,False,0.0
+Sol/medium + 2× Terra/high,3,117.0,1.671,54.3,724975,0.187,False,False,0.097
+2× Sol/medium + Terra/high,3,105.17,1.502,55.6,715059,0.243,False,False,0.0
+Gemini/medium,1,27.0,0.386,75.0,,,False,False,0.0
+Gemini/medium + Sol/medium,2,58.0,0.829,76.2,,,False,False,0.0
+Gemini/medium + Terra/high,2,95.42,1.363,77.2,,,False,False,0.0
+Gemini/medium + 2× Sol/medium,3,69.0,0.986,77.5,,,False,False,0.0
+Gemini/medium + Sol/medium + Terra/high,3,106.04,1.515,77.8,,,False,False,0.0
+Gemini/medium + 2× Terra/high,3,115.0,1.643,78.5,,,False,False,0.017
+Terra/xhigh,1,153.0,2.186,83.8,525075,0.093,True,True,0.387
+Sol/medium + Terra/xhigh,2,159.25,2.275,84.0,760122,0.193,True,False,0.51
+2× Sol/medium + Terra/xhigh,3,161.0,2.3,84.1,995169,0.293,True,False,0.787
+Terra/high + Terra/xhigh,2,162.83,2.326,84.8,770038,0.137,True,True,0.39
+Sol/medium + Terra/high + Terra/xhigh,3,167.35,2.391,85.0,1005086,0.236,True,False,0.937
+2× Terra/high + Terra/xhigh,3,168.17,2.402,85.9,1015002,0.18,True,True,0.71
+Sol/high,1,79.0,1.129,90.1,434066,0.168,False,False,0.0
+Sol/high + Sol/medium,2,85.33,1.219,90.1,669113,0.267,False,False,0.0
+Sol/high + 2× Sol/medium,3,90.0,1.286,90.1,904160,0.367,False,False,0.0
+Gemini/medium + Sol/medium + Terra/xhigh,3,164.25,2.346,91.6,,,False,False,0.027
+Gemini/medium + Terra/xhigh,2,159.0,2.271,91.7,,,False,False,0.0
+Sol/high + Terra/high,2,121.39,1.734,91.9,679029,0.211,False,False,0.003
+Sol/high + Sol/medium + Terra/high,3,123.92,1.77,92.0,914077,0.311,False,False,0.007
+Gemini/medium + Terra/high + Terra/xhigh,3,167.67,2.395,92.6,,,False,False,0.223
+2× Terra/xhigh,2,182.0,2.6,92.8,1050149,0.186,False,True,0.0
+Sol/medium + 2× Terra/xhigh,3,185.5,2.65,92.8,1285197,0.286,True,False,0.913
+Terra/high + 2× Terra/xhigh,3,186.58,2.665,93.6,1295113,0.23,True,True,0.677
+Sol/high + 2× Terra/high,3,136.67,1.952,93.9,923993,0.255,False,False,0.003
+Gemini/medium + Sol/high,2,89.67,1.281,95.0,,,False,False,0.0
+Gemini/medium + Sol/high + Sol/medium,3,94.67,1.352,95.0,,,False,False,0.0
+Gemini/medium + Sol/high + Terra/high,3,127.94,1.828,96.2,,,False,False,0.0
+Gemini/medium + 2× Terra/xhigh,3,186.0,2.657,97.2,,,False,False,0.333
+Sol/high + Terra/xhigh,2,167.5,2.393,99.4,959140,0.26,False,False,0.003
+Sol/high + Sol/medium + Terra/xhigh,3,169.25,2.418,99.4,1194188,0.36,False,False,0.003
+2× Sol/high,2,99.33,1.419,100.0,868131,0.335,False,False,0.0
+2× Sol/high + Sol/medium,3,102.0,1.457,100.0,1103179,0.435,False,False,0.0
+Sol/high + Terra/high + Terra/xhigh,3,175.74,2.511,100.2,1204104,0.304,False,False,0.003
+2× Sol/high + Terra/high,3,133.83,1.912,101.1,1113095,0.379,False,False,0.0
+Gemini/medium + 2× Sol/high,3,109.0,1.557,101.5,,,False,False,0.0
+Gemini/medium + Sol/high + Terra/xhigh,3,172.67,2.467,101.5,,,False,False,0.0
+Sol/high + 2× Terra/xhigh,3,191.33,2.733,102.6,1484215,0.353,True,True,0.95
+3× Sol/high,3,110.0,1.571,103.6,1302197,0.503,False,False,0.0
+2× Sol/high + Terra/xhigh,3,174.17,2.488,103.8,1393206,0.428,False,False,0.003
+Greptile/base,1,98.0,1.4,146.8,,1.0,False,False,0.0
+Greptile/base + Sol/medium,2,108.0,1.543,146.8,,1.1,False,False,0.0
+Greptile/base + 2× Sol/medium,3,113.0,1.614,146.8,,1.2,False,False,0.0
+Gemini/medium + Greptile/base,2,107.0,1.529,147.5,,,False,False,0.0
+Gemini/medium + Greptile/base + Sol/medium,3,115.5,1.65,147.5,,,False,False,0.0
+Greptile/base + Sol/high,2,123.33,1.762,148.2,,1.168,False,False,0.0
+Greptile/base + Sol/high + Sol/medium,3,125.5,1.793,148.2,,1.267,False,False,0.0
+Greptile/base + Terra/high,2,135.17,1.931,148.8,,1.044,False,False,0.0
+Gemini/medium + Greptile/base + Sol/high,3,130.67,1.867,148.9,,,False,False,0.0
+Greptile/base + 2× Sol/high,3,133.0,1.9,148.9,,1.335,False,False,0.0
+Greptile/base + Sol/medium + Terra/high,3,137.96,1.971,148.9,,1.143,False,False,0.0
+Gemini/medium + Greptile/base + Terra/high,3,140.67,2.01,149.4,,,False,False,0.0
+Greptile/base + Sol/medium + Terra/xhigh,3,178.5,2.55,149.7,,1.193,False,False,0.007
+Greptile/base + Terra/xhigh,2,177.0,2.529,149.8,,1.093,False,False,0.0
+Gemini/medium + Greptile/base + Terra/xhigh,3,182.0,2.6,150.0,,,False,False,0.043
+Greptile/base + Sol/high + Terra/high,3,149.25,2.132,150.0,,1.211,False,False,0.0
+Greptile/base + Sol/high + Terra/xhigh,3,184.67,2.638,150.5,,1.26,False,False,0.057
+Greptile/base + 2× Terra/high,3,149.67,2.138,150.5,,1.087,False,False,0.0
+Greptile/base + Terra/high + Terra/xhigh,3,183.46,2.621,150.6,,1.137,False,False,0.023
+Greptile/base + 2× Terra/xhigh,3,198.0,2.829,151.2,,1.186,True,False,0.947
+Gemini/high,1,72.0,1.029,199.5,,,False,False,0.0
+Gemini/high + Gemini/medium,2,73.0,1.043,199.5,,,False,False,0.0
+Gemini/high + Greptile/base,2,132.0,1.886,199.5,,,False,False,0.0
+Gemini/high + Sol/high,2,114.0,1.629,199.5,,,False,False,0.0
+Gemini/high + Sol/medium,2,93.0,1.329,199.5,,,False,False,0.0
+Gemini/high + Terra/xhigh,2,174.5,2.493,199.5,,,False,False,0.0
+Gemini/high + Gemini/medium + Greptile/base,3,133.0,1.9,199.5,,,False,False,0.0
+Gemini/high + Gemini/medium + Sol/high,3,115.0,1.643,199.5,,,False,False,0.0
+Gemini/high + Gemini/medium + Sol/medium,3,93.5,1.336,199.5,,,False,False,0.0
+Gemini/high + Gemini/medium + Terra/xhigh,3,175.0,2.5,199.5,,,False,False,0.0
+Gemini/high + Greptile/base + Sol/high,3,148.0,2.114,199.5,,,False,False,0.0
+Gemini/high + Greptile/base + Sol/medium,3,139.0,1.986,199.5,,,False,False,0.0
+Gemini/high + Greptile/base + Terra/xhigh,3,194.0,2.771,199.5,,,False,False,0.053
+Gemini/high + 2× Sol/high,3,128.67,1.838,199.5,,,False,False,0.0
+Gemini/high + Sol/high + Sol/medium,3,119.0,1.7,199.5,,,False,False,0.0
+Gemini/high + Sol/high + Terra/xhigh,3,185.5,2.65,199.5,,,False,False,0.003
+Gemini/high + 2× Sol/medium,3,102.0,1.457,199.5,,,False,False,0.0
+Gemini/high + Sol/medium + Terra/xhigh,3,179.0,2.557,199.5,,,False,False,0.0
+Gemini/high + 2× Terra/xhigh,3,199.0,2.843,199.5,,,True,False,0.413
+Gemini/high + Greptile/base + Terra/high,3,161.92,2.313,201.8,,,False,False,0.0
+Gemini/high + Sol/medium + Terra/high,3,133.96,1.914,201.8,,,False,False,0.0
+Gemini/high + Terra/high + Terra/xhigh,3,182.83,2.612,201.8,,,False,False,0.0
+Gemini/high + Terra/high,2,127.0,1.814,201.9,,,False,False,0.0
+Gemini/high + Gemini/medium + Terra/high,3,127.33,1.819,201.9,,,False,False,0.0
+Gemini/high + Sol/high + Terra/high,3,148.44,2.121,201.9,,,False,False,0.0
+Gemini/high + 2× Terra/high,3,142.33,2.033,204.2,,,False,False,0.0
+Sol/high + Sol/xhigh,2,127.83,1.826,211.4,1391892,0.497,False,False,0.0
+Sol/xhigh,1,119.5,1.707,211.5,957826,0.33,False,False,0.0
+Sol/xhigh + Terra/xhigh,2,187.5,2.679,211.5,1482901,0.423,False,False,0.0
+2× Sol/medium + Sol/xhigh,3,125.5,1.793,211.5,1427921,0.529,False,False,0.0
+Gemini/medium + Sol/xhigh,2,127.0,1.814,211.6,,,False,False,0.0
+Gemini/medium + Sol/medium + Sol/xhigh,3,129.25,1.846,211.6,,,False,False,0.0
+Gemini/medium + Sol/xhigh + Terra/xhigh,3,191.0,2.729,211.6,,,False,False,0.0
+2× Sol/high + Sol/xhigh,3,133.83,1.912,211.6,1825958,0.665,False,False,0.0
+Sol/high + Sol/medium + Sol/xhigh,3,130.0,1.857,211.6,1626939,0.597,False,False,0.0
+Sol/medium + Sol/xhigh,2,122.75,1.754,211.7,1192874,0.43,False,False,0.0
+Gemini/medium + Sol/high + Sol/xhigh,3,134.5,1.921,211.7,,,False,False,0.0
+Sol/medium + Sol/xhigh + Terra/xhigh,3,188.88,2.698,211.7,1717948,0.523,False,False,0.003
+Sol/xhigh + 2× Terra/xhigh,3,209.0,2.986,211.7,2007976,0.516,True,True,0.983
+Sol/high + Sol/xhigh + Terra/xhigh,3,190.25,2.718,211.8,1916967,0.59,False,False,0.01
+Sol/xhigh + Terra/high,2,155.62,2.223,213.2,1202790,0.373,False,False,0.0
+Gemini/medium + Sol/xhigh + Terra/high,3,159.29,2.276,213.2,,,False,False,0.0
+Sol/high + Sol/xhigh + Terra/high,3,160.26,2.289,213.3,1636856,0.541,False,False,0.0
+Sol/medium + Sol/xhigh + Terra/high,3,157.17,2.245,213.3,1437838,0.473,False,False,0.0
+Sol/xhigh + Terra/high + Terra/xhigh,3,195.0,2.786,213.4,1727865,0.466,False,True,0.033
+Sol/xhigh + 2× Terra/high,3,169.17,2.417,214.7,1447754,0.417,False,False,0.0
+Greptile/base + Sol/xhigh,2,146.5,2.093,216.3,,1.33,False,False,0.0
+Gemini/medium + Greptile/base + Sol/xhigh,3,152.0,2.171,216.3,,,False,False,0.0
+Greptile/base + Sol/high + Sol/xhigh,3,151.67,2.167,216.3,,1.497,False,False,0.0
+Greptile/base + Sol/xhigh + Terra/xhigh,3,198.25,2.832,216.3,,1.423,False,False,0.09
+Greptile/base + Sol/medium + Sol/xhigh,3,148.25,2.118,216.5,,1.43,False,False,0.0
+Greptile/base + Sol/xhigh + Terra/high,3,170.58,2.437,217.5,,1.373,False,False,0.0
+2× Sol/xhigh,2,144.0,2.057,226.0,1915653,0.659,False,False,0.0
+Gemini/medium + 2× Sol/xhigh,3,150.0,2.143,226.0,,,False,False,0.0
+Sol/high + 2× Sol/xhigh,3,148.33,2.119,226.0,2349718,0.827,False,False,0.0
+Sol/medium + 2× Sol/xhigh,3,145.0,2.071,226.0,2150700,0.759,False,False,0.0
+2× Sol/xhigh + Terra/xhigh,3,202.0,2.886,226.0,2440727,0.752,False,False,0.04
+Greptile/base + 2× Sol/xhigh,3,163.0,2.329,227.1,,1.659,False,False,0.0
+2× Sol/xhigh + Terra/high,3,175.42,2.506,227.8,2160617,0.703,False,False,0.0
+Gemini/high + Greptile/base + Sol/xhigh,3,165.5,2.364,238.0,,,False,False,0.0
+Gemini/high + Sol/high + Sol/xhigh,3,149.5,2.136,238.0,,,False,False,0.0
+Gemini/high + Sol/medium + Sol/xhigh,3,146.5,2.093,238.0,,,False,False,0.0
+Gemini/high + Gemini/medium + Sol/xhigh,3,145.0,2.071,238.1,,,False,False,0.0
+Gemini/high + Sol/xhigh,2,144.0,2.057,238.2,,,False,False,0.0
+Gemini/high + Sol/xhigh + Terra/xhigh,3,200.25,2.861,238.2,,,False,False,0.007
+Gemini/high + Sol/xhigh + Terra/high,3,173.04,2.472,238.8,,,False,False,0.0
+Gemini/high + 2× Sol/xhigh,3,163.0,2.329,245.9,,,False,False,0.0
+Greptile/plus,1,142.0,2.029,265.9,,3.0,False,False,0.0
+Gemini/medium + Greptile/plus,2,148.0,2.114,265.9,,,False,False,0.0
+Greptile/base + Greptile/plus,2,151.0,2.157,265.9,,4.0,False,False,0.0
+Greptile/plus + Sol/high,2,153.0,2.186,265.9,,3.168,False,False,0.0
+Greptile/plus + Sol/medium,2,144.5,2.064,265.9,,3.1,False,False,0.0
+Greptile/plus + Terra/high,2,165.33,2.362,265.9,,3.044,False,False,0.0
+Greptile/plus + Terra/xhigh,2,198.5,2.836,265.9,,3.093,False,False,0.0
+Gemini/medium + Greptile/base + Greptile/plus,3,157.0,2.243,265.9,,,False,False,0.0
+Gemini/medium + Greptile/plus + Sol/high,3,158.67,2.267,265.9,,,False,False,0.0
+Gemini/medium + Greptile/plus + Sol/medium,3,150.0,2.143,265.9,,,False,False,0.0
+Gemini/medium + Greptile/plus + Terra/high,3,169.5,2.421,265.9,,,False,False,0.0
+Gemini/medium + Greptile/plus + Terra/xhigh,3,202.5,2.893,265.9,,,False,False,0.0
+Greptile/base + Greptile/plus + Sol/high,3,159.0,2.271,265.9,,4.168,False,False,0.0
+Greptile/base + Greptile/plus + Sol/medium,3,152.5,2.179,265.9,,4.1,False,False,0.0
+Greptile/base + Greptile/plus + Terra/high,3,170.75,2.439,265.9,,4.044,False,False,0.0
+Greptile/base + Greptile/plus + Terra/xhigh,3,202.5,2.893,265.9,,4.093,False,False,0.0
+Greptile/plus + 2× Sol/high,3,157.67,2.252,265.9,,3.335,False,False,0.0
+Greptile/plus + Sol/high + Sol/medium,3,153.83,2.198,265.9,,3.267,False,False,0.0
+Greptile/plus + Sol/high + Terra/high,3,173.56,2.479,265.9,,3.211,False,False,0.0
+Greptile/plus + Sol/high + Terra/xhigh,3,203.33,2.905,265.9,,3.26,False,False,0.0
+Greptile/plus + 2× Sol/medium,3,146.0,2.086,265.9,,3.2,False,False,0.0
+Greptile/plus + Sol/medium + Terra/high,3,167.0,2.386,265.9,,3.143,False,False,0.0
+Greptile/plus + Sol/medium + Terra/xhigh,3,200.0,2.857,265.9,,3.193,False,False,0.0
+Greptile/plus + 2× Terra/high,3,174.5,2.493,265.9,,3.087,False,False,0.0
+Greptile/plus + Terra/high + Terra/xhigh,3,203.29,2.904,265.9,,3.137,False,False,0.0
+Greptile/plus + 2× Terra/xhigh,3,216.0,3.086,265.9,,3.186,True,True,0.957
+Gemini/high + Greptile/plus,2,164.0,2.343,274.9,,,False,False,0.0
+Gemini/high + Gemini/medium + Greptile/plus,3,165.0,2.357,274.9,,,False,False,0.0
+Gemini/high + Greptile/base + Greptile/plus,3,171.0,2.443,274.9,,,False,False,0.0
+Gemini/high + Greptile/plus + Sol/high,3,172.0,2.457,274.9,,,False,False,0.0
+Gemini/high + Greptile/plus + Sol/medium,3,166.0,2.371,274.9,,,False,False,0.0
+Gemini/high + Greptile/plus + Terra/xhigh,3,210.5,3.007,274.9,,,False,False,0.077
+Gemini/high + Greptile/plus + Terra/high,3,183.83,2.626,275.7,,,False,False,0.0
+Greptile/base + Greptile/plus + Sol/xhigh,3,174.5,2.493,286.3,,4.33,False,False,0.0
+Gemini/medium + Greptile/plus + Sol/xhigh,3,173.5,2.479,286.4,,,False,False,0.0
+Greptile/plus + Sol/xhigh,2,169.0,2.414,286.6,,3.33,False,False,0.0
+Greptile/plus + Sol/high + Sol/xhigh,3,171.83,2.455,286.6,,3.497,False,False,0.0
+Greptile/plus + Sol/medium + Sol/xhigh,3,169.75,2.425,286.6,,3.43,False,False,0.0
+Greptile/plus + Sol/xhigh + Terra/xhigh,3,212.75,3.039,286.7,,3.423,False,False,0.19
+Greptile/plus + Sol/xhigh + Terra/high,3,189.21,2.703,288.3,,3.373,False,False,0.0
+Gemini/high + Greptile/plus + Sol/xhigh,3,184.5,2.636,288.5,,,False,False,0.0
+Ember/xhigh,1,26.0,0.371,292.4,1874692,,False,False,0.0
+Ember/xhigh + Gemini/medium,2,42.0,0.6,292.4,,,False,False,0.0
+Ember/xhigh + Greptile/base,2,105.0,1.5,292.4,,,False,False,0.0
+Ember/xhigh + Sol/high,2,86.33,1.233,292.4,2308758,,False,False,0.0
+Ember/xhigh + Sol/medium,2,56.0,0.8,292.4,2109739,,False,False,0.0
+Ember/xhigh + Terra/xhigh,2,157.0,2.243,292.4,2399767,,False,False,0.0
+Ember/xhigh + Gemini/medium + Greptile/base,3,112.0,1.6,292.4,,,False,False,0.0
+Ember/xhigh + Gemini/medium + Sol/high,3,96.33,1.376,292.4,,,False,False,0.0
+Ember/xhigh + Gemini/medium + Sol/medium,3,65.5,0.936,292.4,,,False,False,0.0
+Ember/xhigh + Gemini/medium + Terra/xhigh,3,162.5,2.321,292.4,,,False,False,0.0
+Ember/xhigh + Greptile/base + Sol/high,3,127.0,1.814,292.4,,,False,False,0.0
+Ember/xhigh + Greptile/base + Sol/medium,3,113.5,1.621,292.4,,,False,False,0.0
+Ember/xhigh + Greptile/base + Terra/xhigh,3,178.5,2.55,292.4,,,False,False,0.0
+Ember/xhigh + 2× Sol/high,3,104.33,1.49,292.4,2742823,,False,False,0.0
+Ember/xhigh + Sol/high + Sol/medium,3,91.17,1.302,292.4,2543805,,False,False,0.0
+Ember/xhigh + Sol/high + Terra/xhigh,3,170.17,2.431,292.4,2833832,,False,False,0.0
+Ember/xhigh + 2× Sol/medium,3,66.0,0.943,292.4,2344787,,False,False,0.0
+Ember/xhigh + Sol/medium + Terra/xhigh,3,162.0,2.314,292.4,2634814,,False,False,0.0
+Ember/xhigh + 2× Terra/xhigh,3,184.0,2.629,292.4,2924841,,False,False,0.0
+Ember/xhigh + Sol/medium + Terra/high,3,104.29,1.49,296.4,2354703,,False,False,0.0
+Ember/xhigh + Terra/high + Terra/xhigh,3,166.17,2.374,296.4,2644730,,False,False,0.0
+Ember/xhigh + Terra/high,2,95.17,1.36,296.5,2119656,,False,False,0.0
+Ember/xhigh + Gemini/medium + Terra/high,3,102.33,1.462,296.6,,,False,False,0.0
+Ember/xhigh + Greptile/base + Terra/high,3,138.75,1.982,296.6,,,False,False,0.0
+Ember/xhigh + Sol/high + Terra/high,3,125.67,1.795,296.6,2553721,,False,False,0.0
+Greptile/plus + 2× Sol/xhigh,3,182.0,2.6,297.4,,3.659,False,False,0.0
+Ember/xhigh + 2× Terra/high,3,114.5,1.636,300.7,2364620,,False,False,0.0
+Ember/xhigh + Gemini/high,2,81.0,1.157,304.5,,,False,False,0.0
+Ember/xhigh + Gemini/high + Gemini/medium,3,82.0,1.171,304.5,,,False,False,0.0
+Ember/xhigh + Gemini/high + Greptile/base,3,135.0,1.929,304.5,,,False,False,0.0
+Ember/xhigh + Gemini/high + Sol/high,3,119.33,1.705,304.5,,,False,False,0.0
+Ember/xhigh + Gemini/high + Sol/medium,3,98.0,1.4,304.5,,,False,False,0.0
+Ember/xhigh + Gemini/high + Terra/xhigh,3,177.5,2.536,304.5,,,False,False,0.0
+Ember/xhigh + Gemini/high + Terra/high,3,131.67,1.881,305.7,,,False,False,0.0
+Ember/xhigh + Sol/xhigh,2,125.0,1.786,319.5,2832518,,False,False,0.0
+Ember/xhigh + Greptile/base + Sol/xhigh,3,150.5,2.15,319.5,,,False,False,0.0
+Ember/xhigh + Gemini/high + Sol/xhigh,3,147.0,2.1,319.6,,,False,False,0.0
+Ember/xhigh + Gemini/medium + Sol/xhigh,3,131.0,1.871,319.6,,,False,False,0.0
+Ember/xhigh + Sol/medium + Sol/xhigh,3,127.75,1.825,319.6,3067566,,False,False,0.0
+Ember/xhigh + Sol/high + Sol/xhigh,3,132.17,1.888,319.7,3266584,,False,False,0.0
+Ember/xhigh + Sol/xhigh + Terra/xhigh,3,189.5,2.707,319.7,3357593,,False,False,0.0
+Ember/xhigh + Sol/xhigh + Terra/high,3,158.88,2.27,321.8,3077482,,False,False,0.0
+Ember/xhigh + 2× Sol/xhigh,3,148.0,2.114,333.3,3790345,,False,False,0.0
+Kimi/high,1,60.0,0.857,340.2,971338,,False,False,0.0
+Gemini/high + Kimi/high,2,99.0,1.414,340.2,,,False,False,0.0
+Gemini/medium + Kimi/high,2,74.0,1.057,340.2,,,False,False,0.0
+Greptile/base + Kimi/high,2,121.0,1.729,340.2,,,False,False,0.0
+Kimi/high + Sol/high,2,101.33,1.448,340.2,1405404,,False,False,0.0
+Kimi/high + Sol/medium,2,81.5,1.164,340.2,1206386,,False,False,0.0
+Kimi/high + Terra/xhigh,2,165.0,2.357,340.2,1496413,,False,False,0.0
+Gemini/high + Gemini/medium + Kimi/high,3,100.0,1.429,340.2,,,False,False,0.0
+Gemini/high + Greptile/base + Kimi/high,3,145.0,2.071,340.2,,,False,False,0.0
+Gemini/high + Kimi/high + Sol/high,3,126.67,1.81,340.2,,,False,False,0.0
+Gemini/high + Kimi/high + Sol/medium,3,112.0,1.6,340.2,,,False,False,0.0
+Gemini/high + Kimi/high + Terra/xhigh,3,182.5,2.607,340.2,,,False,False,0.0
+Gemini/medium + Greptile/base + Kimi/high,3,128.0,1.829,340.2,,,False,False,0.0
+Gemini/medium + Kimi/high + Sol/high,3,110.0,1.571,340.2,,,False,False,0.0
+Gemini/medium + Kimi/high + Sol/medium,3,90.0,1.286,340.2,,,False,False,0.0
+Gemini/medium + Kimi/high + Terra/xhigh,3,169.0,2.414,340.2,,,False,False,0.0
+Greptile/base + Kimi/high + Sol/high,3,136.33,1.948,340.2,,,False,False,0.0
+Greptile/base + Kimi/high + Sol/medium,3,127.0,1.814,340.2,,,False,False,0.0
+Greptile/base + Kimi/high + Terra/xhigh,3,185.5,2.65,340.2,,,False,False,0.0
+Kimi/high + 2× Sol/high,3,116.67,1.667,340.2,1839469,,False,False,0.0
+Kimi/high + Sol/high + Sol/medium,3,106.5,1.521,340.2,1640451,,False,False,0.0
+Kimi/high + Sol/high + Terra/xhigh,3,175.83,2.512,340.2,1930478,,False,False,0.0
+Kimi/high + 2× Sol/medium,3,90.0,1.286,340.2,1441433,,False,False,0.0
+Kimi/high + Sol/medium + Terra/xhigh,3,170.0,2.429,340.2,1731460,,False,False,0.0
+Kimi/high + 2× Terra/xhigh,3,191.0,2.729,340.2,2021487,,False,False,0.0
+Kimi/high + Terra/high,2,113.5,1.621,341.6,1216302,,False,False,0.0
+Gemini/high + Kimi/high + Terra/high,3,139.67,1.995,341.6,,,False,False,0.0
+Gemini/medium + Kimi/high + Terra/high,3,119.0,1.7,341.6,,,False,False,0.0
+Greptile/base + Kimi/high + Terra/high,3,148.75,2.125,341.6,,,False,False,0.0
+Kimi/high + Terra/high + Terra/xhigh,3,173.5,2.479,341.6,1741376,,False,False,0.0
+Kimi/high + Sol/high + Terra/high,3,134.67,1.924,341.7,1650367,,False,False,0.0
+Kimi/high + Sol/medium + Terra/high,3,120.46,1.721,341.7,1451349,,False,False,0.0
+Ember/xhigh + Greptile/plus,2,144.0,2.057,341.8,,,False,False,0.0
+Ember/xhigh + Gemini/high + Greptile/plus,3,166.0,2.371,341.8,,,False,False,0.0
+Ember/xhigh + Gemini/medium + Greptile/plus,3,150.0,2.143,341.8,,,False,False,0.0
+Ember/xhigh + Greptile/base + Greptile/plus,3,153.0,2.186,341.8,,,False,False,0.0
+Ember/xhigh + Greptile/plus + Sol/high,3,155.0,2.214,341.8,,,False,False,0.0
+Ember/xhigh + Greptile/plus + Sol/medium,3,146.5,2.093,341.8,,,False,False,0.0
+Ember/xhigh + Greptile/plus + Terra/xhigh,3,200.0,2.857,341.8,,,False,False,0.0
+Kimi/high + Sol/xhigh,2,133.5,1.907,342.3,1929164,,False,False,0.0
+Gemini/high + Kimi/high + Sol/xhigh,3,151.0,2.157,342.3,,,False,False,0.0
+Gemini/medium + Kimi/high + Sol/xhigh,3,139.0,1.986,342.3,,,False,False,0.0
+Greptile/base + Kimi/high + Sol/xhigh,3,156.0,2.229,342.3,,,False,False,0.0
+Kimi/high + Sol/high + Sol/xhigh,3,140.83,2.012,342.3,2363230,,False,False,0.0
+Kimi/high + Sol/medium + Sol/xhigh,3,136.5,1.95,342.3,2164212,,False,False,0.0
+Kimi/high + Sol/xhigh + Terra/xhigh,3,192.5,2.75,342.3,2454239,,False,False,0.0
+Kimi/high + 2× Terra/high,3,129.5,1.85,343.0,1461266,,False,False,0.0
+Ember/xhigh + Greptile/plus + Terra/high,3,167.33,2.39,343.2,,,False,False,0.0
+Kimi/high + Sol/xhigh + Terra/high,3,163.38,2.334,343.7,2174128,,False,False,0.0
+Kimi/high + 2× Sol/xhigh,3,156.0,2.229,344.4,2886991,,False,False,0.0
+Ember/xhigh + Greptile/plus + Sol/xhigh,3,171.0,2.443,346.2,,,False,False,0.0
+Greptile/plus + Kimi/high,2,156.0,2.229,352.1,,,False,False,0.0
+Gemini/high + Greptile/plus + Kimi/high,3,173.0,2.471,352.1,,,False,False,0.0
+Gemini/medium + Greptile/plus + Kimi/high,3,161.0,2.3,352.1,,,False,False,0.0
+Greptile/base + Greptile/plus + Kimi/high,3,163.0,2.329,352.1,,,False,False,0.0
+Greptile/plus + Kimi/high + Sol/high,3,163.33,2.333,352.1,,,False,False,0.0
+Greptile/plus + Kimi/high + Sol/medium,3,158.0,2.257,352.1,,,False,False,0.0
+Greptile/plus + Kimi/high + Terra/xhigh,3,204.5,2.921,352.1,,,False,False,0.0
+Greptile/plus + Kimi/high + Terra/high,3,174.33,2.49,354.3,,,False,False,0.0
+Greptile/plus + Kimi/high + Sol/xhigh,3,177.0,2.529,355.4,,,False,False,0.0
+Ember/xhigh + Kimi/high,2,68.0,0.971,386.7,2846030,,False,False,0.0
+Ember/xhigh + Gemini/high + Kimi/high,3,104.0,1.486,386.7,,,False,False,0.0
+Ember/xhigh + Gemini/medium + Kimi/high,3,79.0,1.129,386.7,,,False,False,0.0
+Ember/xhigh + Greptile/base + Kimi/high,3,124.0,1.771,386.7,,,False,False,0.0
+Ember/xhigh + Kimi/high + Sol/high,3,105.33,1.505,386.7,3280096,,False,False,0.0
+Ember/xhigh + Kimi/high + Sol/medium,3,85.5,1.221,386.7,3081078,,False,False,0.0
+Ember/xhigh + Kimi/high + Terra/xhigh,3,168.0,2.4,386.7,3371105,,False,False,0.0
+Ember/xhigh + Kimi/high + Terra/high,3,116.5,1.664,387.0,3090994,,False,False,0.0
+Ember/xhigh + Kimi/high + Sol/xhigh,3,136.5,1.95,390.0,3803857,,False,False,0.0
+Ember/xhigh + Greptile/plus + Kimi/high,3,158.0,2.257,393.4,,,False,False,0.0

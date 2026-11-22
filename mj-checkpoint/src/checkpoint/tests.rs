@@ -667,73 +667,6 @@ fn write_modern_rollout(path: &Path, id: &str, session_id: &str) {
 }
 
 #[test]
-fn ignore_nested_repositories_exports_outer_work_without_persisting_the_omission() {
-    let temp = tempfile::tempdir().unwrap();
-    let (mut spec, _) = fixture(temp.path());
-    let repository = spec.workspace_root.join("app");
-    let nested = ".scratch/ü landing/master-check";
-    git(
-        &repository,
-        &["worktree", "add", "--detach", nested, "HEAD"],
-    );
-    fs::write(
-        repository.join(nested).join("valuable.txt"),
-        b"nested work\n",
-    )
-    .unwrap();
-    git(
-        &repository,
-        &["clone", "--no-hardlinks", ".", ".scratch/independent"],
-    );
-    fs::write(
-        repository.join(".scratch/independent/valuable.txt"),
-        b"clone work\n",
-    )
-    .unwrap();
-    fs::write(repository.join("README.md"), b"staged\n").unwrap();
-    git(&repository, &["add", "README.md"]);
-    fs::write(repository.join("README.md"), b"unstaged\n").unwrap();
-    fs::write(repository.join("keep.txt"), b"untracked\n").unwrap();
-    let exclude = fs::read(repository.join(".git/info/exclude")).unwrap();
-
-    let error = export_checkpoint(&spec).unwrap_err();
-    assert!(format!("{error:#}").contains(mj_core::archive::NESTED_REPOSITORY_CHECKPOINT_ERROR));
-    assert!(!spec.output_path.exists());
-    spec.ignore_nested_repositories = true;
-    // Exercise the controller/target JSON contract as well as archive restore.
-    let request: CheckpointExportSpec =
-        serde_json::from_slice(&serde_json::to_vec(&spec).unwrap()).unwrap();
-    export_checkpoint(&request).unwrap();
-    verify_archive_streaming(&spec.output_path).unwrap();
-    let restored = temp.path().join("restored");
-    fs::create_dir(&restored).unwrap();
-    git(&restored, &["clone", repository.to_str().unwrap(), "app"]);
-    restore_repositories(&spec.output_path, &restored, &SystemGit).unwrap();
-    let checkout = restored.join("app");
-    assert_eq!(fs::read(checkout.join("README.md")).unwrap(), b"unstaged\n");
-    assert_eq!(git(&checkout, &["show", ":README.md"]), "staged");
-    assert_eq!(fs::read(checkout.join("keep.txt")).unwrap(), b"untracked\n");
-    // The registered worktree is the repository's own work and comes back;
-    // only the independent clone, which the user chose to omit, does not.
-    assert_eq!(
-        fs::read(checkout.join(nested).join("valuable.txt")).unwrap(),
-        b"nested work\n"
-    );
-    assert!(!checkout.join(".scratch/independent").exists());
-    assert_eq!(
-        fs::read(repository.join(".git/info/exclude")).unwrap(),
-        exclude
-    );
-    assert_eq!(
-        fs::read(repository.join(nested).join("valuable.txt")).unwrap(),
-        b"nested work\n"
-    );
-    spec.ignore_nested_repositories = false;
-    let error = export_checkpoint(&spec).unwrap_err();
-    assert!(format!("{error:#}").contains(mj_core::archive::NESTED_REPOSITORY_CHECKPOINT_ERROR));
-}
-
-#[test]
 fn codex_collection_keeps_only_the_root_thread_from_a_session_tree() {
     let temp = tempfile::tempdir().unwrap();
     let archived_root = temp
@@ -1758,7 +1691,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
     let output = worker_root.join("source.hel.zip");
     (
         CheckpointExportSpec {
-            ignore_nested_repositories: false,
+            consent: Default::default(),
             report_directories: None,
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
             session: SessionManifest {
@@ -1795,6 +1728,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                 command_ledger: None,
                 assessment_state: None,
                 notification_stack: None,
+                native_use_evidence: None,
                 event_frontier: 1,
                 event_frontier_digest: "a".repeat(64),
                 session: CanonicalSessionState {
@@ -2335,6 +2269,8 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
+        supervisor: false,
+        supervisors_enabled: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         goal_resume_request: Default::default(),
@@ -2705,11 +2641,12 @@ fn a_checkout_restore_lands_on_the_branch_the_caller_names() {
         ],
     );
 
-    let restored =
+    let notices =
         restore_single_repository_onto_branch(&archive_path, &checkout, "mj/session", &SystemGit)
             .unwrap();
 
-    assert_eq!(restored.as_deref(), Some(archived_branch.as_str()));
+    assert!(notices.is_empty());
+    let _ = archived_branch;
     assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), head);
     assert_eq!(
         git(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -4478,7 +4415,7 @@ fn incompatible_schema_is_rejected_before_restore_mutates_target() {
     for schema_version in [
         1,
         crate::archive::ARCHIVE_SCHEMA_VERSION + 1,
-        crate::archive::ARCHIVE_SCHEMA_VERSION_ORIGIN_DELTA + 1,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_NATIVE_USE + 1,
     ] {
         let incompatible = temp
             .path()
@@ -5408,5 +5345,74 @@ fn restore_checkpoint_with_notices_uses_primary_repository_root_for_origin_delta
     assert_eq!(
         fs::read_to_string(primary_root.join("cross.txt")).unwrap(),
         "dirty edit\n"
+    );
+}
+
+#[test]
+fn native_use_evidence_overrides_empty_transcript_and_content_matches_detects_change() {
+    let base_empty = CanonicalSessionSnapshot {
+        command_ledger: None,
+        assessment_state: None,
+        notification_stack: None,
+        event_frontier: 2,
+        event_frontier_digest: "a".repeat(64),
+        session: CanonicalSessionState {
+            execution: CanonicalExecutionState::Idle,
+            last_activity_at_ms: Some(10),
+            session_title: None,
+            configuration: Default::default(),
+        },
+        transcript: Vec::new(),
+        queued_prompts: Vec::new(),
+        mailbox: None,
+        native_use_evidence: None,
+    };
+
+    // Legacy archive (no evidence): empty transcript falls back to current_native_session_received_prompt == false.
+    let legacy_seed =
+        relay_seed_for_restore(&base_empty, true, QueueRestorePolicy::Restore).unwrap();
+    assert!(legacy_seed.native_session_unused);
+    assert!(legacy_seed.native_use_evidence.is_none());
+
+    // Worker-owned Used or Unknown evidence overrides empty transcript: native_session_unused must be false.
+    for usage in [
+        mj_core::relay::NativeSessionUse::Used,
+        mj_core::relay::NativeSessionUse::Unknown,
+    ] {
+        let mut with_evidence = base_empty.clone();
+        with_evidence.native_use_evidence = Some(mj_core::relay::NativeSessionUseEvidence {
+            version: 1,
+            native_session_id: "native-1".into(),
+            opened_ordinal: Some(1),
+            usage,
+        });
+        let seed =
+            relay_seed_for_restore(&with_evidence, true, QueueRestorePolicy::Restore).unwrap();
+        assert!(
+            !seed.native_session_unused,
+            "evidence {usage:?} must refuse unexplained replacement even with empty transcript"
+        );
+        assert_eq!(seed.native_use_evidence, with_evidence.native_use_evidence);
+    }
+
+    // Worker-owned Unused evidence authorizes replacement when native_continuity is kept.
+    let mut unused_snap = base_empty.clone();
+    unused_snap.native_use_evidence = Some(mj_core::relay::NativeSessionUseEvidence {
+        version: 1,
+        native_session_id: "native-1".into(),
+        opened_ordinal: Some(1),
+        usage: mj_core::relay::NativeSessionUse::Unused,
+    });
+    let unused_seed =
+        relay_seed_for_restore(&unused_snap, true, QueueRestorePolicy::Restore).unwrap();
+    assert!(unused_seed.native_session_unused);
+
+    // content_matches must detect Unused -> Unknown even with identical transcript.
+    let mut unknown_snap = unused_snap.clone();
+    unknown_snap.native_use_evidence.as_mut().unwrap().usage =
+        mj_core::relay::NativeSessionUse::Unknown;
+    assert!(
+        !unused_snap.content_matches(&unknown_snap),
+        "content_matches must not mask Unused -> Unknown evidence flip"
     );
 }

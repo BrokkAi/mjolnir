@@ -10,26 +10,17 @@ use crate::archive::git::{
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CheckoutKey {
-    pub repository_id: String,
-    pub checkout_path: PathBuf,
-}
-impl Default for CheckoutKey {
-    fn default() -> Self {
-        Self {
-            repository_id: "workspace".into(),
-            checkout_path: PathBuf::new(),
-        }
-    }
-}
+pub use mj_core::suspend_consent::{
+    CaptureConsent, CheckoutKey, FileIdentity, GitOperation, GitOperationKind, OperationConsent,
+    ShownOperation, UntrackedConsent, UntrackedItem, UntrackedPath,
+};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Scoped<T> {
     pub checkout: CheckoutKey,
@@ -75,50 +66,85 @@ pub struct LaunchRecord {
     pub stash: Vec<SnapshotStashEntry>,
     pub worktrees: Vec<PathBuf>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(transparent)]
-pub struct FileIdentity(String);
 /// Use the same metadata observation for this identity and the displayed size.
 /// The controller can use this for .mj/keep entries as well as untracked files.
 pub fn file_identity(metadata: &fs::Metadata) -> Result<FileIdentity> {
     let mut identity = blake3::Hasher::new();
     hash_file_metadata(&mut identity, metadata)?;
-    Ok(FileIdentity(identity.finalize().to_hex().to_string()))
+    Ok(FileIdentity::new(identity.finalize().to_hex().to_string()))
 }
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum UntrackedItem {
-    Path {
-        checkout: CheckoutKey,
-        path: PathBuf,
-        identity: FileIdentity,
-    },
-    NestedRepository {
-        checkout: CheckoutKey,
-        path: PathBuf,
-        identity: FileIdentity,
-    },
-    Stash {
-        checkout: CheckoutKey,
-        commit: String,
-        message: String,
-    },
+
+/// Scan `.mj/keep/` (or a session's keep directory) for regular files and symlinks,
+/// returning each entry with its byte size and file identity plus the total size.
+pub fn scan_keep_dir(
+    checkout: &CheckoutKey,
+    keep_dir: &Path,
+) -> Result<(Vec<mj_core::suspend_consent::KeepDirEntry>, u64)> {
+    if !keep_dir.exists() {
+        return Ok((Vec::new(), 0));
+    }
+    let mut entries = Vec::new();
+    let mut total_bytes = 0u64;
+    let mut stack = vec![keep_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut children: Vec<PathBuf> = fs::read_dir(&dir)
+            .with_context(|| format!("read keep directory {}", dir.display()))?
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|entry| entry.path())
+            .collect();
+        children.sort();
+        for path in children {
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("stat keep entry {}", path.display()))?;
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path
+                .strip_prefix(keep_dir)
+                .unwrap_or(&path)
+                .to_path_buf();
+            let bytes = metadata.len();
+            total_bytes = total_bytes.saturating_add(bytes);
+            entries.push(mj_core::suspend_consent::KeepDirEntry {
+                checkout: checkout.clone(),
+                path: relative,
+                bytes,
+                identity: file_identity(&metadata)?,
+            });
+        }
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((entries, total_bytes))
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UntrackedConsent {
-    None,
-    Any,
-    Shown(Vec<UntrackedItem>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OperationConsent {
-    None,
-    Any,
-    Shown(Vec<ShownOperation>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CaptureConsent {
-    pub untracked: UntrackedConsent,
-    pub operations: OperationConsent,
+
+/// Verify that every file currently inside `.mj/keep/` is covered by `consent`.
+/// Called immediately before capture under the barrier so scratch files created
+/// after preflight are never silently discarded.
+pub fn check_keep_dir_consent(
+    checkout: &CheckoutKey,
+    keep_dir: &Path,
+    consent: &UntrackedConsent,
+) -> Result<()> {
+    let (entries, _) = scan_keep_dir(checkout, keep_dir)?;
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let uncovered: Vec<UntrackedItem> = entries
+        .into_iter()
+        .map(|entry| UntrackedItem::KeepDirFile {
+            checkout: entry.checkout,
+            path: entry.path,
+            identity: entry.identity,
+        })
+        .filter(|item| !consent.covers(item))
+        .collect();
+    if uncovered.is_empty() {
+        Ok(())
+    } else {
+        Err(SnapshotRefused::Untracked(uncovered).into())
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnrepresentedWorktree {
@@ -294,6 +320,13 @@ impl std::fmt::Display for SnapshotRefused {
                             checkout.repository_id,
                             checkout.checkout_path.display()
                         )?,
+                        UntrackedItem::KeepDirFile { checkout, path, .. } => write!(
+                            f,
+                            " {}:{} .mj/keep/{}",
+                            checkout.repository_id,
+                            checkout.checkout_path.display(),
+                            path.display()
+                        )?,
                     }
                 }
                 write!(f, ". Commit wanted files, move them outside the clone, or remove them before suspending. Preserve wanted stash contents outside the clone before dropping those stashes.")
@@ -302,28 +335,6 @@ impl std::fmt::Display for SnapshotRefused {
     }
 }
 impl std::error::Error for SnapshotRefused {}
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum GitOperationKind {
-    Merge,
-    Rebase,
-    CherryPick,
-    Revert,
-    Am,
-    Bisect,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GitOperation {
-    pub checkout: CheckoutKey,
-    pub kind: GitOperationKind,
-}
-pub type ShownOperation = GitOperation;
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UntrackedPath {
-    pub checkout: CheckoutKey,
-    pub path: PathBuf,
-    pub bytes: u64,
-    pub identity: FileIdentity,
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceInventory {
     pub notices: Vec<String>,
@@ -364,6 +375,22 @@ impl<'a> CaptureGit<'a> {
 }
 impl GitCommandRunner for CaptureGit<'_> {
     fn run(&self, repository: &Path, command: &GitCommand) -> Result<crate::archive::GitOutput> {
+        let command = self.prepare_command(repository, command)?;
+        self.inner.run(repository, &command)
+    }
+
+    fn run_to_file(
+        &self,
+        repository: &Path,
+        command: &GitCommand,
+        output: fs::File,
+    ) -> Result<crate::archive::GitOutput> {
+        let command = self.prepare_command(repository, command)?;
+        self.inner.run_to_file(repository, &command, output)
+    }
+}
+impl CaptureGit<'_> {
+    fn prepare_command(&self, repository: &Path, command: &GitCommand) -> Result<GitCommand> {
         let mut command = command.clone();
         let mut arguments = vec![
             "-c".into(),
@@ -379,7 +406,7 @@ impl GitCommandRunner for CaptureGit<'_> {
         command.env.push(("GIT_NO_LAZY_FETCH".into(), "0".into()));
         // Inspection must not refresh or lock a user's real index.
         command.env.push(("GIT_OPTIONAL_LOCKS".into(), "0".into()));
-        self.inner.run(repository, &command)
+        Ok(command)
     }
 }
 // Preserve a user-selected identity or proxy before the runner supplies its
@@ -1220,11 +1247,6 @@ fn relative_submodule_url(base: &str, relative: &str, checkout: &Path) -> Result
     Ok(format!("{base}{separator}{suffix}"))
 }
 
-fn append_pack_extension(base: &Path, hash: &str, extension: &str) -> PathBuf {
-    let mut path = base.as_os_str().to_owned();
-    path.push(format!("-{hash}.{extension}"));
-    path.into()
-}
 fn untracked_covered(consent: &UntrackedConsent, item: &UntrackedItem) -> bool {
     match consent {
         UntrackedConsent::None => false,
@@ -1538,15 +1560,71 @@ pub(crate) fn origin_tracking_objects(
     objects.dedup();
     Ok(OriginTracking { objects, ambiguous })
 }
+/// Ref names that must not be excluded when `remote` shares `checkout`'s
+/// common Git directory (for example an originless legacy linked worktree
+/// falling back to `source_repository` via `origin_override`). Otherwise
+/// `ls-remote` would advertise the session's own mutable branch back to
+/// capture and drop the session's commits from the pack.
+fn shared_source_skip_refs(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+    remote: &str,
+    selected_refs: &BTreeMap<String, String>,
+) -> Result<(bool, BTreeSet<String>)> {
+    if remote.is_empty() {
+        return Ok((false, BTreeSet::new()));
+    }
+    let effective = run_git(runner, checkout, ["ls-remote", "--get-url", remote], &[])?;
+    if effective.status != 0 {
+        return Ok((false, BTreeSet::new()));
+    }
+    let text = std::str::from_utf8(
+        effective
+            .stdout
+            .strip_suffix(b"\n")
+            .unwrap_or(&effective.stdout),
+    )?;
+    let Some(local_remote) = local_origin_route(checkout, text)? else {
+        return Ok((false, BTreeSet::new()));
+    };
+    if !local_remote.exists() {
+        return Ok((false, BTreeSet::new()));
+    }
+    let checkout_common_out = run_git(runner, checkout, ["rev-parse", "--git-common-dir"], &[])?;
+    let remote_common_out =
+        run_git(runner, &local_remote, ["rev-parse", "--git-common-dir"], &[])?;
+    if checkout_common_out.status != 0 || remote_common_out.status != 0 {
+        return Ok((false, BTreeSet::new()));
+    }
+    let checkout_common =
+        crate::archive::git::absolute_git_path(checkout, &checkout_common_out.stdout)?;
+    let remote_common =
+        crate::archive::git::absolute_git_path(&local_remote, &remote_common_out.stdout)?;
+    let checkout_canonical = fs::canonicalize(&checkout_common).unwrap_or(checkout_common);
+    let remote_canonical = fs::canonicalize(&remote_common).unwrap_or(remote_common);
+    if checkout_canonical == remote_canonical {
+        Ok((true, selected_refs.keys().cloned().collect()))
+    } else {
+        Ok((false, BTreeSet::new()))
+    }
+}
+
 /// Capture and dry-run share origin queries and objects-only downloads.
 fn origin_exclusions(
     runner: &dyn GitCommandRunner,
     checkout: &Path,
     remote: &str,
     refs: &BTreeMap<String, String>,
+    skip_shared_source_refs: &(bool, BTreeSet<String>),
 ) -> Result<OriginExclusions> {
     let fallback = origin_tracking_objects(runner, checkout, refs)?;
-    let mut result = remote_objects(runner, checkout, remote, &fallback.objects)?;
+    let mut result = remote_objects(
+        runner,
+        checkout,
+        remote,
+        &fallback.objects,
+        skip_shared_source_refs,
+    )?;
     if result.stale && result.objects.is_empty() {
         result.notice = Some(if fallback.ambiguous {
             "snapshot carries full history because origin was unreachable and its offline refs were ambiguous"
@@ -1562,7 +1640,9 @@ pub(crate) fn remote_objects(
     checkout: &Path,
     remote: &str,
     fallback: &[String],
+    skip_shared_source_refs: &(bool, BTreeSet<String>),
 ) -> Result<OriginExclusions> {
+    let (shares_common_dir, skip_refs) = skip_shared_source_refs;
     let advertised = run_git(runner, checkout, ["ls-remote", remote], &[]);
     let mut objects = Vec::new();
     let mut stale = false;
@@ -1573,6 +1653,11 @@ pub(crate) fn remote_objects(
                 let (oid, name) = line
                     .split_once('\t')
                     .context("malformed origin advertisement")?;
+                if *shares_common_dir
+                    && (skip_refs.contains(name) || name.starts_with("refs/heads/mj/"))
+                {
+                    continue;
+                }
                 if name.starts_with("refs/heads/") || name.starts_with("refs/tags/") {
                     tips.push(oid.to_owned());
                 }
@@ -1650,7 +1735,8 @@ pub(crate) fn submodule_selection_has_delta(
             .into_iter()
             .map(|entry| entry.commit),
     );
-    let exclusions = origin_exclusions(runner, checkout, "origin", &refs)?;
+    let no_skip = (false, BTreeSet::new());
+    let exclusions = origin_exclusions(runner, checkout, "origin", &refs, &no_skip)?;
     tips.sort();
     tips.dedup();
     if !missing_tips(runner, checkout, &tips)?.is_empty() {
@@ -1675,10 +1761,26 @@ fn snapshot_exclusions(
     checkout: &Path,
     remote: &str,
     refs: &BTreeMap<String, String>,
+    selected_refs: &BTreeMap<String, String>,
     source: &ExclusionSource,
 ) -> Result<OriginExclusions> {
     match source {
-        ExclusionSource::Origin => origin_exclusions(runner, checkout, remote, refs),
+        ExclusionSource::Origin => {
+            let skip_shared = shared_source_skip_refs(runner, checkout, remote, selected_refs)?;
+            origin_exclusions(runner, checkout, remote, refs, &skip_shared)
+        }
+        ExclusionSource::Remote(_) => {
+            let skip_shared = shared_source_skip_refs(runner, checkout, remote, selected_refs)?;
+            let mut result = remote_objects(runner, checkout, remote, &[], &skip_shared)?;
+            if result.stale && result.objects.is_empty() {
+                result.notice = Some(
+                    "snapshot carries full history because the selected remote was unreachable"
+                        .to_owned(),
+                );
+                result.stale = false;
+            }
+            Ok(result)
+        }
         ExclusionSource::Commits(commits) => {
             let mut objects = Vec::new();
             for commit in commits {
@@ -1818,15 +1920,18 @@ fn write_snapshot_pack(
         revisions.push('\n');
     }
     let base = std::path::absolute(base)?;
-    if let Some(parent) = base.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    // Git owns its scratch files until it exits; the directory then removes
-    // incomplete packs on every failure before any final artifact is published.
-    let scratch = tempfile::tempdir_in(base.parent().context("pack has no parent")?)?;
-    let scratch_base = scratch.path().join("objects");
+    let parent = base.parent().context("pack has no parent")?;
+    fs::create_dir_all(parent)?;
+    // Every in-flight capture owns a distinct temp file in the destination
+    // directory, removed on drop if packing fails or produces an empty pack.
+    // Streaming via `--stdout` avoids Git creating a temp pack in the
+    // repository's object store and renaming it across filesystems (#1635).
+    let mut published = tempfile::Builder::new()
+        .prefix(base.file_name().context("pack base has no filename")?)
+        .suffix(".pack")
+        .tempfile_in(parent)?;
     // A snapshot has one pack artifact; ignore repository-configured splitting.
-    let output = runner.run(
+    let output = runner.run_to_file(
         checkout,
         &GitCommand {
             arguments: vec![
@@ -1834,43 +1939,34 @@ fn write_snapshot_pack(
                 "pack.packSizeLimit=0".into(),
                 "pack-objects".into(),
                 "--revs".into(),
-                scratch_base.as_os_str().to_owned(),
+                "--stdout".into(),
+                "--quiet".into(),
             ],
             stdin: revisions.into_bytes(),
             ..Default::default()
         },
+        published.as_file().try_clone()?,
     )?;
     ensure!(
         output.status == 0,
         "{}",
         git_failure("pack snapshot objects", &output)
     );
-    let hash = String::from_utf8(output.stdout)?.trim().to_owned();
     ensure!(
-        (hash.len() == 40 || hash.len() == 64) && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "Git returned an invalid pack hash"
+        published.as_file().metadata()?.len() >= 32,
+        "Git returned an invalid snapshot pack"
     );
-    let path = append_pack_extension(&scratch_base, &hash, "pack");
     let mut header = [0_u8; 12];
-    fs::File::open(&path)?.read_exact(&mut header)?;
+    published.as_file_mut().seek(SeekFrom::Start(0))?;
+    published.as_file_mut().read_exact(&mut header)?;
     ensure!(
         header.starts_with(b"PACK"),
         "Git returned an invalid snapshot pack"
     );
     if header[8..12] == [0, 0, 0, 0] {
-        fs::remove_file(path)?;
         Ok(None)
     } else {
-        // Every in-flight capture owns a distinct path, even for identical
-        // bytes and the same caller-provided base. No other capture can borrow
-        // an artifact whose owner may still roll it back.
-        let published = tempfile::Builder::new()
-            .prefix(base.file_name().context("pack base has no filename")?)
-            .suffix(".pack")
-            .tempfile_in(base.parent().context("pack has no parent")?)?
-            .into_temp_path();
-        fs::rename(path, &published)?;
-        Ok(Some(published))
+        Ok(Some(published.into_temp_path()))
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1920,33 +2016,38 @@ fn estimate_delta_with_source(
     let capture = CaptureGit::new(runner);
     let runner: &dyn GitCommandRunner = &capture;
     let history_cutoff = matches!(source, ExclusionSource::Commits(_));
-    let (remote, inventory_origin) = if history_cutoff {
-        (String::new(), None)
-    } else {
-        let configured = run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?;
-        let remote = if configured.status == 0 {
-            Some("origin".to_owned())
-        } else {
-            origin_override
-        };
-        let Some(remote) = remote else {
-            ensure!(
-                matches!(ownership, CheckoutOwnership::Raw { .. }),
-                "managed snapshot requires an origin remote or source override"
-            );
-            return Ok(DeltaEstimate {
-                committed_bytes: 0,
-                working_state_bytes: None,
-                total_bytes: None,
-                remote_refs_stale: false,
-            });
-        };
-        let resolved_remote = if configured.status == 0 {
-            remote.clone()
-        } else {
-            absolute_config_url(checkout, &remote)?
-        };
-        (resolved_remote, Some(remote))
+    let (remote, inventory_origin) = match source {
+        ExclusionSource::Commits(_) => (String::new(), None),
+        ExclusionSource::Remote(url) => (
+            absolute_config_url(checkout, url)?,
+            Some(url.clone()),
+        ),
+        ExclusionSource::Origin => {
+            let configured = run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?;
+            let remote = if configured.status == 0 {
+                Some("origin".to_owned())
+            } else {
+                origin_override
+            };
+            let Some(remote) = remote else {
+                ensure!(
+                    matches!(ownership, CheckoutOwnership::Raw { .. }),
+                    "managed snapshot requires an origin remote or source override"
+                );
+                return Ok(DeltaEstimate {
+                    committed_bytes: 0,
+                    working_state_bytes: None,
+                    total_bytes: None,
+                    remote_refs_stale: false,
+                });
+            };
+            let resolved_remote = if configured.status == 0 {
+                remote.clone()
+            } else {
+                absolute_config_url(checkout, &remote)?
+            };
+            (resolved_remote, Some(remote))
+        }
     };
     let inventory = workspace_inventory_scoped(
         runner,
@@ -1957,8 +2058,8 @@ fn estimate_delta_with_source(
         history_cutoff,
     )?;
     let cut = pin_workspace_cut(runner, checkout, ownership)?;
-    let exclusions = snapshot_exclusions(runner, checkout, &remote, &cut.refs, source)?;
     let refs = selected_refs(runner, checkout, &cut, ownership)?;
+    let exclusions = snapshot_exclusions(runner, checkout, &remote, &cut.refs, &refs, source)?;
     let mut committed: Vec<_> = refs.values().cloned().collect();
     committed.push(cut.head.commit().to_owned());
     committed.extend(
@@ -2037,6 +2138,9 @@ fn estimate_delta_with_source(
 pub enum ExclusionSource {
     #[default]
     Origin,
+    /// Exclude objects reachable from this explicit remote URL even when
+    /// `remote.origin.url` points elsewhere.
+    Remote(String),
     Commits(Vec<String>),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2191,12 +2295,19 @@ pub fn capture_session_snapshot(
             }
         }
         for (repository, raw, inputs) in pending {
-            check_consent_inputs(
-                raw,
-                inputs,
-                consent.repositories.get(&repository.id).unwrap_or(&none),
-            )
-            .map_err(|error| session_error(&repository.id, error))?;
+            let repo_consent = consent.repositories.get(&repository.id).unwrap_or(&none);
+            check_consent_inputs(raw, inputs, repo_consent)
+                .map_err(|error| session_error(&repository.id, error))?;
+            if !raw
+                && let Some(keep_dir) = &repository.keep_dir
+            {
+                check_keep_dir_consent(
+                    &repository_key(&repository.id),
+                    keep_dir,
+                    &repo_consent.untracked,
+                )
+                .map_err(|error| session_error(&repository.id, error))?;
+            }
         }
         Ok(())
     };
@@ -2391,29 +2502,40 @@ fn capture_prepared_workspace(
     let checkout = &repository.checkout;
     let ownership = &repository.ownership;
     let history_cutoff = matches!(repository.exclusions, ExclusionSource::Commits(_));
-    let (origin_url, remote) = if history_cutoff {
-        (None, String::new())
-    } else {
-        let configured = config_values(runner, checkout, "remote.origin.url")?
-            .into_iter()
-            .next();
-        let origin_url = configured
-            .clone()
-            .or_else(|| repository.origin_override.clone());
-        let Some(origin_url) = origin_url else {
-            return capture_in_place_metadata(runner, repository);
-        };
-        let remote = if configured.is_some() {
-            "origin".to_owned()
-        } else {
-            absolute_config_url(checkout, &origin_url)?
-        };
-        (Some(redact_snapshot_url(&origin_url)?), remote)
+    let (origin_url, remote) = match &repository.exclusions {
+        ExclusionSource::Commits(_) => (None, String::new()),
+        ExclusionSource::Remote(url) => {
+            let remote = absolute_config_url(checkout, url)?;
+            (Some(redact_snapshot_url(url)?), remote)
+        }
+        ExclusionSource::Origin => {
+            let configured = config_values(runner, checkout, "remote.origin.url")?
+                .into_iter()
+                .next();
+            let origin_url = configured
+                .clone()
+                .or_else(|| repository.origin_override.clone());
+            let Some(origin_url) = origin_url else {
+                return capture_in_place_metadata(runner, repository);
+            };
+            let remote = if configured.is_some() {
+                "origin".to_owned()
+            } else {
+                absolute_config_url(checkout, &origin_url)?
+            };
+            (Some(redact_snapshot_url(&origin_url)?), remote)
+        }
     };
     let cut = pin_workspace_cut(runner, checkout, ownership)?;
     let refs = selected_refs(runner, checkout, &cut, ownership)?;
-    let exclusions =
-        snapshot_exclusions(runner, checkout, &remote, &cut.refs, &repository.exclusions)?;
+    let exclusions = snapshot_exclusions(
+        runner,
+        checkout,
+        &remote,
+        &cut.refs,
+        &refs,
+        &repository.exclusions,
+    )?;
     let mut notices = inventory.notices.clone();
     notices.extend(exclusions.notice.clone());
     let original_stash = selected_stash(runner, checkout, ownership)?;
@@ -2585,7 +2707,7 @@ fn nested_repository_inventory(root: &Path) -> Result<(u64, FileIdentity)> {
         let encoded = relative.as_os_str().as_encoded_bytes();
         identity.update(&(encoded.len() as u64).to_be_bytes());
         identity.update(encoded);
-        identity.update(file_identity(&metadata)?.0.as_bytes());
+        identity.update(file_identity(&metadata)?.as_str().as_bytes());
         if metadata.is_dir() {
             let mut children = fs::read_dir(&path)?
                 .map(|entry| entry.map(|entry| entry.path()))
@@ -2603,7 +2725,7 @@ fn nested_repository_inventory(root: &Path) -> Result<(u64, FileIdentity)> {
     }
     Ok((
         bytes,
-        FileIdentity(identity.finalize().to_hex().to_string()),
+        FileIdentity::new(identity.finalize().to_hex().to_string()),
     ))
 }
 fn keep_relative(repository: &RepositoryInput) -> Result<Option<PathBuf>> {
@@ -2670,53 +2792,19 @@ fn tracked_keep_paths(
     Ok(paths)
 }
 
-fn include_ignored_keep_paths(
-    runner: &dyn GitCommandRunner,
-    checkout: &Path,
-    inventory: &mut WorkspaceInventory,
-    keep: &Path,
-) -> Result<()> {
+fn strip_keep_paths_from_untracked(inventory: &mut WorkspaceInventory, keep: &Path) {
     let local_keep = match keep.strip_prefix(&inventory.checkout.checkout_path) {
         Ok(path) if !path.as_os_str().is_empty() => path,
         _ if inventory.checkout.checkout_path.starts_with(keep) => Path::new("."),
-        _ => return Ok(()),
+        _ => return,
     };
-    let paths = git_bytes(
-        runner,
-        checkout,
-        [
-            "--literal-pathspecs",
-            "ls-files",
-            "-z",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--",
-            local_keep.to_str().context("keep path is not UTF-8")?,
-        ],
-        &[],
-        "inspect ignored keep files",
-    )?;
-    for path in paths
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-    {
-        let path = mj_core::path_input::from_git_bytes(path)?;
-        let full_path = checkout.join(&path);
-        let metadata = fs::symlink_metadata(&full_path)?;
-        let (bytes, identity) = if metadata.is_dir() {
-            nested_repository_inventory(&full_path)?
+    inventory.untracked.retain(|entry| {
+        if local_keep == Path::new(".") {
+            false
         } else {
-            (metadata.len(), file_identity(&metadata)?)
-        };
-        inventory.untracked.push(UntrackedPath {
-            checkout: inventory.checkout.clone(),
-            path,
-            bytes,
-            identity,
-        });
-    }
-    Ok(())
+            !entry.path.starts_with(local_keep)
+        }
+    });
 }
 
 fn repository_inventory(
@@ -2743,7 +2831,11 @@ fn repository_inventory(
         && let Some(keep) = keep_relative(repository)?
     {
         inventory.keep_dir = repository.keep_dir.clone();
-        include_ignored_keep_paths(runner, &repository.checkout, &mut inventory, &keep)?;
+        // `.mj/keep/<session-id>/` files are owned exclusively by
+        // `scan_keep_dir` / `keep_dir_entries` / `check_keep_dir_consent` so
+        // preflight and dialogs never double-count them in both `untracked`
+        // and `keep_dir_entries`.
+        strip_keep_paths_from_untracked(&mut inventory, &keep);
         inventory.tracked_keep_files = tracked_keep_paths(
             runner,
             &repository.checkout,
@@ -2765,7 +2857,7 @@ fn repository_inventory(
         for (path, nested) in &mut inventory.worktrees {
             let directory = repository.checkout.join(path.as_path());
             nested.keep_dir = repository.keep_dir.clone();
-            include_ignored_keep_paths(runner, &directory, nested, &keep)?;
+            strip_keep_paths_from_untracked(nested, &keep);
             nested.tracked_keep_files =
                 tracked_keep_paths(runner, &directory, &nested.checkout, &keep, None)?;
             nested.tracked_keep_files.extend(tracked_keep_paths(
@@ -4114,19 +4206,30 @@ mod tests {
     use crate::archive::SystemGit;
 
     struct FileGit;
+    fn prepare_file_git(command: &GitCommand) -> GitCommand {
+        let mut command = command.clone();
+        command
+            .arguments
+            .splice(0..0, ["-c".into(), "protocol.file.allow=always".into()]);
+        command.env.extend([
+            ("GIT_AUTHOR_NAME".into(), "Snapshot Test".into()),
+            ("GIT_AUTHOR_EMAIL".into(), "snapshot@example.test".into()),
+            ("GIT_COMMITTER_NAME".into(), "Snapshot Test".into()),
+            ("GIT_COMMITTER_EMAIL".into(), "snapshot@example.test".into()),
+        ]);
+        command
+    }
     impl GitCommandRunner for FileGit {
         fn run(&self, path: &Path, command: &GitCommand) -> Result<crate::archive::GitOutput> {
-            let mut command = command.clone();
-            command
-                .arguments
-                .splice(0..0, ["-c".into(), "protocol.file.allow=always".into()]);
-            command.env.extend([
-                ("GIT_AUTHOR_NAME".into(), "Snapshot Test".into()),
-                ("GIT_AUTHOR_EMAIL".into(), "snapshot@example.test".into()),
-                ("GIT_COMMITTER_NAME".into(), "Snapshot Test".into()),
-                ("GIT_COMMITTER_EMAIL".into(), "snapshot@example.test".into()),
-            ]);
-            SystemGit.run(path, &command)
+            SystemGit.run(path, &prepare_file_git(command))
+        }
+        fn run_to_file(
+            &self,
+            path: &Path,
+            command: &GitCommand,
+            output: fs::File,
+        ) -> Result<crate::archive::GitOutput> {
+            SystemGit.run_to_file(path, &prepare_file_git(command), output)
         }
     }
     fn git(path: &Path, args: &[&str]) -> String {
@@ -4801,12 +4904,8 @@ mod tests {
     struct HostGit {
         global: PathBuf,
     }
-    impl GitCommandRunner for HostGit {
-        fn run(
-            &self,
-            repository: &Path,
-            command: &GitCommand,
-        ) -> Result<crate::archive::GitOutput> {
+    impl HostGit {
+        fn prepare_command(&self, command: &GitCommand) -> GitCommand {
             let mut command = command.clone();
             command.env.extend([
                 (
@@ -4819,7 +4918,24 @@ mod tests {
                 ),
                 ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ]);
-            SystemGit.run(repository, &command)
+            command
+        }
+    }
+    impl GitCommandRunner for HostGit {
+        fn run(
+            &self,
+            repository: &Path,
+            command: &GitCommand,
+        ) -> Result<crate::archive::GitOutput> {
+            SystemGit.run(repository, &self.prepare_command(command))
+        }
+        fn run_to_file(
+            &self,
+            repository: &Path,
+            command: &GitCommand,
+            output: fs::File,
+        ) -> Result<crate::archive::GitOutput> {
+            SystemGit.run_to_file(repository, &self.prepare_command(command), output)
         }
     }
     fn host_git(path: &Path, name: &str) -> HostGit {
@@ -5189,6 +5305,130 @@ mod tests {
         assert_eq!(
             git(&restored, &["rev-parse", "HEAD^{tree}"]),
             git(&root.checkout, &["rev-parse", "HEAD^{tree}"])
+        );
+        git(&restored, &["fsck", "--full"]);
+    }
+
+    // Hard-won: #1635: snapshot packing failed with EXDEV when repository and capture directory were on different filesystems.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn snapshot_and_estimate_pack_across_different_filesystems() {
+        use std::os::unix::fs::MetadataExt;
+
+        let system_temp = std::env::temp_dir();
+        let system_dev = fs::metadata(&system_temp).unwrap().dev();
+        let Some(other) = ["/dev/shm", "/var/tmp", "/tmp"]
+            .into_iter()
+            .find_map(|candidate| {
+                let metadata = fs::metadata(candidate).ok()?;
+                if !metadata.is_dir() || metadata.dev() == system_dev {
+                    return None;
+                }
+                tempfile::Builder::new()
+                    .prefix("mj-snapshot-exdev-")
+                    .tempdir_in(candidate)
+                    .ok()
+            })
+        else {
+            eprintln!(
+                "skipping cross-filesystem snapshot test: no writable mount distinct from {}",
+                system_temp.display()
+            );
+            return;
+        };
+        assert_ne!(fs::metadata(other.path()).unwrap().dev(), system_dev);
+
+        let origin = other.path().join("origin.git");
+        let checkout = other.path().join("checkout");
+        git(
+            other.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                origin.to_str().unwrap(),
+            ],
+        );
+        git(
+            other.path(),
+            &[
+                "clone",
+                origin.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        fs::write(checkout.join("file"), "origin\n").unwrap();
+        git(&checkout, &["add", "file"]);
+        git(&checkout, &["commit", "-m", "base"]);
+        git(&checkout, &["push", "origin", "main"]);
+        let capture_dir = tempfile::tempdir_in(&system_temp).unwrap();
+        assert_ne!(
+            fs::metadata(other.path()).unwrap().dev(),
+            fs::metadata(capture_dir.path()).unwrap().dev()
+        );
+        let pack_base = capture_dir.path().join("snapshot");
+        let clean = capture_workspace_snapshot(
+            &FileGit,
+            &checkout,
+            &CheckoutOwnership::Managed,
+            &pack_base,
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(clean.pack.is_none());
+        assert!(!fs::read_dir(capture_dir.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "pack")
+        }));
+        assert_eq!(
+            estimate_delta(&FileGit, &checkout, &CheckoutOwnership::Managed, None)
+                .unwrap()
+                .total_bytes,
+            Some(0)
+        );
+
+        fs::write(checkout.join("committed"), "committed change\n").unwrap();
+        git(&checkout, &["add", "committed"]);
+        git(&checkout, &["commit", "-m", "committed change"]);
+        fs::write(checkout.join("file"), "working change\n").unwrap();
+        let estimate =
+            estimate_delta(&FileGit, &checkout, &CheckoutOwnership::Managed, None).unwrap();
+        let snapshot = capture_workspace_snapshot(
+            &FileGit,
+            &checkout,
+            &CheckoutOwnership::Managed,
+            &pack_base,
+            &CaptureConsent {
+                untracked: UntrackedConsent::Any,
+                operations: OperationConsent::Any,
+            },
+            None,
+        )
+        .unwrap();
+        let pack = snapshot.pack.as_ref().unwrap();
+        let pack_len = fs::metadata(pack).unwrap().len();
+        assert_eq!(estimate.total_bytes, Some(pack_len));
+
+        let root = Repo {
+            temp: other,
+            origin,
+            checkout,
+        };
+        let restored = root.restore(&snapshot, None);
+        assert_eq!(
+            git(&restored, &["rev-parse", "HEAD^{tree}"]),
+            git(&root.checkout, &["rev-parse", "HEAD^{tree}"])
+        );
+        assert_eq!(
+            fs::read(restored.join("file")).unwrap(),
+            b"working change\n"
         );
         git(&restored, &["fsck", "--full"]);
     }
@@ -7128,6 +7368,95 @@ mod tests {
                 Some(SnapshotRefused::DirtySubmodule(_))
             ),
             "expected DirtySubmodule refusal, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn consent_staleness_refuses_new_untracked_or_keep_dir_file_after_clean_preflight() {
+        let r = Repo::new();
+        let keep_dir = r.checkout.join(".mj/keep");
+        let input = RepositoryInput {
+            id: "workspace".to_owned(),
+            checkout: r.checkout.clone(),
+            ownership: CheckoutOwnership::Managed,
+            origin_override: None,
+            pack_path: r.temp.path().join("stale.pack"),
+            exclusions: ExclusionSource::Origin,
+            keep_dir: Some(keep_dir.clone()),
+        };
+        // 1. Preflight sees a clean workspace (no untracked files, no keep-dir files).
+        let inv = session_inventory(&FileGit, std::slice::from_ref(&input)).unwrap();
+        assert!(inv["workspace"].untracked.is_empty());
+        assert!(scan_keep_dir(&inv["workspace"].checkout, &keep_dir).unwrap().0.is_empty());
+
+        // 2. A file appears before the capture cut. Capture with UntrackedConsent::None refuses.
+        fs::write(r.checkout.join("late-scratch.txt"), "created after preflight\n").unwrap();
+        let err = capture_session_snapshot(&FileGit, std::slice::from_ref(&input), &SessionCaptureConsent::default())
+            .expect_err("capture must refuse untracked file created after clean preflight");
+        assert!(
+            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            "expected Untracked refusal, got: {err:#}"
+        );
+
+        // 3. Even if the user approved `late-scratch.txt` via Shown, modifying it or adding a
+        //    keep-dir file after preflight refuses because the file identity / keep-dir changed.
+        let inv2 = session_inventory(&FileGit, std::slice::from_ref(&input)).unwrap();
+        let shown_item = UntrackedItem::Path {
+            checkout: inv2["workspace"].checkout.clone(),
+            path: inv2["workspace"].untracked[0].path.clone(),
+            identity: inv2["workspace"].untracked[0].identity.clone(),
+        };
+        fs::write(r.checkout.join("late-scratch.txt"), "different content and size!\n").unwrap();
+        let stale_consent = SessionCaptureConsent {
+            repositories: [(
+                "workspace".to_owned(),
+                CaptureConsent {
+                    untracked: UntrackedConsent::Shown(vec![shown_item]),
+                    operations: OperationConsent::None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let err = capture_session_snapshot(&FileGit, std::slice::from_ref(&input), &stale_consent)
+            .expect_err("capture must refuse when approved file identity changed");
+        assert!(
+            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            "expected Untracked refusal for changed identity, got: {err:#}"
+        );
+
+        // 4. A file created in `.mj/keep/` after preflight is owned solely by
+        //    keep_dir scanning (never duplicated into `inventory.untracked`),
+        //    and is refused directly by `capture_session_snapshot` as well as
+        //    `check_keep_dir_consent`.
+        fs::remove_file(r.checkout.join("late-scratch.txt")).unwrap();
+        fs::create_dir_all(&keep_dir).unwrap();
+        fs::write(keep_dir.join("note.txt"), "keep note\n").unwrap();
+        let inv_with_keep = session_inventory(&FileGit, std::slice::from_ref(&input)).unwrap();
+        assert!(
+            inv_with_keep["workspace"].untracked.is_empty(),
+            "keep_dir files must not be duplicated into inventory.untracked: {:?}",
+            inv_with_keep["workspace"].untracked
+        );
+        let err = capture_session_snapshot(
+            &FileGit,
+            std::slice::from_ref(&input),
+            &SessionCaptureConsent::default(),
+        )
+        .expect_err("capture_session_snapshot must refuse unapproved keep_dir file");
+        assert!(
+            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            "expected Untracked refusal from capture_session_snapshot, got: {err:#}"
+        );
+        let err = check_keep_dir_consent(
+            &inv2["workspace"].checkout,
+            &keep_dir,
+            &UntrackedConsent::None,
+        )
+        .expect_err("keep-dir check must refuse unapproved keep file");
+        assert!(
+            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            "expected Untracked refusal for keep-dir file, got: {err:#}"
         );
     }
 }

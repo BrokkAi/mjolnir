@@ -233,7 +233,6 @@ impl DashboardState {
                     .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned())
                     .with_supervisors(session.supervisors),
             ),
-            files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
             title: session.listed_title().to_owned(),
@@ -302,7 +301,6 @@ impl DashboardState {
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
             subagents: Box::default(),
-            files: Default::default(),
             session_id: wiki_id,
             source: ResumeSource::Archive,
             title,
@@ -364,7 +362,6 @@ impl DashboardState {
                     .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned())
                     .with_supervisors(session.supervisors),
             ),
-            files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
             title: session.listed_title().to_owned(),
@@ -449,7 +446,6 @@ impl DashboardState {
                     .or_else(|| session.subagents.clone())
                     .unwrap_or_default(),
             )),
-            files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
             title: session.listed_title().to_owned(),

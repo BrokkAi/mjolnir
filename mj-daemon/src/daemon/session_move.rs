@@ -255,7 +255,8 @@ impl RuntimeState {
                     session_id: session_id.to_owned(),
                     profile_id: Some(profile_id.to_owned()),
                     target_template_id: None,
-                    workspace: Default::default(),
+                    consent: Default::default(),
+                    skip_keep_paths: Vec::new(),
                     clear_resource_allocation: false,
                     additional_mounts: None,
                     resource_allocation: None,
@@ -461,6 +462,118 @@ impl RuntimeState {
     ) -> Result<MoveRecoveryOwners> {
         let mut owned = BTreeSet::new();
         let mut closes = BTreeSet::new();
+        // At daemon startup (before live Move admission opens), no direct
+        // transfer from a previous daemon process is still running, including
+        // for any Move that crashed mid-Transferring. Passing an empty active
+        // set prunes every dead pre-crash user immediately so live-safe
+        // background reconciliation revokes their EC2 ingress rules while
+        // preserving any new Moves admitted after startup.
+        mj_controller::controller::move_session::recovery::spawn_ec2_grant_reconcile_background(
+            BTreeSet::new(),
+        );
+        // Schedule non-admitted background revocation for any ephemeral Move
+        // credentials left on non-active moves without blocking startup on SSH.
+        if operations
+            .iter()
+            .any(|op| !op.is_active() && !op.granted_keys.is_empty())
+        {
+            mj_controller::controller::move_session::recovery::spawn_move_key_cleanup_background();
+        }
+        // Recover any pre-149 LegacyMoveOperation rows across an upgrade:
+        // - Fully resolved legacy moves are deleted immediately (local SQLite).
+        // - Retryable inactive (Failed/Cancelled) moves retaining a handoff,
+        //   checkpoint, or prepared destination are converted to current
+        //   MoveOperation rows locally so retryability and archive retention survive.
+        // - Active or unfinished-queue moves are admitted as supervised
+        //   background lifecycle tasks (holds_through_drain: false) so remote
+        //   cleanup, worker probes, and relay connections never block startup.
+        if let Ok(legacy_ops) = mj_controller::database::load_legacy_move_operations() {
+            for (session_id, legacy_op) in legacy_ops {
+                if legacy_op.is_resolved() {
+                    let _ = mj_controller::database::delete_move_operation(&session_id);
+                    continue;
+                }
+                if !legacy_op.needs_recovery() {
+                    let converted = legacy_op.into_retryable_move_operation(&session_id);
+                    if let Err(error) = mj_controller::database::save_move_operation(&converted) {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            operation_id = %legacy_op.operation_id,
+                            error = %error,
+                            "could not migrate retryable legacy Move row; preserving legacy row"
+                        );
+                    }
+                    continue;
+                }
+                let op_id = legacy_op.operation_id.clone();
+                let key = format!("legacy-recovery:{op_id}");
+                let id_for_task = session_id.clone();
+                let op_for_task = legacy_op.clone();
+                let result = self
+                    .admit_lifecycle(
+                        session_id.clone(),
+                        LifecycleKind::Move,
+                        super::lifecycle::LifecycleStart {
+                            origin: super::lifecycle::LifecycleOrigin::Automatic,
+                            resume_workspace_id: None,
+                            request_key: Some(key),
+                            control: None,
+                            phase: LifecyclePhase::Executing,
+                            move_operation_id: Some(op_id.clone()),
+                            deferrable_admission: None,
+                            holds_through_drain: false,
+                        },
+                        move |state, session_id, cancelled, _session_admission| async move {
+                            let notice_state = state.clone();
+                            let outcome = state
+                                .run_move_controller_work(
+                                    session_id.clone(),
+                                    cancelled,
+                                    |mut controller, executor, _manager| async move {
+                                        let notice = controller
+                                            .recover_legacy_move_operation(
+                                                &id_for_task,
+                                                &op_for_task,
+                                                &executor,
+                                            )
+                                            .await?;
+                                        let _ = mj_controller::database::delete_move_operation(
+                                            &id_for_task,
+                                        );
+                                        Ok(mj_core::state::MoveOutcome {
+                                            operation_id: op_for_task.operation_id,
+                                            session_id: id_for_task,
+                                            profile_id: op_for_task.source_profile_id,
+                                            target_template_id: op_for_task
+                                                .source_target_template_id,
+                                            outcome: "completed".into(),
+                                            error: None,
+                                            recovery: Some(notice),
+                                        })
+                                    },
+                                )
+                                .await?;
+                            if let Some(notice) = outcome.recovery.clone() {
+                                notice_state.push_notice(&session_id, notice);
+                            }
+                            Ok(DaemonLifecycleResult::Move(outcome))
+                        },
+                    )
+                    .await?;
+                owned.insert(session_id.clone());
+                let state = self.clone();
+                mj_core::runtime::spawn(async move {
+                    let channel = result.clone();
+                    if let Err(error) = Self::wait_lifecycle_result(result).await {
+                        state.push_notice(
+                            &session_id,
+                            format!("Legacy Move {op_id} recovery failed: {error:#}"),
+                        );
+                    }
+                    state.remove_completed_lifecycle(&channel);
+                });
+            }
+        }
         for operation in &operations {
             mj_controller::controller::move_session::restore_move_queue_hold(operation);
         }

@@ -85,10 +85,14 @@ impl ViewerMoveRecovery {
                 .clone()
                 .unwrap_or_default(),
             phase: match operation.phase {
-                MovePhase::Preparing => "preparing",
-                MovePhase::ClosingSource => "closing_source",
-                MovePhase::ResumingDestination => "resuming_destination",
-                MovePhase::StartingQueue => "starting_queue",
+                MovePhase::Capturing => "capturing",
+                MovePhase::Transferring => "transferring",
+                MovePhase::Restoring => "restoring",
+                MovePhase::DestinationStarting => "destination_starting",
+                MovePhase::DestinationOwns => "destination_owns",
+                MovePhase::SourceRetired => "source_retired",
+                MovePhase::QueueAdmitted => "queue_admitted",
+                MovePhase::DispatchReleased => "dispatch_released",
                 MovePhase::Completed => "completed",
                 MovePhase::Failed => "failed",
                 MovePhase::Cancelled => "cancelled",

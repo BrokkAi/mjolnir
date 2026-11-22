@@ -6,6 +6,28 @@ pub struct CheckpointArtifact {
     pub native_session_id: String,
     /// Digest paired with `metadata.event_frontier` at the relay barrier.
     pub event_frontier_digest: String,
+    /// True when `metadata.archive_path` lives on the source target for direct
+    /// Move streaming rather than installed in daemon `sessions/`.
+    pub on_source_target: bool,
+    /// Archive manifest returned by the target worker at export time.
+    pub manifest: Option<mj_core::archive::ArchiveManifest>,
+    /// Queued prompts and pending mail captured at the barrier cut.
+    pub captured_queue: Option<(
+        Vec<mj_core::archive::CanonicalQueuedPrompt>,
+        Option<mj_core::archive::CanonicalMailbox>,
+    )>,
+}
+
+/// Where the target-exported archive goes after export finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::controller) enum CheckpointDelivery {
+    /// Download to daemon `sessions/`, verify, remove from target, and publish
+    /// to host snapshot cache (ordinary suspend).
+    DownloadToDaemon,
+    /// Leave the exported archive on the source target so cross-target Move
+    /// streams it directly to the destination without touching daemon disk or
+    /// overwriting `session.checkpoint`.
+    KeepOnSourceTarget,
 }
 
 /// The relay connection one lifecycle operation talks to.
@@ -170,8 +192,6 @@ pub(in crate::controller) enum CheckpointExportPolicy {
     OriginDeltaRaw,
     /// Explicit suspend of a history-cutoff session.
     OriginDeltaCutoff,
-    /// Fresh verified export with explicit consent to omit nested repositories.
-    IgnoreNestedRepositories,
     /// Export session state and repository metadata; the lifecycle intent owns
     /// this handoff separately from the full recovery checkpoint.
     SessionHandoff,

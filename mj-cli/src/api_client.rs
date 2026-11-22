@@ -16,7 +16,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mj_daemon::server::api::{
     API_VERSION, API_VERSION_HEADER, ApiSession, CreateWorkspaceRequest, CreateWorkspaceResponse,
     ExportRequest, GithubTokenResponse, MailboxEventRequest, MailboxEventResponse, PromptRequest,
-    PromptResponse, PushedBranch, ResumeSessionRequest, ResumeSessionResponse, SessionListResponse,
+    PromptResponse, PurgeUntrackedRequest, PurgeUntrackedResponse, PushedBranch,
+    ResumeSessionRequest, ResumeSessionResponse, SessionListResponse,
     SessionMessageRequest, SessionMessageResponse, StartSessionRequest, StartSessionResponse,
     SuspendSessionResponse, TranscriptResponse, WaitRequest, WaitResponse, WorkspaceListResponse,
 };
@@ -797,26 +798,57 @@ impl ApiClient {
         Ok(ExportResult::Bytes(bytes))
     }
 
+    pub(crate) fn suspend_preflight_query(dry_run: bool, without_checkpoint: bool) -> &'static str {
+        match (dry_run, without_checkpoint) {
+            (true, true) => "?dry_run=true&without_checkpoint=true",
+            (true, false) => "?dry_run=true",
+            (false, true) => "?without_checkpoint=true",
+            (false, false) => "",
+        }
+    }
+
+    pub(crate) async fn suspend_preflight(
+        &self,
+        session_id: &str,
+        dry_run: bool,
+        without_checkpoint: bool,
+    ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
+        let query = Self::suspend_preflight_query(dry_run, without_checkpoint);
+        let response = self
+            .send(
+                self.http
+                    .get(self.url(&format!("/sessions/{session_id}/suspend-preflight{query}")))
+                    .timeout(REQUEST_TIMEOUT),
+            )
+            .await?;
+        let body = response
+            .bytes()
+            .await
+            .context("read the suspend preflight answer")?;
+        serde_json::from_slice(&body).context("decode the suspend preflight answer")
+    }
+
     /// Ask the daemon to suspend a session. The answer says how many
     /// sub-agents the suspend stops, and warns when some of them have not
-    /// handed back. An older daemon answers with no body, which reads as a
-    /// suspend that stops none.
+    /// handed back.
     pub(crate) async fn suspend(
         &self,
         session_id: &str,
-        acknowledge_unpublished_work: bool,
+        consent: &mj_core::suspend_consent::SuspendConsent,
     ) -> Result<SuspendSessionResponse> {
+        let mut payload = serde_json::json!({
+            "discard_untracked": consent.discard_untracked,
+            "abort_operations": consent.abort_operations,
+            "without_checkpoint": consent.without_checkpoint,
+        });
+        if consent.confirm_no_checkpoint {
+            payload["confirm_no_checkpoint"] = serde_json::json!(true);
+        }
         let response = self
             .send(
                 self.http
                     .post(self.url(&format!("/sessions/{session_id}/suspend")))
-                    .json(&serde_json::json!({
-                        // An older daemon refuses to suspend a parent with
-                        // active sub-agents without this; a current one
-                        // ignores it.
-                        "acknowledge_active_subagents": true,
-                        "acknowledge_unpublished_work": acknowledge_unpublished_work,
-                    }))
+                    .json(&payload)
                     .timeout(REQUEST_TIMEOUT),
             )
             .await?;
@@ -830,11 +862,27 @@ impl ApiClient {
         serde_json::from_slice(&body).context("read the suspend answer")
     }
 
-    pub(crate) async fn destroy(&self, session_id: &str, delete_branch: bool) -> Result<()> {
+    pub(crate) async fn purge_untracked(
+        &self,
+        request: &PurgeUntrackedRequest,
+    ) -> Result<PurgeUntrackedResponse> {
+        // No total or read timeout. Ctrl-C drops this process, which closes
+        // the connection, and the daemon stops the batch on that disconnect.
+        let response = self
+            .send(
+                self.http
+                    .post(self.url("/checkpoints/purge-untracked"))
+                    .json(request),
+            )
+            .await?;
+        decode(response).await
+    }
+
+    pub(crate) async fn destroy(&self, session_id: &str) -> Result<()> {
         self.send(
             self.http
                 .post(self.url(&format!("/sessions/{session_id}/destroy")))
-                .json(&serde_json::json!({"delete_branch": delete_branch}))
+                .json(&serde_json::json!({}))
                 .timeout(REQUEST_TIMEOUT),
         )
         .await
@@ -879,6 +927,23 @@ impl ApiClient {
         )
         .await
         .map(|_| ())
+    }
+
+    pub(crate) async fn restart_session(&self, session_id: &str) -> Result<serde_json::Value> {
+        let response = self
+            .send(
+                self.http
+                    .post(self.url(&format!("/sessions/{session_id}/restart")))
+                    .timeout(REQUEST_TIMEOUT),
+            )
+            .await?;
+        let text = response.text().await?;
+        if text.trim().is_empty() {
+            Ok(serde_json::json!({ "session_id": session_id, "restarted": true }))
+        } else {
+            Ok(serde_json::from_str(&text)
+                .unwrap_or_else(|_| serde_json::json!({ "session_id": session_id, "restarted": true })))
+        }
     }
 
     /// Start a one-off review of the turn the session just finished. The
@@ -1492,14 +1557,29 @@ mod tests {
         });
         let client = ApiClient::new(url, "secret-token".into()).unwrap();
 
-        let warned = client.suspend("session-1", false).await.unwrap();
+        let warned = client
+            .suspend(
+                "session-1",
+                &mj_core::suspend_consent::SuspendConsent::default(),
+            )
+            .await
+            .unwrap();
         assert_eq!(warned.stopped_subagents, 2);
         assert_eq!(warned.subagents_not_handed_back, 1);
         assert_eq!(
             warned.warning.as_deref(),
             Some("1 sub-agent has not handed back; suspending stops it")
         );
-        let older = client.suspend("session-1", true).await.unwrap();
+        let older = client
+            .suspend(
+                "session-1",
+                &mj_core::suspend_consent::SuspendConsent {
+                    discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(older.session_id, "session-1");
         assert_eq!(older.warning, None);
         for body in bodies.lock().unwrap().iter() {

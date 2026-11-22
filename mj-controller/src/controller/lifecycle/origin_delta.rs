@@ -1,11 +1,15 @@
 use super::*;
-use crate::targets::CommandSpec;
-use mj_core::worker_launch::WorkerRunMode;
+use crate::controller::worktree::ExecutorGit;
+use mj_core::worker_launch::{WorkerLaunchConfig, WorkerRunMode};
 use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest};
+use std::path::Path;
+
+const MISSING_WIRE_EXIT_STATUS: i32 = 44;
 
 pub(super) struct OriginDeltaSuspend {
+    session_id: String,
     backend: targets::TargetLocator,
-    root: PathBuf,
+    root: String,
     checkout: PathBuf,
     child_sessions: Vec<String>,
     operation: String,
@@ -13,63 +17,373 @@ pub(super) struct OriginDeltaSuspend {
     accepted: bool,
 }
 
-impl OriginDeltaSuspend {
-    /// Whether this suspend captures OriginDelta. An accepted suspend keeps
-    /// the capture it started with, even after its worker has exited. A new
-    /// one needs a live worker that can quiesce the checkout and a clone with
-    /// an origin to delta against; otherwise it keeps the capture this
-    /// release replaced, so an older worker or an originless clone suspends
-    /// as it did before the upgrade.
-    pub(super) fn applies(
-        controller: &Controller,
-        session_id: &str,
-        clone: &std::path::Path,
-    ) -> Result<bool> {
-        let (_, root) = controller.worker_placement(session_id)?;
-        let root = PathBuf::from(root);
-        mj_core::runtime::off_async_worker(|| -> Result<bool> {
-            if wire::read::<String>(&root, wire::ACCEPTED)?.is_some() {
-                return Ok(true);
+fn read_wire_bytes(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    root: &str,
+    name: &str,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<Option<Vec<u8>>> {
+    if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
+        let path = Path::new(root).join(name);
+        return match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+        };
+    }
+    let path = format!("{root}/{name}");
+    let script = format!(
+        "path={}; if [ -e \"$path\" ]; then exec cat -- \"$path\"; fi; exit {MISSING_WIRE_EXIT_STATUS}",
+        targets::posix_quote(&path),
+    );
+    let command = targets::command_on_locator(
+        targets::SshTrafficClass::Control,
+        backend,
+        session_id,
+        vec!["sh".into(), "-c".into(), script],
+        format!("read suspend record {name}"),
+    )?;
+    let output = mj_core::runtime::off_async_worker(|| executor.execute(&command))?;
+    if output.status == 0 {
+        Ok(Some(output.stdout))
+    } else if output.status == MISSING_WIRE_EXIT_STATUS {
+        Ok(None)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "read suspend record {name} failed (status {}): {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+}
+
+fn read_wire<T: serde::de::DeserializeOwned>(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    root: &str,
+    name: &str,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<Option<T>> {
+    let Some(bytes) = read_wire_bytes(backend, session_id, root, name, executor)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("decode {root}/{name}"))?,
+    ))
+}
+
+fn write_wire<T: serde::Serialize>(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    root: &str,
+    name: &str,
+    value: &T,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<()> {
+    if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
+        return wire::write(Path::new(root), name, value);
+    }
+    let path = format!("{root}/{name}");
+    let tmp = format!("{path}.tmp.$$");
+    let script = format!(
+        "path={}; tmp={}; mkdir -p -- \"$(dirname -- \"$path\")\" && cat > \"$tmp\" && mv -f -- \"$tmp\" \"$path\"",
+        targets::posix_quote(&path),
+        targets::posix_quote(&tmp),
+    );
+    let command = targets::command_on_locator(
+        targets::SshTrafficClass::Control,
+        backend,
+        session_id,
+        vec!["sh".into(), "-c".into(), script],
+        format!("write suspend record {name}"),
+    )?
+    .with_sensitive_stdin(serde_json::to_vec(value)?);
+    mj_core::runtime::off_async_worker(|| super::super::execute_checked(executor, command))?;
+    Ok(())
+}
+
+fn remove_wire_files(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    root: &str,
+    names: &[&str],
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<()> {
+    if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
+        for name in names {
+            match std::fs::remove_file(Path::new(root).join(name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("remove suspend record {name}"));
+                }
             }
-            let capable = match wire::read::<wire::WorkerIdentity>(&root, wire::CAPABILITY)? {
-                Some(worker) => worker.is_alive()?,
-                None => false,
-            };
-            if !capable {
-                return Ok(false);
-            }
-            use mj_checkpoint::archive::GitCommandRunner;
-            let origin = mj_checkpoint::archive::SystemGit.run(
-                clone,
+        }
+        return Ok(());
+    }
+    let mut args = vec!["rm".to_owned(), "-f".to_owned(), "--".to_owned()];
+    for name in names {
+        args.push(format!("{root}/{name}"));
+    }
+    let command = targets::command_on_locator(
+        targets::SshTrafficClass::Control,
+        backend,
+        session_id,
+        args,
+        "clear worker suspend records",
+    )?;
+    mj_core::runtime::off_async_worker(|| super::super::execute_checked(executor, command))?;
+    Ok(())
+}
+
+fn read_launch_config(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    root: &str,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<WorkerLaunchConfig> {
+    if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
+        return WorkerLaunchConfig::read(&Path::new(root).join("launch.json"));
+    }
+    read_wire::<WorkerLaunchConfig>(backend, session_id, root, "launch.json", executor)?
+        .with_context(|| format!("read {root}/launch.json: file not found"))
+}
+
+fn worker_identity_is_alive(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    root: &str,
+    worker: wire::WorkerIdentity,
+    executor: &(impl CommandExecutor + Sync),
+    allow_unsupported: bool,
+) -> Result<bool> {
+    if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
+        return mj_core::runtime::off_async_worker(|| worker.is_alive());
+    }
+    let command = targets::command_on_locator(
+        targets::SshTrafficClass::Control,
+        backend,
+        session_id,
+        vec![
+            format!("{root}/hel"),
+            "worker".into(),
+            "identity-alive".into(),
+            "--pid".into(),
+            worker.pid.to_string(),
+            "--start".into(),
+            worker.start.to_string(),
+        ],
+        "check suspend worker liveness",
+    )?;
+    let output = mj_core::runtime::off_async_worker(|| executor.execute(&command))?;
+    if output.status != 0 {
+        if allow_unsupported {
+            return Ok(false);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "check suspend worker liveness failed (status {}): {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+    match output.stdout.as_slice() {
+        b"alive\n" => Ok(true),
+        b"dead\n" => Ok(false),
+        other => anyhow::bail!(
+            "unexpected worker identity-alive output: {:?}",
+            String::from_utf8_lossy(other)
+        ),
+    }
+}
+
+fn checkout_has_origin_remote(
+    git: &impl mj_checkpoint::archive::GitCommandRunner,
+    repository: &Path,
+) -> Result<bool> {
+    let origin = git.run(
+        repository,
+        &mj_checkpoint::archive::GitCommand {
+            arguments: ["config", "--get", "remote.origin.url"]
+                .map(Into::into)
+                .into(),
+            ..Default::default()
+        },
+    )?;
+    Ok(origin.status == 0 && !origin.stdout.trim_ascii().is_empty())
+}
+
+pub(in crate::controller) fn managed_origin_override(
+    worktree: &mj_core::state::ManagedWorktree,
+) -> Option<String> {
+    if !matches!(worktree.target, mj_core::state::ManagedWorktreeTarget::Local) {
+        return None;
+    }
+    mj_core::runtime::off_async_worker(|| {
+        use mj_checkpoint::archive::GitCommandRunner;
+        let origin = mj_checkpoint::archive::SystemGit
+            .run(
+                &worktree.worktree_root,
                 &mj_checkpoint::archive::GitCommand {
                     arguments: ["config", "--get", "remote.origin.url"]
                         .map(Into::into)
                         .into(),
                     ..Default::default()
                 },
-            )?;
-            Ok(origin.status == 0 && !origin.stdout.trim_ascii().is_empty())
-        })
+            )
+            .ok()?;
+        if origin.status == 0 && !origin.stdout.trim_ascii().is_empty() {
+            return None;
+        }
+        if !worktree.source_repository.exists() {
+            return None;
+        }
+        let git_dir = mj_checkpoint::archive::SystemGit
+            .run(
+                &worktree.source_repository,
+                &mj_checkpoint::archive::GitCommand {
+                    arguments: ["rev-parse", "--git-dir"].map(Into::into).into(),
+                    ..Default::default()
+                },
+            )
+            .ok()?;
+        if git_dir.status == 0 {
+            Some(worktree.source_repository.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    })
+}
+
+impl OriginDeltaSuspend {
+    /// Whether this suspend captures OriginDelta. An accepted suspend keeps
+    /// the capture it started with, even after its worker has exited. A new
+    /// one applies to any managed checkout (local bare, SSH bare, or container
+    /// workspace) with an `origin` remote or local source repository to delta
+    /// against; if the running worker predates `suspend-worker.json`, suspend
+    /// upgrades it in place instead of falling back to version-2 capture.
+    pub(super) fn applies(
+        controller: &Controller,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<bool> {
+        let (backend, root) = controller.worker_placement(session_id)?;
+        if read_wire::<String>(&backend, session_id, &root, wire::ACCEPTED, executor)?.is_some() {
+            return Ok(true);
+        }
+        let checkout = controller.state.checkout(session_id)?;
+        let git = ExecutorGit::for_session(executor, &backend, session_id);
+        match checkout {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                if !worktree.uses_origin_delta_suspend() {
+                    return Ok(false);
+                }
+                let has_origin = mj_core::runtime::off_async_worker(|| {
+                    checkout_has_origin_remote(&git, &worktree.worktree_root)
+                })?;
+                if has_origin {
+                    return Ok(true);
+                }
+                Ok(managed_origin_override(worktree).is_some())
+            }
+            mj_core::state::Checkout::ManagedWorkspace => {
+                let session = controller
+                    .state
+                    .sessions
+                    .get(session_id)
+                    .with_context(|| format!("unknown session {session_id}"))?;
+                let Some(bundle) = session.project_bundle(&controller.config) else {
+                    return Ok(false);
+                };
+                if bundle.repositories.is_empty() {
+                    return Ok(false);
+                }
+                let workspace_root = PathBuf::from(crate::controller::network_git::workspace_root(
+                    &backend,
+                    session.container_workspace.as_deref(),
+                ));
+                mj_core::runtime::off_async_worker(|| {
+                    for repository in &bundle.repositories {
+                        let repo_path = workspace_root.join(&repository.destination);
+                        if !checkout_has_origin_remote(&git, &repo_path)? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                })
+            }
+            mj_core::state::Checkout::Attached { .. }
+            | mj_core::state::Checkout::Borrowed { .. } => Ok(false),
+        }
     }
 
-    pub(super) fn load(controller: &Controller, session_id: &str) -> Result<Self> {
+    /// Whether the session's live worker advertises origin-delta quiescence
+    /// capability (`suspend-worker.json` with a live PID in the target
+    /// namespace).
+    pub(super) fn worker_capable(
+        &self,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<bool> {
+        match read_wire::<wire::WorkerIdentity>(
+            &self.backend,
+            &self.session_id,
+            &self.root,
+            wire::CAPABILITY,
+            executor,
+        )? {
+            Some(worker) => worker_identity_is_alive(
+                &self.backend,
+                &self.session_id,
+                &self.root,
+                worker,
+                executor,
+                true,
+            ),
+            None => Ok(false),
+        }
+    }
+
+    pub(super) fn load(
+        controller: &Controller,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<Self> {
+        let session = controller
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
         let checkout = controller.state.checkout(session_id)?;
-        let checkout = checkout
-            .managed_worktree()
-            .context("managed clone is missing")?;
         let (backend, root) = controller.worker_placement(session_id)?;
-        let root = PathBuf::from(root);
-        let accepted = wire::read::<String>(&root, wire::ACCEPTED)?;
-        let request = wire::read::<SuspendRequest>(&root, wire::REQUEST)?;
+        let checkout_path = match checkout {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                worktree.worktree_root.clone()
+            }
+            mj_core::state::Checkout::ManagedWorkspace => {
+                PathBuf::from(crate::controller::network_git::workspace_root(
+                    &backend,
+                    session.container_workspace.as_deref(),
+                ))
+            }
+            _ => bail!("managed checkout is missing"),
+        };
+        let accepted =
+            read_wire::<String>(&backend, session_id, &root, wire::ACCEPTED, executor)?;
+        let request =
+            read_wire::<SuspendRequest>(&backend, session_id, &root, wire::REQUEST, executor)?;
         let request_recorded = accepted.as_ref().is_some_and(|operation| {
             request
                 .as_ref()
                 .is_some_and(|request| &request.operation == operation)
         });
         Ok(Self {
+            session_id: session_id.to_owned(),
             backend,
             root,
-            checkout: checkout.worktree_root.clone(),
+            checkout: checkout_path,
             child_sessions: controller.state.active_child_session_ids(session_id),
             request_recorded,
             accepted: accepted.is_some(),
@@ -84,9 +398,16 @@ impl OriginDeltaSuspend {
         self.accepted
     }
 
-    pub(super) fn accept(&mut self) -> Result<()> {
+    pub(super) fn accept(&mut self, executor: &(impl CommandExecutor + Sync)) -> Result<()> {
         self.operation = new_command_id("origin-delta-suspend")?;
-        wire::write(&self.root, wire::ACCEPTED, &self.operation)?;
+        write_wire(
+            &self.backend,
+            &self.session_id,
+            &self.root,
+            wire::ACCEPTED,
+            &self.operation,
+            executor,
+        )?;
         self.request_recorded = false;
         self.accepted = true;
         Ok(())
@@ -96,62 +417,97 @@ impl OriginDeltaSuspend {
         self.request_recorded
     }
 
-    pub(super) fn restart_reason(&self) -> Result<Option<String>> {
-        Ok(wire::read::<SuspendReceipt>(&self.root, wire::RESTART)?
-            .filter(|receipt| receipt.operation == self.operation)
-            .and_then(|receipt| receipt.error))
+    pub(super) fn restart_reason(
+        &self,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<Option<String>> {
+        Ok(read_wire::<SuspendReceipt>(
+            &self.backend,
+            &self.session_id,
+            &self.root,
+            wire::RESTART,
+            executor,
+        )?
+        .filter(|receipt| receipt.operation == self.operation)
+        .and_then(|receipt| receipt.error))
     }
 
-    pub(super) fn record_restart(&self, error: &anyhow::Error) -> Result<()> {
-        wire::write(
+    pub(super) fn record_restart(
+        &self,
+        error: &anyhow::Error,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        write_wire(
+            &self.backend,
+            &self.session_id,
             &self.root,
             wire::RESTART,
             &SuspendReceipt {
                 operation: self.operation.clone(),
                 error: Some(format!("{error:#}")),
             },
+            executor,
         )
     }
 
-    pub(super) fn clear_after_restart(&self) -> Result<()> {
-        for name in [
-            wire::ACCEPTED,
-            wire::REQUEST,
-            wire::RECEIPT,
-            wire::PROGRESS,
-            wire::RESTART,
-        ] {
-            match std::fs::remove_file(self.root.join(name)) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(error).with_context(|| format!("remove suspend record {name}"));
-                }
-            }
-        }
-        Ok(())
+    pub(super) fn clear_after_restart(
+        &self,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        remove_wire_files(
+            &self.backend,
+            &self.session_id,
+            &self.root,
+            &[
+                wire::ACCEPTED,
+                wire::REQUEST,
+                wire::RECEIPT,
+                wire::PROGRESS,
+                wire::RESTART,
+            ],
+            executor,
+        )
     }
 
-    fn receipt(&self) -> Result<Option<SuspendReceipt>> {
-        Ok(wire::read::<SuspendReceipt>(&self.root, wire::RECEIPT)?
-            .filter(|receipt| receipt.operation == self.operation))
+    fn receipt(&self, executor: &(impl CommandExecutor + Sync)) -> Result<Option<SuspendReceipt>> {
+        Ok(read_wire::<SuspendReceipt>(
+            &self.backend,
+            &self.session_id,
+            &self.root,
+            wire::RECEIPT,
+            executor,
+        )?
+        .filter(|receipt| receipt.operation == self.operation))
     }
 
     pub(super) fn request_stop(&mut self, executor: &(impl CommandExecutor + Sync)) -> Result<()> {
-        if self.receipt()?.is_some() {
+        if self.receipt(executor)?.is_some() {
             return Ok(());
         }
-        if let Some(request) = wire::read::<SuspendRequest>(&self.root, wire::REQUEST)?
-            && request.operation == self.operation
-            && !request.worker.is_alive()?
+        if let Some(request) = read_wire::<SuspendRequest>(
+            &self.backend,
+            &self.session_id,
+            &self.root,
+            wire::REQUEST,
+            executor,
+        )? && request.operation == self.operation
+            && !worker_identity_is_alive(
+                &self.backend,
+                &self.session_id,
+                &self.root,
+                request.worker,
+                executor,
+                false,
+            )?
         {
             return Ok(());
         }
         let mut args = vec![
+            format!("{}/hel", self.root),
             "worker".to_owned(),
             "quiesce".to_owned(),
             "--root".to_owned(),
-            self.root.to_string_lossy().into_owned(),
+            self.root.clone(),
             "--operation".to_owned(),
             self.operation.clone(),
             "--checkout".to_owned(),
@@ -160,8 +516,13 @@ impl OriginDeltaSuspend {
         for id in &self.child_sessions {
             args.extend(["--child-session".to_owned(), id.clone()]);
         }
-        let command = CommandSpec::new(self.root.join("hel").to_string_lossy(), args)
-            .purpose("request managed clone process quiescence");
+        let command = targets::command_on_locator(
+            targets::SshTrafficClass::Control,
+            &self.backend,
+            &self.session_id,
+            args,
+            "request managed checkout process quiescence",
+        )?;
         mj_core::runtime::off_async_worker(|| super::super::execute_checked(executor, command))?;
         self.request_recorded = true;
         Ok(())
@@ -171,12 +532,43 @@ impl OriginDeltaSuspend {
         &self,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<SuspendReceipt> {
+        self.wait_for_stop_with_uncancelled(executor, &ProcessExecutor)
+            .await
+    }
+
+    pub(super) async fn wait_for_stop_with_uncancelled(
+        &self,
+        executor: &(impl CommandExecutor + Sync),
+        uncancelled: &(impl CommandExecutor + Sync),
+    ) -> Result<SuspendReceipt> {
         executor.begin_resumable_work()?;
         let outcome = async {
-            let worker = wire::read::<SuspendRequest>(&self.root, wire::REQUEST)?
-                .context("worker did not record the suspend request")?
-                .worker;
-            let mut cancellation_recorded = self.restart_reason()?.is_some();
+            let initial_cancelled =
+                executor.cancellation_requested() && !executor.shutdown_interrupted();
+            let worker = if initial_cancelled {
+                read_wire::<SuspendRequest>(
+                    &self.backend,
+                    &self.session_id,
+                    &self.root,
+                    wire::REQUEST,
+                    uncancelled,
+                )?
+            } else {
+                read_wire::<SuspendRequest>(
+                    &self.backend,
+                    &self.session_id,
+                    &self.root,
+                    wire::REQUEST,
+                    executor,
+                )?
+            }
+            .context("worker did not record the suspend request")?
+            .worker;
+            let mut cancellation_recorded = if initial_cancelled {
+                self.restart_reason(uncancelled)?.is_some()
+            } else {
+                self.restart_reason(executor)?.is_some()
+            };
             let mut displayed_notice = String::new();
             loop {
                 ensure!(
@@ -184,12 +576,37 @@ impl OriginDeltaSuspend {
                     "suspend process wait was handed off"
                 );
                 if executor.cancellation_requested() && !cancellation_recorded {
-                    self.record_restart(&anyhow::anyhow!("suspend was cancelled"))?;
+                    self.record_restart(&anyhow::anyhow!("suspend was cancelled"), uncancelled)?;
                     cancellation_recorded = true;
                 }
+                let use_uncancelled = cancellation_recorded || executor.cancellation_requested();
                 // A receipt can precede the worker's last cleanup tasks.
-                if !worker.is_alive()? {
-                    return Ok(self.receipt()?.unwrap_or_else(|| SuspendReceipt {
+                let poll_executor_alive = if use_uncancelled {
+                    worker_identity_is_alive(
+                        &self.backend,
+                        &self.session_id,
+                        &self.root,
+                        worker,
+                        uncancelled,
+                        false,
+                    )?
+                } else {
+                    worker_identity_is_alive(
+                        &self.backend,
+                        &self.session_id,
+                        &self.root,
+                        worker,
+                        executor,
+                        false,
+                    )?
+                };
+                if !poll_executor_alive {
+                    let receipt = if use_uncancelled {
+                        self.receipt(uncancelled)?
+                    } else {
+                        self.receipt(executor)?
+                    };
+                    return Ok(receipt.unwrap_or_else(|| SuspendReceipt {
                         operation: self.operation.clone(),
                         error: Some(
                             "the worker exited without confirming checkout quiescence".to_owned(),
@@ -201,8 +618,24 @@ impl OriginDeltaSuspend {
                 } else {
                     "Waiting for the session's processes to stop".to_owned()
                 };
-                if let Some(progress) =
-                    wire::read::<wire::SuspendProgress>(&self.root, wire::PROGRESS)?
+                let progress = if use_uncancelled {
+                    read_wire::<wire::SuspendProgress>(
+                        &self.backend,
+                        &self.session_id,
+                        &self.root,
+                        wire::PROGRESS,
+                        uncancelled,
+                    )?
+                } else {
+                    read_wire::<wire::SuspendProgress>(
+                        &self.backend,
+                        &self.session_id,
+                        &self.root,
+                        wire::PROGRESS,
+                        executor,
+                    )?
+                };
+                if let Some(progress) = progress
                     && progress.operation == self.operation
                     && !progress.remaining_pids.is_empty()
                 {
@@ -244,7 +677,7 @@ impl OriginDeltaSuspend {
             .context("reconnect plan is missing")?;
         let mut launch = controller.current_worker_launch_config(session_id, &self.backend)?;
         launch.run_mode = run_mode;
-        let worker_root = self.root.to_str().context("worker root is not UTF-8")?;
+        let worker_root = self.root.as_str();
         let mut restart = InstalledWorkerRestart {
             backend: &self.backend,
             worker_root,
@@ -258,8 +691,7 @@ impl OriginDeltaSuspend {
         // Quiescence proved the original worker exited. If a worker has since
         // booted in the requested mode, observe it through the existing launch
         // owner, including when the daemon exited before recording readiness.
-        let installed =
-            mj_core::worker_launch::WorkerLaunchConfig::read(&self.root.join("launch.json"))?;
+        let installed = read_launch_config(&self.backend, session_id, worker_root, executor)?;
         let same_mode = installed.run_mode == run_mode;
         let existing = mj_core::runtime::off_async_worker(|| {
             super::super::worker_binary::probe_worker_liveness(

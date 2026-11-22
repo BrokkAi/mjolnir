@@ -1,9 +1,9 @@
 //! One daemon-owned model state machine. Downloads, retry scheduling and device
 //! transitions are decided here; readers never inspect the cache for readiness.
-mod assets;
+pub(crate) mod assets;
 mod concurrent;
 mod inference;
-mod runtime;
+pub(crate) mod runtime;
 
 use anyhow::{Context, Result};
 use std::{
@@ -83,7 +83,7 @@ pub enum StudentNotice {
     },
     InferenceRecovered,
 }
-type Notice = Arc<dyn Fn(StudentNotice) + Send + Sync>;
+pub(crate) type Notice = Arc<dyn Fn(StudentNotice) + Send + Sync>;
 
 enum Device {
     Cpu,
@@ -806,10 +806,10 @@ async fn supervise(
 }
 
 #[derive(Debug)]
-struct PreparationFailure {
+pub(crate) struct PreparationFailure {
     kind: StudentFailureKind,
     cause: String,
-    retry_after: Option<Duration>,
+    pub(crate) retry_after: Option<Duration>,
     notice: Option<StudentNotice>,
 }
 impl PreparationFailure {

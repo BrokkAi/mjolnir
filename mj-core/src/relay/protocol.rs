@@ -284,6 +284,42 @@ pub enum RelayRequest {
         command_id: String,
         command: RelayCommand,
     },
+    /// Atomically hold queue dispatch for a same-target in-place Move, bound to
+    /// `expected_store_id`, and return the pending command IDs captured when
+    /// the hold was taken. Idempotent by `operation_id`. Protocol 81.
+    HoldInPlaceMoveDispatch {
+        operation_id: String,
+        expected_store_id: String,
+    },
+    /// Idempotently discard held pending commands for an active in-place Move
+    /// hold matching `operation_id` and `expected_store_id`. Protocol 81.
+    DiscardHeldMoveCommands {
+        operation_id: String,
+        expected_store_id: String,
+        command_ids: Vec<String>,
+    },
+    /// Submit a continuation command to the head (index 0) of the pending queue
+    /// while `operation_id` holds dispatch on `expected_store_id`. Protocol 81.
+    SubmitFront {
+        operation_id: String,
+        expected_store_id: String,
+        command_id: String,
+        command: RelayCommand,
+    },
+    /// Idempotently release an in-place Move dispatch hold for `operation_id`
+    /// on `expected_store_id` and resume queue promotion. Protocol 81.
+    ReleaseInPlaceMoveDispatch {
+        operation_id: String,
+        expected_store_id: String,
+    },
+    /// Restart only the harness bridge process under a new launch configuration
+    /// without stopping the worker daemon or its non-harness processes.
+    /// Protocol 81.
+    RestartHarnessInPlace {
+        operation_id: String,
+        expected_store_id: String,
+        launch_config: Box<crate::worker_launch::WorkerLaunchConfig>,
+    },
     CommandRetentionStatus,
     /// Freeze a coherent current-state recovery cut on this connection.
     BeginLiveBaseline,
@@ -302,6 +338,14 @@ pub enum RelayRequest {
         barrier_command_id: String,
         cut: super::snapshot::RelayCursor,
     },
+    /// The worker-owned native-session-use evidence at the cut of a ready
+    /// checkpoint barrier. Refused unless that barrier is ready at exactly
+    /// `cut` and nothing has been journaled since.
+    /// Protocol 80.
+    ReadCheckpointNativeUse {
+        barrier_command_id: String,
+        cut: super::snapshot::RelayCursor,
+    },
     ReadPendingElicitation {
         elicitation_id: String,
     },
@@ -316,6 +360,8 @@ pub enum RelayRequest {
     /// Atomically lease pending mailbox events to a harness tool hook.
     DrainMailbox {
         hook_event: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<String>,
     },
     /// Confirm that a hook wrote and flushed the leased events to its output.
     AckMailbox {
@@ -458,6 +504,10 @@ pub enum RelayRequest {
     HistoryRequests,
     CompleteHistoryRequest {
         result: crate::history::HistoryResult,
+    },
+    GuardianRequests,
+    CompleteGuardianRequest {
+        result: crate::guardian::GuardianReviewResult,
     },
     /// Acknowledge a completed MCP request and cache its bounded answer for
     /// subsequent tool calls and restart recovery.
@@ -603,9 +653,15 @@ impl RelayRequest {
             Self::Attach { .. } => "attach",
             Self::Acknowledge { .. } => "acknowledge",
             Self::Submit { .. } => "submit",
+            Self::HoldInPlaceMoveDispatch { .. } => "hold_in_place_move_dispatch",
+            Self::DiscardHeldMoveCommands { .. } => "discard_held_move_commands",
+            Self::SubmitFront { .. } => "submit_front",
+            Self::ReleaseInPlaceMoveDispatch { .. } => "release_in_place_move_dispatch",
+            Self::RestartHarnessInPlace { .. } => "restart_harness_in_place",
             Self::ReadPendingElicitation { .. } => "read_pending_elicitation",
             Self::ReadQueuedCommand { .. } => "read_queued_command",
             Self::ReadCheckpointMailbox { .. } => "read_checkpoint_mailbox",
+            Self::ReadCheckpointNativeUse { .. } => "read_checkpoint_native_use",
             Self::BeginLiveBaseline => "begin_live_baseline",
             Self::ReadLiveBaselinePage { .. } => "read_live_baseline_page",
             Self::AbortLiveBaseline => "abort_live_baseline",
@@ -649,6 +705,8 @@ impl RelayRequest {
             Self::HistoryQuery { .. } => "history_query",
             Self::HistoryRequests => "history_requests",
             Self::CompleteHistoryRequest { .. } => "complete_history_request",
+            Self::GuardianRequests => "guardian_requests",
+            Self::CompleteGuardianRequest { .. } => "complete_guardian_request",
             Self::CompleteSubagentRequest { .. } => "complete_subagent_request",
             Self::Reviewer { request, .. } => request.action_name(),
         }
@@ -676,6 +734,9 @@ impl RelayRequest {
             Self::HistoryQuery { .. }
             | Self::HistoryRequests
             | Self::CompleteHistoryRequest { .. } => 16,
+            Self::GuardianRequests | Self::CompleteGuardianRequest { .. } => {
+                super::RELAY_GUARDIAN_REVIEW_PROTOCOL
+            }
             Self::AttachmentPresent { .. }
             | Self::InstallAttachment { .. }
             | Self::ReadAttachment { .. } => 8,
@@ -698,6 +759,12 @@ impl RelayRequest {
             | Self::CommandRetentionStatus
             | Self::UpdateCommandRetention { .. } => super::RELAY_COMMAND_RETENTION_PROTOCOL,
             Self::ReadCheckpointMailbox { .. } => super::RELAY_CHECKPOINT_MAILBOX_PROTOCOL,
+            Self::ReadCheckpointNativeUse { .. } => super::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL,
+            Self::HoldInPlaceMoveDispatch { .. }
+            | Self::DiscardHeldMoveCommands { .. }
+            | Self::SubmitFront { .. }
+            | Self::ReleaseInPlaceMoveDispatch { .. }
+            | Self::RestartHarnessInPlace { .. } => super::RELAY_IN_PLACE_MOVE_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
             Self::Reviewer {
                 request:
@@ -970,12 +1037,15 @@ pub enum RelayResponsePayload {
         state_digest: Option<String>,
     },
     /// The answer to [`RelayRequest::WaitForChange`]: the worker's latest event
-    /// ordinal and state digest now, and whether this connection's sub-agent
-    /// queue has changes to poll. Equal values mean the wait ran out.
+    /// ordinal and state digest now, and whether the sub-agent or guardian
+    /// queue has changes to poll. An unchanged frontier with no queue changes
+    /// means the wait ran out.
     ChangeObserved {
         latest_ordinal: u64,
         state_digest: String,
         subagent_queue_changed: bool,
+        #[serde(default, skip_serializing_if = "crate::transcript::is_false")]
+        guardian_queue_changed: bool,
     },
     /// An attach whose `known_state_digest` still matches: the state is the
     /// one the controller holds, so only the events are sent. Protocol 57.
@@ -992,6 +1062,12 @@ pub enum RelayResponsePayload {
         command_id: String,
         ordinal: u64,
     },
+    InPlaceMoveDispatchHeld {
+        captured_pending_command_ids: Vec<String>,
+    },
+    HeldMoveCommandsDiscarded,
+    InPlaceMoveDispatchReleased,
+    HarnessRestartedInPlace,
     Status(RelayOperationalState),
     LiveBaselineWaiting {
         blockers: Vec<String>,
@@ -1009,6 +1085,9 @@ pub enum RelayResponsePayload {
     },
     CheckpointMailbox {
         mailbox: crate::archive::CanonicalMailbox,
+    },
+    CheckpointNativeUse {
+        native_use_evidence: Option<super::snapshot::NativeSessionUseEvidence>,
     },
     PendingElicitation {
         request: Option<crate::elicitation::ElicitationRequest>,
@@ -1106,10 +1185,14 @@ pub enum RelayResponsePayload {
     HistoryRequests {
         requests: Vec<crate::history::HistoryRequest>,
     },
+    GuardianRequests {
+        requests: Vec<crate::guardian::GuardianReviewRequest>,
+    },
     HistoryResult {
         result: crate::history::HistoryResult,
     },
     HistoryRequestCompleted,
+    GuardianRequestCompleted,
     /// What every workspace repository changed since the stored baselines.
     ReviewDelta {
         repositories: Vec<RepoDelta>,
@@ -1167,6 +1250,10 @@ pub enum RelayErrorDetail {
         earliest_digest: String,
         latest: u64,
         latest_digest: String,
+    },
+    StoreMismatch {
+        expected_store_id: String,
+        actual_store_id: Option<String>,
     },
 }
 

@@ -526,7 +526,6 @@ pub enum RuntimeLifecycleKind {
     Suspend,
     Resume,
     Move,
-    ForceStop,
     DestroyStopped,
     ForceDestroy,
     /// A sub-agent stopped and removed because its parent is being
@@ -570,8 +569,14 @@ pub struct ResumeSessionRequest {
 pub enum SessionLifecycleRequest {
     Suspend {
         session_id: String,
-        acknowledge_unpublished_work: bool,
-        ignore_nested_repositories: bool,
+        #[serde(default)]
+        discard_untracked: mj_core::suspend_consent::UntrackedConsent,
+        #[serde(default)]
+        abort_operations: mj_core::suspend_consent::OperationConsent,
+        #[serde(default)]
+        without_checkpoint: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        confirm_no_checkpoint: bool,
     },
     Restart {
         session_id: String,
@@ -579,17 +584,11 @@ pub enum SessionLifecycleRequest {
     },
     Resume(Box<ResumeSessionRequest>),
     Move(Box<MoveSessionRequest>),
-    Discard {
-        session_id: String,
-        checkpoint: mj_core::state::CheckpointMetadata,
-    },
     DestroyStopped {
         session_id: String,
-        delete_branch: bool,
     },
     ForceDestroy {
         session_id: String,
-        delete_branch: bool,
     },
 }
 
@@ -598,9 +597,8 @@ impl SessionLifecycleRequest {
         match self {
             Self::Suspend { session_id, .. }
             | Self::Restart { session_id, .. }
-            | Self::Discard { session_id, .. }
-            | Self::DestroyStopped { session_id, .. }
-            | Self::ForceDestroy { session_id, .. } => session_id,
+            | Self::DestroyStopped { session_id }
+            | Self::ForceDestroy { session_id } => session_id,
             Self::Resume(request) => &request.session_id,
             Self::Move(request) => &request.preparation.selection.session_id,
         }
@@ -1291,14 +1289,23 @@ pub enum DaemonAction {
     },
     StartSessionLifecycle(SessionLifecycleRequest),
     WaitSessionLifecycle(LifecycleReceipt),
+    SuspendPreflight {
+        session_id: String,
+        #[serde(default)]
+        dry_run: bool,
+        #[serde(default)]
+        without_checkpoint: bool,
+    },
     SuspendSession {
         session_id: String,
         #[serde(default)]
-        acknowledge_unpublished_work: bool,
-    },
-    /// Explicitly omit untracked nested Git repositories from this suspension.
-    IgnoreNestedRepositoriesAndSuspend {
-        session_id: String,
+        discard_untracked: mj_core::suspend_consent::UntrackedConsent,
+        #[serde(default)]
+        abort_operations: mj_core::suspend_consent::OperationConsent,
+        #[serde(default)]
+        without_checkpoint: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        confirm_no_checkpoint: bool,
     },
     RestartSession {
         session_id: String,
@@ -1320,21 +1327,11 @@ pub enum DaemonAction {
         session_id: String,
         cleanup_operation_id: Option<String>,
     },
-    DiscardSinceCheckpoint {
-        session_id: String,
-        checkpoint: mj_core::state::CheckpointMetadata,
-    },
     DestroyStoppedSession {
         session_id: String,
-        /// Whether to delete the session's managed git branch as well. The
-        /// branch can hold work the user still wants, so destroying keeps it
-        /// unless the request asks for the deletion.
-        delete_branch: bool,
     },
     ForceDestroySession {
         session_id: String,
-        /// See [`DaemonAction::DestroyStoppedSession`].
-        delete_branch: bool,
     },
     CancelLifecycle {
         session_id: String,
@@ -1518,6 +1515,7 @@ pub enum DaemonReply {
     },
     RegisteredSession(Box<RegisteredSession>),
     ContainerUpgradePreview(mj_core::state::ContainerUpgradePreview),
+    SuspendPreflight(Box<mj_core::suspend_consent::SuspendPreflight>),
     MovePreparation(Box<MovePreparation>),
     MoveOutcome(MoveOutcome),
     MoveSources(Vec<mj_core::move_workspace::RetainedMoveSource>),
@@ -3594,32 +3592,45 @@ impl DaemonClient {
         }
     }
 
-    pub async fn suspend_session(&mut self, session_id: String) -> Result<()> {
-        self.suspend_session_with_ack(session_id, false).await
-    }
-
-    pub async fn ignore_nested_repositories_and_suspend(
+    pub async fn suspend_preflight(
         &mut self,
         session_id: String,
-    ) -> Result<()> {
+        dry_run: bool,
+        without_checkpoint: bool,
+    ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
         match self
-            .request(DaemonAction::IgnoreNestedRepositoriesAndSuspend { session_id })
+            .request(DaemonAction::SuspendPreflight {
+                session_id,
+                dry_run,
+                without_checkpoint,
+            })
             .await?
         {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected ignore-and-suspend reply {reply:?}"),
+            DaemonReply::SuspendPreflight(preflight) => Ok(*preflight),
+            reply => bail!("unexpected suspend-preflight reply {reply:?}"),
         }
     }
 
-    pub async fn suspend_session_with_ack(
+    pub async fn suspend_session(&mut self, session_id: String) -> Result<()> {
+        self.suspend_session_with_consent(
+            session_id,
+            mj_core::suspend_consent::SuspendConsent::default(),
+        )
+        .await
+    }
+
+    pub async fn suspend_session_with_consent(
         &mut self,
         session_id: String,
-        acknowledge_unpublished_work: bool,
+        consent: mj_core::suspend_consent::SuspendConsent,
     ) -> Result<()> {
         match self
             .request(DaemonAction::SuspendSession {
                 session_id,
-                acknowledge_unpublished_work,
+                discard_untracked: consent.discard_untracked,
+                abort_operations: consent.abort_operations,
+                without_checkpoint: consent.without_checkpoint,
+                confirm_no_checkpoint: consent.confirm_no_checkpoint,
             })
             .await?
         {
@@ -3690,33 +3701,9 @@ impl DaemonClient {
         }
     }
 
-    pub async fn discard_since_checkpoint(
-        &mut self,
-        session_id: String,
-        checkpoint: mj_core::state::CheckpointMetadata,
-    ) -> Result<()> {
+    pub async fn destroy_stopped_session(&mut self, session_id: String) -> Result<()> {
         match self
-            .request(DaemonAction::DiscardSinceCheckpoint {
-                session_id,
-                checkpoint,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected force-stop reply {reply:?}"),
-        }
-    }
-
-    pub async fn destroy_stopped_session(
-        &mut self,
-        session_id: String,
-        delete_branch: bool,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::DestroyStoppedSession {
-                session_id,
-                delete_branch,
-            })
+            .request(DaemonAction::DestroyStoppedSession { session_id })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -3724,16 +3711,9 @@ impl DaemonClient {
         }
     }
 
-    pub async fn force_destroy_session(
-        &mut self,
-        session_id: String,
-        delete_branch: bool,
-    ) -> Result<()> {
+    pub async fn force_destroy_session(&mut self, session_id: String) -> Result<()> {
         match self
-            .request(DaemonAction::ForceDestroySession {
-                session_id,
-                delete_branch,
-            })
+            .request(DaemonAction::ForceDestroySession { session_id })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -3942,9 +3922,12 @@ pub const RUNTIME_SHELL_INTERRUPT_PROTOCOL: u32 = RUNTIME_SESSION_VERDICTS_PROTO
 /// A review view names its review and the repositories it covers, and a
 /// session can have several open. Older readers reject the new fields.
 pub const RUNTIME_REVIEW_IDENTITY_PROTOCOL: u32 = RUNTIME_SHELL_INTERRUPT_PROTOCOL + 1;
+/// Typed suspend consent, suspend preflight, and removal of publication consent and delete_branch.
+pub const SUSPEND_CONSENT_PROTOCOL: u32 = RUNTIME_REVIEW_IDENTITY_PROTOCOL + 1;
+pub const MOVE_ORIGIN_DELTA_PROTOCOL: u32 = SUSPEND_CONSENT_PROTOCOL + 1;
 /// Supervisor delegation adds `supervisors` on session creation/move and runtime feed.
-pub const SUPERVISOR_DELEGATION_PROTOCOL: u32 = RUNTIME_REVIEW_IDENTITY_PROTOCOL + 1;
-pub const PROTOCOL_VERSION: u32 = SUPERVISOR_DELEGATION_PROTOCOL;
+pub const SUPERVISORS_PROTOCOL: u32 = MOVE_ORIGIN_DELTA_PROTOCOL + 1;
+pub const PROTOCOL_VERSION: u32 = SUPERVISORS_PROTOCOL;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";
@@ -4048,6 +4031,7 @@ impl DaemonAction {
                 | Self::ProfileLoginStatuses
                 | Self::DiscoverSetup { .. }
                 | Self::PreflightNewSession { .. }
+                | Self::SuspendPreflight { .. }
                 | Self::ValidateProjectDirectory { .. }
                 | Self::CompletePath { .. }
                 | Self::CheckProjectDirectories { .. }
@@ -4946,8 +4930,10 @@ mod tests {
             let error = client
                 .start_session_lifecycle(SessionLifecycleRequest::Suspend {
                     session_id: "observed-session".into(),
-                    acknowledge_unpublished_work: true,
-                    ignore_nested_repositories: false,
+                    discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
+                    abort_operations: mj_core::suspend_consent::OperationConsent::None,
+                    without_checkpoint: false,
+                    confirm_no_checkpoint: false,
                 })
                 .await
                 .unwrap_err();

@@ -44,13 +44,19 @@ impl RuntimeState {
         let started = match request {
             SessionLifecycleRequest::Suspend {
                 session_id,
-                acknowledge_unpublished_work,
-                ignore_nested_repositories,
+                discard_untracked,
+                abort_operations,
+                without_checkpoint,
+                confirm_no_checkpoint,
             } => {
                 self.start_suspend_session(
                     session_id,
-                    acknowledge_unpublished_work,
-                    ignore_nested_repositories,
+                    mj_core::suspend_consent::SuspendConsent {
+                        discard_untracked,
+                        abort_operations,
+                        without_checkpoint,
+                        confirm_no_checkpoint,
+                    },
                 )
                 .await?
             }
@@ -69,25 +75,11 @@ impl RuntimeState {
                 self.start_move_session(*request, LifecycleControl::default())
                     .await?
             }
-            SessionLifecycleRequest::Discard {
-                session_id,
-                checkpoint,
-            } => self.start_discard_session(session_id, checkpoint).await?,
-            SessionLifecycleRequest::DestroyStopped {
-                session_id,
-                delete_branch,
-            }
-            | SessionLifecycleRequest::ForceDestroy {
-                session_id,
-                delete_branch,
-            } => {
+            SessionLifecycleRequest::DestroyStopped { session_id }
+            | SessionLifecycleRequest::ForceDestroy { session_id } => {
                 self.start_destroy_session(
                     session_id,
-                    if delete_branch {
-                        BranchDisposition::Delete
-                    } else {
-                        BranchDisposition::Keep
-                    },
+                    BranchDisposition::Keep,
                     LifecycleKind::ForceDestroy,
                     true,
                     super::resume::DestroyRequest::AwaitingReceipt,
@@ -263,7 +255,7 @@ mod tests {
         let failed = state
             .admit_prepared_lifecycle(
                 "failed-observation".into(),
-                LifecycleKind::ForceStop,
+                LifecycleKind::Suspend,
                 super::super::lifecycle::LifecycleStart::request(
                     "selected-checkpoint".into(),
                     None,

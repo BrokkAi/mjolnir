@@ -714,7 +714,11 @@ impl PlanProbe {
             initial_model: None,
             harness,
             execution_policy: policy,
-            approval_choices: Default::default(),
+            // These probes exercise the person's permission form.
+            approval_choices: mj_core::config::ApprovalChoices {
+                mjolnir_guardian: false,
+                ..Default::default()
+            },
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
@@ -1780,6 +1784,7 @@ async fn permission_ids_survive_bridge_restart_without_consuming_the_new_questio
                     prompt: vec![ContentBlock::from("run tests")],
                 },
                 created_at_ms: 1,
+                insert_at_front: false,
             },
         )
         .unwrap();

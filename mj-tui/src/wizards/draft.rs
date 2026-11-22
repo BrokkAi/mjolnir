@@ -845,52 +845,6 @@ impl WizardDraft for ResumeWizard {
         if self.step == WizardStep::Review && self.subagents.activate(id) {
             return Ok(dashboard.keep(self));
         }
-        if id == WizardControl::ChooseMoveFiles
-            && self
-                .preparation
-                .as_ref()
-                .is_some_and(|p| p.workspace.is_some())
-        {
-            self.step = WizardStep::MoveFiles;
-            self.form.get_mut().focus(WizardControl::Next);
-            return Ok(dashboard.keep(self));
-        }
-        if self.step == WizardStep::MoveFiles {
-            match id {
-                WizardControl::Back => {
-                    self.step = if self.skips_review() {
-                        WizardStep::Launching
-                    } else {
-                        WizardStep::Review
-                    }
-                }
-                WizardControl::Next => {
-                    self.files.selection.acknowledge_large_transfer = true;
-                    self.files.reviewed = true;
-                    self.step = if self.skips_review() {
-                        WizardStep::Launching
-                    } else {
-                        WizardStep::Review
-                    };
-                    let profile = self.destination_profile(dashboard);
-                    return Ok(dashboard.start_move_preparation(self, profile));
-                }
-                WizardControl::ExpandMoveFile(index) => {
-                    if let Some(assessment) =
-                        self.preparation.as_ref().and_then(|p| p.workspace.as_ref())
-                        && let Some((node, _)) = self.files.rows(assessment).get(index)
-                    {
-                        let path = node.location.clone();
-                        if !self.files.expanded.remove(&path) {
-                            self.files.expanded.insert(path);
-                        }
-                    }
-                }
-                WizardControl::MoveOtherFiles => self.files.show_other = !self.files.show_other,
-                _ => {}
-            }
-            return Ok(dashboard.keep(self));
-        }
         Err(self)
     }
 
@@ -938,17 +892,6 @@ impl WizardDraft for ResumeWizard {
             dashboard.record_event_handled();
             return;
         }
-        if let Interaction::Toggle(WizardControl::MoveFile(index)) = interaction
-            && let Some(assessment) = self.preparation.as_ref().and_then(|p| p.workspace.as_ref())
-            && let Some((node, _)) = self.files.rows(assessment).get(*index)
-        {
-            let path = node.location.clone();
-            let include = node.state(assessment, &self.files.selection)
-                != mj_core::move_workspace::FileSelectionState::Included;
-            self.files
-                .selection
-                .set_included(assessment, &path, include);
-        }
         if matches!(
             interaction,
             Interaction::Toggle(WizardControl::DiscardQueue)
@@ -982,12 +925,8 @@ impl WizardDraft for ResumeWizard {
             .is_none()
     }
 
-    fn declare_extra_step(&self, _dashboard: &DashboardState, form: &mut Dialog<WizardControl>) {
-        if self.step == WizardStep::MoveFiles {
-            move_files::declare(self, form);
-        } else {
-            unreachable!("invalid resume wizard step")
-        }
+    fn declare_extra_step(&self, _dashboard: &DashboardState, _form: &mut Dialog<WizardControl>) {
+        unreachable!("invalid resume wizard step")
     }
 
     /// A resume never waits on a background job before accepting input.
@@ -1016,13 +955,6 @@ impl WizardDraft for ResumeWizard {
         if self.has_queued_work(dashboard) {
             form.declare_with_enabled(WizardControl::DiscardQueue, ControlKind::Checkbox, true);
         }
-        if self
-            .preparation
-            .as_ref()
-            .is_some_and(|p| p.workspace.is_some())
-        {
-            form.declare_with_enabled(WizardControl::ChooseMoveFiles, ControlKind::Button, true);
-        }
         (self.subagent_change(dashboard).is_none() || self.subagents.error().is_none())
             && (!self.moving || self.preparation.is_some() || self.preparation_error.is_some())
     }
@@ -1031,8 +963,6 @@ impl WizardDraft for ResumeWizard {
 impl ResumeWizard {
     pub(crate) fn note_destination_change(&mut self) {
         invalidate_move_preparation(self);
-        self.files.reviewed = false;
-        self.files.selection.acknowledge_large_transfer = false;
     }
 
     /// The profile this resume or move lands on.

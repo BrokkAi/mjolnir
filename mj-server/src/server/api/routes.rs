@@ -63,6 +63,10 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         .route("/sessions/{session_id}/usage/tree", get(usage_tree))
         .route("/sessions/{session_id}/wait", post(wait))
         .route("/sessions/{session_id}/suspend", post(suspend))
+        .route(
+            "/sessions/{session_id}/suspend-preflight",
+            get(suspend_preflight),
+        )
         .route("/sessions/{session_id}/restart", post(restart_agent))
         .route(
             "/sessions/{session_id}/container-upgrade",
@@ -97,6 +101,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             post(respond_elicitation),
         )
         .route("/sessions/{session_id}/export", post(export))
+        .route("/checkpoints/purge-untracked", post(purge_untracked))
         .route("/ui/requests", post(request_ui))
         .route("/wiki/search", get(wiki_search))
         .route("/wiki/sync", post(wiki_sync_request))

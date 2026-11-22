@@ -445,15 +445,40 @@ pub(super) async fn transcript(
 /// checkpoint and the session is suspended alone; the answer warns when some
 /// of those sub-agents have not handed back their reports. Accepting the
 /// suspend is not finishing it.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SuspendPreflightQuery {
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    without_checkpoint: bool,
+}
+
+pub(super) async fn suspend_preflight(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<SuspendPreflightQuery>,
+) -> Result<Json<mj_core::suspend_consent::SuspendPreflight>, ApiFailure> {
+    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    let preflight = crate::server::handlers::ask_suspend_preflight(
+        &state,
+        session_id,
+        query.dry_run,
+        query.without_checkpoint,
+    )
+    .await?;
+    Ok(Json(preflight))
+}
+
 pub(super) async fn suspend(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
     request: Option<Json<SuspendRequest>>,
 ) -> Result<(StatusCode, Json<SuspendSessionResponse>), ApiFailure> {
-    let (active_children, publication_ack_required) = {
+    let active_children = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
-        let active_children = session
+        session
             .subagent_session_ids
             .iter()
             .filter(|id| {
@@ -463,25 +488,8 @@ pub(super) async fn suspend(
                     .any(|child| child.id == id.as_str() && child.lifecycle.is_dashboard_visible())
             })
             .cloned()
-            .collect::<Vec<_>>();
-        // Child close retains the parent's checkout and commits. Only an
-        // owning session can release unpublished repository work here.
-        (
-            active_children,
-            !session.is_subagent_session && session.publication_state.is_some(),
-        )
+            .collect::<Vec<_>>()
     };
-    // The controller re-checks publication after its checkpoint; this is only
-    // an early refusal that avoids a needless checkpoint.
-    if publication_ack_required
-        && !request
-            .as_ref()
-            .is_some_and(|r| r.acknowledge_unpublished_work)
-    {
-        return Err(ApiFailure::conflict(
-            "publication status is unverified for this live clone; retry with acknowledge_unpublished_work=true to suspend it",
-        ));
-    }
     let backend = backend(&state)?.clone();
     // Counted before the suspend is sent, which is what stops the children.
     let mut not_handed_back = 0;
@@ -503,13 +511,15 @@ pub(super) async fn suspend(
         }
     }
     backend.cancel_start(session_id.clone()).await?;
+    let body = request.map(|Json(body)| body).unwrap_or_default();
     let status = send_action(
         &state,
         ControllerAction::Suspend {
             session_id: session_id.clone(),
-            acknowledge_unpublished_work: request
-                .as_ref()
-                .is_some_and(|r| r.acknowledge_unpublished_work),
+            discard_untracked: body.discard_untracked,
+            abort_operations: body.abort_operations,
+            without_checkpoint: body.without_checkpoint,
+            confirm_no_checkpoint: body.confirm_no_checkpoint,
         },
     )
     .await?;
@@ -532,32 +542,27 @@ pub(super) struct SuspendRequest {
     #[serde(default, rename = "acknowledge_active_subagents")]
     _acknowledge_active_subagents: bool,
     #[serde(default)]
-    pub(super) acknowledge_unpublished_work: bool,
+    pub(super) discard_untracked: mj_core::suspend_consent::UntrackedConsent,
+    #[serde(default)]
+    pub(super) abort_operations: mj_core::suspend_consent::OperationConsent,
+    #[serde(default)]
+    pub(super) without_checkpoint: bool,
+    #[serde(default)]
+    pub(super) confirm_no_checkpoint: bool,
 }
 
 pub(super) async fn destroy(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
-    request: Option<Json<DestroyRequest>>,
+    _request: Option<Json<DestroyRequest>>,
 ) -> Result<StatusCode, ApiFailure> {
     backend(&state)?.cancel_start(session_id.clone()).await?;
-    let delete_branch = request.is_some_and(|r| r.delete_branch);
-    send_action(
-        &state,
-        ControllerAction::Destroy {
-            session_id,
-            delete_branch,
-        },
-    )
-    .await
+    send_action(&state, ControllerAction::Destroy { session_id }).await
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct DestroyRequest {
-    #[serde(default)]
-    pub(super) delete_branch: bool,
-}
+pub(super) struct DestroyRequest {}
 
 /// The safe recent notices outlive their session record. Absence here says
 /// nothing about completion: an accepted Destroy can still be running.

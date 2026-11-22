@@ -20,9 +20,17 @@ mod background;
 #[cfg(test)]
 pub(crate) use background::AirTaskFixture;
 mod checkpoint_hold;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InPlaceHarnessRestartDecision {
+    Proceed,
+    AlreadyRestarted,
+}
+
 #[cfg(test)]
 mod checkpoint_hold_tests;
 mod commands;
+#[cfg(test)]
+mod in_place_move_tests;
 mod journal;
 mod native_history;
 mod replay;
@@ -81,16 +89,22 @@ enum SteeringDeliveryMode {
     /// The harness has no mailbox hook; carry waking events through its
     /// ordinary durable prompt queue and safe-boundary steering instead.
     AcpWithMailbox,
-    ClaudePostToolBatch,
-    ClaudeTurnEnd,
+    HookPostToolBatch,
+    HookTurnEnd,
 }
 
 impl SteeringDeliveryMode {
-    fn for_harness(harness: mj_core::config::HarnessKind, claude_hook: bool) -> Self {
-        match (harness, claude_hook) {
+    fn for_harness(harness: mj_core::config::HarnessKind, boundary_hook: bool) -> Self {
+        match (harness, boundary_hook) {
             (mj_core::config::HarnessKind::Dsh, _) => Self::AcpWithMailbox,
-            (mj_core::config::HarnessKind::Claude, true) => Self::ClaudePostToolBatch,
-            (mj_core::config::HarnessKind::Claude, false) => Self::ClaudeTurnEnd,
+            (
+                mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Antigravity,
+                true,
+            ) => Self::HookPostToolBatch,
+            (
+                mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Antigravity,
+                false,
+            ) => Self::HookTurnEnd,
             _ => Self::Acp,
         }
     }
@@ -143,6 +157,8 @@ struct PendingNativeResume {
 pub struct RelayCell {
     relay: std::sync::Mutex<DurableRelay>,
     released: tokio::sync::watch::Sender<u64>,
+    #[cfg(unix)]
+    pub(crate) guardian: std::sync::Arc<crate::worker_runtime::guardian_endpoint::GuardianEndpoint>,
 }
 
 impl RelayCell {
@@ -150,6 +166,8 @@ impl RelayCell {
         Self {
             relay: std::sync::Mutex::new(relay),
             released: tokio::sync::watch::Sender::new(0),
+            #[cfg(unix)]
+            guardian: Default::default(),
         }
     }
 
@@ -247,6 +265,8 @@ pub struct DurableRelay {
     /// journal: every bridge start records its own `AgentInitialized`.
     session_setup: bool,
     checkpoint_only: bool,
+    /// Active in-place harness restart operation ID serialized with the hold.
+    in_place_harness_restart_in_flight: Option<String>,
     /// Live reviewer leases share this owner's atomic checkpoint decision.
     reviewer_admissions: BTreeMap<u64, String>,
     /// Reviewer leases exist only around the Unix reviewer runtime, so this
@@ -429,7 +449,6 @@ impl DurableRelay {
         }
     }
 
-    #[cfg(any(unix, test))]
     pub(crate) fn native_goal_resume_sent(
         &mut self,
         resume_id: u64,
@@ -440,7 +459,6 @@ impl DurableRelay {
             .push(PendingNativeResume { resume_id, goal });
     }
 
-    #[cfg(any(unix, test))]
     pub(crate) fn native_goal_resume_rejected(&mut self, resume_id: u64) {
         self.pending_native_resumes
             .retain(|pending| pending.resume_id != resume_id);
@@ -828,11 +846,16 @@ impl DurableRelay {
                 // bridge start, exactly as it does after a restart.
                 snapshot.config.extend(restored.accepted_config);
                 snapshot.restored_native_session_unused = restored.native_session_unused;
-                snapshot.record_native_use(if restored.native_session_unused {
-                    NativeSessionUse::Unused
+                if let Some(evidence) = restored.native_use_evidence {
+                    snapshot.native_session_used = evidence.usage == NativeSessionUse::Used;
+                    snapshot.native_use_evidence = Some(evidence);
                 } else {
-                    NativeSessionUse::Unknown
-                });
+                    snapshot.record_native_use(if restored.native_session_unused {
+                        NativeSessionUse::Unused
+                    } else {
+                        NativeSessionUse::Unknown
+                    });
+                }
                 for queued in restored.queued_prompts {
                     anyhow::ensure!(
                         mj_core::continuation::valid_command_id(&queued.command_id),
@@ -999,6 +1022,7 @@ impl DurableRelay {
         )?;
 
         let mut relay = Self {
+            in_place_harness_restart_in_flight: None,
             operator_away: Default::default(),
             root,
             relay_version: relay_version.into(),
@@ -1417,7 +1441,7 @@ impl DurableRelay {
         state.jev_rate_limit = mj_core::jev::current_rate_limit();
         state.acp_ready = Some(self.is_acp_ready());
         state.checkpoint_only = self.checkpoint_only;
-        state.steering_supported = self.steering_supported;
+        state.steering_supported = self.effective_steering_supported();
         state.mailbox_delivery = self.mailbox_delivery_mode;
         // Harness-initiated turns have no owned prompt ID. Keep their existing
         // explicit interrupt surface; queue steering always needs an owned turn.
@@ -1430,14 +1454,7 @@ impl DurableRelay {
         state.foreground_tool_started_at_ms = self.foreground_tools.newest_started_at_ms();
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
         state.native_agent_count = self.native_agent_count();
-        state.clear_context = matches!(
-            self.verdict_harness,
-            Some(
-                mj_core::config::HarnessKind::Codex
-                    | mj_core::config::HarnessKind::Claude
-                    | mj_core::config::HarnessKind::Kimi
-            )
-        );
+        state.clear_context = self.supports_clear_context();
         state.background_commands = self.background_commands();
         state.background_work_known = self.background_work_known;
         // Answer the activity question once, here, where every fact is in
@@ -1499,21 +1516,43 @@ impl DurableRelay {
         self.steering_supported = supported;
     }
 
+    /// Effective steering capability combining ACP support with hook-based delivery.
+    pub fn effective_steering_supported(&self) -> Option<bool> {
+        match self.steering_delivery_mode {
+            SteeringDeliveryMode::HookPostToolBatch => self.steering_supported.map(|_| true),
+            SteeringDeliveryMode::HookTurnEnd => self.steering_supported.map(|_| false),
+            SteeringDeliveryMode::Acp | SteeringDeliveryMode::AcpWithMailbox => {
+                self.steering_supported
+            }
+        }
+    }
+
+    fn supports_clear_context(&self) -> bool {
+        matches!(
+            self.verdict_harness,
+            Some(
+                mj_core::config::HarnessKind::Codex
+                    | mj_core::config::HarnessKind::Claude
+                    | mj_core::config::HarnessKind::Kimi
+                    | mj_core::config::HarnessKind::Antigravity
+            )
+        )
+    }
+
     /// Allow the relay to steer queued prompts into the running turn itself.
     pub fn set_automatic_steering(&mut self, enabled: bool) {
         self.automatic_steering = enabled;
     }
 
     /// Select steering delivery for the configured harness and staged profile.
-    /// The safe Claude turn-end mode is selected before worker admission opens;
+    /// The safe turn-end mode is selected before worker admission opens;
     /// preparation upgrades it only after verifying a usable hook marker.
     pub fn set_steering_delivery_mode(
         &mut self,
         harness: mj_core::config::HarnessKind,
-        claude_post_tool_batch_hook: bool,
+        boundary_hook: bool,
     ) {
-        self.steering_delivery_mode =
-            SteeringDeliveryMode::for_harness(harness, claude_post_tool_batch_hook);
+        self.steering_delivery_mode = SteeringDeliveryMode::for_harness(harness, boundary_hook);
     }
 
     /// Set when a Codex session's mailbox messages may reach it, from the
@@ -1823,6 +1862,21 @@ impl DurableRelay {
             .values()
             .any(RelayDispatchRecord::prompt_may_have_reached_agent);
         if let Some(evidence) = &self.snapshot.native_use_evidence {
+            // Before the restored worker opens its first harness session,
+            // `native_session_id` is still `None` while the seed's archived
+            // evidence is already present. Honor `restored_native_session_unused`
+            // so an unused restored session can still take `LoadBeforeReplace`.
+            if self.snapshot.native_session_id.is_none() {
+                return if evidence.version == 1
+                    && evidence.usage == NativeSessionUse::Unused
+                    && self.snapshot.restored_native_session_unused
+                    && !dispatched
+                {
+                    NativeSessionHistory::LoadBeforeReplace
+                } else {
+                    NativeSessionHistory::MayHaveHistory
+                };
+            }
             if evidence.version != 1
                 || Some(&evidence.native_session_id) != self.snapshot.native_session_id.as_ref()
                 || evidence.usage != NativeSessionUse::Unused

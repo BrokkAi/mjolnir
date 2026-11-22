@@ -379,6 +379,15 @@ fn repository_cache_key(source: &str) -> String {
     lower_hex(Sha256::digest(identity.as_bytes()))
 }
 
+/// Home-relative path to the host clone-cache bare mirror for `source`,
+/// e.g. `.cache/mjolnir/git/mirrors/<sha256>/repo.git`.
+pub fn mirror_repo_relative_path(source: &str) -> String {
+    format!(
+        "{CACHE_RELATIVE_ROOT}/mirrors/{}/repo.git",
+        repository_cache_key(source)
+    )
+}
+
 const PREPARE_REPOSITORY_SCRIPT: &str = r#"
 set -eu
 cache_root=$1

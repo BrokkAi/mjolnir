@@ -149,6 +149,11 @@ pub const SESSION_MESSAGE_MCP_ENV: &str = "MJ_SESSION_MESSAGE_MCP";
 /// installation. The worker consumes this directive before starting a harness.
 pub const SESSION_PROJECT_TOOLS_ROOTS: &str = "MJ_SESSION_PROJECT_TOOLS_ROOTS";
 
+/// Absolute path of this session's scratch directory,
+/// `<checkout>/.mj/keep/<session-id>/`. Move copies that directory; suspend
+/// does not save it. The worker sets it after creating the directory.
+pub const SESSION_KEEP_DIR_ENV: &str = "MJ_KEEP_DIR";
+
 /// Whether this worker executes the harness or only preserves recovered state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -158,7 +163,7 @@ pub enum WorkerRunMode {
     CheckpointOnly,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
     /// Chosen from the target locator, never from ambient container detection.
@@ -314,7 +319,7 @@ pub struct WorkerLaunchConfig {
     pub observe_policy: Option<serde::de::IgnoredAny>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitialWorkerCommand {
     pub command_id: String,

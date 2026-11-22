@@ -69,6 +69,7 @@ ARMS = {
     # Non-GPT reviewers, one session each. Muse's highest effort is xhigh.
     "L": ["muse-ember-1.0:xhigh", "gemini-4-hydrogen:high", "kimi-code/k3.1-pro:high"],
     "M": ["glm-5.3:high", "glm-5.3-flash:high"],  # GLM, one session each
+    "N": ["gemini-4-hydrogen:medium"],  # Gemini 4 Hydrogen at medium effort, one session
 }
 # Hard-won candidates and the sampled ordinary diffs share one id space.
 CORPUS = {c["id"]: c for path, setting in ((CORPUS_PATH, "REVIEW_ARMS_CORPUS"),
@@ -438,8 +439,12 @@ def pilot_claude_hold(profile):
 
 
 def repair_progress(previous, current):
-    """Admit the first repair, then require a proper subset of the previous errors."""
-    return previous is None or current < previous
+    """Admit the first repair, then require fewer errors than the previous round.
+
+    Fixing some errors can introduce others (51 unaccounted candidates became 36
+    depth errors in the live gate); that is still improvement. The count strictly
+    falls, so the loop ends; a round that swaps errors without fewer of them stops."""
+    return previous is None or len(current) < len(previous)
 
 
 def expected_provider_model(manifest, role="judge"):
@@ -631,21 +636,36 @@ RUNTIME_PROBES_LOCK = threading.Lock()
 
 
 def probe_runtime(d, child, carrier):
-    """Samples one reviewer's runtime on its own thread, so a slow podman or mj call never delays the
-    status polls that observe the other reviewers. Retries until it records the runtime or the
-    reviewer is gone; every failed attempt is written to runtime-errors.jsonl."""
-    path = d / "reviewers" / child[:12] / "runtime.json"
+    """Samples one reviewer's runtime and prompt timestamp on its own thread, so a slow podman or mj
+    call never delays the status polls that observe the other reviewers. Retries until both are
+    recorded or the reviewer is gone; every failed attempt is written to runtime-errors.jsonl."""
+    cd = d / "reviewers" / child[:12]
+    path = cd / "runtime.json"
+    prompt_path = cd / "prompt-time.json"
     stop = RUNTIME_STOP[d]
-    while not path.exists() and not stop.is_set():
-        try:
-            runtime = reviewer_runtime(child, carrier)
-        except Exception as e:  # noqa: BLE001 - a probe failure loses evidence, never fails a review
-            with (d / "runtime-errors.jsonl").open("a") as f:
-                f.write(json.dumps({"child": child, "error": repr(e), "time_ns": time.time_ns()}) + "\n")
-            runtime = None
-        if runtime:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            save(path, runtime)
+    while (not path.exists() or not prompt_path.exists()) and not stop.is_set():
+        if not path.exists():
+            try:
+                runtime = reviewer_runtime(child, carrier)
+            except Exception as e:  # noqa: BLE001 - a probe failure loses evidence, never fails a review
+                with (d / "runtime-errors.jsonl").open("a") as f:
+                    f.write(json.dumps({"child": child, "error": repr(e), "time_ns": time.time_ns()}) + "\n")
+                runtime = None
+            if runtime:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                save(path, runtime)
+        if not prompt_path.exists():
+            try:
+                page = mj("transcript", "--session", child, "--after-seq", 0, "--limit", 20, "--role", "user")
+                prompt_ms = next((i["created_at_ms"] for i in page.get("items", [])
+                                  if i.get("role") == "user" and i.get("created_at_ms")), None)
+                if prompt_ms is not None:
+                    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+                    save(prompt_path, {"prompt_created_at_ms": prompt_ms, "observed_ns": time.time_ns()})
+            except Exception as e:  # noqa: BLE001 - a probe failure loses timing, never fails a review
+                with (d / "runtime-errors.jsonl").open("a") as f:
+                    f.write(json.dumps({"child": child, "prompt_time_error": repr(e), "time_ns": time.time_ns()}) + "\n")
+        if path.exists() and prompt_path.exists():
             return
         try:
             if session(child).get("lifecycle") in ("suspended", "closed", "failed", "destroyed"):
@@ -661,7 +681,8 @@ def record_runtimes(d, children):
     with RUNTIME_PROBES_LOCK:
         RUNTIME_STOP.setdefault(d, threading.Event())
         for child in children:
-            if (d, child) not in RUNTIME_PROBES and not (d / "reviewers" / child[:12] / "runtime.json").exists():
+            cd = d / "reviewers" / child[:12]
+            if (d, child) not in RUNTIME_PROBES and (not (cd / "runtime.json").exists() or not (cd / "prompt-time.json").exists()):
                 t = threading.Thread(target=probe_runtime, args=(d, child, carrier), daemon=True)
                 RUNTIME_PROBES[(d, child)] = t
                 t.start()

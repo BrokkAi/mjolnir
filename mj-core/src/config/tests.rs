@@ -1047,6 +1047,30 @@ fn unconstrained_enforcement_splits_acp_modes_from_launch_controls() {
 
 #[test]
 fn configured_approvals_preserve_other_profiles_and_select_guardians() {
+    for kind in HarnessKind::ALL {
+        let mut stored = Config::default();
+        stored.profiles.insert(
+            "p".into(),
+            HarnessProfile {
+                mjolnir_guardian: false,
+                ..HarnessProfile::new(kind, PathBuf::from("/profiles").join(kind.id()))
+            },
+        );
+        let text = toml::to_string(&stored).expect("serialize the profile");
+        let config: Config = toml::from_str(&text).expect("load a profile with guardian disabled");
+        config
+            .validate()
+            .expect("all harnesses can disable Mjolnir review");
+        let disabled = config.profiles["p"].approval_choices();
+        let enabled = ApprovalChoices {
+            mjolnir_guardian: true,
+            ..disabled
+        };
+        assert!(kind.mjolnir_guardian_reviews(ExecutionPolicy::ConfiguredApprovals, enabled));
+        assert!(!kind.mjolnir_guardian_reviews(ExecutionPolicy::ConfiguredApprovals, disabled));
+        assert!(!kind.mjolnir_guardian_reviews(ExecutionPolicy::Unconstrained, enabled));
+    }
+
     let codex = HarnessKind::Codex
         .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
         .expect("Codex ACP selects guardian explicitly");

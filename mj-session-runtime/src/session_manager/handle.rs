@@ -5,6 +5,7 @@ pub struct SessionManagerControl {
     pub session_gate: Arc<crate::recovery_gate::RecoveryGate>,
     pub credential_wakes: Arc<crate::worker_client::CredentialWakes>,
     pub harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
+    pub guardian_stage1: Arc<std::sync::OnceLock<Arc<dyn GuardianStage1>>>,
     pub model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
     pub session_cpu: watch::Receiver<SessionCpuTable>,
     pub commands: mpsc::Sender<ManagerCommand>,
@@ -66,6 +67,13 @@ pub struct ManagedSessionHandle {
 }
 
 impl SessionManagerControl {
+    pub fn install_guardian_stage1(&self, classifier: Arc<dyn GuardianStage1>) {
+        assert!(
+            self.guardian_stage1.set(classifier).is_ok(),
+            "Guardian Stage 1 classifier installed once"
+        );
+    }
+
     pub fn install_harness_failure_handler(&self, handler: HarnessFailureHandler) {
         assert!(
             self.harness_failure.set(handler).is_ok(),

@@ -7,6 +7,23 @@ pub(super) use operation::{validate_operation_state_tar, validate_operation_stat
 /// invoking the host's Git executable.
 pub trait GitCommandRunner: Sync {
     fn run(&self, repository: &Path, command: &GitCommand) -> Result<GitOutput>;
+
+    /// Run `command` with its stdout written directly to `output` rather than
+    /// buffered in memory. The returned `GitOutput::stdout` is empty.
+    fn run_to_file(
+        &self,
+        repository: &Path,
+        command: &GitCommand,
+        mut output: fs::File,
+    ) -> Result<GitOutput> {
+        let result = self.run(repository, command)?;
+        output.write_all(&result.stdout)?;
+        Ok(GitOutput {
+            status: result.status,
+            stdout: Vec::new(),
+            stderr: result.stderr,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,22 +56,7 @@ pub struct SystemGit;
 
 impl GitCommandRunner for SystemGit {
     fn run(&self, repository: &Path, command: &GitCommand) -> Result<GitOutput> {
-        let mut process = Command::new("git");
-        process.args(&command.arguments).current_dir(repository);
-        for (name, value) in NON_INTERACTIVE_GIT_ENV {
-            process.env(name, value);
-        }
-        for (name, value) in &command.env {
-            process.env(name, value);
-        }
-        if !command
-            .env
-            .iter()
-            .any(|(name, _)| name == "GIT_SSH_COMMAND")
-            && let Some(default) = mj_core::local_git::local_git_ssh_command()
-        {
-            process.env("GIT_SSH_COMMAND", default);
-        }
+        let mut process = prepare_command(repository, command);
         let output = mj_core::subprocess::run_with_input(&mut process, &command.stdin)
             .with_context(|| format!("run git in {}", repository.display()))?;
         Ok(GitOutput {
@@ -63,6 +65,43 @@ impl GitCommandRunner for SystemGit {
             stderr: output.stderr,
         })
     }
+
+    fn run_to_file(
+        &self,
+        repository: &Path,
+        command: &GitCommand,
+        output: fs::File,
+    ) -> Result<GitOutput> {
+        let mut process = prepare_command(repository, command);
+        let output =
+            mj_core::subprocess::run_with_input_to_file(&mut process, &command.stdin, output)
+                .with_context(|| format!("run git in {}", repository.display()))?;
+        Ok(GitOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+}
+
+fn prepare_command(repository: &Path, command: &GitCommand) -> Command {
+    let mut process = Command::new("git");
+    process.args(&command.arguments).current_dir(repository);
+    for (name, value) in NON_INTERACTIVE_GIT_ENV {
+        process.env(name, value);
+    }
+    for (name, value) in &command.env {
+        process.env(name, value);
+    }
+    if !command
+        .env
+        .iter()
+        .any(|(name, _)| name == "GIT_SSH_COMMAND")
+        && let Some(default) = mj_core::local_git::local_git_ssh_command()
+    {
+        process.env("GIT_SSH_COMMAND", default);
+    }
+    process
 }
 
 /// Stable identity for internal commits and reflogs; never written to user config.
@@ -127,8 +166,6 @@ pub enum GitSnapshotProgress {
 pub enum UntrackedFiles {
     Include,
     Exclude,
-    /// Explicit user consent to omit untracked nested Git repositories.
-    IgnoreNestedRepositories,
 }
 
 pub fn collect_git_snapshot(
@@ -2527,6 +2564,11 @@ fn relocated_review_refs(
     Ok(restored)
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct LegacyRestoreOptions {
+    pub(crate) detach_on_branch_collision: bool,
+}
+
 /// Restore a snapshot into `repository`, the directory its paths are named
 /// from. For a snapshot that records a `checkout_subdirectory` that is the
 /// destination checkout's top level: its untracked files are named from
@@ -2536,7 +2578,8 @@ pub fn restore_git_snapshot(
     repository: &Path,
     snapshot: &RepositorySnapshot,
 ) -> Result<()> {
-    restore_git_snapshot_for_session(runner, repository, snapshot, None, true)
+    restore_git_snapshot_for_session(runner, repository, snapshot, None, true)?;
+    Ok(())
 }
 
 pub(crate) fn restore_git_snapshot_for_session(
@@ -2545,7 +2588,26 @@ pub(crate) fn restore_git_snapshot_for_session(
     snapshot: &RepositorySnapshot,
     session: Option<&str>,
     restore_contents: bool,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    restore_git_snapshot_for_session_with_options(
+        runner,
+        repository,
+        snapshot,
+        session,
+        restore_contents,
+        LegacyRestoreOptions::default(),
+    )
+}
+
+pub(crate) fn restore_git_snapshot_for_session_with_options(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    snapshot: &RepositorySnapshot,
+    session: Option<&str>,
+    restore_contents: bool,
+    options: LegacyRestoreOptions,
+) -> Result<Vec<String>> {
+    let mut notices = Vec::new();
     // Raw snapshots restore ref metadata only, even when the caller asks
     // to restore repositories. Other sessions may be using this checkout.
     let restore_contents = restore_contents && !snapshot.metadata.review_refs_metadata_only;
@@ -2556,7 +2618,7 @@ pub(crate) fn restore_git_snapshot_for_session(
             .keys()
             .any(|name| name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE))
     {
-        return Ok(());
+        return Ok(notices);
     }
     if snapshot.metadata.remote_workspace {
         mj_core::remote_git::validate_network_url(&snapshot.metadata.origin)?;
@@ -2609,11 +2671,9 @@ pub(crate) fn restore_git_snapshot_for_session(
         )?;
     }
     let saved_refs = relocated_review_refs(runner, repository, &snapshot.metadata, session)?;
-    if let Some((operation, _)) = operation {
-        operation::verify_objects(runner, repository, operation)?;
-    }
     let clone_refs =
         !snapshot.metadata.saved_refs.is_empty() || !snapshot.metadata.stash_stack.is_empty();
+    let mut preserved_colliding_branch: Option<String> = None;
     if restore_contents {
         let checkout_target = if snapshot.committed_bundle.is_empty() || imports_without_head {
             snapshot.metadata.head_commit.as_str()
@@ -2628,14 +2688,62 @@ pub(crate) fn restore_git_snapshot_for_session(
                 &[],
                 "validate restored branch",
             )?;
-            git_bytes(
-                runner,
-                repository,
-                ["checkout", "-B", branch, checkout_target],
-                &[],
-                "restore committed branch",
-            )
-            .with_context(|| checkout_advice(snapshot))?;
+            let mut detach_for_collision = false;
+            if options.detach_on_branch_collision {
+                let existing = run_git(
+                    runner,
+                    repository,
+                    [
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{branch}^{{commit}}"),
+                    ],
+                    &[],
+                )?;
+                if existing.status == 0 {
+                    let existing_commit = trim_output(&existing.stdout, "read existing branch")?;
+                    let target_commit = trim_output(
+                        &git_bytes(
+                            runner,
+                            repository,
+                            ["rev-parse", "--verify", &format!("{checkout_target}^{{commit}}")],
+                            &[],
+                            "resolve restored commit",
+                        )
+                        .with_context(|| checkout_advice(snapshot))?,
+                        "resolve restored commit",
+                    )?;
+                    if existing_commit != target_commit {
+                        detach_for_collision = true;
+                        preserved_colliding_branch = Some(format!("refs/heads/{branch}"));
+                        notices.push(format!(
+                            "Checked out detached HEAD at {target_commit} because branch '{branch}' already exists at {existing_commit} in the fresh clone."
+                        ));
+                    }
+                } else if existing.status != 1 {
+                    return Err(git_failure("read existing branch", &existing));
+                }
+            }
+            if detach_for_collision {
+                git_bytes(
+                    runner,
+                    repository,
+                    ["checkout", "--detach", checkout_target],
+                    &[],
+                    "restore detached commit on branch collision",
+                )
+                .with_context(|| checkout_advice(snapshot))?;
+            } else {
+                git_bytes(
+                    runner,
+                    repository,
+                    ["checkout", "-B", branch, checkout_target],
+                    &[],
+                    "restore committed branch",
+                )
+                .with_context(|| checkout_advice(snapshot))?;
+            }
         } else {
             git_bytes(
                 runner,
@@ -2654,15 +2762,21 @@ pub(crate) fn restore_git_snapshot_for_session(
             if !restore_contents && !name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE) {
                 continue;
             }
+            if preserved_colliding_branch.as_deref() == Some(name.as_str()) {
+                continue;
+            }
+            if operation.is_some()
+                && operation::OPERATION_REF_NAMESPACES
+                    .iter()
+                    .any(|namespace| name.starts_with(namespace))
+            {
+                continue;
+            }
             ensure!(
                 name.starts_with("refs/heads/")
                     || name.starts_with("refs/tags/")
                     || name.starts_with("refs/notes/")
-                    || name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE)
-                    || (operation.is_some()
-                        && operation::OPERATION_REF_NAMESPACES
-                            .iter()
-                            .any(|namespace| name.starts_with(namespace))),
+                    || name.starts_with(mj_core::archive::MJOLNIR_REF_NAMESPACE),
                 "saved Git ref has an unsupported namespace: {name}"
             );
             git_bytes(
@@ -2755,7 +2869,7 @@ pub(crate) fn restore_git_snapshot_for_session(
         }
     }
     if !restore_contents {
-        return Ok(());
+        return Ok(notices);
     }
     restore_remote_workspace_configuration(runner, repository, &snapshot.metadata)?;
     if !snapshot.staged_patch.is_empty() {
@@ -2778,11 +2892,16 @@ pub(crate) fn restore_git_snapshot_for_session(
     }
     restore_untracked_tar(repository, &snapshot.untracked_tar)?;
     if let Some((operation, payloads)) = operation {
-        operation::restore(runner, repository, operation, payloads)?;
+        notices.push(operation::restore(repository, operation, payloads)?);
     }
     // After the checkout is whole: a worktree cannot take a branch the
     // checkout holds, and its directory must not exist when it is added.
-    restore_linked_worktrees(runner, repository, &snapshot.linked_worktrees)
+    notices.extend(restore_linked_worktrees(
+        runner,
+        repository,
+        &snapshot.linked_worktrees,
+    )?);
+    Ok(notices)
 }
 
 /// Recreates the checkout's linked worktrees, parents before children, each
@@ -2791,21 +2910,24 @@ pub(crate) fn restore_linked_worktrees(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     worktrees: &[LinkedWorktreeSnapshot],
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut notices = Vec::new();
     let mut ordered = worktrees.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
         let depth = |worktree: &LinkedWorktreeSnapshot| worktree.metadata.path.components().count();
         (depth(left), &left.metadata.path).cmp(&(depth(right), &right.metadata.path))
     });
     for worktree in ordered {
-        restore_linked_worktree(runner, repository, worktree).with_context(|| {
-            format!(
-                "restore linked worktree {}",
-                worktree.metadata.path.display()
-            )
-        })?;
+        notices.extend(
+            restore_linked_worktree(runner, repository, worktree).with_context(|| {
+                format!(
+                    "restore linked worktree {}",
+                    worktree.metadata.path.display()
+                )
+            })?,
+        );
     }
-    Ok(())
+    Ok(notices)
 }
 
 /// One entry of `git worktree list --porcelain`.
@@ -2848,7 +2970,7 @@ fn restore_linked_worktree(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     worktree: &LinkedWorktreeSnapshot,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let metadata = &worktree.metadata;
     validate_worktree_relative_path(&metadata.path)?;
     ensure_no_symlink_ancestors(repository, &metadata.path)?;
@@ -2874,7 +2996,7 @@ fn restore_linked_worktree(
                 directory.display(),
                 metadata.head_commit
             );
-            return Ok(());
+            return Ok(Vec::new());
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
@@ -2964,29 +3086,32 @@ fn restore_linked_worktree(
     )?;
     // All or nothing: a worktree left half-restored would be taken for a
     // finished one by a retry, which skips it and loses its dirty state.
-    if let Err(error) = restore_linked_worktree_state(runner, repository, &directory, worktree) {
-        let removed = git_success(
-            runner,
-            repository,
-            GitCommand {
-                arguments: vec![
-                    OsString::from("worktree"),
-                    OsString::from("remove"),
-                    OsString::from("--force"),
-                    OsString::from("--force"),
-                    directory.clone().into_os_string(),
-                ],
-                stdin: Vec::new(),
-                env: Vec::new(),
-            },
-            "remove the partly restored linked worktree",
-        );
-        return Err(match removed {
-            Ok(_) => error,
-            Err(removal) => error.context(format!("also failed to clean up: {removal:#}")),
-        });
-    }
-    Ok(())
+    let notices = match restore_linked_worktree_state(runner, repository, &directory, worktree) {
+        Ok(notices) => notices,
+        Err(error) => {
+            let removed = git_success(
+                runner,
+                repository,
+                GitCommand {
+                    arguments: vec![
+                        OsString::from("worktree"),
+                        OsString::from("remove"),
+                        OsString::from("--force"),
+                        OsString::from("--force"),
+                        directory.clone().into_os_string(),
+                    ],
+                    stdin: Vec::new(),
+                    env: Vec::new(),
+                },
+                "remove the partly restored linked worktree",
+            );
+            return Err(match removed {
+                Ok(_) => error,
+                Err(removal) => error.context(format!("also failed to clean up: {removal:#}")),
+            });
+        }
+    };
+    Ok(notices)
 }
 
 /// Applies a linked worktree's dirty state, operation and lock to its fresh
@@ -2996,7 +3121,8 @@ fn restore_linked_worktree_state(
     repository: &Path,
     directory: &Path,
     worktree: &LinkedWorktreeSnapshot,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut notices = Vec::new();
     let metadata = &worktree.metadata;
     let directory = directory.to_path_buf();
     if !worktree.staged_patch.is_empty() {
@@ -3021,8 +3147,7 @@ fn restore_linked_worktree_state(
     match (&metadata.git_operation, &worktree.operation_payloads) {
         (None, None) => {}
         (Some(operation), Some(payloads)) => {
-            operation::verify_objects(runner, &directory, operation)?;
-            operation::restore(runner, &directory, operation, payloads)?;
+            notices.push(operation::restore(&directory, operation, payloads)?);
         }
         _ => bail!("the linked worktree's Git operation metadata and payloads disagree"),
     }
@@ -3043,7 +3168,7 @@ fn restore_linked_worktree_state(
             "lock the linked worktree",
         )?;
     }
-    Ok(())
+    Ok(notices)
 }
 
 /// Whether `directory` is already a worktree of `repository` at `head_commit`.
@@ -3376,7 +3501,7 @@ impl WorktreeTar {
 pub(super) fn build_untracked_tar(
     repository: &Path,
     nul_paths: &[u8],
-    policy: UntrackedFiles,
+    _policy: UntrackedFiles,
     linked_worktrees: &BTreeSet<PathBuf>,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<Vec<u8>> {
@@ -3407,11 +3532,6 @@ pub(super) fn build_untracked_tar(
                     &fs::canonicalize(&source)
                         .with_context(|| format!("resolve {}", source.display()))?,
                 )
-            {
-                continue;
-            }
-            if policy == UntrackedFiles::IgnoreNestedRepositories
-                && is_nested_repository(&source, &metadata)?
             {
                 continue;
             }

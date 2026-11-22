@@ -14,6 +14,62 @@ impl Controller {
         requested_operation_id: Option<&str>,
         held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
+        self.checkpoint_session_latched_for_operation_with_consent(
+            admission,
+            session_id,
+            executor,
+            manager,
+            exclusivity,
+            export_policy,
+            requested_operation_id,
+            held_relay,
+            &mj_core::suspend_consent::CaptureConsent::default(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::controller) async fn checkpoint_session_latched_for_operation_with_consent(
+        &self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: Option<&SessionManagerControl>,
+        exclusivity: LatchExclusivity,
+        export_policy: CheckpointExportPolicy,
+        requested_operation_id: Option<&str>,
+        held_relay: Option<ControllerRelayLease>,
+        consent: &mj_core::suspend_consent::CaptureConsent,
+    ) -> Result<LatchedCheckpoint> {
+        self.checkpoint_session_latched_for_operation_with_delivery(
+            admission,
+            session_id,
+            executor,
+            manager,
+            exclusivity,
+            export_policy,
+            CheckpointDelivery::DownloadToDaemon,
+            requested_operation_id,
+            held_relay,
+            consent,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::controller) async fn checkpoint_session_latched_for_operation_with_delivery(
+        &self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: Option<&SessionManagerControl>,
+        exclusivity: LatchExclusivity,
+        export_policy: CheckpointExportPolicy,
+        delivery: CheckpointDelivery,
+        requested_operation_id: Option<&str>,
+        held_relay: Option<ControllerRelayLease>,
+        consent: &mj_core::suspend_consent::CaptureConsent,
+    ) -> Result<LatchedCheckpoint> {
         self.checkpoint_session_latched_with_recovery_stage(
             admission,
             session_id,
@@ -21,9 +77,11 @@ impl Controller {
             manager,
             exclusivity,
             export_policy,
+            delivery,
             exclusivity.holds_through_close(),
             requested_operation_id,
             held_relay,
+            consent,
         )
         .await
     }
@@ -37,14 +95,27 @@ impl Controller {
         manager: Option<&SessionManagerControl>,
         exclusivity: LatchExclusivity,
         export_policy: CheckpointExportPolicy,
+        delivery: CheckpointDelivery,
         recovery_copy: bool,
         requested_operation_id: Option<&str>,
         held_relay: Option<ControllerRelayLease>,
+        consent: &mj_core::suspend_consent::CaptureConsent,
     ) -> Result<LatchedCheckpoint> {
         let mut layout = self.session_export_layout(session_id, executor)?;
         if export_policy == CheckpointExportPolicy::OriginDelta {
+            let origin_override = self
+                .state
+                .checkout(session_id)
+                .ok()
+                .and_then(|checkout| checkout.managed_worktree().cloned())
+                .and_then(|worktree| {
+                    crate::controller::lifecycle::origin_delta::managed_origin_override(&worktree)
+                });
             for repository in &mut layout.repositories {
                 repository.capture = CheckpointRepositoryCapture::OriginDelta;
+                if repository.origin_override.is_none() {
+                    repository.origin_override = origin_override.clone();
+                }
             }
         } else if export_policy == CheckpointExportPolicy::SessionHandoff {
             for repository in &mut layout.repositories {
@@ -57,17 +128,19 @@ impl Controller {
         // wrappers that follow (up to the daemon action) carry a copy on the
         // thread stack; a direct `mj checkpoint` overflowed a 2 MiB Tokio
         // worker stack that way. Boxing it once here keeps them small.
-        Box::pin(self.checkpoint_session_latched_with_layout(
+        Box::pin(self.checkpoint_session_latched_with_layout_and_delivery(
             admission,
             session_id,
             executor,
             manager,
             exclusivity,
             export_policy,
+            delivery,
             recovery_copy && export_policy != CheckpointExportPolicy::SessionHandoff,
             requested_operation_id,
             layout,
             held_relay,
+            consent,
         ))
         .await
     }
@@ -79,7 +152,7 @@ impl Controller {
     /// such as a Move's hold on its source; the checkpoint uses it instead of
     /// leasing another.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::controller) async fn checkpoint_session_latched_with_layout(
+    pub(in crate::controller) async fn checkpoint_session_latched_with_layout_and_delivery(
         &self,
         admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
@@ -87,10 +160,12 @@ impl Controller {
         manager: Option<&SessionManagerControl>,
         exclusivity: LatchExclusivity,
         export_policy: CheckpointExportPolicy,
+        delivery: CheckpointDelivery,
         recovery_copy: bool,
         requested_operation_id: Option<&str>,
         layout: SessionExportLayout,
         held_relay: Option<ControllerRelayLease>,
+        consent: &mj_core::suspend_consent::CaptureConsent,
     ) -> Result<LatchedCheckpoint> {
         crate::worker_lifecycle::run_admitted(admission, session_id, async {
         let pending_legacy_queue = crate::database::load_move_operation(session_id)?.is_some_and(|operation| operation.queue_admission_started && !operation.queue_admission_finished);
@@ -553,6 +628,15 @@ impl Controller {
                 if keys.len() == 1 { "It will" } else { "They will" },
             ));
         }
+        if relay.connection_mut().protocol_version()
+            >= mj_core::relay::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL
+        {
+            canonical_session.native_use_evidence = relay
+                .connection_mut()
+                .read_checkpoint_native_use(barrier_command_id.clone(), cursor.clone())
+                .await
+                .context("read the worker's native-session-use evidence at the checkpoint cut")?;
+        }
         let native_session_id = barrier
             .operational
             .native_session_id
@@ -575,6 +659,7 @@ impl Controller {
         // bookkeeping events, and only by those; resume rolls the controller's
         // projection back to the archived record.
         if export_policy == CheckpointExportPolicy::ReuseUnchangedArchive
+            && delivery == CheckpointDelivery::DownloadToDaemon
             // Host worktree edits do not advance the relay frontier. Always
             // recapture before retiring one, including archives written by
             // older workers that only recorded its Git metadata.
@@ -644,7 +729,7 @@ impl Controller {
         let exported: Result<CheckpointArtifact> = async {
             let target_files = target_files.get_or_insert_with(own_target_files);
             let spec = CheckpointExportSpec {
-                ignore_nested_repositories: export_policy == CheckpointExportPolicy::IgnoreNestedRepositories,
+                consent: consent.clone(),
                 protocol_version: CheckpointRepositoryCapture::export_protocol_version(&repositories),
                 session: session_manifest(&native_session_id),
                 target: target_manifest,
@@ -671,8 +756,9 @@ impl Controller {
                     workspace_root: spec.workspace_root.clone(),
                     repositories: spec.repositories.clone(),
                     report_directories: spec.report_directories.clone(),
-                    allow_empty_native: !current_native_session_received_prompt(
+                    allow_empty_native: current_native_session_is_unused(
                         &spec.canonical_session,
+                        Some(spec.session.native_session_id.as_str()),
                     ),
                     stage_path: target_path(&remote_stage),
                     refresh_existing: true,
@@ -788,6 +874,54 @@ impl Controller {
                 bail!("target checkpoint event frontier digest changed");
             }
 
+            let captured_queue = Some((
+                spec.canonical_session.queued_prompts.clone(),
+                spec.canonical_session.mailbox.clone(),
+            ));
+            let exported_manifest = target_checkpoint.manifest.clone();
+
+            if delivery == CheckpointDelivery::KeepOnSourceTarget {
+                if completion == CheckpointCompletion::HeldBarrier {
+                    relay
+                        .sync_snapshot()
+                        .await
+                        .and_then(|snapshot| {
+                            if releases_after_capture {
+                                validate_automatic_checkpoint_barrier_snapshot(
+                                    &snapshot,
+                                    &barrier_command_id,
+                                    &cursor,
+                                    session.harness_kind,
+                                )
+                            } else {
+                                validate_checkpoint_barrier_snapshot(
+                                    &snapshot,
+                                    &barrier_command_id,
+                                    &cursor,
+                                )
+                            }
+                        })
+                        .context("checkpoint barrier changed while exporting source Move archive")?;
+                }
+                // Keep the archive on the source target so Move's transport
+                // streams it directly to the destination without staging on
+                // daemon disk.
+                target_files.handed_off();
+                return Ok(CheckpointArtifact {
+                    metadata: CheckpointMetadata {
+                        archive_path: target_checkpoint.path,
+                        sha256: target_checkpoint.sha256,
+                        created_at: checkpointed_at.clone(),
+                        event_frontier: target_checkpoint.event_frontier,
+                    },
+                    native_session_id,
+                    event_frontier_digest: expected_digest,
+                    on_source_target: true,
+                    manifest: exported_manifest,
+                    captured_queue,
+                });
+            }
+
             // Checkpoint archives are immutable once controller metadata points
             // at them. A repeated checkpoint may have the same event frontier,
             // so a frontier-only name could overwrite the last known-good
@@ -872,6 +1006,17 @@ impl Controller {
                 // Packing removed the stage and the cleanup just removed the
                 // archive, so nothing is left for the exit to remove.
                 target_files.handed_off();
+                // Best-effort atomic publish into host-owned snapshot cache
+                // before the session's environment (e.g. container) is retired.
+                if exclusivity == LatchExclusivity::HoldThroughClose {
+                    super::publish_host_snapshot_cache_best_effort(
+                        session_id,
+                        &backend,
+                        verified.archive_path(),
+                        verified.sha256(),
+                        executor,
+                    );
+                }
                 CheckpointMetadata {
                     archive_path: verified.archive_path().to_path_buf(),
                     sha256: verified.sha256().to_string(),
@@ -883,6 +1028,9 @@ impl Controller {
                 metadata,
                 native_session_id,
                 event_frontier_digest: expected_digest,
+                on_source_target: false,
+                manifest: exported_manifest,
+                captured_queue,
             })
         }
         .await;

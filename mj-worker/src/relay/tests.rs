@@ -6719,7 +6719,7 @@ fn clearable_relay(root: &Path) -> DurableRelay {
 }
 
 // The admission gate and the published capability must agree per harness:
-// Kimi clears like Codex and Claude; every other harness still refuses.
+// Codex, Claude, Kimi, and Antigravity support /clear; every other harness refuses.
 #[test]
 fn clear_admission_matches_the_published_capability_per_harness() {
     for (harness, supported) in [
@@ -6730,7 +6730,7 @@ fn clear_admission_matches_the_published_capability_per_harness() {
         (HarnessKind::Muse, false),
         (HarnessKind::OpenCode, false),
         (HarnessKind::Dsh, false),
-        (HarnessKind::Antigravity, false),
+        (HarnessKind::Antigravity, true),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
@@ -8150,6 +8150,7 @@ fn request_mailbox_drain_for_test(
         request_id,
         RelayRequest::DrainMailbox {
             hook_event: "PostToolBatch".into(),
+            conversation_id: None,
         },
     ));
     let RelayResponseBody::Ok {
@@ -8168,7 +8169,7 @@ fn request_mailbox_drain_for_test(
 }
 
 fn drain_post_tool_batch(relay: &mut DurableRelay) -> (Option<String>, usize, Option<String>) {
-    match relay.drain_mailbox("PostToolBatch").unwrap() {
+    match relay.drain_mailbox("PostToolBatch", None).unwrap() {
         RelayResponsePayload::MailboxDrained {
             lease_id,
             text,
@@ -8453,7 +8454,7 @@ fn mailbox_post_tool_use_drains_follow_the_resolved_delivery_mode() {
         },
     );
     let post_tool_use_drain =
-        |relay: &mut DurableRelay| match relay.drain_mailbox("PostToolUse").unwrap() {
+        |relay: &mut DurableRelay| match relay.drain_mailbox("PostToolUse", None).unwrap() {
             RelayResponsePayload::MailboxDrained {
                 lease_id,
                 text,
@@ -9498,6 +9499,7 @@ fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_o
             .into_iter()
             .collect(),
         native_session_unused: true,
+        native_use_evidence: None,
         mailbox: None,
     };
     fs::write(
@@ -11076,4 +11078,287 @@ fn answered_elicitation_starts_a_new_auxiliary_reply_before_unlabelled_chunks() 
     drop(relay);
     let relay = DurableRelay::open(temp.path(), SESSION, "elicitation-answer-reopen").unwrap();
     check(&relay);
+}
+
+#[test]
+fn checkpoint_native_use_returns_worker_evidence_at_cut_and_refuses_off_cut() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "native-use-cut").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "native-cut-1".into(),
+            native_continuity_lost: false,
+            resumed: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let barrier_id = "barrier-native-use".to_owned();
+    let cut = ready_checkpoint(&mut relay, &barrier_id);
+    let envelope = |request_id: &str, request: RelayRequest| RelayRequestEnvelope {
+        request_id: request_id.into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request,
+    };
+    let response = relay.handle(envelope(
+        "read-native-use",
+        RelayRequest::ReadCheckpointNativeUse {
+            barrier_command_id: barrier_id.clone(),
+            cut: cut.clone(),
+        },
+    ));
+    match response.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::CheckpointNativeUse {
+                    native_use_evidence,
+                },
+        } => {
+            let evidence = native_use_evidence.expect("worker owns native-use evidence");
+            assert_eq!(evidence.version, 1);
+            assert_eq!(evidence.native_session_id, "native-cut-1");
+            assert_eq!(evidence.usage, NativeSessionUse::Unused);
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    // Wrong barrier ID is refused.
+    let refused = relay.handle(envelope(
+        "read-native-use-refused",
+        RelayRequest::ReadCheckpointNativeUse {
+            barrier_command_id: "other-barrier".into(),
+            cut,
+        },
+    ));
+    assert!(matches!(refused.body, RelayResponseBody::Error { .. }));
+}
+
+#[test]
+fn restored_schema_15_seed_preserves_load_before_replace_and_used_or_unknown_evidence() {
+    // 1. Unused evidence restored into a fresh relay (native_session_id == None)
+    //    must return LoadBeforeReplace, and opening a replacement fresh ID must
+    //    record replaced_unused_native_session_id and reset evidence to the fresh ID.
+    let temp = tempfile::tempdir().unwrap();
+    let unused_seed = mj_core::relay::RestoredRelaySeed {
+        command_ledger: None,
+        assessment_state: None,
+        notification_stack: None,
+        event_frontier: 4,
+        event_frontier_digest: "a".repeat(64),
+        queued_prompts: Vec::new(),
+        accepted_config: Default::default(),
+        native_session_unused: true,
+        mailbox: None,
+        native_use_evidence: Some(mj_core::relay::NativeSessionUseEvidence {
+            version: 1,
+            native_session_id: "archived-unused".into(),
+            opened_ordinal: Some(2),
+            usage: NativeSessionUse::Unused,
+        }),
+    };
+    std::fs::write(
+        mj_core::relay::restored_relay_seed_path(temp.path()),
+        serde_json::to_vec(&unused_seed).unwrap(),
+    )
+    .unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "restore-unused-evidence").unwrap();
+    assert_eq!(relay.operational_state().native_session_id, None);
+    assert_eq!(
+        relay.native_session_history(),
+        NativeSessionHistory::LoadBeforeReplace
+    );
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "fresh-replacement".into(),
+            native_continuity_lost: false,
+            resumed: false,
+            replaced_unused_native_session_id: Some("archived-unused".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        relay.operational_state().replaced_unused_native_session_id.as_deref(),
+        Some("archived-unused")
+    );
+    let fresh_evidence = relay.snapshot.native_use_evidence.as_ref().unwrap();
+    assert_eq!(fresh_evidence.native_session_id, "fresh-replacement");
+    assert_eq!(fresh_evidence.usage, NativeSessionUse::Unused);
+
+    // 2. Unknown or Used evidence restored into a fresh relay must return
+    //    MayHaveHistory and preserve Unknown / Used when the archived ID opens.
+    for usage in [NativeSessionUse::Unknown, NativeSessionUse::Used] {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = mj_core::relay::RestoredRelaySeed {
+            command_ledger: None,
+            assessment_state: None,
+            notification_stack: None,
+            event_frontier: 4,
+            event_frontier_digest: "a".repeat(64),
+            queued_prompts: Vec::new(),
+            accepted_config: Default::default(),
+            native_session_unused: false,
+            mailbox: None,
+            native_use_evidence: Some(mj_core::relay::NativeSessionUseEvidence {
+                version: 1,
+                native_session_id: "archived-id".into(),
+                opened_ordinal: Some(2),
+                usage,
+            }),
+        };
+        std::fs::write(
+            mj_core::relay::restored_relay_seed_path(dir.path()),
+            serde_json::to_vec(&seed).unwrap(),
+        )
+        .unwrap();
+        let mut relay = DurableRelay::open(dir.path(), SESSION, "restore-used-evidence").unwrap();
+        assert_eq!(
+            relay.native_session_history(),
+            NativeSessionHistory::MayHaveHistory
+        );
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "archived-id".into(),
+                native_continuity_lost: false,
+                resumed: false,
+                replaced_unused_native_session_id: None,
+            })
+            .unwrap();
+        let opened_evidence = relay.snapshot.native_use_evidence.as_ref().unwrap();
+        assert_eq!(opened_evidence.native_session_id, "archived-id");
+        assert_eq!(opened_evidence.usage, usage);
+        assert_eq!(
+            relay.native_session_history(),
+            NativeSessionHistory::MayHaveHistory
+        );
+    }
+}
+
+#[test]
+fn antigravity_hook_steering_and_conversation_id_filtering() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Antigravity);
+    relay.set_steering_delivery_mode(HarnessKind::Antigravity, true);
+    relay.set_mailbox_delivery_mode(mj_core::mailbox::MailboxDeliveryMode::ToolBoundary);
+    relay.set_acp_ready(true);
+    relay.set_steering_supported(Some(false));
+    let automatic = relay.effective_steering_supported() == Some(true);
+    relay.set_automatic_steering(automatic);
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "agy-conv-1".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+
+    assert_eq!(relay.operational_state().steering_supported, Some(true));
+    assert!(automatic);
+
+    submit_relay(&mut relay, "agy-initial-prompt", prompt("initial task"));
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    submit_relay(
+        &mut relay,
+        "agy-steer-prompt",
+        prompt("change direction now"),
+    );
+    // Automatic steering should queue a hook steer without claiming an ACP steer dispatch.
+    let claimed_after_queue = relay.claim_pending_commands(true).unwrap();
+    assert!(claimed_after_queue.is_empty());
+
+    // Mismatched conversation_id (internal sub-agent) must return empty and not consume the lease.
+    let subagent_drain = relay
+        .drain_mailbox("PostToolBatch", Some("agy-subagent-99"))
+        .unwrap();
+    assert!(matches!(
+        subagent_drain,
+        RelayResponsePayload::MailboxDrained {
+            lease_id: None,
+            text: None,
+            count: 0,
+            ..
+        }
+    ));
+
+    // Matching conversation_id drains the steer and acks it to Applied.
+    let root_drain = relay
+        .drain_mailbox("PostToolBatch", Some("agy-conv-1"))
+        .unwrap();
+    let RelayResponsePayload::MailboxDrained {
+        lease_id: Some(lease_id),
+        text: Some(text),
+        count,
+        ..
+    } = root_drain
+    else {
+        panic!("expected Antigravity steer lease, got {root_drain:?}");
+    };
+    assert_eq!(count, 1);
+    assert!(text.contains("change direction now"), "{text}");
+
+    let ack = relay.ack_mailbox(&lease_id).unwrap();
+    assert!(matches!(
+        ack,
+        RelayResponsePayload::MailboxAcknowledged { acknowledged: true }
+    ));
+    assert_eq!(
+        relay.snapshot.steering.as_ref().map(|s| s.status),
+        Some(mj_core::relay::SteeringStatus::Applied)
+    );
+
+    // Finish turn 1 and /clear to a new native_session_id.
+    finish_prompt(&mut relay, "agy-initial-prompt");
+    relay.mark_native_session_used().unwrap();
+    submit_relay(&mut relay, "agy-clear-context", RelayCommand::ClearContext);
+    let claimed_clear = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed_clear.len(), 1);
+    relay
+        .record_command_completed(
+            "agy-clear-context",
+            RelayCommandOutcome::ContextCleared {
+                native_session_id: "agy-conv-2".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+
+    // Queue a mailbox event in the new conversation: old conversation_id is ignored, new one drains.
+    let event = mj_core::mailbox::MailboxEvent {
+        key: "api:after-clear".into(),
+        source: "api".into(),
+        wake: false,
+        created_at_ms: 2,
+        body: mj_core::mailbox::MailboxEventBody::PlainText {
+            text: "post-clear mailbox note".into(),
+        },
+    };
+    submit_relay(
+        &mut relay,
+        "mailbox-after-clear",
+        RelayCommand::DeliverMailboxEvent { event },
+    );
+    let stale_drain = relay
+        .drain_mailbox("PostToolBatch", Some("agy-conv-1"))
+        .unwrap();
+    assert!(matches!(
+        stale_drain,
+        RelayResponsePayload::MailboxDrained {
+            lease_id: None,
+            count: 0,
+            ..
+        }
+    ));
+    let fresh_drain = relay
+        .drain_mailbox("PostToolBatch", Some("agy-conv-2"))
+        .unwrap();
+    assert!(matches!(
+        fresh_drain,
+        RelayResponsePayload::MailboxDrained {
+            lease_id: Some(_),
+            text: Some(ref t),
+            count: 1,
+            ..
+        } if t.contains("post-clear mailbox note")
+    ));
 }

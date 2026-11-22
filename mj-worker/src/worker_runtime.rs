@@ -324,7 +324,7 @@ pub use mj_core::harness_install::ManagedHarness;
 #[cfg(unix)]
 mod gh_rules;
 #[cfg(unix)]
-mod harness_launch;
+pub(crate) mod harness_launch;
 #[cfg(unix)]
 mod json_gh_rules;
 #[cfg(unix)]
@@ -346,6 +346,7 @@ pub async fn discover_profile_config(
     anyhow::bail!("profile discovery requires a Unix worker host")
 }
 
+pub(crate) mod guardian_endpoint;
 #[cfg(unix)]
 mod history;
 #[cfg(unix)]
@@ -577,4 +578,4 @@ mod startup_record_tests {
 }
 
 #[cfg(all(test, unix))]
-mod relay_tests;
+pub(crate) mod relay_tests;

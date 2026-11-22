@@ -152,10 +152,10 @@ impl DurableRelay {
                             SteeringDeliveryMode::Acp | SteeringDeliveryMode::AcpWithMailbox => {
                                 self.steering_supported != Some(false)
                             }
-                            SteeringDeliveryMode::ClaudePostToolBatch => {
+                            SteeringDeliveryMode::HookPostToolBatch => {
                                 mj_core::acp::steering_text_context(prompt).is_some()
                             }
-                            SteeringDeliveryMode::ClaudeTurnEnd => false,
+                            SteeringDeliveryMode::HookTurnEnd => false,
                         }
                         && self
                             .snapshot
@@ -305,6 +305,322 @@ impl DurableRelay {
         command_id: &str,
         command: RelayCommand,
     ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
+        self.submit_command_inner(command_id, command, false)
+    }
+
+    fn verify_expected_store_id(&self, expected_store_id: &str) -> Option<RelayProtocolError> {
+        if expected_store_id.trim().is_empty() {
+            return Some(relay_protocol_error(
+                RelayErrorCode::InvalidRequest,
+                "expected_store_id is required",
+                false,
+                None,
+            ));
+        }
+        if self.snapshot.store_id.as_deref() != Some(expected_store_id) {
+            return Some(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                format!(
+                    "relay store_id mismatch: expected {expected_store_id}, actual {}",
+                    self.snapshot.store_id.as_deref().unwrap_or("<none>")
+                ),
+                false,
+                Some(RelayErrorDetail::StoreMismatch {
+                    expected_store_id: expected_store_id.to_owned(),
+                    actual_store_id: self.snapshot.store_id.clone(),
+                }),
+            ));
+        }
+        None
+    }
+
+    pub(super) fn hold_in_place_move_dispatch(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+    ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
+        if operation_id.trim().is_empty() {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidRequest,
+                "operation_id is required",
+                false,
+                None,
+            )));
+        }
+        if let Some(error) = self.verify_expected_store_id(expected_store_id) {
+            return Ok(Err(error));
+        }
+        if let Some(existing) = &self.snapshot.in_place_move_hold {
+            if existing.operation_id == operation_id {
+                return Ok(Ok(RelayResponsePayload::InPlaceMoveDispatchHeld {
+                    captured_pending_command_ids: existing.captured_pending_command_ids.clone(),
+                }));
+            }
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                format!(
+                    "dispatch is already held by in-place move operation {}",
+                    existing.operation_id
+                ),
+                false,
+                None,
+            )));
+        }
+        let captured_pending_command_ids: Vec<String> = self
+            .snapshot
+            .queued_prompts
+            .iter()
+            .map(|queued| queued.command_id.clone())
+            .collect();
+        self.snapshot.in_place_move_hold = Some(mj_core::relay::InPlaceMoveHold {
+            operation_id: operation_id.to_owned(),
+            captured_pending_command_ids: captured_pending_command_ids.clone(),
+            harness_restarted: false,
+        });
+        self.persist_snapshot()?;
+        Ok(Ok(RelayResponsePayload::InPlaceMoveDispatchHeld {
+            captured_pending_command_ids,
+        }))
+    }
+
+    pub(super) fn discard_held_move_commands(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        command_ids: &[String],
+    ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
+        if let Some(error) = self.verify_expected_store_id(expected_store_id) {
+            return Ok(Err(error));
+        }
+        if self.in_place_harness_restart_in_flight.is_some() {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "cannot discard held commands while an in-place harness restart is in progress",
+                true,
+                None,
+            )));
+        }
+        let captured = match &self.snapshot.in_place_move_hold {
+            Some(hold) if hold.operation_id == operation_id => {
+                hold.captured_pending_command_ids.clone()
+            }
+            Some(hold) => {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    format!(
+                        "dispatch is held by a different in-place move operation {}",
+                        hold.operation_id
+                    ),
+                    false,
+                    None,
+                )));
+            }
+            None => {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "no active in-place move dispatch hold",
+                    false,
+                    None,
+                )));
+            }
+        };
+        for command_id in command_ids {
+            if !captured.iter().any(|id| id == command_id) {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidRequest,
+                    format!(
+                        "command {command_id} was not captured by in-place move hold {operation_id}"
+                    ),
+                    false,
+                    None,
+                )));
+            }
+        }
+        for command_id in command_ids {
+            if self
+                .snapshot
+                .queued_prompts
+                .iter()
+                .any(|queued| queued.command_id == *command_id)
+            {
+                self.record_command_rejected(
+                    command_id,
+                    mj_core::event_outcome::OutcomeReason::AdmissionRejected,
+                    "Discarded by in-place move",
+                )?;
+            }
+        }
+        Ok(Ok(RelayResponsePayload::HeldMoveCommandsDiscarded))
+    }
+
+    pub(super) fn submit_front_command(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        command_id: &str,
+        command: RelayCommand,
+    ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
+        if let Some(error) = self.verify_expected_store_id(expected_store_id) {
+            return Ok(Err(error));
+        }
+        if self.in_place_harness_restart_in_flight.is_some() {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "cannot submit to front while an in-place harness restart is in progress",
+                true,
+                None,
+            )));
+        }
+        match &self.snapshot.in_place_move_hold {
+            Some(hold) if hold.operation_id == operation_id => {}
+            Some(hold) => {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    format!(
+                        "SubmitFront rejected: dispatch is held by a different in-place move operation {}",
+                        hold.operation_id
+                    ),
+                    false,
+                    None,
+                )));
+            }
+            None => {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "SubmitFront requires an active in-place move dispatch hold",
+                    false,
+                    None,
+                )));
+            }
+        }
+        self.submit_command_inner(command_id, command, true)
+    }
+
+    pub(super) fn release_in_place_move_dispatch(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+    ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
+        if let Some(error) = self.verify_expected_store_id(expected_store_id) {
+            return Ok(Err(error));
+        }
+        if self.in_place_harness_restart_in_flight.is_some() {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "cannot release in-place move dispatch hold while an in-place harness restart is in progress",
+                true,
+                None,
+            )));
+        }
+        match &self.snapshot.in_place_move_hold {
+            Some(hold) if hold.operation_id == operation_id => {
+                self.snapshot.in_place_move_hold = None;
+                self.persist_snapshot()?;
+                self.promote_next_queued_command()?;
+                Ok(Ok(RelayResponsePayload::InPlaceMoveDispatchReleased))
+            }
+            Some(hold) => Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                format!(
+                    "dispatch is held by a different in-place move operation {}",
+                    hold.operation_id
+                ),
+                false,
+                None,
+            ))),
+            None => Ok(Ok(RelayResponsePayload::InPlaceMoveDispatchReleased)),
+        }
+    }
+
+    pub(crate) fn admit_in_place_harness_restart(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+    ) -> std::result::Result<InPlaceHarnessRestartDecision, Box<RelayProtocolError>> {
+        if let Some(error) = self.verify_expected_store_id(expected_store_id) {
+            return Err(Box::new(error));
+        }
+        let Some(hold) = &self.snapshot.in_place_move_hold else {
+            return Err(Box::new(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "RestartHarnessInPlace requires an active in-place move dispatch hold",
+                false,
+                None,
+            )));
+        };
+        if hold.operation_id != operation_id {
+            return Err(Box::new(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                format!(
+                    "RestartHarnessInPlace rejected: dispatch is held by a different in-place move operation {}",
+                    hold.operation_id
+                ),
+                false,
+                None,
+            )));
+        }
+        if self.in_place_harness_restart_in_flight.is_some() {
+            return Err(Box::new(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "an in-place harness restart is already in progress",
+                true,
+                None,
+            )));
+        }
+        if hold.harness_restarted {
+            return Ok(InPlaceHarnessRestartDecision::AlreadyRestarted);
+        }
+        if self.turn_in_progress() || self.effectful_command_in_progress() {
+            return Err(Box::new(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "cannot restart harness in place while a turn or effectful command is in progress",
+                true,
+                None,
+            )));
+        }
+        self.in_place_harness_restart_in_flight = Some(operation_id.to_owned());
+        Ok(InPlaceHarnessRestartDecision::Proceed)
+    }
+
+    pub(crate) fn cancel_in_place_harness_restart(&mut self, operation_id: &str) {
+        if self.in_place_harness_restart_in_flight.as_deref() == Some(operation_id) {
+            self.in_place_harness_restart_in_flight = None;
+        }
+    }
+
+    pub(crate) fn mark_in_place_harness_restarted(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.snapshot.store_id.as_deref() == Some(expected_store_id),
+            "relay store_id changed before completing in-place harness restart for {operation_id}"
+        );
+        anyhow::ensure!(
+            self.in_place_harness_restart_in_flight.as_deref() == Some(operation_id),
+            "in-place harness restart for {operation_id} is no longer in flight"
+        );
+        let Some(hold) = self.snapshot.in_place_move_hold.as_mut() else {
+            bail!("in-place move dispatch hold disappeared before completing harness restart for {operation_id}");
+        };
+        anyhow::ensure!(
+            hold.operation_id == operation_id,
+            "in-place move dispatch hold owner changed to {} before completing harness restart for {operation_id}",
+            hold.operation_id
+        );
+        hold.harness_restarted = true;
+        self.persist_snapshot()?;
+        self.in_place_harness_restart_in_flight = None;
+        Ok(())
+    }
+
+    fn submit_command_inner(
+        &mut self,
+        command_id: &str,
+        command: RelayCommand,
+        insert_at_front: bool,
+    ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
         if let Err(error) =
             ensure_serialized_budget(&command, RELAY_COMMAND_BYTE_BUDGET, "relay command")
         {
@@ -429,14 +745,7 @@ impl DurableRelay {
             )));
         }
         if matches!(command, RelayCommand::ClearContext) {
-            if !matches!(
-                self.verdict_harness,
-                Some(
-                    mj_core::config::HarnessKind::Codex
-                        | mj_core::config::HarnessKind::Claude
-                        | mj_core::config::HarnessKind::Kimi
-                )
-            ) {
+            if !self.supports_clear_context() {
                 return Ok(Err(relay_protocol_error(
                     RelayErrorCode::InvalidState,
                     "This harness does not support /clear",
@@ -929,6 +1238,7 @@ impl DurableRelay {
                 command_id: command_id.to_owned(),
                 command: command.clone(),
                 created_at_ms,
+                insert_at_front,
             },
         )?;
 
@@ -1199,7 +1509,8 @@ impl DurableRelay {
         // Mailbox and user input share the same serialized steering decision.
         // Claim the events into the durable queue before dispatch, so a hook,
         // retry, restart or idle wake cannot also deliver them.
-        if self.steering_delivery_mode == SteeringDeliveryMode::AcpWithMailbox
+        if self.snapshot.in_place_move_hold.is_none()
+            && self.steering_delivery_mode == SteeringDeliveryMode::AcpWithMailbox
             && self.snapshot.queued_prompts.is_empty()
             && self.automatic_steer_active_prompt().is_some()
             && self
@@ -1401,7 +1712,7 @@ impl DurableRelay {
     /// asked. It goes through admission like an Escape steer, so the journal
     /// and every client see the same steering operation.
     fn submit_automatic_steer(&mut self) -> Result<()> {
-        if self.live_baseline_pending() {
+        if self.live_baseline_pending() || self.snapshot.in_place_move_hold.is_some() {
             return Ok(());
         }
 
@@ -1444,7 +1755,7 @@ impl DurableRelay {
         if !self.automatic_steering || self.checkpoint_only || self.has_held_claude_turn() {
             return None;
         }
-        if self.steering_delivery_mode == SteeringDeliveryMode::ClaudeTurnEnd {
+        if self.steering_delivery_mode == SteeringDeliveryMode::HookTurnEnd {
             return None;
         }
         // Automatic steering is only useful for a Hel-owned prompt. In a
@@ -1560,11 +1871,12 @@ impl DurableRelay {
         &mut self,
         maximum_runs: usize,
     ) -> Result<Vec<ClaimedRelayCommand>> {
-        let maximum_runs = if self.live_baseline_pending() {
-            0
-        } else {
-            maximum_runs
-        };
+        let maximum_runs =
+            if self.live_baseline_pending() || self.snapshot.in_place_move_hold.is_some() {
+                0
+            } else {
+                maximum_runs
+            };
         if self.checkpoint_only || self.snapshot.checkpoint_barrier.is_some() {
             return Ok(Vec::new());
         }
@@ -2264,7 +2576,7 @@ impl DurableRelay {
     /// Start the head of the durable command queue once the relay is idle.
     /// Entries run one at a time; restart recovery precedes previously queued input.
     pub(super) fn promote_next_queued_command(&mut self) -> Result<Option<u64>> {
-        if self.live_baseline_pending() {
+        if self.live_baseline_pending() || self.snapshot.in_place_move_hold.is_some() {
             return Ok(None);
         }
         let recovery = self
@@ -2379,6 +2691,7 @@ impl DurableRelay {
                 command_id: command_id.clone(),
                 command: RelayCommand::MailboxWake { events },
                 created_at_ms: epoch_millis(),
+                insert_at_front: false,
             },
         )?;
         Ok(())
@@ -2386,7 +2699,7 @@ impl DurableRelay {
 
     fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, &str)> {
         if hook_event != "PostToolBatch"
-            || self.steering_delivery_mode != SteeringDeliveryMode::ClaudePostToolBatch
+            || self.steering_delivery_mode != SteeringDeliveryMode::HookPostToolBatch
             // A turn being interrupted discards its input; the prompt runs next.
             || self.turn_cancellation_pending()
         {
@@ -2441,11 +2754,27 @@ impl DurableRelay {
     /// prompt context), so an unresolved or unsafe provider never receives a
     /// developer message between a tool call and its output (#1277).
     /// `PostToolBatch` drains are unaffected.
-    pub fn drain_mailbox(&mut self, hook_event: &str) -> Result<RelayResponsePayload> {
+    pub fn drain_mailbox(
+        &mut self,
+        hook_event: &str,
+        conversation_id: Option<&str>,
+    ) -> Result<RelayResponsePayload> {
         anyhow::ensure!(
             matches!(hook_event, "PostToolUse" | "PostToolBatch"),
             "unsupported mailbox hook event"
         );
+        if let (Some(incoming), Some(expected)) = (
+            conversation_id.filter(|id| !id.is_empty()),
+            self.snapshot.native_session_id.as_deref(),
+        ) && incoming != expected
+        {
+            return Ok(RelayResponsePayload::MailboxDrained {
+                lease_id: None,
+                text: None,
+                count: 0,
+                contexts: Vec::new(),
+            });
+        }
         if hook_event == "PostToolUse"
             && self.mailbox_delivery_mode
                 != Some(mj_core::mailbox::MailboxDeliveryMode::ToolBoundary)

@@ -79,7 +79,7 @@ fn scheduler_defaults() -> Value {
 /// kind's fields, so the editor never offers them.
 fn profile_defaults(kind: &str) -> Value {
     let mut fields = json!({"enabled":true,"kind":kind,"home":"","environment":{},"context_window_bytes":null,
-               "load_balancing_may_consume_credits":false});
+               "load_balancing_may_consume_credits":false,"mjolnir_guardian":true});
     let object = fields.as_object_mut().unwrap();
     match kind {
         "codex" => {
@@ -93,11 +93,6 @@ fn profile_defaults(kind: &str) -> Value {
             object.insert("third_party_models".to_owned(), Value::Bool(true));
         }
         _ => {}
-    }
-    if serde_json::from_value::<mj_core::config::HarnessKind>(Value::String(kind.to_owned()))
-        .is_ok_and(|kind| kind.guardian() == mj_core::config::GuardianReviewer::Mjolnir)
-    {
-        object.insert("mjolnir_guardian".to_owned(), Value::Bool(true));
     }
     object.insert("models".to_owned(), json!([]));
     fields
@@ -1069,7 +1064,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Antigravity only: offer the Claude and GPT models of the account's third-party quota pool. Off: the profile offers only Gemini models, refuses switching to the others, and hides that pool's quota. A session already on one keeps it until you switch."
         }
         "mjolnir_guardian" => {
-            "On runtimes that ask for approvals, Mjolnir reviews each action this agent asks permission for and allows or denies it, asking you only when it cannot decide. Off: every action that needs permission asks you. Applies to new sessions."
+            "On runtimes that keep configured approvals, Mjolnir reviews the tool permission requests that reach it after the harness applies its own rules. Off: pending requests go to your permission form. Applies to new sessions."
         }
         "claude_permission_mode" => {
             "How new sessions on runtimes that ask for approvals handle Claude's permissions. Auto: Claude's classifier approves or denies each action. Accept edits: file edits run, everything else asks you. Manual: every action that needs permission asks you. Runtimes that allow all actions always bypass permissions."

@@ -804,11 +804,7 @@ impl Controller {
                 .ensure_ready(&session.last_profile)?;
             // A recovered Move may already have sealed its handoff. Check
             // the recorded source before running any destination preflight.
-            let move_bundle = if self.state.checkout(session_id)?.project_directory().is_none() {
-                self.move_destination_bundle(session_id, executor)?
-            } else {
-                None
-            };
+            let move_bundle = None;
             let mut runtime = mj_core::state::TargetRuntimeSettings::from(selected);
             if let Some(recorded) = &session.target_runtime {
                 runtime.tool_cache = recorded.tool_cache.clone();
@@ -924,8 +920,12 @@ impl Controller {
             }
             let resource_name = crate::database::load_move_operation(session_id)?
                 .filter(|op| {
-                    op.workspace_transfer.is_some()
-                        && op.phase == mj_core::state::MovePhase::ResumingDestination
+                    !op.in_place
+                        && matches!(
+                            op.phase,
+                            mj_core::state::MovePhase::Restoring
+                                | mj_core::state::MovePhase::DestinationStarting
+                        )
                 })
                 .map(|op| targets::move_resource_name(session_id, &op.operation_id))
                 .unwrap_or_else(|| targets::resource_name(session_id))?;

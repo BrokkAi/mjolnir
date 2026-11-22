@@ -322,7 +322,7 @@ to {project / 'report-b'}, and give your final answer.
             if parent:
                 (root / "parent-transcript.json").write_text(
                     cli("transcript", "--session", parent, "--limit", "1000", "--json", check=False))
-                cli("suspend", "--session", parent, "--acknowledge-unpublished-work", check=False)
+                cli("suspend", "--session", parent, "--discard-untracked", check=False)
                 for child in child_ids:
                     cli("wait", "--session", child, "--timeout", "90", "--json", check=False)
                     cli("destroy", "--session", child, check=False)

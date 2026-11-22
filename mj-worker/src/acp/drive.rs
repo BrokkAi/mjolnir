@@ -36,6 +36,7 @@ pub(super) async fn drive<T: ConnectTo<Client>>(
             replacing_previous_bridge,
             replace_unused_codex_thread,
             first_replaced_unused_native_session_id: &mut None,
+            pending_reload_ack: &mut None,
         },
     )
     .await
@@ -53,7 +54,7 @@ pub(super) async fn drive_bridge<T>(
 where
     T: ConnectTo<Client>,
 {
-    let guardian = guardian::Guardian::for_launch(&spec);
+    let guardian = guardian::Guardian::for_launch(&spec, None);
     let result = drive_with_terminals(
         transport,
         spec,
@@ -487,8 +488,8 @@ where
                         );
                         return responder.respond(response);
                     }
-                    // A harness without its own guardian: the Mjolnir guardian
-                    // answers the request, or hands it to the person's form.
+                    // Review permissions that reached ACP after the existing
+                    // native and owned-tool approvals.
                     let mut guardian_preface = None;
                     if !plan_permission
                         && !claude_plan_approval
@@ -2033,6 +2034,12 @@ pub(super) fn drain_requests_from_the_previous_bridge(
             CommandRequest::StopBackgroundTask { resolved, .. } => {
                 let _ = resolved.send(Err("ACP bridge restarted before stopping task".into()));
                 ("StopBackgroundTask", None)
+            }
+            CommandRequest::ReloadLaunchConfig { resolved, .. } => {
+                let _ = resolved.send(Err(
+                    "ACP bridge restarted before applying launch configuration".into(),
+                ));
+                ("ReloadLaunchConfig", None)
             }
         };
         tracing::debug!(

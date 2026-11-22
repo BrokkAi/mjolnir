@@ -132,7 +132,7 @@ pub(crate) fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
     let output = worker_root.join("source.hel.zip");
     (
         CheckpointExportSpec {
-            ignore_nested_repositories: false,
+            consent: Default::default(),
             report_directories: None,
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
             session: SessionManifest {
@@ -169,6 +169,7 @@ pub(crate) fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                 command_ledger: None,
                 assessment_state: None,
                 notification_stack: None,
+                native_use_evidence: None,
                 event_frontier: 1,
                 event_frontier_digest: "a".repeat(64),
                 session: CanonicalSessionState {
@@ -540,4 +541,67 @@ fn accepted_mail_crosses_a_checkpoint_into_the_restored_relay_exactly_once() {
     let started = discarded.claim_pending_commands(true).unwrap();
     assert_eq!(started[0].command_id, "queued-1");
     assert!(started[0].hidden_prompt_context.is_none());
+}
+
+#[test]
+fn worker_suspend_preflight_reports_untracked_keep_dir_and_dry_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.com"]);
+    fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+    git(&["add", "tracked.txt"]);
+    git(&["commit", "-m", "initial"]);
+    let head = git(&["rev-parse", "HEAD"]);
+
+    fs::write(repo.join(".git/info/exclude"), "/.mj/keep/\n").unwrap();
+    fs::write(repo.join("scratch.txt"), "untracked\n").unwrap();
+    let keep_dir = repo.join(".mj/keep/s1");
+    fs::create_dir_all(&keep_dir).unwrap();
+    fs::write(keep_dir.join("evidence.txt"), "keep\n").unwrap();
+
+    let spec = mj_core::suspend_consent::WorkerSuspendPreflightSpec {
+        session_id: "s1".to_owned(),
+        repositories: vec![mj_core::suspend_consent::WorkerPreflightRepo {
+            id: "workspace".to_owned(),
+            path: repo.clone(),
+            raw: false,
+            exclude_commits: Some(vec![head]),
+            keep_dir: Some(keep_dir),
+            origin_override: None,
+        }],
+        dry_run: true,
+    };
+    let result = crate::checkpoint::run_suspend_preflight(&spec, &mj_checkpoint::archive::SystemGit)
+        .unwrap();
+    assert!(
+        result
+            .untracked
+            .iter()
+            .any(|u| u.path == std::path::Path::new("scratch.txt")),
+        "expected scratch.txt in untracked: {:?}",
+        result.untracked
+    );
+    assert_eq!(result.keep_dir_entries.len(), 1);
+    assert_eq!(result.keep_dir_entries[0].path, PathBuf::from("evidence.txt"));
+    assert!(result.keep_dir_bytes > 0);
+    let dry_run = result.dry_run.expect("dry_run estimate");
+    assert_eq!(dry_run.session_state_bytes, None);
+    assert!(dry_run.git_delta_bytes.is_some());
 }

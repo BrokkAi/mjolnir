@@ -1,3 +1,4 @@
+use super::standalone::ConnectionActivity;
 use super::*;
 
 const DEFERRED_SUBMIT_CAPACITY: usize = 32;
@@ -134,7 +135,7 @@ pub async fn run_session_actor(
         Returned(Option<Box<ReturnedConnection>>),
         Reviewer(Option<std::result::Result<(), tokio::task::JoinError>>),
         Tick,
-        RelayChanged,
+        ConnectionActivity(ConnectionActivity),
         Policy,
         OwnerChanged(bool),
         Command(Option<Box<ActorCommand>>),
@@ -177,12 +178,12 @@ pub async fn run_session_actor(
                         // A sealed relay has nothing left to follow. Its lifecycle
                         // owner may stop the target after returning the connection.
                         && connection.as_ref().is_none_or(|connection| connection.operational().execution != mj_core::relay::RelayExecutionState::Closed) => Event::Tick,
-                    () = async {
+                    completed = async {
                         match connection.as_mut() {
-                            Some(connection) => connection.relay_changed().await,
+                            Some(connection) => connection.wait_for_activity().await,
                             None => std::future::pending().await,
                         }
-                    } => Event::RelayChanged,
+                    } => Event::ConnectionActivity(completed),
                     _ = policies.changed() => Event::Policy,
                     ready = async {
                         match recovery_waiting.expect("guarded recovery wait") {
@@ -198,14 +199,28 @@ pub async fn run_session_actor(
             } => event,
         };
         match event {
-            // A busy session is followed on the fast cadence already; a quiet
-            // one syncs now instead of waiting for its slow timer.
-            Event::RelayChanged => {
-                if connection
-                    .as_ref()
-                    .is_some_and(|connection| !connection.follows_closely())
+            Event::ConnectionActivity(ConnectionActivity::RelayChanged { guardian }) => {
+                if guardian
+                    || connection
+                        .as_ref()
+                        .is_some_and(|connection| !connection.follows_closely())
                 {
                     schedule.no_later_than(Duration::ZERO);
+                }
+            }
+            Event::ConnectionActivity(ConnectionActivity::GuardianCompleted(result)) => {
+                let deliver = connection
+                    .as_mut()
+                    .expect("guardian connection")
+                    .deliver_guardian_review(result);
+                tokio::select! {
+                    biased;
+                    _ = retirement.wait_for(|retired| *retired) => break,
+                    result = deliver => if let Err(error) = result {
+                        tracing::debug!(session_id = %target.session_id, %error, "guardian response delivery lost its relay");
+                        connection = None;
+                        schedule.no_later_than(Duration::ZERO);
+                    }
                 }
             }
             Event::OwnerChanged(ready) => {
@@ -321,6 +336,13 @@ pub async fn run_session_actor(
                     let snapshot =
                         sync_actor_connection(&updates.session_gate, &target, &mut connection)
                             .await?;
+                    // Only the relay actor consumes Guardian requests. A
+                    // lifecycle connection leaves them pending for this tick.
+                    connection
+                        .as_mut()
+                        .expect("synced connection")
+                        .sync_guardian(updates.guardian_stage1.get())
+                        .await?;
                     let observed_at = tokio::time::Instant::now();
                     let now = tokio::time::Instant::now();
                     if now >= next_cpu_read {
@@ -1300,6 +1322,9 @@ pub async fn run_session_actor(
             }
         }
     }
+    if let Some(connection) = connection.as_mut() {
+        connection.cancel_guardian_jobs();
+    }
     reviewer_cancellation.cancel();
     reviewer_connections.clear();
     reviewer_tails.clear();
@@ -1909,25 +1934,61 @@ async fn reopen_subagent_admission_after_move(
 
     let id = target.session_id.clone();
     let query_owner = owner.clone();
-    let (queue_enabled, move_active) = mj_core::runtime::spawn_blocking(move || {
-        query_owner.scope_blocking(|| -> Result<_> {
-            let Some(session) = crate::database::load_session_record(&id)? else {
-                return Ok((false, false));
-            };
-            let subagent = crate::database::load_subagent(&id)?;
-            let queue_enabled =
-                crate::session_manager::move_ownership::worker_subagent_queue_enabled(
-                    &session.subagents.clone().unwrap_or_default(),
-                    session.harness_kind,
-                    subagent.as_ref().map(|child| child.handback_tool),
-                    true,
-                );
-            let move_active = crate::database::has_active_in_place_move(&id)?;
-            Ok((queue_enabled, move_active))
+    let active_hold = connection.operational().in_place_move_hold.clone();
+    let live_store_id = connection.operational().store_id.clone();
+    let (queue_enabled, move_active, release_orphaned_hold) =
+        mj_core::runtime::spawn_blocking(move || {
+            query_owner.scope_blocking(|| -> Result<_> {
+                let current_move = crate::database::load_move_operation(&id)?;
+                let release_orphaned_hold = active_hold.as_ref().and_then(|hold| {
+                    let owned_by_active_move = current_move.as_ref().is_some_and(|op| {
+                        op.in_place
+                            && op.operation_id == hold.operation_id
+                            && op.is_active()
+                            && op.phase != mj_core::state::MovePhase::DispatchReleased
+                    });
+                    (!owned_by_active_move).then(|| hold.operation_id.clone())
+                });
+                let Some(session) = crate::database::load_session_record(&id)? else {
+                    return Ok((false, false, release_orphaned_hold));
+                };
+                let subagent = crate::database::load_subagent(&id)?;
+                let queue_enabled =
+                    crate::session_manager::move_ownership::worker_subagent_queue_enabled(
+                        &session.subagents.clone().unwrap_or_default(),
+                        session.harness_kind,
+                        subagent.as_ref().map(|child| child.handback_tool),
+                        true,
+                    );
+                let move_active = current_move
+                    .as_ref()
+                    .is_some_and(|op| op.in_place && op.is_active());
+                Ok((queue_enabled, move_active, release_orphaned_hold))
+            })
         })
-    })
-    .await
-    .context("inspect sub-agent admission ownership")??;
+        .await
+        .context("inspect sub-agent admission ownership")??;
+    if let (Some(orphaned_op_id), Some(store_id)) = (release_orphaned_hold, live_store_id)
+        && connection.protocol_version() >= mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL
+    {
+        tracing::info!(
+            session_id = target.session_id,
+            operation_id = orphaned_op_id,
+            "releasing orphaned in-place Move dispatch hold with no active intent"
+        );
+        if let Err(error) = connection
+            .client
+            .release_in_place_move_dispatch(&orphaned_op_id, &store_id)
+            .await
+        {
+            tracing::warn!(
+                session_id = target.session_id,
+                operation_id = orphaned_op_id,
+                error = %error,
+                "could not release orphaned in-place Move dispatch hold on reconnect"
+            );
+        }
+    }
     if !queue_enabled || move_active {
         return Ok(());
     }

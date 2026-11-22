@@ -68,8 +68,9 @@ not a low-risk guardian policy.
 Every harness has a guardian on a bare runtime: an automatic reviewer that
 approves routine actions and stops risky ones, so the person is not asked about
 every call. Codex, Claude Code, Grok Build, Muse Code, and Antigravity bring
-their own; Kimi Code, OpenCode, and DSH get the
-[Mjolnir guardian](#the-mjolnir-guardian). Muse's guardian is muse-acp's auto-review: Mjolnir
+their own. Permission requests that reach Mjolnir from any harness go to the
+[Mjolnir guardian](#the-mjolnir-guardian). Muse's native reviewer is muse-acp's
+auto-review. Mjolnir
 stages the `:ask-me` permission profile, selects `promptUnmatched` approvals,
 and turns auto-review on, so a read-only Muse reviewer answers each approval
 and a failed review denies the action. In containers Muse instead runs without
@@ -129,41 +130,43 @@ the ACP boundary instead.
 
 ## The Mjolnir guardian
 
-For Kimi Code, OpenCode, and DSH under configured approvals, the Mjolnir worker
-answers each permission request the harness sends with the guardian review
-from OpenAI's Codex (its policy, prompt, and decision rules, ported from the
-Codex source). Literal `gh` invocations, which Mjolnir pre-approves, and plan
-approvals, which always need your consent, do not go to it. Calls to Mjolnir's
-own MCP tools do under Kimi Code and OpenCode, whose requests do not say which
-server a tool belongs to; under DSH Mjolnir approves them itself.
+Under configured approvals, the Mjolnir guardian reviews tool permission
+requests that any supported harness forwards over ACP. The harness keeps its
+native approval mode and any native reviewer. Literal `gh` and identifiable
+Mjolnir-owned tools that are already approved, along with plan approvals that
+need your consent, follow their existing paths.
 
-The reviewer is the same harness on the session's own model. The worker starts
-a second copy of the session's harness, with the same staged home and
-credentials, and opens a fresh session there for each review, at low reasoning
-effort where the model offers it. Mjolnir gives that session no MCP servers, no
-client terminal, and no client file system, and refuses every permission
-request it raises, so the reviewer can read files to gather evidence but not
-run commands, write, or reach the network through any tool that asks first.
-An OpenCode reviewer runs without the session's Mjolnir plugins (it never sees
-the session's mailbox); your own plugins stay, since a provider may need one to
-sign in. Its own hook and rules deny everything but reading, which OpenCode
-reports to it as a tool error. A Kimi Code reviewer still loads the
-MCP servers in the session's staged `mcp.json`, Mjolnir's included; their calls
-are refused when Kimi Code asks before them. Each review sees:
+The daemon first scores eligible actions locally with Wolf Defender Jev. This
+approve-only stage can allow an action when the model scores it as strongly
+aligned with your task. Borderline scores, long actions, context that exceeds
+the model's token limit, and requests received while the model is unavailable
+continue to the next stage. The daemon downloads the pinned model on demand.
+
+When a direct utility model is configured, the next stage sends it the request
+and retained evidence for a structured decision. This reviewer has no tools
+or file access. If no direct utility model is configured, the worker starts a
+separate session using the same harness, login, and model. It removes
+session-owned mailbox hooks and MCP registrations, supplies no MCP servers or
+client tools, and refuses its permission requests. This reviewer can inspect
+files where the harness allows reads. A review already waiting for the daemon
+keeps its request if the daemon restarts.
+
+The utility and ACP reviewers see:
 
 - Codex's security policy: data exfiltration, credential probing, persistent
   security weakening, and destructive actions, with Codex's risk levels and
   user-authorization scoring.
-- The messages you wrote in the session. Codex's policy lets only these and
-  `AGENTS.md` files authorize an action; messages Mjolnir delivered on your
-  behalf, tool output, and the agent's own text are evidence, not
-  authorization. A sub-agent session has no messages of its own from you, so
-  nothing authorizes its high-risk actions.
+- The messages you wrote in the session and a bounded excerpt of project
+  instructions from `AGENTS.md`. The ACP reviewer can also inspect those files
+  where it has read access. Messages Mjolnir delivered on your behalf,
+  tool output, and the agent's own text supply evidence. A sub-agent session
+  has no messages of its own from you, so it has no direct authorization for
+  high-risk actions.
 - The recent transcript, within Codex's review budget.
 - The exact action: the tool, its input, and any file edit as a unified patch.
 
-The reviewer answers with a risk level, how clearly you authorized the action,
-and allow or deny. Mjolnir enforces Codex's thresholds on that answer: a
+The utility or ACP reviewer answers with a risk level, how clearly you
+authorized the action, and allow or deny. Mjolnir enforces Codex's thresholds on that answer: a
 `critical` action is always denied, and a `high`-risk one unless you
 authorized it at least in substance. If you write to the session while a
 review runs, its verdict is set aside and the action reviewed again on what you
@@ -176,10 +179,9 @@ conversation: a later review sees your message.
 
 The person decides instead when the guardian cannot:
 
-- The review failed or did not finish within Codex's 90-second review deadline
-  (after up to three attempts, counting a reviewer that had to be restarted and
-  a reply that had to be asked again for its verdict). The worker log names
-  why, with the reviewer's stderr when its bridge stopped.
+- The review failed or reached its 90-second deadline. The ACP reviewer can
+  make up to three attempts within its deadline. The worker log names any
+  review failure, including the reviewer's stderr if its bridge stopped.
 - The guardian denied three actions in a row, or ten of its last fifty, in the
   current turn. The rest of that turn's requests go to you.
 
@@ -189,14 +191,10 @@ Cancelling the turn withdraws a review in flight, as it withdraws an open form,
 and a request that arrives later in the cancelled turn is refused. `/clear`
 waits while a review runs and says so.
 
-Each review is a turn of the session's model, charged to the session's
-profile; DSH is usage-priced. Reviews run for seconds to tens of seconds. The
-reviewer's sessions stay in the harness's own session store in the session's
-staged home, so they are part of its checkpoints.
-
-To answer every request yourself, set `mjolnir_guardian = false` on the
-profile; see [Turn off the Mjolnir guardian](/profiles/#turn-off-the-mjolnir-guardian).
-Each request then opens the permission form directly, and no reviewer runs.
+A utility review uses the selected utility profile's quota or billing. An
+ACP review uses the session profile. Set `mjolnir_guardian = false` on any
+profile to have pending permission requests open the permission form directly.
+See [Turn off the Mjolnir guardian](/profiles/#turn-off-the-mjolnir-guardian).
 
 A guardian is not a sandbox. It judges each action from the evidence it has,
 and a model can be wrong. For untrusted repositories, choose a container or an

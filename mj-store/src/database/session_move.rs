@@ -1,24 +1,7 @@
 //! Move intent uses the same guarded writer as session lifecycle transitions.
 
 use super::*;
-use mj_core::state::{MoveOperation, MoveSelection};
-
-pub fn retain_move_source(operation: &MoveOperation) -> Result<()> {
-    let operation = operation.clone();
-    submit_database_write("retain_move_source", move |connection| {
-        let transfer = operation
-            .workspace_transfer
-            .as_ref()
-            .context("Move transfer missing")?;
-        connection.execute(
-            "INSERT INTO retained_move_sources(operation_id, session_id, source_json, exclusions_json, created_at,environment_id)
-             VALUES (?1, ?2, ?3, ?4, ?5,(SELECT source_environment_id FROM session_moves WHERE operation_id=?1)) ON CONFLICT(operation_id) DO NOTHING",
-            params![operation.operation_id, operation.selection.session_id,
-                serde_json::to_string(&transfer.source)?, serde_json::to_string(&operation.selection.workspace.exclusions)?, operation.created_at],
-        )?;
-        Ok(())
-    })
-}
+use mj_core::state::{LegacyMoveOperation, MoveOperation, MovePhase, MoveSelection, StoredMoveOperation};
 
 pub fn retained_move_sources(
     session_id: &str,
@@ -53,6 +36,46 @@ pub fn forget_retained_move_source(operation_id: &str) -> Result<()> {
             "DELETE FROM retained_move_sources WHERE operation_id=?1",
             [operation_id],
         )?;
+        Ok(())
+    })
+}
+
+/// Atomically remove revoked ephemeral SSH credentials from whichever
+/// `MoveOperation` row is currently persisted for `session_id`, without
+/// overwriting any other field (so background cleanup can never clobber a
+/// newer Move admitted concurrently for the same session).
+pub fn remove_revoked_move_granted_keys(
+    session_id: &str,
+    revoked: &[mj_core::state::GrantedMoveKey],
+    updated_at: &str,
+) -> Result<()> {
+    if revoked.is_empty() {
+        return Ok(());
+    }
+    let session_id = session_id.to_owned();
+    let revoked = revoked.to_vec();
+    let updated_at = updated_at.to_owned();
+    submit_database_write("remove_revoked_move_granted_keys", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(mut current) = load_move_operation_with(&tx, &session_id)? else {
+            return Ok(());
+        };
+        let before = current.granted_keys.len();
+        current
+            .granted_keys
+            .retain(|key| !revoked.contains(key));
+        if current.granted_keys.len() != before {
+            current.updated_at = updated_at;
+            tx.execute(
+                "UPDATE session_moves SET operation_json=?2 WHERE session_id=?1 AND operation_id=?3",
+                params![
+                    session_id,
+                    serde_json::to_string(&current)?,
+                    current.operation_id
+                ],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     })
 }
@@ -195,14 +218,7 @@ pub fn has_active_in_place_move(session_id: &str) -> Result<bool> {
 }
 
 fn move_holds_subagent_gate(operation: &MoveOperation) -> bool {
-    operation.in_place
-        && matches!(
-            operation.phase,
-            mj_core::state::MovePhase::Preparing
-                | mj_core::state::MovePhase::ClosingSource
-                | mj_core::state::MovePhase::ResumingDestination
-                | mj_core::state::MovePhase::StartingQueue
-        )
+    operation.in_place && operation.is_active()
 }
 
 pub(super) fn load_move_operation_with(
@@ -274,6 +290,77 @@ pub fn load_move_operations() -> Result<Vec<MoveOperation>> {
     }
     let connection = open_reader(&database_path())?;
     load_move_operations_with(&connection)
+}
+
+/// Load any pre-148 `LegacyMoveOperation` rows still present in `session_moves`
+/// so startup recovery can roll back source-owned moves or finish forward
+/// destination-owned moves.
+pub fn load_legacy_move_operations() -> Result<Vec<(String, LegacyMoveOperation)>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT session_id, operation_json FROM session_moves ORDER BY session_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut legacy = Vec::new();
+    for row in rows {
+        let (session_id, json) = row?;
+        if let Ok(StoredMoveOperation::Legacy(op)) = StoredMoveOperation::decode_json(&json) {
+            legacy.push((session_id, *op));
+        }
+    }
+    Ok(legacy)
+}
+
+/// Delete a settled legacy `MoveOperation` row after startup recovery.
+pub fn delete_move_operation(session_id: &str) -> Result<()> {
+    let session_id = session_id.to_owned();
+    submit_database_write("delete_move_operation", move |connection| {
+        connection.execute(
+            "DELETE FROM session_moves WHERE session_id = ?1",
+            [session_id],
+        )?;
+        Ok(())
+    })
+}
+
+/// Single-transaction commit point for a cross-target Move: moves the operation
+/// to `DestinationOwns` and updates the session's placement to the destination.
+pub fn commit_move_destination_owns(
+    operation: &MoveOperation,
+    destination_session: &SessionRecord,
+) -> Result<()> {
+    ensure!(
+        operation.phase == MovePhase::DestinationOwns,
+        "commit_move_destination_owns requires MovePhase::DestinationOwns"
+    );
+    let operation = operation.clone();
+    let destination_session = destination_session.clone();
+    submit_database_write("commit_move_destination_owns", move |connection| {
+        let tx = connection.transaction()?;
+        super::state_io::update_lifecycle_fields(&tx, &destination_session)?;
+        super::state_io::replace_targets(&tx, &destination_session)?;
+        save_move_operation_with(&tx, &operation)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+/// Single-transaction durable transition for an in-place same-target Move
+/// recording `DispatchReleased` before telling the worker to release its hold.
+pub fn commit_in_place_dispatch_released(operation: &MoveOperation) -> Result<()> {
+    ensure!(
+        operation.phase == MovePhase::DispatchReleased,
+        "commit_in_place_dispatch_released requires MovePhase::DispatchReleased"
+    );
+    let operation = operation.clone();
+    submit_database_write("commit_in_place_dispatch_released", move |connection| {
+        let tx = connection.transaction()?;
+        save_move_operation_with(&tx, &operation)?;
+        tx.commit()?;
+        Ok(())
+    })
 }
 
 /// Read Move and close intent together; an unmatched/stale close ID is inert.
@@ -408,6 +495,7 @@ pub(super) fn reap_finished_move_intents_with(connection: &Connection) -> Result
                 .as_ref()
                 .is_some_and(|destination| destination.owns_resource()))
             || operation.retains_checkpoint()
+            || !operation.granted_keys.is_empty()
             || operation
                 .restore_artifact()
                 .is_some_and(|checkpoint| checkpoint.archive_path.exists())
@@ -436,7 +524,11 @@ pub fn request_move_cancellation(session_id: &str) -> Result<()> {
     submit_database_write("request_move_cancellation", move |connection| {
         connection.execute(
             "UPDATE session_moves SET operation_json=json_set(operation_json, '$.cancellation_requested', json('true'))
-             WHERE session_id=?1 AND json_extract(operation_json, '$.phase') IN ('preparing','closing_source','resuming_destination','starting_queue')",
+             WHERE session_id=?1 AND json_extract(operation_json, '$.phase') IN (
+                 'capturing','transferring','restoring','destination_starting',
+                 'destination_owns','source_retired','queue_admitted','dispatch_released',
+                 'preparing','closing_source','resuming_destination','starting_queue'
+             )",
             [session_id],
         )?;
         Ok(())
@@ -513,8 +605,17 @@ mod tests {
             prepared_destination: None,
             accepted_preparation: None,
             acknowledge_interruption: false,
-            workspace_transfer: None,
-            handoff: None,
+            transfer_route: None,
+            consent: Default::default(),
+            skip_keep_paths: Vec::new(),
+            granted_keys: Vec::new(),
+            granted_ec2_rules: Vec::new(),
+            in_place_expected_store_id: None,
+            in_place_continuation_command_id: None,
+            in_place_held_command_ids: Vec::new(),
+            in_place_harness_restarted: false,
+            deferred_environment_changes: Vec::new(),
+            source_snapshot: None,
             in_place: false,
             source_checkpoint_only: false,
             operation_id: "move-one".into(),
@@ -523,7 +624,8 @@ mod tests {
                 supervisors: None,
                 oracle_choice: None,
                 subagents: None,
-                workspace: Default::default(),
+                consent: Default::default(),
+                skip_keep_paths: Vec::new(),
                 clear_resource_allocation: false,
                 session_id: session.id.clone(),
                 profile_id: Some("destination".into()),
@@ -546,7 +648,7 @@ mod tests {
             checkpoint: session.checkpoint.clone().map(|v| *v),
             recovery_session: Some(session.clone()),
             queue: ResumeQueueDisposition::Start,
-            phase: MovePhase::Preparing,
+            phase: MovePhase::Capturing,
             queue_admission_started: false,
             queue_admission_finished: false,
             cancellation_requested: false,
@@ -580,7 +682,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .phase,
-            MovePhase::Preparing
+            MovePhase::Capturing
         );
         assert_eq!(
             load_state_from(&path).unwrap().sessions[&session.id].last_error,
@@ -631,7 +733,7 @@ mod tests {
             writer.writer.committed_state().unwrap().moves["moving"].phase,
             MovePhase::Failed
         );
-        assert_eq!(held.moves["moving"].phase, MovePhase::Preparing);
+        assert_eq!(held.moves["moving"].phase, MovePhase::Capturing);
         writer
             .writer
             .execute("delete moving session", |connection| {
@@ -661,15 +763,15 @@ mod tests {
         save_session_to(&path, &session).unwrap();
         let mut intent = operation(&session);
         for phase in [
-            MovePhase::Preparing,
-            MovePhase::ClosingSource,
-            MovePhase::ResumingDestination,
-            MovePhase::StartingQueue,
+            MovePhase::Capturing,
+            MovePhase::Transferring,
+            MovePhase::Restoring,
+            MovePhase::DestinationOwns,
             MovePhase::Failed,
             MovePhase::Completed,
         ] {
             intent.phase = phase;
-            if phase == MovePhase::StartingQueue {
+            if phase == MovePhase::DestinationOwns {
                 intent.queue_admission_started = true;
                 intent.destination_target = session.target.clone().map(|v| *v);
                 intent.destination_store_id = Some("durable-destination".into());
@@ -881,7 +983,7 @@ mod tests {
             ("failed-gone", MovePhase::Failed, false, false, true),
             (
                 "running-gone",
-                MovePhase::ResumingDestination,
+                MovePhase::Restoring,
                 false,
                 false,
                 true,
@@ -942,13 +1044,13 @@ mod tests {
         let mut cancelled = intent.clone();
         cancelled.cancellation_requested = true;
         save_move_operation_with(&connection, &cancelled).unwrap();
-        intent.phase = MovePhase::ClosingSource;
+        intent.phase = MovePhase::Transferring;
         save_move_operation_with(&connection, &intent).unwrap();
         let restored = load_move_operation_with(&connection, &session.id)
             .unwrap()
             .unwrap();
         assert!(restored.cancellation_requested);
-        assert_eq!(restored.phase, MovePhase::ClosingSource);
+        assert_eq!(restored.phase, MovePhase::Transferring);
         intent.operation_id = "explicit-new-operation".into();
         save_move_operation_with(&connection, &intent).unwrap();
         assert!(
@@ -976,10 +1078,10 @@ mod tests {
         let mut intent = operation(&session);
         intent.in_place = true;
         for phase in [
-            MovePhase::Preparing,
-            MovePhase::ClosingSource,
-            MovePhase::ResumingDestination,
-            MovePhase::StartingQueue,
+            MovePhase::Capturing,
+            MovePhase::Transferring,
+            MovePhase::Restoring,
+            MovePhase::DestinationOwns,
         ] {
             intent.phase = phase;
             assert!(move_holds_subagent_gate(&intent), "{phase:?}");
@@ -993,7 +1095,7 @@ mod tests {
             assert!(!move_holds_subagent_gate(&intent), "{phase:?}");
         }
         intent.in_place = false;
-        intent.phase = MovePhase::ClosingSource;
+        intent.phase = MovePhase::Transferring;
         assert!(!move_holds_subagent_gate(&intent));
     }
 

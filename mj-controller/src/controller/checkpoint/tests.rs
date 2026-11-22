@@ -217,7 +217,7 @@ fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
     state.sessions.insert(session_id.into(), session);
 
     assert_eq!(
-        reconcile_managed_checkpoint_archives_in(directory.path(), &state, &[], &[]).unwrap(),
+        reconcile_managed_checkpoint_archives_in(directory.path(), &state, &[], &[], &[]).unwrap(),
         1
     );
     assert!(directory.path().join(referenced_name).exists());
@@ -240,6 +240,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
         latest_credential_sync_signal: None,
         worker_build: None,
         operational: mj_core::relay::RelayOperationalState {
+            in_place_move_hold: None,
             assessment: None,
             open_request: None,
             notification_stack: Default::default(),
@@ -420,12 +421,13 @@ fn exported_checkpoint_json() -> Vec<u8> {
         event_frontier: 7,
         event_frontier_digest: "d".repeat(64),
         timings: None,
+        manifest: None,
     })
     .unwrap()
 }
 fn export_spec_fixture() -> CheckpointExportSpec {
     CheckpointExportSpec {
-        ignore_nested_repositories: false,
+        consent: Default::default(),
         report_directories: None,
         protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
         session: mj_checkpoint::archive::SessionManifest {
@@ -711,17 +713,13 @@ fn an_export_with_no_native_history_tells_the_caller_why() {
 /// current spec before it can apply obsolete path or collection behavior.
 #[test]
 fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
-    for (ignore_nested_repositories, field) in [
-        (false, "protocol_version"),
-        (true, "ignore_nested_repositories"),
-    ] {
+    for field in ["protocol_version", "consent"] {
         let locator = targets::TargetLocator::LocalPodman {
             borrowed_from: None,
             container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
             workspace_storage: Default::default(),
         };
-        let mut spec = export_spec_fixture();
-        spec.ignore_nested_repositories = ignore_nested_repositories;
+        let spec = export_spec_fixture();
         let failure = format!(
             "Error: parse checkpoint export spec from standard input\n\nCaused by:\n    unknown field `{field}`, expected `session` at line 1 column 20\n"
         );
@@ -2701,6 +2699,9 @@ fn latched_checkpoint(
             },
             native_session_id: "native-session".into(),
             event_frontier_digest: cursor.digest.clone(),
+            on_source_target: false,
+            manifest: None,
+            captured_queue: None,
         },
         relay,
         barrier_command_id,
@@ -2969,16 +2970,16 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
 #[cfg(unix)]
 const IN_PLACE_CLOSE_CHILD: &str = "MJ_TEST_IN_PLACE_CLOSE_CHILD";
 
-/// A move that keeps its environment still needs a verified checkpoint and a
-/// sealed relay. It must stop there: the record stays `Closing` with its
-/// checkpoint and its target, and nothing tears the target down.
+/// A cross-target Move captures its snapshot onto the source target without
+/// overwriting the session's existing suspend checkpoint or tearing down the
+/// source environment before `DestinationOwns` commits.
 #[cfg(unix)]
 #[tokio::test]
-async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
+async fn a_cross_target_move_capture_keeps_the_source_target_and_preserves_session_checkpoint() {
     if std::env::var_os(IN_PLACE_CLOSE_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let name = format!(
-            "{}::an_in_place_move_close_seals_the_source_and_keeps_its_target",
+            "{}::a_cross_target_move_capture_keeps_the_source_target_and_preserves_session_checkpoint",
             module_path!()
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
@@ -3088,7 +3089,8 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         supervisors: None,
         oracle_choice: None,
         subagents: None,
-        workspace: Default::default(),
+        consent: Default::default(),
+        skip_keep_paths: Vec::new(),
         clear_resource_allocation: false,
         session_id: LATCH_RELAY_SESSION.into(),
         profile_id: Some("codex".into()),
@@ -3102,11 +3104,20 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
-        workspace_transfer: None,
-        handoff: None,
-        in_place: true,
+        transfer_route: None,
+        consent: Default::default(),
+        skip_keep_paths: Vec::new(),
+        granted_keys: Vec::new(),
+        granted_ec2_rules: Vec::new(),
+        in_place_expected_store_id: None,
+        in_place_continuation_command_id: None,
+        in_place_held_command_ids: Vec::new(),
+        in_place_harness_restarted: false,
+        deferred_environment_changes: Vec::new(),
+        source_snapshot: None,
+        in_place: false,
         source_checkpoint_only: false,
-        operation_id: "move-in-place-close".into(),
+        operation_id: "move-cross-target-capture".into(),
         selection: selection.clone(),
         source_profile_id: "codex".into(),
         source_target_template_id: "local".into(),
@@ -3125,7 +3136,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         checkpoint: None,
         recovery_session: None,
         queue: mj_core::state::ResumeQueueDisposition::Discard,
-        phase: mj_core::state::MovePhase::ClosingSource,
+        phase: mj_core::state::MovePhase::Capturing,
         queue_admission_started: false,
         queue_admission_finished: false,
         cancellation_requested: false,
@@ -3220,22 +3231,33 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     assert_eq!(sealed.state, SessionState::Closing);
     assert_eq!(sealed.checkpoint.as_deref(), Some(&checkpoint));
     assert_eq!(sealed.target, session.target);
-    assert_eq!(operation.checkpoint.as_ref(), Some(&checkpoint));
+    assert!(
+        operation.checkpoint.is_none(),
+        "cross-target Move must not install a daemon checkpoint row"
+    );
+    let snapshot = operation
+        .source_snapshot
+        .as_ref()
+        .expect("cross-target Move records its source-target snapshot");
+    assert!(
+        snapshot.archive_path.exists(),
+        "source-target snapshot must remain on source for direct streaming"
+    );
+    assert!(!snapshot.sha256.is_empty());
     // The durable record has to agree: recovery reads it, not this process.
     let persisted = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
     assert_eq!(persisted.state, SessionState::Closing);
     assert_eq!(persisted.target, session.target);
-    assert!(persisted.checkpoint.is_some());
+    assert_eq!(persisted.checkpoint.as_deref(), Some(&checkpoint));
 
     let purposes = executor.purposes.lock().unwrap().clone();
     for purpose in &purposes {
         let lowered = purpose.to_lowercase();
         assert!(
             !lowered.contains("remove exact")
-                && !lowered.contains("stop the")
                 && !lowered.contains("delete")
                 && !lowered.contains("retire"),
-            "an in-place close must not tear anything down, but it ran {purpose:?} \
+            "cross-target Move capture must not tear down the source before DestinationOwns, but it ran {purpose:?} \
              (all: {purposes:?})"
         );
     }
@@ -3395,6 +3417,7 @@ impl CommandExecutor for RestartCheckpointExecutor {
             event_frontier: canonical_session.event_frontier,
             event_frontier_digest: canonical_session.event_frontier_digest,
             timings: None,
+            manifest: None,
         };
         Ok(CommandOutput {
             status: 0,
@@ -3436,8 +3459,7 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
-            true,
-            false,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             None,
         )
         .await;
@@ -3452,87 +3474,6 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     }
     assert_eq!(record.state, SessionState::Stopped);
     assert_eq!(record.last_error, None);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardown() {
-    const NAME: &str = "ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardown";
-    if !in_close_cut_child(NAME, LATE_HARNESS_NOTIFICATION) {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let (mut controller, channels, _handle) = close_cut_controller(SessionState::Closing).await;
-    let original = controller.state.sessions[LATCH_RELAY_SESSION]
-        .checkpoint
-        .clone();
-    #[derive(Default)]
-    struct RefuseExport(std::sync::Mutex<Option<bool>>);
-    impl CommandExecutor for RefuseExport {
-        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-            mj_core::targets::DeadlinePause::none()
-        }
-
-        fn cancellation_requested_without_deadline(&self) -> bool {
-            self.cancellation_requested()
-        }
-
-        fn execute_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-            self.execute(command)
-        }
-
-        fn execute_with_stdin_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-            input: &mut (dyn std::io::Read + Send),
-        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-            self.execute_with_stdin(command, input)
-        }
-
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            SucceedingExecutor.execute(command)
-        }
-        fn execute_with_stdin(
-            &self,
-            command: &CommandSpec,
-            input: &mut (dyn std::io::Read + Send),
-        ) -> Result<CommandOutput> {
-            assert_eq!(command.purpose, "export target checkpoint");
-            let spec: CheckpointExportSpec = serde_json::from_reader(input)?;
-            *self.0.lock().unwrap() = Some(spec.ignore_nested_repositories);
-            Ok(CommandOutput {
-                status: 1,
-                stdout: Vec::new(),
-                stderr: b"disk full while writing checkpoint".to_vec(),
-            })
-        }
-    }
-    let executor = RefuseExport::default();
-    let error = controller
-        .recover_interrupted_close_managed(
-            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
-            LATCH_RELAY_SESSION,
-            &executor,
-            &channels.control,
-            true,
-            true,
-            None,
-        )
-        .await
-        .unwrap_err();
-    channels.shutdown.shutdown().await.unwrap();
-    assert!(
-        format!("{error:#}").contains("disk full while writing checkpoint"),
-        "{error:#}"
-    );
-    assert_eq!(*executor.0.lock().unwrap(), Some(true));
-    let record = &controller.state.sessions[LATCH_RELAY_SESSION];
-    assert_eq!(record.state, SessionState::Running);
-    assert!(record.target.is_some());
-    assert_eq!(record.checkpoint, original);
 }
 
 /// The container recreation an upgrade starts on its own may never cancel
@@ -3977,8 +3918,7 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
-            true,
-            false,
+            &mj_core::suspend_consent::SuspendConsent::default(),
             None,
         )
         .await;
@@ -4052,6 +3992,7 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
     let entry_size = std::mem::size_of_val(&entry);
     drop(entry);
     let executor = RefusingExecutor("not used");
+    let consent = mj_core::suspend_consent::CaptureConsent::default();
     let latched = controller.checkpoint_session_latched_with_recovery_stage(
         &admission,
         "session-1",
@@ -4059,9 +4000,11 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
         None,
         LatchExclusivity::ReleaseAfterLatch,
         CheckpointExportPolicy::Always,
+        CheckpointDelivery::DownloadToDaemon,
         false,
         None,
         None,
+        &consent,
     );
     let latched_size = std::mem::size_of_val(&latched);
     drop(latched);

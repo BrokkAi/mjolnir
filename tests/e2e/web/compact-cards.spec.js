@@ -1793,3 +1793,175 @@ test('a first visit lands on notifications without redirecting links that name a
   await expect(conversation).toHaveURL(/#conversation\/load-conversation$/);
   await expect(conversation.locator('#conversation')).toBeVisible();
 });
+
+function permissionRequest(id, message) {
+  return {
+    id,
+    title: 'Permission',
+    message,
+    tool_permission: { skip: true },
+    fields: [{
+      id: 'choice',
+      title: 'Permission',
+      required: true,
+      secret: false,
+      kind: 'single_select',
+      options: [
+        { value: 'allow', title: 'Allow' },
+        { value: 'reject', title: 'Reject' },
+      ],
+    }],
+  };
+}
+
+function elicitationNotice(requestId, message, extra = {}) {
+  return {
+    badge: 'needs_input',
+    holder: null,
+    dismissal: { stack: { revision: 4 } },
+    since_ms: SERVER_TIME_MS - 1000,
+    entries: [],
+    form: {
+      source: 'elicitation',
+      raised_at_ms: SERVER_TIME_MS - 1000,
+      request_id: requestId,
+      message,
+    },
+    ...extra,
+  };
+}
+
+test('an Antigravity permission request is answered from notifications', async ({ page }) => {
+  const message = 'Antigravity requests permission:\nRun git status';
+  const agy = session('agy-session', 'agy', 'Antigravity', {
+    attention: 'needs_input',
+    title: 'agy',
+    profileId: 'agy',
+    activity: SERVER_TIME_MS - 1000,
+    pendingElicitations: [permissionRequest('tool-permission-1', message)],
+  });
+  agy.harness_kind = 'antigravity';
+  agy.notification_card = elicitationNotice('tool-permission-1', message, {
+    entries: [{
+      completed_ordinal: 3,
+      completed_at_ms: SERVER_TIME_MS - 5000,
+      kind: 'important',
+      message: { found: 'agent:3' },
+    }],
+  });
+  const state = await mount(page, [agy], null, '');
+  await expect(page).toHaveURL(/#notifications$/);
+
+  const form = page.locator('#inbox .inbox-elicitation');
+  const pager = page.locator('#inbox .inbox-message-pager');
+  await expect(page.getByLabel('Quick reply')).toBeHidden();
+  await expect(form.locator('.elicitation-message')).toHaveText(message);
+  await expect(form.getByRole('radio', { name: 'Allow', exact: true })).toBeChecked();
+  await expect(form.getByRole('radio', { name: 'Reject', exact: true })).toBeVisible();
+  await expect(form.getByRole('button', { name: 'Answer & Next', exact: true })).toBeVisible();
+  await expect(form.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible();
+  await expect(pager).toContainText('2 of 2');
+
+  await form.getByRole('radio', { name: 'Reject', exact: true }).check();
+  agy.last_activity_at_ms = SERVER_TIME_MS + 1000;
+  await refresh(page, state);
+  await expect(form.getByRole('radio', { name: 'Reject', exact: true })).toBeChecked();
+  await expect(form.getByRole('radio', { name: 'Allow', exact: true })).not.toBeChecked();
+
+  state.failAction = { action: 'respond-elicitation', error: 'permission was withdrawn' };
+  await form.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await expect.poll(() => state.actions.filter(action => action.action === 'respond-elicitation')).toEqual([{
+    action: 'respond-elicitation',
+    session_id: 'agy-session',
+    elicitation_id: 'tool-permission-1',
+    response: { action: 'accept', content: { choice: 'reject' } },
+  }]);
+  await expect(page.locator('#inbox .inbox-card .error')).toHaveText('permission was withdrawn');
+  await expect(form.getByRole('button', { name: 'Answer & Next', exact: true })).toBeEnabled();
+  await expect(form.getByRole('radio', { name: 'Reject', exact: true })).toBeEnabled();
+  await expect(form.getByRole('radio', { name: 'Reject', exact: true })).toBeChecked();
+
+  await pager.getByRole('button', { name: 'Previous', exact: true }).click();
+  await expect(pager).toContainText('1 of 2');
+  await expect(form.locator('.elicitation')).toHaveCount(0);
+  await expect(page.locator('#inbox .inbox-message')).toContainText('Second paragraph.');
+  await expect(page.getByLabel('Quick reply')).toBeVisible();
+
+  await pager.getByRole('button', { name: 'Next', exact: true }).click();
+  await expect(pager).toContainText('2 of 2');
+  await expect(form.locator('.elicitation-message')).toHaveText(message);
+  await expect(page.getByLabel('Quick reply')).toBeHidden();
+  await expect(form.getByRole('radio', { name: 'Reject', exact: true })).toBeChecked();
+});
+
+test('a child permission form loads from the holder and a native form keeps Quick reply', async ({ page }) => {
+  const message = 'Antigravity requests permission:\nApply the patch';
+  const native = session('native-owner', 'native', 'Native', {
+    attention: 'needs_input',
+    title: 'native owner',
+    activity: SERVER_TIME_MS - 5000,
+  });
+  native.notification_card = {
+    badge: 'needs_input',
+    holder: null,
+    dismissal: { stack: { revision: 2 } },
+    since_ms: SERVER_TIME_MS - 5000,
+    entries: [],
+    form: {
+      source: 'native',
+      raised_at_ms: SERVER_TIME_MS - 5000,
+      request_id: 'native.5:child.1.native-request',
+      message: 'Approve native action?',
+    },
+  };
+  const parent = session('perm-parent', 'agy', 'Antigravity', {
+    attention: 'needs_input',
+    title: 'agy parent',
+    activity: SERVER_TIME_MS - 1000,
+    subagentSessionIds: ['perm-child'],
+  });
+  parent.notification_card = elicitationNotice('tool-permission-child', message, { holder: 'perm-child' });
+  const child = session('perm-child', 'agy', 'Antigravity', {
+    attention: 'working',
+    title: 'agy child',
+    profileId: 'agy',
+    subagentParentId: 'perm-parent',
+  });
+  child.detail = false;
+  child.harness_kind = 'antigravity';
+  child.pending_elicitations = [permissionRequest('tool-permission-child', message)];
+
+  const state = await mount(page, [native, parent, child]);
+  await page.locator('#notifications-badge').click();
+  await expect(page).toHaveURL(/#notifications$/);
+  await expect(page.locator('#inbox .inbox-message')).toHaveText('Approve native action?');
+  await expect(page.getByLabel('Quick reply')).toBeVisible();
+  await expect(page.locator('#inbox .inbox-elicitation .elicitation')).toHaveCount(0);
+  await expect(page.locator('#inbox')).not.toContainText("Waiting for the session's form update");
+
+  let releaseDetail;
+  state.holdDetail = new Promise(resolve => { releaseDetail = resolve; });
+  try {
+    await page.getByRole('button', { name: 'Skip', exact: true }).click();
+    await expect(page.locator('#inbox .inbox-message')).toContainText('Loading form…');
+    await expect(page.locator('#inbox .inbox-message')).toContainText('Apply the patch');
+    await expect(page.getByLabel('Quick reply')).toBeHidden();
+    await expect.poll(() => state.detailRequests).toContain('perm-child');
+  } finally {
+    releaseDetail();
+    state.holdDetail = null;
+  }
+
+  const form = page.locator('#inbox .inbox-elicitation');
+  await expect(form.locator('.elicitation-message')).toHaveText(message);
+  await form.getByRole('radio', { name: 'Reject', exact: true }).check();
+  await form.getByRole('button', { name: 'Answer & Next', exact: true }).click();
+  await expect.poll(() => state.actions.find(action => action.action === 'respond-elicitation')).toEqual({
+    action: 'respond-elicitation',
+    session_id: 'perm-child',
+    elicitation_id: 'tool-permission-child',
+    response: { action: 'accept', content: { choice: 'reject' } },
+  });
+  await expect(form.getByRole('button', { name: 'Answer & Next', exact: true })).toBeDisabled();
+  await expect(form).toContainText('Answer sent');
+});

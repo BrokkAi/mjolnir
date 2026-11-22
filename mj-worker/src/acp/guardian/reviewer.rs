@@ -2,8 +2,8 @@
 //!
 //! A [`Guardian`] belongs to one bridge, and `run_bridge` stops its reviewer
 //! after that bridge's own teardown on every exit path. On its first review it
-//! starts a second process from the session's own launch: the same harness,
-//! staged home and credentials, so the same harness configuration and model.
+//! starts a second process from the session's launch, retaining the harness,
+//! login, and model in a reviewer-specific environment.
 //! Each review opens a fresh session there, so no review inherits another's
 //! history.
 //!
@@ -16,14 +16,11 @@
 //! it raises is refused once.
 
 use super::*;
+use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
+use mj_core::guardian::{GuardianReviewOutcome, collect_project_instructions};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
-/// Codex's `REVIEW_TIMEOUT`: one deadline for a whole review, including
-/// starting the reviewer and every attempt. Waiting while another review
-/// starts the shared reviewer is a queue for it, not this review's own work,
-/// so the deadline starts after that.
-const REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
 /// Codex's `MAX_REVIEW_ATTEMPTS`: reviewer prompts per review, counting a
 /// retry on a fresh reviewer and a reminder for a reply without a verdict.
 const MAX_REVIEW_ATTEMPTS: usize = 3;
@@ -44,19 +41,21 @@ type HostSlot<'a> = tokio::sync::MutexGuard<'a, Option<Arc<ReviewerHost>>>;
 pub(in crate::acp) struct Guardian {
     spec: LaunchSpec,
     host: tokio::sync::Mutex<Option<Arc<ReviewerHost>>>,
+    endpoint: Option<Arc<GuardianEndpoint>>,
 }
 
 impl Guardian {
-    /// The guardian for `spec`, when its harness relies on Mjolnir's, its
-    /// target keeps configured approvals, and its profile has not turned the
-    /// guardian off.
-    pub(in crate::acp) fn for_launch(spec: &LaunchSpec) -> Option<Arc<Self>> {
+    pub(in crate::acp) fn for_launch(
+        spec: &LaunchSpec,
+        endpoint: Option<Arc<GuardianEndpoint>>,
+    ) -> Option<Arc<Self>> {
         spec.harness
             .mjolnir_guardian_reviews(spec.execution_policy, spec.approval_choices)
             .then(|| {
                 Arc::new(Self {
                     spec: spec.clone(),
                     host: tokio::sync::Mutex::new(None),
+                    endpoint,
                 })
             })
     }
@@ -68,6 +67,7 @@ impl Guardian {
         input: Option<&serde_json::Value>,
         native_child: bool,
     ) -> GuardianDecision {
+        let deadline = tokio::time::Instant::now() + GUARDIAN_REVIEW_TIMEOUT;
         if self.spec.turn_context.guardian_tripped() {
             tracing::info!(
                 target: "mj_guardian",
@@ -85,46 +85,136 @@ impl Guardian {
             &self.spec.cwd,
             native_child,
         );
-        let slot = self.host.lock().await;
-        let started = std::time::Instant::now();
-        let assessment =
-            match tokio::time::timeout(REVIEW_TIMEOUT, self.decide(slot, &action)).await {
-                Ok(Ok(assessment)) => assessment,
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        target: "mj_guardian",
-                        harness = %self.spec.harness.display_name(),
-                        tool_call_id = %request.tool_call.tool_call_id,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        error = %format!("{error:#}"),
-                        "guardian review failed; asking the person"
-                    );
+        let tool_call_id = request.tool_call.tool_call_id.to_string();
+        let cwd = self.spec.cwd.clone();
+        let project_instructions = match tokio::time::timeout_at(
+            deadline,
+            mj_core::runtime::spawn_blocking(move || collect_project_instructions(&cwd)),
+        )
+        .await
+        {
+            Ok(Ok(instructions)) => instructions,
+            Ok(Err(error)) => {
+                tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "could not collect project instructions");
+                return GuardianDecision::AskPerson {
+                    reason: format!("it could not collect project instructions: {error}"),
+                };
+            }
+            Err(_) => {
+                tracing::warn!(target: "mj_guardian", %tool_call_id, "collecting project instructions timed out");
+                return GuardianDecision::AskPerson {
+                    reason: "collecting project instructions timed out".into(),
+                };
+            }
+        };
+        if let Some(endpoint) = &self.endpoint {
+            match self
+                .review_remotely(
+                    endpoint,
+                    &tool_call_id,
+                    &action,
+                    project_instructions.as_deref(),
+                    deadline,
+                )
+                .await
+            {
+                Ok(GuardianReviewOutcome::UseAcpFallback { .. }) => {}
+                Ok(GuardianReviewOutcome::Allow { .. }) => return self.record_verdict(None),
+                Ok(GuardianReviewOutcome::Deny { rationale, .. }) => {
+                    return self.record_verdict(Some(rationale));
+                }
+                Ok(GuardianReviewOutcome::AskPerson { reason }) => {
+                    return GuardianDecision::AskPerson { reason };
+                }
+                Err(error) => {
+                    tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "guardian review failed; asking the person");
                     return GuardianDecision::AskPerson {
                         reason: format!("its review failed: {error:#}"),
                     };
                 }
-                Err(_) => {
-                    tracing::warn!(
-                        target: "mj_guardian",
-                        harness = %self.spec.harness.display_name(),
-                        tool_call_id = %request.tool_call.tool_call_id,
-                        "guardian review timed out; asking the person"
-                    );
-                    return GuardianDecision::AskPerson {
-                        reason: format!(
-                            "its review did not finish within {} seconds",
-                            REVIEW_TIMEOUT.as_secs()
-                        ),
-                    };
-                }
-            };
+            }
+        }
+        self.review_over_acp(&tool_call_id, &action, project_instructions.as_deref())
+            .await
+    }
+
+    async fn review_remotely(
+        &self,
+        endpoint: &GuardianEndpoint,
+        tool_call_id: &str,
+        action: &serde_json::Value,
+        project_instructions: Option<&str>,
+        deadline: tokio::time::Instant,
+    ) -> Result<GuardianReviewOutcome> {
+        let mut evidence = self.collect_evidence(tool_call_id, action, project_instructions);
+        loop {
+            let result = endpoint.review(evidence.request.clone(), deadline).await?;
+            if matches!(
+                result.decision,
+                GuardianReviewOutcome::UseAcpFallback { .. }
+            ) {
+                return Ok(result.decision);
+            }
+            let current = self.collect_evidence(tool_call_id, action, project_instructions);
+            if !current.person_wrote_since(&evidence) {
+                return Ok(result.decision);
+            }
+            evidence = current;
+            tracing::info!(target: "mj_guardian", "the person wrote during a guardian review; reviewing again");
+        }
+    }
+
+    async fn review_over_acp(
+        &self,
+        tool_call_id: &str,
+        action: &serde_json::Value,
+        project_instructions: Option<&str>,
+    ) -> GuardianDecision {
+        let slot = self.host.lock().await;
+        // Time spent waiting for the shared reviewer is outside the review deadline.
+        let started = std::time::Instant::now();
+        let assessment = match tokio::time::timeout(
+            GUARDIAN_REVIEW_TIMEOUT,
+            self.decide(slot, tool_call_id, action, project_instructions),
+        )
+        .await
+        {
+            Ok(Ok(assessment)) => assessment,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    target: "mj_guardian",
+                    harness = %self.spec.harness.display_name(),
+                    %tool_call_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    error = %format!("{error:#}"),
+                    "guardian review failed; asking the person"
+                );
+                return GuardianDecision::AskPerson {
+                    reason: format!("its review failed: {error:#}"),
+                };
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "mj_guardian",
+                    harness = %self.spec.harness.display_name(),
+                    %tool_call_id,
+                    "guardian review timed out; asking the person"
+                );
+                return GuardianDecision::AskPerson {
+                    reason: format!(
+                        "its review did not finish within {} seconds",
+                        GUARDIAN_REVIEW_TIMEOUT.as_secs()
+                    ),
+                };
+            }
+        };
         let outcome = assessment.enforced_outcome();
         // Never the rationale or the reviewer's text: both can quote
         // workspace content. The transcript carries a denial's rationale.
         tracing::info!(
             target: "mj_guardian",
             harness = %self.spec.harness.display_name(),
-            tool_call_id = %request.tool_call.tool_call_id,
+            %tool_call_id,
             ?outcome,
             reviewer_outcome = ?assessment.outcome,
             risk_level = ?assessment.risk_level,
@@ -132,12 +222,17 @@ impl Guardian {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "guardian reviewed a permission request"
         );
-        let denied = outcome == Outcome::Deny;
-        let tripped = self.spec.turn_context.record_guardian_review(denied);
-        if !denied {
+        self.record_verdict((outcome == Outcome::Deny).then_some(assessment.rationale))
+    }
+
+    fn record_verdict(&self, rationale: Option<String>) -> GuardianDecision {
+        let tripped = self
+            .spec
+            .turn_context
+            .record_guardian_review(rationale.is_some());
+        let Some(mut rationale) = rationale else {
             return GuardianDecision::Allow;
-        }
-        let mut rationale = assessment.rationale;
+        };
         if tripped {
             rationale.push_str(
                 " The guardian has denied several actions in this turn, so it will ask you about the rest of the turn's requests.",
@@ -146,24 +241,43 @@ impl Guardian {
         GuardianDecision::Deny { rationale }
     }
 
+    fn collect_evidence(
+        &self,
+        tool_call_id: &str,
+        action: &serde_json::Value,
+        project_instructions: Option<&str>,
+    ) -> ReviewEvidence {
+        ReviewEvidence::collect(
+            self.spec.harness,
+            &self.spec.turn_context,
+            tool_call_id,
+            action,
+            project_instructions.map(str::to_owned),
+        )
+    }
+
     /// Review `action` against the evidence as it stands. If the person wrote
     /// while it was reviewed, the verdict may rest on stale authorization, so
     /// it is reviewed again on what they now say, as Codex discards a stale
     /// verdict (`review_request.rs`). Each repeat follows a new message; the
     /// review deadline bounds them.
-    async fn decide(&self, first: HostSlot<'_>, action: &serde_json::Value) -> Result<Assessment> {
+    async fn decide(
+        &self,
+        first: HostSlot<'_>,
+        tool_call_id: &str,
+        action: &serde_json::Value,
+        project_instructions: Option<&str>,
+    ) -> Result<Assessment> {
         let mut slot = Some(first);
         let mut attempts = 0;
         loop {
-            let evidence =
-                ReviewEvidence::collect(self.spec.harness, &self.spec.turn_context, action);
+            let evidence = self.collect_evidence(tool_call_id, action, project_instructions);
             let prompt = vec![
-                ContentBlock::Text(TextContent::new(reviewer_instructions())),
-                ContentBlock::Text(TextContent::new(evidence.request_text())),
+                ContentBlock::Text(TextContent::new(reviewer_instructions_acp())),
+                ContentBlock::Text(TextContent::new(evidence.request.request_text())),
             ];
             let assessment = self.assess(&mut slot, &prompt, &mut attempts).await?;
-            let current =
-                ReviewEvidence::collect(self.spec.harness, &self.spec.turn_context, action);
+            let current = self.collect_evidence(tool_call_id, action, project_instructions);
             if !current.person_wrote_since(&evidence) {
                 return Ok(assessment);
             }
@@ -289,6 +403,7 @@ struct ReviewerLaunch {
     command: PathBuf,
     args: Vec<String>,
     environment: BTreeMap<String, String>,
+    profile: Option<tempfile::TempDir>,
 }
 
 /// The session's launch, narrowed for a reviewer. A production bridge is the
@@ -299,6 +414,16 @@ fn reviewer_launch(spec: &LaunchSpec) -> Result<ReviewerLaunch> {
     if let Some(path) = &spec.bridge_spec_path {
         let mut supervisor = crate::worker_runtime::AcpSupervisorSpec::read(path)?;
         supervisor.environment = reviewer_environment(spec.harness, &supervisor.environment)?;
+        supervisor.excluded_environment.extend(
+            reviewer_profile::SESSION_ENVIRONMENT
+                .iter()
+                .map(|name| (*name).to_owned()),
+        );
+        let profile = reviewer_profile::stage(
+            spec.harness,
+            &mut supervisor.environment,
+            &mut supervisor.args,
+        )?;
         let reviewer_path = path.with_file_name(REVIEWER_SUPERVISOR_SPEC);
         supervisor.write_spec(&reviewer_path)?;
         let mut args = spec.args.clone();
@@ -315,13 +440,29 @@ fn reviewer_launch(spec: &LaunchSpec) -> Result<ReviewerLaunch> {
         return Ok(ReviewerLaunch {
             command: spec.command.clone(),
             args,
-            environment: spec.environment.clone(),
+            environment: {
+                let mut environment = spec.environment.clone();
+                reviewer_profile::remove_session_environment(&mut environment);
+                environment
+            },
+            profile,
         });
     }
+    let environment = reviewer_environment(spec.harness, &spec.environment)?;
+    #[cfg(unix)]
+    let (environment, args, profile) = {
+        let mut environment = environment;
+        let mut args = spec.args.clone();
+        let profile = reviewer_profile::stage(spec.harness, &mut environment, &mut args)?;
+        (environment, args, profile)
+    };
+    #[cfg(not(unix))]
+    let (args, profile) = (spec.args.clone(), None);
     Ok(ReviewerLaunch {
         command: spec.command.clone(),
-        args: spec.args.clone(),
-        environment: reviewer_environment(spec.harness, &spec.environment)?,
+        args,
+        environment,
+        profile,
     })
 }
 
@@ -330,12 +471,38 @@ fn reviewer_environment(
     harness: HarnessKind,
     environment: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
+    let mut environment = environment.clone();
+    reviewer_profile::remove_session_environment(&mut environment);
     match harness {
         #[cfg(unix)]
-        HarnessKind::OpenCode => crate::worker_runtime::opencode_reviewer_environment(environment),
+        HarnessKind::OpenCode => crate::worker_runtime::opencode_reviewer_environment(&environment),
         #[cfg(not(unix))]
         HarnessKind::OpenCode => bail!("an OpenCode reviewer needs a Unix worker"),
-        _ => Ok(environment.clone()),
+        HarnessKind::Codex => {
+            let mut config: serde_json::Map<String, serde_json::Value> = environment
+                .get("CODEX_CONFIG")
+                .map(|config| serde_json::from_str(config))
+                .transpose()
+                .context("parse the Codex reviewer configuration")?
+                .unwrap_or_default();
+            config.remove("hooks");
+            config.remove("mcp_servers");
+            config.remove("sandbox_mode");
+            config.insert("default_permissions".into(), ":read-only".into());
+            config.insert("web_search".into(), "disabled".into());
+            let features = config
+                .entry("features")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .context("Codex reviewer features must be an object")?;
+            features.remove("codex_hooks");
+            for key in ["hooks", "apps", "plugins", "remote_plugin"] {
+                features.insert(key.into(), false.into());
+            }
+            environment.insert("CODEX_CONFIG".into(), serde_json::to_string(&config)?);
+            Ok(environment)
+        }
+        _ => Ok(environment),
     }
 }
 
@@ -484,7 +651,9 @@ impl ReviewerHost {
         let task_gone = gone.clone();
         let harness = spec.harness;
         let (connection_tx, connection_rx) = oneshot::channel();
+        let profile = launch.profile;
         let task = mj_core::runtime::spawn(async move {
+            let _profile = profile;
             let stderr_tail = mj_core::runtime::spawn(read_stderr_tail(stderr));
             let (reaped, ended) = {
                 let run = Client
@@ -639,9 +808,23 @@ impl ReviewerHost {
 
     /// Open a reviewer session configured like the reviewed one.
     async fn open_session(self: &Arc<Self>, spec: &LaunchSpec) -> Result<ReviewerSession> {
+        let mut request = NewSessionRequest::new(spec.cwd.clone()).mcp_servers(Vec::new());
+        if spec.harness == HarnessKind::Claude {
+            request = request.meta(serde_json::Map::from_iter([(
+                "claudeCode".into(),
+                serde_json::json!({
+                    "options": {
+                        "settingSources": ["user"],
+                        "settings": {"disableAllHooks": true},
+                        "strictMcpConfig": true,
+                        "tools": ["Read", "Glob", "Grep"]
+                    }
+                }),
+            )]));
+        }
         let created = self
             .connection
-            .send_request(NewSessionRequest::new(spec.cwd.clone()).mcp_servers(Vec::new()))
+            .send_request(request)
             .block_task()
             .await
             .context("open a reviewer session")?;

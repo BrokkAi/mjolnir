@@ -71,6 +71,139 @@ pub fn export_from_spec_file(path: &Path) -> Result<TargetCheckpoint> {
 pub fn export_from_spec_reader(reader: &mut impl std::io::Read) -> Result<TargetCheckpoint> {
     export_checkpoint(&CheckpointExportSpec::read_from(reader)?)
 }
+
+/// Hidden target CLI entry point: `mj worker suspend-preflight --spec PATH|-`.
+pub fn suspend_preflight_from_spec_file(
+    path: &Path,
+) -> Result<mj_core::suspend_consent::WorkerSuspendPreflightResult> {
+    let spec: mj_core::suspend_consent::WorkerSuspendPreflightSpec =
+        if path == Path::new(EXPORT_SPEC_STDIN) {
+            read_json_from(&mut std::io::stdin().lock(), "suspend preflight spec")?
+        } else {
+            serde_json::from_slice(&fs::read(path).with_context(|| {
+                format!("read suspend preflight spec {}", path.display())
+            })?)
+            .context("decode suspend preflight spec")?
+        };
+    run_suspend_preflight(&spec, &SystemGit)
+}
+
+pub fn run_suspend_preflight(
+    spec: &mj_core::suspend_consent::WorkerSuspendPreflightSpec,
+    git: &dyn mj_checkpoint::archive::GitCommandRunner,
+) -> Result<mj_core::suspend_consent::WorkerSuspendPreflightResult> {
+    let mut result = mj_core::suspend_consent::WorkerSuspendPreflightResult::default();
+    let mut git_delta_total: Option<u64> = if spec.dry_run { Some(0) } else { None };
+    let mut git_delta_unavailable: Option<String> = None;
+
+    for repo in &spec.repositories {
+        let mut input = if repo.raw {
+            mj_checkpoint::checkpoint::raw_snapshot_input(
+                &repo.id,
+                &repo.path,
+                None,
+                None,
+                std::path::PathBuf::new(),
+            )
+        } else if let Some(exclude_commits) = &repo.exclude_commits {
+            mj_checkpoint::checkpoint::cutoff_snapshot_input(
+                &repo.id,
+                &repo.path,
+                Some(&spec.session_id),
+                exclude_commits.clone(),
+                std::path::PathBuf::new(),
+            )?
+        } else {
+            mj_checkpoint::checkpoint::managed_clone_snapshot_input(
+                &repo.id,
+                &repo.path,
+                Some(&spec.session_id),
+                std::path::PathBuf::new(),
+                repo.origin_override.clone(),
+            )?
+        };
+        input.keep_dir = repo.keep_dir.clone();
+
+        let inventories =
+            mj_checkpoint::snapshot::session_inventory(git, std::slice::from_ref(&input))?;
+        let (_, inventory) = inventories
+            .into_iter()
+            .next()
+            .context("session inventory returned no repository")?;
+
+        if let Some(keep_dir) = &input.keep_dir {
+            let (entries, bytes) =
+                mj_checkpoint::snapshot::scan_keep_dir(&inventory.checkout, keep_dir)?;
+            result.keep_dir_entries.extend(entries);
+            result.keep_dir_bytes = result.keep_dir_bytes.saturating_add(bytes);
+        }
+
+        if spec.dry_run && git_delta_unavailable.is_none() {
+            if let Some(op) = &inventory.operation {
+                git_delta_total = None;
+                git_delta_unavailable =
+                    Some(format!("Git size estimate unavailable during {}", op.kind));
+            } else {
+                match mj_checkpoint::snapshot::estimate_repository_delta(git, &input) {
+                    Ok(est) => {
+                        if let (Some(acc), Some(bytes)) = (git_delta_total, est.total_bytes) {
+                            git_delta_total = Some(acc.saturating_add(bytes));
+                        } else {
+                            git_delta_total = None;
+                        }
+                    }
+                    Err(err) => {
+                        git_delta_total = None;
+                        git_delta_unavailable = Some(format!("Git size estimate unavailable: {err}"));
+                    }
+                }
+            }
+        }
+
+        result.untracked.extend(inventory.untracked);
+        result.nested_repositories.extend(inventory.nested_repositories);
+        result.untracked_stashes.extend(
+            inventory
+                .untracked_stashes
+                .into_iter()
+                .map(|s| mj_core::suspend_consent::SuspendUntrackedStash {
+                    checkout: s.checkout,
+                    commit: s.value.commit,
+                    message: s.value.message,
+                }),
+        );
+        if let Some(op) = inventory.operation {
+            result.operations.push(op);
+        }
+        result.raw |= inventory.raw;
+        result.blockers.extend(
+            inventory
+                .blockers
+                .into_iter()
+                .map(|b| mj_core::suspend_consent::SuspendBlocker {
+                    kind: format!("{:?}", b.kind),
+                    paths: b
+                        .paths
+                        .into_iter()
+                        .map(|p| p.value.display().to_string())
+                        .collect(),
+                    remedy: b.remedy,
+                }),
+        );
+    }
+
+    if spec.dry_run {
+        result.dry_run = Some(mj_core::suspend_consent::DryRunEstimate {
+            git_delta_bytes: git_delta_total,
+            git_delta_unavailable_reason: git_delta_unavailable,
+            session_state_bytes: None,
+            keep_dir_bytes: result.keep_dir_bytes,
+            transfer_route: None,
+        });
+    }
+
+    Ok(result)
+}
 pub fn capture_from_spec_reader(reader: &mut impl std::io::Read) -> Result<CapturedCheckpoint> {
     let spec: CheckpointCaptureSpec = read_json_from(reader, "checkpoint capture spec")?;
     capture_checkpoint_with_native_state(&spec, &SystemGit, &NativeState)

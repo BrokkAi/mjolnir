@@ -130,7 +130,6 @@ impl DashboardState {
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
-            WizardStep::MoveFiles => unreachable!("file selection belongs to Move"),
             WizardStep::Review | WizardStep::Launching => {
                 unreachable!("review input is handled before picker navigation")
             }

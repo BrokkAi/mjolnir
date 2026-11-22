@@ -89,7 +89,7 @@ pub(crate) fn apply_worker_activity(
 pub(crate) const fn lifecycle_kind(kind: RuntimeLifecycleKind) -> SessionOperationKind {
     match kind {
         RuntimeLifecycleKind::Create => SessionOperationKind::Launching,
-        RuntimeLifecycleKind::Suspend | RuntimeLifecycleKind::ForceStop => {
+        RuntimeLifecycleKind::Suspend => {
             SessionOperationKind::Suspending
         }
         RuntimeLifecycleKind::Resume => SessionOperationKind::Resuming,
@@ -251,6 +251,7 @@ mod tests {
         current_step_started_at_ms: Option<i64>,
     ) -> RelayOperationalState {
         RelayOperationalState {
+            in_place_move_hold: None,
             assessment: None,
             open_request: None,
             notification_stack: Default::default(),

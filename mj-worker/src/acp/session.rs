@@ -240,6 +240,13 @@ pub(super) async fn serve_session(
                 .as_ref()
                 .map(|info| info.version.as_str()),
         );
+    let antigravity_whole_turns = spec.harness == HarnessKind::Antigravity
+        && antigravity_usage::reports_whole_turns(
+            initialized
+                .agent_info
+                .as_ref()
+                .map(|info| info.version.as_str()),
+        );
 
     // Grok Build publishes its catalogue here rather than as `configOptions`.
     let mut grok_models = (spec.harness == HarnessKind::Grok)
@@ -786,6 +793,9 @@ pub(super) async fn serve_session(
         resumed,
         native_session_used,
     });
+    if let Some(resolved) = session_open.pending_reload_ack.take() {
+        let _ = resolved.send(Ok(()));
+    }
     // Drop anything the worker queued for the bridge this one replaced. The
     // worker dispatches only while it believes the session is configured; it
     // clears that flag on `HarnessRestarting` and sets it again only after this
@@ -1164,6 +1174,14 @@ pub(super) async fn serve_session(
                                     {
                                         emit_runtime_event(events, RuntimeEvent::Warning {
                                             message: format!("OpenCode usage could not be reconciled; turn accounting is incomplete: {error:#}"),
+                                        }).await?;
+                                    }
+                                    if antigravity_whole_turns
+                                        && let Some(usage) = usage.as_mut()
+                                        && let Err(error) = antigravity_usage::normalize(usage, usage_meta.as_ref())
+                                    {
+                                        emit_runtime_event(events, RuntimeEvent::Warning {
+                                            message: format!("Antigravity usage could not be reconciled; turn accounting is incomplete: {error:#}"),
                                         }).await?;
                                     }
                                     if spec.harness == HarnessKind::Grok {
@@ -1597,6 +1615,12 @@ pub(super) async fn serve_session(
                                 )
                                 .await;
                             }
+                            Some(CommandRequest::ReloadLaunchConfig { resolved, .. }) => {
+                                let _ = resolved.send(Err(
+                                    "cannot reload launch configuration while a turn is active"
+                                        .into(),
+                                ));
+                            }
                         },
                         restored = async {
                             mode_restoration.as_mut().expect("mode restoration branch is guarded").await
@@ -1988,6 +2012,29 @@ pub(super) async fn serve_session(
             CommandRequest::StopBackgroundTask { target, resolved } => {
                 resolve_background_task_stop(connection, &session_id, terminals, target, resolved)
                     .await;
+            }
+            CommandRequest::ReloadLaunchConfig {
+                launch_config,
+                environment,
+                command,
+                args,
+                additional_directories,
+                supervisor_spec,
+                leases,
+                resolved,
+            } => {
+                let preserve_native_session = launch_config.harness == spec.harness;
+                return Ok(Some(SessionRestart::ReloadLaunchConfig {
+                    launch_config,
+                    environment,
+                    command,
+                    args,
+                    additional_directories,
+                    supervisor_spec,
+                    leases,
+                    resume_session: preserve_native_session.then(|| session_id.to_string()),
+                    resolved,
+                }));
             }
             CommandRequest::Close { request_id } => {
                 let outcome = connection

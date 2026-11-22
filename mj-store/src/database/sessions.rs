@@ -1108,9 +1108,11 @@ pub fn fail_unready_session(
 pub fn save_suspension_intent(
     session: &SessionRecord,
     ready_move: Option<&mj_core::state::MoveOperation>,
+    consent: Option<&mj_core::suspend_consent::SuspendConsent>,
 ) -> Result<()> {
     let mut session = session.clone();
     let ready_move = ready_move.cloned();
+    let consent_json = consent.map(serde_json::to_string).transpose()?;
     submit_database_write("save suspension intent", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut operation = super::session_move::load_move_operation_with(&tx, &session.id)?;
@@ -1138,9 +1140,31 @@ pub fn save_suspension_intent(
         }
         validate_session_record(&session)?;
         update_lifecycle_fields(&tx, &session)?;
+        tx.execute(
+            "UPDATE sessions SET closing_consent = ?2 WHERE session_id = ?1",
+            params![session.id, consent_json],
+        )?;
         tx.commit()?;
         Ok(())
     })
+}
+
+/// Read the persisted suspend consent for a session currently in `Closing`.
+pub fn load_closing_consent(
+    session_id: &str,
+) -> Result<Option<mj_core::suspend_consent::SuspendConsent>> {
+    let connection = open_reader(&database_path())?;
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT closing_consent FROM sessions WHERE session_id = ?1",
+            [session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    raw.as_deref()
+        .map(|json| serde_json::from_str(json).context("decode sessions.closing_consent"))
+        .transpose()
 }
 
 pub fn save_failed_close(session: &SessionRecord) -> Result<SessionRecord> {
@@ -1260,6 +1284,44 @@ pub fn clear_recorded_lifecycle_failure(
 
 /// Install a lifecycle transition together with the checkpoint it just
 /// verified and the harness session id that produced it.
+/// Point one checkpoint row at a replacement archive when it still names
+/// `expected_archive_path` and `expected_sha256`.
+///
+/// The update changes only `archive_path` and `sha256`, in one immediate
+/// transaction. `created_at` and `event_frontier` stay as they are. A missing
+/// row or a row that no longer matches returns `Ok(false)` so a concurrent
+/// checkpoint write is left alone. An illegal digest is an error from the
+/// table's check constraint.
+pub fn replace_checkpoint_archive_if_current(
+    session_id: &str,
+    expected_archive_path: &Path,
+    expected_sha256: &str,
+    replacement: &CheckpointMetadata,
+) -> Result<bool> {
+    let session_id = session_id.to_owned();
+    let expected_archive_path = path_to_blob(expected_archive_path);
+    let expected_sha256 = expected_sha256.to_owned();
+    let archive_path = path_to_blob(&replacement.archive_path);
+    let sha256 = replacement.sha256.clone();
+    submit_database_write("replace_checkpoint_archive_if_current", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE session_checkpoints
+                 SET archive_path = ?3, sha256 = ?4
+                 WHERE session_id = ?1 AND archive_path = ?2 AND sha256 = ?5",
+            params![
+                session_id,
+                expected_archive_path,
+                archive_path,
+                sha256,
+                expected_sha256,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(changed == 1)
+    })
+}
+
 pub fn save_checkpointed_session(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("save_checkpointed_session", move |_| {
@@ -1933,7 +1995,11 @@ pub(super) fn save_session_with_container_size_to(
     let mut session = session.clone();
     let moving: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM session_moves WHERE session_id=?1
-         AND json_extract(operation_json, '$.phase') IN ('preparing','closing_source','resuming_destination','starting_queue'))",
+         AND json_extract(operation_json, '$.phase') IN (
+             'capturing','transferring','restoring','destination_starting',
+             'destination_owns','source_retired','queue_admitted','dispatch_released',
+             'preparing','closing_source','resuming_destination','starting_queue'
+         ))",
         [&session.id], |row| row.get(0),
     )?;
     if moving {

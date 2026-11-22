@@ -3424,7 +3424,10 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     let error = validate_action(
         &ControllerAction::Suspend {
             session_id: "not-managed".into(),
-            acknowledge_unpublished_work: false,
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
+            abort_operations: mj_core::suspend_consent::OperationConsent::None,
+            without_checkpoint: false,
+            confirm_no_checkpoint: false,
         },
         &snapshot,
     )
@@ -3556,7 +3559,8 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
         supervisors: None,
         oracle_choice: None,
         subagents: None,
-        workspace: Default::default(),
+        consent: Default::default(),
+        skip_keep_paths: Vec::new(),
         clear_resource_allocation: false,
         session_id: "session-1".into(),
         profile_id: Some("codex-1".into()),
@@ -3567,7 +3571,9 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     let preparation = MovePreparation {
         container_upgrade: None,
         destination_checks: Default::default(),
-        workspace: None,
+        route_preview: None,
+        suspend_preflight: None,
+        skip_keep_sizes: Vec::new(),
         in_place: false,
         stops_subagents: true,
         source_unavailable: false,

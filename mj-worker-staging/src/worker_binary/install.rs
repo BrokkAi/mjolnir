@@ -105,6 +105,18 @@ pub fn append_container_storage_guidance(
     append_staged_instructions(harness, destination, &guidance)
 }
 
+/// Suspend and Move rules for every harness, including bare sessions.
+pub fn append_session_state_instructions(
+    harness: mj_core::config::HarnessKind,
+    destination: &Path,
+) -> Result<()> {
+    append_staged_instructions(
+        harness,
+        destination,
+        mj_core::session_keep::SESSION_STATE_INSTRUCTIONS,
+    )
+}
+
 pub fn append_subagent_policy(
     harness: mj_core::config::HarnessKind,
     destination: &Path,

@@ -478,7 +478,8 @@ pub enum DashboardAction {
         oracle: Option<bool>,
         supervisors: Option<bool>,
         oracle_choice: Option<mj_core::config::SubagentChoice>,
-        workspace_selection: mj_core::move_workspace::WorkspaceSelection,
+        consent: mj_core::suspend_consent::SuspendConsent,
+        skip_keep_paths: Vec<std::path::PathBuf>,
         session_id: String,
         profile_id: String,
         target_template_id: String,
@@ -527,27 +528,18 @@ pub enum DashboardAction {
     RemoveBundle {
         bundle_id: String,
     },
+    SuspendPreflight {
+        session_id: String,
+    },
     Suspend {
         session_id: String,
-        acknowledge_unpublished_work: bool,
-    },
-    IgnoreNestedRepositoriesAndSuspend {
-        session_id: String,
-    },
-    DiscardSinceCheckpoint {
-        session_id: String,
-        checkpoint: mj_core::state::CheckpointMetadata,
+        consent: mj_core::suspend_consent::SuspendConsent,
     },
     DestroyStopped {
         session_id: String,
-        /// Whether the user asked for the session's managed git branch to go
-        /// with it. Destroying keeps the branch unless they did.
-        delete_branch: bool,
     },
     ForceDestroy {
         session_id: String,
-        /// See [`DashboardAction::DestroyStopped`].
-        delete_branch: bool,
     },
     RenameSession {
         session_id: String,

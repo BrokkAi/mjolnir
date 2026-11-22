@@ -34,7 +34,10 @@ fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() 
     for action in [
         ControllerAction::Suspend {
             session_id: "suspend-web-session".into(),
-            acknowledge_unpublished_work: true,
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
+            abort_operations: mj_core::suspend_consent::OperationConsent::None,
+            without_checkpoint: false,
+            confirm_no_checkpoint: false,
         },
         ControllerAction::Restart {
             session_id: "restart-web-session".into(),
@@ -369,8 +372,17 @@ fn move_recovery_fixture() -> mj_core::state::MoveOperation {
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
-        workspace_transfer: None,
-        handoff: None,
+        transfer_route: None,
+        consent: Default::default(),
+        skip_keep_paths: Vec::new(),
+        granted_keys: Vec::new(),
+        granted_ec2_rules: Vec::new(),
+        in_place_expected_store_id: None,
+        in_place_continuation_command_id: None,
+        in_place_held_command_ids: Vec::new(),
+        in_place_harness_restarted: false,
+        deferred_environment_changes: Vec::new(),
+        source_snapshot: None,
         in_place: false,
         source_checkpoint_only: false,
         operation_id: "move-1".into(),
@@ -379,7 +391,8 @@ fn move_recovery_fixture() -> mj_core::state::MoveOperation {
         supervisors: None,
             oracle_choice: None,
             subagents: None,
-            workspace: Default::default(),
+            consent: Default::default(),
+            skip_keep_paths: Vec::new(),
             clear_resource_allocation: true,
             session_id: "session-1".into(),
             profile_id: Some("destination-profile".into()),
@@ -795,6 +808,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     record.state = SessionState::Running;
     controller.state.sessions.insert(record.id.clone(), record);
     let operational = RelayOperationalState {
+        in_place_move_hold: None,
         assessment: None,
         open_request: None,
         notification_stack: Default::default(),
@@ -2275,7 +2289,6 @@ fn force_close_is_admitted_like_close() {
     let mut active = std::collections::BTreeSet::from(["session-1".to_owned()]);
     let force_close = ControllerAction::Destroy {
         session_id: "session-1".into(),
-        delete_branch: false,
     };
     // A session already busy with a stuck close is exactly when a force
     // close has to get through.
@@ -2319,7 +2332,10 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
     );
     let close = ControllerAction::Suspend {
         session_id: "session-1".into(),
-        acknowledge_unpublished_work: false,
+        discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
+        abort_operations: mj_core::suspend_consent::OperationConsent::None,
+        without_checkpoint: false,
+        confirm_no_checkpoint: false,
     };
     assert_eq!(
         admit_phone_action(&close, &mut active, &sessions, &cancellations),

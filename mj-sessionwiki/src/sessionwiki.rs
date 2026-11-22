@@ -2435,6 +2435,16 @@ pub fn sessions_ready_to_archive(
     sessions_ready_to_archive_from_state(&state, now, older_than_days)
 }
 
+fn checkpoint_may_be_origin_delta(checkpoint: &mj_core::state::CheckpointMetadata) -> bool {
+    match mj_checkpoint::archive::checkpoint_archive_uses_origin_delta(&checkpoint.archive_path) {
+        Ok(uses_origin_delta) => uses_origin_delta,
+        // Fail closed when an archive file exists on disk and cannot be read;
+        // return false only if confirmed absent so synthetic unit tests with
+        // non-existent paths continue to work.
+        Err(_) => checkpoint.archive_path.try_exists().unwrap_or(true),
+    }
+}
+
 pub fn sessions_ready_to_archive_from_state(
     state: &mj_core::state::State,
     now: DateTime<Utc>,
@@ -2453,6 +2463,11 @@ pub fn sessions_ready_to_archive_from_state(
                         if worktree.kind == mj_core::state::ManagedCheckoutKind::Worktree
                 )
             });
+            let is_legacy_managed_worktree = is_managed_worktree
+                && !record
+                    .checkpoint
+                    .as_deref()
+                    .is_some_and(checkpoint_may_be_origin_delta);
             // Preserve the historical child rule: its copied raw path counted
             // as a raw checkout, even when the parent owns a managed clone.
             let has_raw_path = checkout.as_ref().is_some_and(|checkout| {
@@ -2465,7 +2480,7 @@ pub fn sessions_ready_to_archive_from_state(
             });
             record.state == mj_core::state::SessionState::Stopped
                 && parse_time(&record.updated_at).is_some_and(|updated| updated <= cutoff)
-                && (is_managed_worktree
+                && (is_legacy_managed_worktree
                     || has_raw_path
                     || record
                         .checkpoint
@@ -2810,6 +2825,7 @@ fn snapshot_of(
         command_ledger: None,
         assessment_state: None,
         notification_stack: None,
+        native_use_evidence: None,
         event_frontier,
         // Not a relay frontier, so there is no recorded digest to carry. It has
         // to be a well-formed non-genesis digest, and deriving it from the
@@ -3128,6 +3144,7 @@ mod tests {
                     command_ledger: None,
                     assessment_state: None,
                     notification_stack: None,
+                    native_use_evidence: None,
                     event_frontier: 4,
                     event_frontier_digest: "a".repeat(64),
                     session: CanonicalSessionState {
@@ -3303,6 +3320,7 @@ mod tests {
         SessionRecord {
             oracle_choice: None,
             oracle: true,
+            supervisors: false,
             notifications_ignored: false,
             project: None,
             target_runtime: None,
@@ -4115,6 +4133,7 @@ mod tests {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
+            supervisor: false,
         }
     }
 
@@ -4179,6 +4198,175 @@ mod tests {
         session.publication.as_mut().unwrap().stashed = false;
         session.publication.as_mut().unwrap().checkpoint_sha256 = "b".repeat(64);
         assert!(ready(vec![session], vec![]).is_empty());
+    }
+
+    #[test]
+    fn aged_worktree_with_origin_delta_or_unreadable_archive_requires_clean_published_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let make_archive = |name: &str, origin_delta: bool| -> PathBuf {
+            let path = temp.path().join(name);
+            let mut metadata = mj_checkpoint::archive::RepositoryMetadata {
+                id: "workspace".into(),
+                relative_destination: PathBuf::from("workspace"),
+                checkout_subdirectory: None,
+                origin: "https://example.test/repository.git".into(),
+                push_urls: Vec::new(),
+                remote_workspace: false,
+                plain_directory: false,
+                base_commit: "1".repeat(40),
+                head_commit: "2".repeat(40),
+                branch: Some("mj/test".into()),
+                review_refs_metadata_only: false,
+                review_baseline_ref: None,
+                saved_refs: Default::default(),
+                stash_stack: Vec::new(),
+                git_operation: None,
+                origin_delta: None,
+            };
+            if origin_delta {
+                metadata.origin_delta = Some(Box::new(mj_core::archive::WorkspaceSnapshotMetadata {
+                    origin_url: Some("https://example.test/repository.git".into()),
+                    object_format: "sha1".into(),
+                    notices: Vec::new(),
+                    head: mj_core::archive::SnapshotHead::Branch {
+                        name: "mj/test".into(),
+                        commit: "2".repeat(40),
+                    },
+                    refs: BTreeMap::new(),
+                    branch_tracking: BTreeMap::new(),
+                    stash: Vec::new(),
+                    working_state: None,
+                    working_state_skipped: false,
+                    has_uncommitted_state: false,
+                    worktrees: Vec::new(),
+                    initialized_submodules: Vec::new(),
+                    index_gitlinks: Vec::new(),
+                    remote_refs_stale: false,
+                    prerequisites: Vec::new(),
+                    history_cutoff: false,
+                }));
+            }
+            let input = ArchiveInput {
+                session: SessionManifest {
+                    id: "0123456789abcdef0123456789abcdef".into(),
+                    title: "aged worktree".into(),
+                    harness_kind: mj_core::config::HarnessKind::Codex,
+                    profile_id: "codex".into(),
+                    native_session_id: "native-session".into(),
+                    created_at: "2026-09-01T00:00:00Z".into(),
+                    checkpointed_at: "2026-09-01T01:00:00Z".into(),
+                    hel_version: "test".into(),
+                    relay_version: "test".into(),
+                    adapter_version: "test".into(),
+                },
+                target: TargetManifest {
+                    template_id: "local".into(),
+                    target_kind: "local-bare".into(),
+                    details: BTreeMap::new(),
+                },
+                bundle: BundleManifest {
+                    id: "project".into(),
+                    primary_repository: "workspace".into(),
+                },
+                canonical_session: CanonicalSessionSnapshot {
+                    command_ledger: None,
+                    assessment_state: None,
+                    notification_stack: None,
+                    native_use_evidence: None,
+                    event_frontier: 0,
+                    event_frontier_digest: "0".repeat(64),
+                    session: CanonicalSessionState {
+                        execution: CanonicalExecutionState::Idle,
+                        last_activity_at_ms: None,
+                        session_title: None,
+                        configuration: Default::default(),
+                    },
+                    transcript: Vec::new(),
+                    queued_prompts: Vec::new(),
+                    mailbox: Default::default(),
+                },
+                native_artifacts: Vec::new(),
+                repositories: vec![mj_checkpoint::archive::RepositorySnapshot {
+                    metadata,
+                    origin_delta_pack: None,
+                    committed_bundle: Vec::new(),
+                    staged_patch: Vec::new(),
+                    unstaged_patch: Vec::new(),
+                    untracked_tar: Vec::new(),
+                    operation_payloads: None,
+                    linked_worktrees: Vec::new(),
+                }],
+            };
+            write_archive_atomic(&path, &input).unwrap();
+            path
+        };
+
+        let origin_delta_path = make_archive("origin-delta.hel.zip", true);
+        let legacy_path = make_archive("legacy.hel.zip", false);
+        let corrupt_path = temp.path().join("corrupt.hel.zip");
+        std::fs::write(&corrupt_path, b"not a valid zip archive").unwrap();
+
+        let make_worktree_session = |id: &str, archive_path: PathBuf| -> SessionRecord {
+            let root = PathBuf::from(format!("/srv/project/.mj/worktrees/{id}"));
+            let mut session = record(
+                id,
+                mj_core::state::SessionState::Stopped,
+                "2026-09-01T00:00:00Z",
+            );
+            session.project_directory = Some(root.clone());
+            session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+                kind: mj_core::state::ManagedCheckoutKind::Worktree,
+                source_project_directory: "/srv/project".into(),
+                source_repository: "/srv/project".into(),
+                worktree_root: root,
+                branch: format!("mj/{id}"),
+                target: mj_core::state::ManagedWorktreeTarget::Local,
+                base_commit: Some("1".repeat(40)),
+            }));
+            session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+                archive_path,
+                sha256: "a".repeat(64),
+                created_at: "2026-09-01T00:00:00Z".into(),
+                event_frontier: 0,
+            }));
+            session
+        };
+
+        let origin_delta_id = "0123456789abcdef0123456789abcde1";
+        let mut origin_delta_session = make_worktree_session(origin_delta_id, origin_delta_path);
+        assert!(
+            ready(vec![origin_delta_session.clone()], vec![]).is_empty(),
+            "aged worktree with OriginDelta archive must not be archived without Published evidence"
+        );
+        origin_delta_session.publication = Some(Box::new(mj_core::state::PublicationAssessment {
+            checkpoint_sha256: "a".repeat(64),
+            state: mj_core::state::PublicationState::Published,
+            dirty: false,
+            stashed: false,
+            saved_commits: vec!["2".repeat(40)],
+            destinations: vec!["https://example.test/repository.git".into()],
+            checked_at: "2026-09-01T01:00:00Z".into(),
+            reason: None,
+        }));
+        assert_eq!(
+            ready(vec![origin_delta_session], vec![]),
+            vec![origin_delta_id]
+        );
+
+        let corrupt_id = "0123456789abcdef0123456789abcde2";
+        let corrupt_session = make_worktree_session(corrupt_id, corrupt_path);
+        assert!(
+            ready(vec![corrupt_session], vec![]).is_empty(),
+            "unreadable existing archive must fail closed and block age-only archival"
+        );
+
+        let legacy_id = "0123456789abcdef0123456789abcde3";
+        let legacy_session = make_worktree_session(legacy_id, legacy_path);
+        assert_eq!(
+            ready(vec![legacy_session], vec![]),
+            vec![legacy_id],
+            "legacy worktree archive remains eligible under the age-only rule"
+        );
     }
 
     /// A session whose checkpoint archive and attachments sit under `root`.
@@ -4448,6 +4636,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
+                supervisor: false,
             }
             .into(),
         );

@@ -12,11 +12,11 @@ pub mod worker_stop;
 pub mod relay;
 
 pub mod acp;
+pub mod authorized_keys;
 pub mod exit_record;
 pub mod terminal;
 
 pub mod checkpoint;
-pub mod move_workspace;
 
 pub mod mailbox_hook;
 mod mcp_stdio;

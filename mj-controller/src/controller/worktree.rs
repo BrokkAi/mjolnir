@@ -275,7 +275,13 @@ impl Controller {
         };
         let reuse_existing_branch =
             !origin_delta && retained_managed_worktree_branch_available(executor, &worktree)?;
-        if !reuse_existing_branch {
+        if origin_delta {
+            worktree.kind = ManagedCheckoutKind::Clone;
+            worktree.worktree_root =
+                target_path::join(source, &Path::new(".mj").join("clones").join(&session.id));
+            worktree.branch = format!("mj/{}", session.id);
+            worktree.base_commit = None;
+        } else if !reuse_existing_branch {
             // The archived delta restored into this clone needs the session's
             // base, which the network remote served after the host's last fetch.
             refresh_source_origin(executor, &worktree.target, source)?;
@@ -1024,7 +1030,7 @@ pub(super) fn plan_raw_to_workspace_from_origin_delta(
     );
     mj_core::remote_git::validate_network_url(&metadata.origin).with_context(|| {
         format!(
-            "archived origin {:?} is not a network Git URL that an isolated target can clone",
+            "archived origin {:?} is not a network Git URL that an isolated target can clone; resume this session on its original target",
             metadata.origin
         )
     })?;
@@ -1254,140 +1260,107 @@ pub(super) fn plan_raw_to_workspace_with_checkout(
     })
 }
 
-/// Snapshot the host checkout as the repository content an isolated workspace
-/// arrives with: commits that are on no origin ref, plus staged, unstaged, and
-/// untracked work.
-///
-/// The metadata carries the checkout's own network remote, so the container
-/// clones real provenance and its later checkpoints behave like any other
-/// workspace session's.
-pub(super) fn raw_checkout_snapshot(
+pub(super) struct LegacyRawConversionSnapshot {
+    pub(super) repository: mj_checkpoint::archive::RepositorySnapshot,
+    pub(super) untracked_paths: Vec<PathBuf>,
+    _pack_dir: tempfile::TempDir,
+}
+
+/// Capture an untouched legacy raw checkout using Milestone 1's
+/// `capture_workspace_snapshot` (`CheckoutOwnership::Raw { launch: None }`,
+/// `UntrackedConsent::Any`). Returns the origin-delta `RepositorySnapshot`
+/// (whose pack file lives in `_pack_dir`) and the list of untracked paths that
+/// remain in the untouched raw checkout for the resume notice.
+pub(super) fn capture_legacy_raw_checkout_snapshot(
     checkout: &Path,
     repository_id: &str,
     source: &mj_core::remote_git::NetworkGitSource,
     destination: &Path,
     git: &dyn mj_checkpoint::archive::GitCommandRunner,
-    managed_clone: bool,
-) -> Result<mj_checkpoint::archive::RepositorySnapshot> {
-    let base = raw_checkout_base(git, checkout, repository_id)?;
-    reject_dirty_submodules_for_move(git, checkout)?;
-    let history = if managed_clone {
-        mj_checkpoint::archive::GitHistoryMode::CloneFrom(
-            base.origin_boundary
-                .clone()
-                .context("managed clone has no origin boundary commit")?,
-        )
-    } else {
-        mj_checkpoint::archive::GitHistoryMode::SessionDelta
+) -> Result<LegacyRawConversionSnapshot> {
+    use mj_checkpoint::snapshot::{
+        CaptureConsent, CheckoutOwnership, ExclusionSource, OperationConsent, RepositoryInput,
+        SessionCaptureConsent, SnapshotHead, UntrackedConsent, capture_session_snapshot,
+        session_inventory,
     };
-    let mut snapshot = mj_checkpoint::archive::collect_git_snapshot(
-        git,
-        checkout,
-        &mj_checkpoint::archive::GitCollectionSpec {
+
+    let pack_dir = tempfile::tempdir().context("create temporary directory for raw snapshot")?;
+    let pack_path = pack_dir.path().join(format!("{repository_id}.pack"));
+    let repo_input = RepositoryInput {
+        id: repository_id.to_owned(),
+        checkout: checkout.to_path_buf(),
+        ownership: CheckoutOwnership::Raw { launch: None },
+        origin_override: Some(source.fetch_url.clone()),
+        pack_path,
+        exclusions: ExclusionSource::Remote(source.fetch_url.clone()),
+        keep_dir: None,
+    };
+
+    let inventory = session_inventory(git, std::slice::from_ref(&repo_input))
+        .with_context(|| format!("inspect untracked files in {}", checkout.display()))?;
+    let mut untracked_paths = inventory
+        .get(repository_id)
+        .map(|repo| {
+            repo.untracked
+                .iter()
+                .map(|item| item.path.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    untracked_paths.sort();
+
+    let mut consent = SessionCaptureConsent::default();
+    consent.repositories.insert(
+        repository_id.to_owned(),
+        CaptureConsent {
+            untracked: UntrackedConsent::Any,
+            operations: OperationConsent::None,
+        },
+    );
+    let snapshot = capture_session_snapshot(git, std::slice::from_ref(&repo_input), &consent)
+        .with_context(|| format!("capture raw checkout snapshot at {}", checkout.display()))?
+        .repositories
+        .remove(repository_id)
+        .context("raw checkout snapshot missing captured repository")?;
+
+    let origin = mj_checkpoint::archive::redact_origin_credentials(&source.fetch_url)?;
+    let branch = match &snapshot.metadata.head {
+        SnapshotHead::Branch { name, .. } => Some(name.clone()),
+        SnapshotHead::Detached(_) => None,
+    };
+    let head_commit = snapshot.metadata.head.commit().to_owned();
+    let repository = mj_checkpoint::archive::RepositorySnapshot {
+        metadata: mj_checkpoint::archive::RepositoryMetadata {
             id: repository_id.to_owned(),
             relative_destination: destination.to_path_buf(),
-            history,
-            origin_override: None,
+            checkout_subdirectory: None,
+            origin,
+            push_urls: Vec::new(),
+            remote_workspace: false,
+            plain_directory: false,
+            base_commit: String::new(),
+            head_commit,
+            branch,
+            review_refs_metadata_only: false,
+            review_baseline_ref: None,
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
+            git_operation: None,
+            origin_delta: Some(Box::new(snapshot.metadata)),
         },
-    )
-    .with_context(|| format!("snapshot the checkout at {}", checkout.display()))?;
-    // The resolved remote, not whatever `origin` happens to be: the checkout's
-    // branch may track another remote. Credentials stay out of the archive.
-    snapshot.metadata.origin =
-        mj_checkpoint::archive::redact_origin_credentials(&source.fetch_url)?;
-    snapshot.metadata.push_urls = source
-        .push_urls
-        .iter()
-        .map(|url| mj_checkpoint::archive::redact_origin_credentials(url))
-        .collect::<Result<Vec<_>>>()?;
-    snapshot.metadata.remote_workspace = true;
-    snapshot.metadata.base_commit = base.commit;
-    Ok(snapshot)
-}
-
-pub(super) struct RawCheckoutBase {
-    origin_boundary: Option<String>,
-    pub(super) commit: String,
-}
-
-/// The existing host-to-workspace conversion boundary, shared by full
-/// repository snapshots and Move's metadata-only handoff.
-pub(super) fn raw_checkout_base(
-    git: &dyn mj_checkpoint::archive::GitCommandRunner,
-    checkout: &Path,
-    repository_id: &str,
-) -> Result<RawCheckoutBase> {
-    // A bundle's prerequisites must already be durable at the cloned origin.
-    mj_checkpoint::checkpoint::repair_origin_refs(git, checkout, repository_id)?;
-    let origin_boundary = origin_boundary_commit(git, checkout)?;
-    let commit = match &origin_boundary {
-        Some(boundary) => boundary.clone(),
-        None => git_runner_stdout(
-            git,
-            checkout,
-            ["rev-parse", "HEAD"],
-            "read durable checkout HEAD",
-        )?,
+        origin_delta_pack: snapshot.pack,
+        committed_bundle: Vec::new(),
+        staged_patch: Vec::new(),
+        unstaged_patch: Vec::new(),
+        untracked_tar: Vec::new(),
+        operation_payloads: None,
+        linked_worktrees: Vec::new(),
     };
-    Ok(RawCheckoutBase {
-        origin_boundary,
-        commit,
-    })
-}
-
-/// The newest commit the checkout shares with `origin`, which is where a
-/// converted workspace measures its own session delta from. `None` when HEAD
-/// is already on an origin ref, leaving no boundary to report.
-fn origin_boundary_commit(
-    git: &dyn mj_checkpoint::archive::GitCommandRunner,
-    checkout: &Path,
-) -> Result<Option<String>> {
-    let listed = git_runner_stdout(
-        git,
-        checkout,
-        [
-            "rev-list",
-            "--boundary",
-            "HEAD",
-            "--not",
-            "--remotes=origin",
-        ],
-        "list commits outside origin",
-    )?;
-    // `--boundary` marks the excluded parents of the listed commits with `-`,
-    // and lists them after the commits themselves.
-    Ok(listed
-        .lines()
-        .filter_map(|line| line.strip_prefix('-'))
-        .map(|commit| commit.trim().to_owned())
-        .find(|commit| !commit.is_empty()))
-}
-
-fn git_runner_stdout(
-    git: &dyn mj_checkpoint::archive::GitCommandRunner,
-    repository: &Path,
-    args: impl IntoIterator<Item = impl AsRef<str>>,
-    purpose: &str,
-) -> Result<String> {
-    let output = git.run(
+    Ok(LegacyRawConversionSnapshot {
         repository,
-        &mj_checkpoint::archive::GitCommand {
-            arguments: args
-                .into_iter()
-                .map(|argument| std::ffi::OsString::from(argument.as_ref()))
-                .collect(),
-            stdin: Vec::new(),
-            env: Vec::new(),
-        },
-    )?;
-    command_stdout(
-        CommandOutput {
-            status: output.status,
-            stdout: output.stdout,
-            stderr: output.stderr,
-        },
-        purpose,
-    )
+        untracked_paths,
+        _pack_dir: pack_dir,
+    })
 }
 
 /// Describe a raw-to-workspace conversion for a person to confirm. Reads Git
@@ -2206,14 +2179,60 @@ pub(super) fn create_managed_worktree(
     Ok(())
 }
 
+enum CloneSeedMode<'a> {
+    FreshBranch,
+    LocalSnapshot(&'a mj_checkpoint::snapshot::WorkspaceSnapshot),
+    RemoteSnapshot {
+        object_format: &'a str,
+        origin_url: Option<&'a str>,
+    },
+}
+
+impl<'a> CloneSeedMode<'a> {
+    fn snapshot_object_format(&self) -> Option<&'a str> {
+        match self {
+            Self::FreshBranch => None,
+            Self::LocalSnapshot(snapshot) => Some(snapshot.metadata.object_format.as_str()),
+            Self::RemoteSnapshot { object_format, .. } => Some(*object_format),
+        }
+    }
+
+    fn snapshot_origin_url(&self) -> Option<&'a str> {
+        match self {
+            Self::FreshBranch => None,
+            Self::LocalSnapshot(snapshot) => snapshot.metadata.origin_url.as_deref(),
+            Self::RemoteSnapshot { origin_url, .. } => *origin_url,
+        }
+    }
+
+    fn local_snapshot(&self) -> Option<&'a mj_checkpoint::snapshot::WorkspaceSnapshot> {
+        match self {
+            Self::LocalSnapshot(snapshot) => Some(snapshot),
+            Self::FreshBranch | Self::RemoteSnapshot { .. } => None,
+        }
+    }
+
+    fn is_fresh_branch(&self) -> bool {
+        matches!(self, Self::FreshBranch)
+    }
+}
+
+pub(super) enum ManagedCloneRestoreOutcome {
+    /// Snapshot was applied directly into the local managed clone.
+    RestoredLocally(Vec<String>),
+    /// Empty clone was seeded on the remote SSH target; the target worker
+    /// must run `restore_repositories` during `restore_into_target`.
+    SeededForRemoteRestore,
+}
+
 fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorktree) -> Result<()> {
-    create_managed_clone_with_snapshot(executor, checkout, None).map(drop)
+    create_managed_clone_with_snapshot(executor, checkout, CloneSeedMode::FreshBranch).map(drop)
 }
 
 fn create_managed_clone_with_snapshot(
     executor: &impl CommandExecutor,
     checkout: &ManagedWorktree,
-    snapshot: Option<&mj_checkpoint::snapshot::WorkspaceSnapshot>,
+    mode: CloneSeedMode<'_>,
 ) -> Result<Vec<String>> {
     let parent = checkout
         .worktree_root
@@ -2237,9 +2256,9 @@ fn create_managed_clone_with_snapshot(
         .purpose("create managed clone parent"),
     )?;
     let mut published = false;
-    let seed_from_source = match snapshot {
+    let seed_from_source = match mode.snapshot_object_format() {
         None => true,
-        Some(snapshot) => {
+        Some(expected_object_format) => {
             path_exists_on_managed_target(executor, &checkout.target, &checkout.source_repository)?
                 && executor
                     .execute(&managed_git_command(
@@ -2252,7 +2271,7 @@ fn create_managed_clone_with_snapshot(
                     .is_ok_and(|output| {
                         output.status == 0
                             && String::from_utf8_lossy(&output.stdout).trim()
-                                == snapshot.metadata.object_format
+                                == expected_object_format
                     })
         }
     };
@@ -2316,7 +2335,7 @@ fn create_managed_clone_with_snapshot(
                 ),
             }
             copy_clone_local_git_preferences(executor, checkout, &staging)?;
-            if snapshot.is_none() {
+            if mode.is_fresh_branch() {
                 execute_checked(
                     executor,
                     managed_git_command(
@@ -2370,8 +2389,8 @@ fn create_managed_clone_with_snapshot(
                 }
             }
         } else {
-            let origin = snapshot
-                .and_then(|snapshot| snapshot.metadata.origin_url.as_deref())
+            let origin = mode
+                .snapshot_origin_url()
                 .context("origin-seeded managed clone requires a snapshot origin URL")?;
             execute_checked(
                 executor,
@@ -2390,7 +2409,7 @@ fn create_managed_clone_with_snapshot(
                 .purpose("seed independent managed clone from origin"),
             )?;
         }
-        let notices = if let Some(snapshot) = snapshot {
+        let notices = if let Some(snapshot) = mode.local_snapshot() {
             let mut notices = snapshot.notices.clone();
             // Restore runs Git fetches; keep them off the async workers.
             notices.extend(mj_core::runtime::off_async_worker(|| {
@@ -2419,7 +2438,7 @@ fn create_managed_clone_with_snapshot(
             .purpose("publish managed clone checkout"),
         )?;
         published = true;
-        if let Some(snapshot) = snapshot {
+        if let Some(snapshot) = mode.local_snapshot() {
             mj_checkpoint::snapshot::repair_workspace_snapshot(
                 &mj_checkpoint::archive::SystemGit,
                 snapshot,
@@ -2634,14 +2653,13 @@ pub(super) fn restore_managed_clone_origin_delta(
     worktree: &ManagedWorktree,
     archive: &Path,
     manifest: &mj_checkpoint::archive::ArchiveManifest,
-) -> Result<Vec<String>> {
+) -> Result<ManagedCloneRestoreOutcome> {
     use mj_checkpoint::archive::CheckpointPayloadReader;
     use mj_checkpoint::snapshot::WorkspaceSnapshot;
 
     ensure!(
-        worktree.kind == ManagedCheckoutKind::Clone
-            && matches!(&worktree.target, ManagedWorktreeTarget::Local),
-        "origin delta resume requires a local independent managed clone"
+        worktree.kind == ManagedCheckoutKind::Clone,
+        "origin delta resume requires an independent managed clone"
     );
     let [repository] = manifest.repositories.as_slice() else {
         bail!("origin delta resume requires exactly one repository");
@@ -2652,24 +2670,6 @@ pub(super) fn restore_managed_clone_origin_delta(
         .as_deref()
         .context("origin delta metadata is missing")?
         .clone();
-    let pack = repository
-        .origin_delta_pack_path
-        .as_ref()
-        .map(|path| -> Result<_> {
-            let descriptor = manifest
-                .payloads
-                .iter()
-                .find(|payload| &payload.path == path)
-                .context("origin delta pack descriptor is missing")?;
-            let mut pack = tempfile::NamedTempFile::new()?;
-            CheckpointPayloadReader::open(archive)?.copy_payload(descriptor, pack.as_file_mut())?;
-            Ok(pack)
-        })
-        .transpose()?;
-    let snapshot = WorkspaceSnapshot {
-        metadata,
-        pack: pack.as_ref().map(|pack| pack.path().to_owned()),
-    };
     if path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)?
         && executor
             .execute(&managed_git_command(
@@ -2688,7 +2688,350 @@ pub(super) fn restore_managed_clone_origin_delta(
             worktree.kind,
         )?;
     }
-    create_managed_clone_with_snapshot(executor, worktree, Some(&snapshot))
+    match &worktree.target {
+        ManagedWorktreeTarget::Local => {
+            let pack = repository
+                .origin_delta_pack_path
+                .as_ref()
+                .map(|path| -> Result<_> {
+                    let descriptor = manifest
+                        .payloads
+                        .iter()
+                        .find(|payload| &payload.path == path)
+                        .context("origin delta pack descriptor is missing")?;
+                    let mut pack = tempfile::NamedTempFile::new()?;
+                    CheckpointPayloadReader::open(archive)?
+                        .copy_payload(descriptor, pack.as_file_mut())?;
+                    Ok(pack)
+                })
+                .transpose()?;
+            let snapshot = WorkspaceSnapshot {
+                metadata,
+                pack: pack.as_ref().map(|pack| pack.path().to_owned()),
+            };
+            let notices = create_managed_clone_with_snapshot(
+                executor,
+                worktree,
+                CloneSeedMode::LocalSnapshot(&snapshot),
+            )?;
+            Ok(ManagedCloneRestoreOutcome::RestoredLocally(notices))
+        }
+        ManagedWorktreeTarget::Ssh { .. } => {
+            // Seed the empty clone on the SSH host; `restore_into_target` then
+            // invokes `mj-worker worker restore-checkpoint` with
+            // `restore_repositories = true` so the snapshot is unpacked and
+            // applied directly on the SSH host.
+            create_managed_clone_with_snapshot(
+                executor,
+                worktree,
+                CloneSeedMode::RemoteSnapshot {
+                    object_format: &metadata.object_format,
+                    origin_url: metadata.origin_url.as_deref(),
+                },
+            )?;
+            Ok(ManagedCloneRestoreOutcome::SeededForRemoteRestore)
+        }
+    }
+}
+
+/// Upgrade a legacy linked-worktree record to a fresh independent managed clone
+/// under `<source_repository>/.mj/clones/<session_id>`, preserving any relative
+/// subdirectory in `project_directory`.
+pub(super) fn upgrade_legacy_worktree_to_clone(
+    worktree: &ManagedWorktree,
+    session_id: &str,
+    project_directory: Option<&Path>,
+) -> (ManagedWorktree, Option<PathBuf>) {
+    let clone_root = target_path::join(
+        &worktree.source_repository,
+        &Path::new(".mj").join("clones").join(session_id),
+    );
+    let upgraded = ManagedWorktree {
+        worktree_root: clone_root.clone(),
+        kind: ManagedCheckoutKind::Clone,
+        ..worktree.clone()
+    };
+    let upgraded_project_directory = project_directory.map(|dir| {
+        if let Ok(relative) = dir.strip_prefix(&worktree.worktree_root)
+            && !relative.as_os_str().is_empty()
+        {
+            target_path::join(&clone_root, relative)
+        } else {
+            clone_root
+        }
+    });
+    (upgraded, upgraded_project_directory)
+}
+
+/// Resume a legacy `ManagedCheckoutKind::Worktree` archive into a fresh
+/// independent managed clone:
+/// 1. Clone `metadata.origin` (or `source_repository` when `origin` is empty).
+/// 2. If `base_commit` is missing from that clone, fetch it once from
+///    `source_repository` on the original target.
+/// 3. Apply the archived legacy delta and check out the saved commit on the
+///    saved branch name, or as a detached HEAD (with a notice) on collision.
+pub(super) fn restore_legacy_worktree_as_managed_clone(
+    executor: &impl CommandExecutor,
+    checkout: &ManagedWorktree,
+    archive: &Path,
+    manifest: &mj_checkpoint::archive::ArchiveManifest,
+) -> Result<Vec<String>> {
+    ensure!(
+        checkout.kind == ManagedCheckoutKind::Clone,
+        "legacy worktree resume requires an upgraded managed clone target"
+    );
+    ensure!(
+        matches!(&checkout.target, ManagedWorktreeTarget::Local),
+        "legacy worktree resume into a fresh clone currently requires a local target"
+    );
+    let [repository] = manifest.repositories.as_slice() else {
+        bail!("legacy worktree resume requires exactly one archived repository");
+    };
+    if path_exists_on_managed_target(executor, &checkout.target, &checkout.source_repository)?
+        && executor
+            .execute(&managed_git_command(
+                SshTrafficClass::Control,
+                &checkout.target,
+                &checkout.source_repository,
+                ["rev-parse", "--git-dir"],
+                "check whether source repository is a Git repository",
+            ))
+            .is_ok_and(|output| output.status == 0)
+    {
+        ensure_managed_worktree_excluded(
+            executor,
+            &checkout.target,
+            &checkout.source_repository,
+            checkout.kind,
+        )?;
+    }
+
+    let parent = checkout
+        .worktree_root
+        .parent()
+        .context("managed clone has no parent")?;
+    let staging = checkout.worktree_root.with_extension("provisioning");
+    ensure!(
+        !path_exists_on_managed_target(executor, &checkout.target, &staging)?
+            && !path_exists_on_managed_target(executor, &checkout.target, &checkout.worktree_root)?,
+        "managed clone path is already occupied: {}",
+        checkout.worktree_root.display()
+    );
+    execute_checked(
+        executor,
+        managed_target_command(
+            SshTrafficClass::Control,
+            &checkout.target,
+            "mkdir",
+            ["-p", &parent.to_string_lossy()],
+        )
+        .purpose("create managed clone parent"),
+    )?;
+
+    let mut moved_to_destination = false;
+    let create = (|| -> Result<Vec<String>> {
+        let origin = repository.metadata.origin.trim();
+        if !origin.is_empty() {
+            execute_checked(
+                executor,
+                managed_target_command(
+                    SshTrafficClass::Bulk,
+                    &checkout.target,
+                    "git",
+                    [
+                        "clone",
+                        "--no-checkout",
+                        "--",
+                        origin,
+                        &staging.to_string_lossy(),
+                    ],
+                )
+                .purpose("clone origin for legacy worktree resume"),
+            )?;
+        } else {
+            ensure!(
+                path_exists_on_managed_target(
+                    executor,
+                    &checkout.target,
+                    &checkout.source_repository
+                )?,
+                "managed worktree source repository is unavailable: {}",
+                checkout.source_repository.display()
+            );
+            execute_checked(
+                executor,
+                managed_target_command(
+                    SshTrafficClass::Bulk,
+                    &checkout.target,
+                    "git",
+                    [
+                        "clone",
+                        "--local",
+                        "--dissociate",
+                        "--no-checkout",
+                        "--",
+                        &checkout.source_repository.to_string_lossy(),
+                        &staging.to_string_lossy(),
+                    ],
+                )
+                .purpose("clone local source repository for originless legacy worktree resume"),
+            )?;
+        }
+
+        let base_commit = repository.metadata.base_commit.trim();
+        if !base_commit.is_empty() {
+            let has_base = executor
+                .execute(&managed_git_command(
+                    SshTrafficClass::Control,
+                    &checkout.target,
+                    &staging,
+                    ["cat-file", "-e", &format!("{base_commit}^{{commit}}")],
+                    "check whether archive base commit is present in fresh clone",
+                ))
+                .is_ok_and(|output| output.status == 0);
+            if !has_base {
+                ensure!(
+                    path_exists_on_managed_target(
+                        executor,
+                        &checkout.target,
+                        &checkout.source_repository
+                    )?,
+                    "archive base commit {base_commit} is missing from origin and source repository {} is unavailable",
+                    checkout.source_repository.display()
+                );
+                let _ = executor.execute(&managed_git_command(
+                    SshTrafficClass::Bulk,
+                    &checkout.target,
+                    &staging,
+                    [
+                        "fetch",
+                        "--no-tags",
+                        "--",
+                        &checkout.source_repository.to_string_lossy(),
+                        "+refs/heads/*:refs/mj-legacy-source/*",
+                        "+HEAD:refs/mj-legacy-source/HEAD",
+                    ],
+                    "fetch missing base commit from source repository",
+                ));
+                let has_base_after_heads = executor
+                    .execute(&managed_git_command(
+                        SshTrafficClass::Control,
+                        &checkout.target,
+                        &staging,
+                        ["cat-file", "-e", &format!("{base_commit}^{{commit}}")],
+                        "recheck archive base commit after fetching source heads",
+                    ))
+                    .is_ok_and(|output| output.status == 0);
+                if !has_base_after_heads {
+                    let _ = executor.execute(&managed_git_command(
+                        SshTrafficClass::Bulk,
+                        &checkout.target,
+                        &staging,
+                        [
+                            "fetch",
+                            "--no-tags",
+                            "--",
+                            &checkout.source_repository.to_string_lossy(),
+                            base_commit,
+                        ],
+                        "fetch archive base commit directly from source repository",
+                    ));
+                }
+                if let Ok(refs) = executor.execute(&managed_git_command(
+                    SshTrafficClass::Control,
+                    &checkout.target,
+                    &staging,
+                    ["for-each-ref", "--format=%(refname)", "refs/mj-legacy-source/"],
+                    "list temporary legacy source refs",
+                )) && refs.status == 0
+                {
+                    for refname in String::from_utf8_lossy(&refs.stdout).lines() {
+                        let refname = refname.trim();
+                        if !refname.is_empty() {
+                            let _ = executor.execute(&managed_git_command(
+                                SshTrafficClass::Control,
+                                &checkout.target,
+                                &staging,
+                                ["update-ref", "-d", refname],
+                                "remove temporary legacy source ref",
+                            ));
+                        }
+                    }
+                }
+                execute_checked(
+                    executor,
+                    managed_git_command(
+                        SshTrafficClass::Control,
+                        &checkout.target,
+                        &staging,
+                        ["cat-file", "-e", &format!("{base_commit}^{{commit}}")],
+                        "verify archive base commit after fetching from source repository",
+                    ),
+                )?;
+            }
+        }
+
+        let notices = mj_checkpoint::checkpoint::restore_single_repository_into_clone(
+            archive,
+            &staging,
+            &mj_checkpoint::archive::SystemGit,
+        )?;
+        execute_checked(
+            executor,
+            managed_target_command(
+                SshTrafficClass::Control,
+                &checkout.target,
+                "mv",
+                [
+                    &staging.to_string_lossy(),
+                    &checkout.worktree_root.to_string_lossy(),
+                ],
+            )
+            .purpose("publish resumed legacy managed clone"),
+        )?;
+        moved_to_destination = true;
+        if !repository.linked_worktrees.is_empty() {
+            let mut args = vec!["worktree".to_owned(), "repair".to_owned()];
+            for nested in &repository.linked_worktrees {
+                args.push(
+                    checkout
+                        .worktree_root
+                        .join(&nested.metadata.path)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            execute_checked(
+                executor,
+                managed_git_command(
+                    SshTrafficClass::Control,
+                    &checkout.target,
+                    &checkout.worktree_root,
+                    args,
+                    "repair nested linked worktrees after publishing legacy managed clone",
+                ),
+            )?;
+        }
+        Ok(notices)
+    })();
+    if let Err(error) = create {
+        let cleanup_path = if moved_to_destination {
+            &checkout.worktree_root
+        } else {
+            &staging
+        };
+        let _ = executor.execute(
+            &managed_target_command(
+                SshTrafficClass::Control,
+                &checkout.target,
+                "rm",
+                ["-rf", &cleanup_path.to_string_lossy()],
+            )
+            .purpose("remove failed legacy managed clone"),
+        );
+        return Err(error);
+    }
+    create
 }
 
 pub(super) fn restore_managed_worktree(
@@ -2727,18 +3070,12 @@ pub(super) fn restore_managed_worktree(
             String::from_utf8_lossy(&output.stderr).trim()
         ),
     }
-    // A remote bare target may already have removed the checkout directory.
-    // Prune its stale registration before adding the retained branch again.
-    execute_checked(
-        executor,
-        managed_git_command(
-            SshTrafficClass::Control,
-            &worktree.target,
-            &worktree.source_repository,
-            ["worktree", "prune"],
-            "prune retired managed worktree metadata",
-        ),
-    )?;
+    if matches!(worktree.target, ManagedWorktreeTarget::Ssh { .. }) {
+        // A remote bare target may already have removed the checkout directory
+        // without unregistering the worktree. Clean up only this worktree's
+        // stale admin registration before adding the retained branch again.
+        remove_missing_linked_worktree_admin(executor, worktree)?;
+    }
     let parent = worktree
         .worktree_root
         .parent()
@@ -2772,7 +3109,7 @@ pub(super) fn restore_managed_worktree(
     Ok(true)
 }
 
-fn ensure_managed_worktree_available(
+pub(super) fn ensure_managed_worktree_available(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
 ) -> Result<()> {
@@ -2939,15 +3276,8 @@ pub(super) enum CloneRetirementPrerequisite {
 pub(super) fn clone_retirement_prerequisite_for_checkpoint(
     checkpoint: &mj_core::state::CheckpointMetadata,
 ) -> CloneRetirementPrerequisite {
-    match mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path) {
-        Ok(manifest)
-            if manifest
-                .repositories
-                .iter()
-                .any(|repository| repository.metadata.origin_delta.is_some()) =>
-        {
-            CloneRetirementPrerequisite::None
-        }
+    match mj_checkpoint::archive::checkpoint_archive_uses_origin_delta(&checkpoint.archive_path) {
+        Ok(true) => CloneRetirementPrerequisite::None,
         _ => CloneRetirementPrerequisite::LegacySourceCommit,
     }
 }
@@ -2986,8 +3316,8 @@ pub(super) fn retire_managed_worktree(
     cleanup_managed_worktree(authority, executor, worktree, BranchDisposition::Keep)
 }
 
-/// Remove the checkout and prune its metadata. Returns whether the repository
-/// is still there to act on at all.
+/// Remove the checkout and its own registration without pruning sibling
+/// worktrees. Returns whether the repository is still there to act on at all.
 ///
 /// Every caller has stopped the session's worker first, so once the checkout
 /// is gone nothing can build in it again, and mbx is told to drop its build
@@ -3023,6 +3353,8 @@ fn remove_managed_worktree_checkout(
         return Ok(false);
     }
     if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? {
+        // Use a single `--force` so Git removes dirty checkouts while still
+        // refusing locked registrations (a second `--force` would override the lock).
         execute_checked(
             executor,
             managed_git_command(
@@ -3033,24 +3365,185 @@ fn remove_managed_worktree_checkout(
                     "worktree",
                     "remove",
                     "--force",
+                    "--",
                     &worktree.worktree_root.to_string_lossy(),
                 ],
                 "remove managed raw-session worktree",
             ),
         )?;
         release();
+    } else {
+        remove_missing_linked_worktree_admin(executor, worktree)?;
     }
-    execute_checked(
-        executor,
-        managed_git_command(
-            SshTrafficClass::Control,
-            &worktree.target,
-            &worktree.source_repository,
-            ["worktree", "prune"],
-            "prune managed worktree metadata",
-        ),
-    )?;
     Ok(true)
+}
+
+/// Canonicalize as much of `path` as exists on disk so missing checkouts under
+/// symlinked parents (such as `/var` vs `/private/var`) compare equal.
+fn canonicalize_missing_path(path: &Path) -> PathBuf {
+    let mut existing = path.to_path_buf();
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            break;
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = existing.parent() else {
+            break;
+        };
+        existing = parent.to_path_buf();
+    }
+    let mut resolved = std::fs::canonicalize(&existing).unwrap_or(existing);
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    resolved
+}
+
+/// Remove only the single `<common_dir>/worktrees/<name>` admin directory whose
+/// `gitdir` points at `worktree.worktree_root/.git`, without running
+/// repository-wide `git worktree prune`. Keeps locked registrations untouched.
+fn remove_missing_linked_worktree_admin(
+    executor: &impl CommandExecutor,
+    worktree: &ManagedWorktree,
+) -> Result<()> {
+    match &worktree.target {
+        ManagedWorktreeTarget::Local => {
+            let common_raw = managed_git_stdout(
+                executor,
+                &worktree.target,
+                &worktree.source_repository,
+                ["rev-parse", "--git-common-dir"],
+                "locate managed worktree git common directory",
+            )?;
+            let common_path = PathBuf::from(common_raw);
+            let common_dir = if common_path.is_relative() {
+                worktree.source_repository.join(common_path)
+            } else {
+                common_path
+            };
+            let worktrees_dir = common_dir.join("worktrees");
+            if !worktrees_dir.is_dir() {
+                return Ok(());
+            }
+            let target_root = canonicalize_missing_path(&worktree.worktree_root);
+            for entry in std::fs::read_dir(&worktrees_dir).with_context(|| {
+                format!("read worktrees directory {}", worktrees_dir.display())
+            })? {
+                let entry = entry?;
+                let admin_dir = entry.path();
+                if !admin_dir.is_dir() {
+                    continue;
+                }
+                let gitdir_file = admin_dir.join("gitdir");
+                let Ok(raw_gitdir) = std::fs::read_to_string(&gitdir_file) else {
+                    continue;
+                };
+                let trimmed = raw_gitdir.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let gitdir_path = PathBuf::from(trimmed);
+                let resolved_gitdir = if gitdir_path.is_relative() {
+                    admin_dir.join(gitdir_path)
+                } else {
+                    gitdir_path
+                };
+                let Some(checkout_root) = resolved_gitdir.parent() else {
+                    continue;
+                };
+                if canonicalize_missing_path(checkout_root) == target_root {
+                    if admin_dir.join("locked").exists() {
+                        tracing::warn!(
+                            worktree_root = %worktree.worktree_root.display(),
+                            admin_dir = %admin_dir.display(),
+                            "keeping locked managed worktree registration after checkout removal"
+                        );
+                        return Ok(());
+                    }
+                    std::fs::remove_dir_all(&admin_dir).with_context(|| {
+                        format!(
+                            "remove managed worktree admin directory {}",
+                            admin_dir.display()
+                        )
+                    })?;
+                    return Ok(());
+                }
+            }
+            Ok(())
+        }
+        ManagedWorktreeTarget::Ssh { .. } => {
+            const SCRIPT: &str = r#"set -eu
+src="$1"
+target="$2"
+common=$(git -C "$src" rev-parse --git-common-dir)
+case "$common" in
+  /*) ;;
+  *) common="$src/$common" ;;
+esac
+wt_dir="$common/worktrees"
+[ -d "$wt_dir" ] || exit 0
+norm_path() {
+  p="$1"
+  suffix=""
+  while [ -n "$p" ] && [ "$p" != "/" ] && [ ! -d "$p" ]; do
+    base=$(basename "$p")
+    suffix="/$base$suffix"
+    p=$(dirname "$p")
+  done
+  if [ -d "$p" ]; then
+    p=$(cd "$p" 2>/dev/null && pwd -P) || p="$p"
+  fi
+  case "$p" in
+    /) printf '%s' "${suffix:-/}" ;;
+    *) printf '%s%s' "$p" "$suffix" ;;
+  esac
+}
+norm_target=$(norm_path "$target")
+for admin in "$wt_dir"/*; do
+  [ -d "$admin" ] && [ -f "$admin/gitdir" ] || continue
+  IFS= read -r gd < "$admin/gitdir" || [ -n "$gd" ] || continue
+  [ -n "$gd" ] || continue
+  case "$gd" in
+    /*) ;;
+    *) gd="$admin/$gd" ;;
+  esac
+  parent=$(dirname "$gd")
+  if [ "$(norm_path "$parent")" = "$norm_target" ]; then
+    if [ -e "$admin/locked" ]; then
+      printf 'LOCKED\n'
+      exit 0
+    fi
+    rm -rf -- "$admin"
+    exit 0
+  fi
+done
+"#;
+            let output = execute_checked(
+                executor,
+                managed_target_command(
+                    SshTrafficClass::Control,
+                    &worktree.target,
+                    "sh",
+                    [
+                        "-c",
+                        SCRIPT,
+                        "--",
+                        &worktree.source_repository.to_string_lossy(),
+                        &worktree.worktree_root.to_string_lossy(),
+                    ],
+                )
+                .purpose("remove missing managed worktree registration"),
+            )?;
+            if String::from_utf8_lossy(&output.stdout).trim() == "LOCKED" {
+                tracing::warn!(
+                    worktree_root = %worktree.worktree_root.display(),
+                    "keeping locked remote managed worktree registration after checkout removal"
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Whether the session branch is contained in a branch that is not a Mjolnir

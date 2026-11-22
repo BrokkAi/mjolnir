@@ -2657,6 +2657,53 @@ fn a_checkpoint_releases_the_tool_output_it_covers_and_keeps_the_diffstat() {
     );
 }
 
+#[test]
+fn compaction_drains_all_batches_past_non_shrinking_tool_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let old_text = (0..400)
+        .map(|line| format!("line {line}\n"))
+        .collect::<String>();
+    let new_text = old_text.replace("line 200\n", "line 200 edited\n");
+    let non_shrinking = Arc::new(TranscriptItem {
+        stable_id: "tool:5".into(),
+        position: 5,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1_000,
+        last_changed_at_ms: 1_000,
+        body: TranscriptBody::Tool {
+            call: serde_json::json!({
+                "toolCallId": "call-5",
+                "title": "x".repeat(5 * 1024),
+                "status": "completed",
+                "content": [],
+            })
+            .into(),
+            terminal_outputs: Default::default(),
+            terminal_refs: Default::default(),
+            presentation: None,
+        },
+    });
+    let mut materialized = MaterializedSession::empty("session-1");
+    materialized.applied_event_ordinal = 30;
+    materialized.applied_event_digest = event_digest(30);
+    materialized.transcript = vec![
+        non_shrinking,
+        tool_item(10, "src/first.rs", &old_text, &new_text),
+        tool_item(15, "src/second.rs", &old_text, &new_text),
+    ];
+    save_materialized_session_to(&database, &materialized).unwrap();
+
+    // Batch size 1 forces multiple batches and starts on a >4 KiB tool row that
+    // cannot shrink; the cursor must still advance and compact both later rows.
+    let retention =
+        compact_materialized_transcript_all_in(&database, "session-1", 20, 1).unwrap();
+    assert_eq!(retention.items, 2);
+    assert!(!retention.remaining);
+    assert!(retention.bytes > 128 * 1024);
+}
+
 /// The steady-state poll loads this on every change, so it must cost the
 /// window rather than the history — including the two facts that live outside
 /// the window, which are read rather than scanned for.
@@ -7487,6 +7534,7 @@ fn history_window_deduplicates_deliveries_after_their_row_leaves_the_live_tail()
                     events: vec![message.clone()],
                 },
                 created_at_ms: 5000,
+                insert_at_front: false,
             },
         ] {
             assert!(

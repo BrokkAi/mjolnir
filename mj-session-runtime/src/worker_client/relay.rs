@@ -94,6 +94,34 @@ impl RelayClient {
         }
     }
 
+    pub async fn guardian_requests(
+        &mut self,
+    ) -> Result<Vec<mj_core::guardian::GuardianReviewRequest>> {
+        if !RelayRequest::GuardianRequests.supported_at(self.protocol_version) {
+            return Ok(Vec::new());
+        }
+        match self.call(RelayRequest::GuardianRequests).await? {
+            RelayResponsePayload::GuardianRequests { requests } => Ok(requests),
+            _ => bail!("relay returned an unexpected guardian queue response"),
+        }
+    }
+
+    pub async fn complete_guardian_request(
+        &mut self,
+        result: mj_core::guardian::GuardianReviewResult,
+    ) -> Result<()> {
+        if !RelayRequest::GuardianRequests.supported_at(self.protocol_version) {
+            bail!("worker does not support guardian review completion");
+        }
+        match self
+            .call(RelayRequest::CompleteGuardianRequest { result })
+            .await?
+        {
+            RelayResponsePayload::GuardianRequestCompleted => Ok(()),
+            _ => bail!("relay returned an unexpected guardian completion response"),
+        }
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -917,6 +945,25 @@ impl RelayClient {
         {
             RelayResponsePayload::CheckpointMailbox { mailbox } => Ok(mailbox),
             _ => bail!("relay returned an unexpected checkpoint mailbox response"),
+        }
+    }
+
+    pub async fn read_checkpoint_native_use(
+        &mut self,
+        barrier_command_id: String,
+        cut: mj_core::relay::RelayCursor,
+    ) -> Result<Option<mj_core::relay::NativeSessionUseEvidence>> {
+        match self
+            .call(RelayRequest::ReadCheckpointNativeUse {
+                barrier_command_id,
+                cut,
+            })
+            .await?
+        {
+            RelayResponsePayload::CheckpointNativeUse {
+                native_use_evidence,
+            } => Ok(native_use_evidence),
+            _ => bail!("relay returned an unexpected checkpoint native-use response"),
         }
     }
 

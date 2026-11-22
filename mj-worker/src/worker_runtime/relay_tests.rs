@@ -372,7 +372,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
     mpsc::channel(1)
 }
 
-pub(super) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
+pub(crate) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
         cpu_accounting: Default::default(),
         no_github_credentials: false,
@@ -6455,6 +6455,7 @@ async fn restored_relay_seed_records_a_restart_marker() {
             accepted_config: Default::default(),
             native_session_unused: false,
             mailbox: None,
+            native_use_evidence: None,
         })
         .unwrap(),
     )
@@ -6496,6 +6497,7 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
             .collect(),
             native_session_unused: false,
             mailbox: None,
+            native_use_evidence: None,
         })
         .unwrap(),
     )
@@ -6532,6 +6534,7 @@ fn a_restored_never_prompted_session_may_replace_its_native_session() {
                 accepted_config: Default::default(),
                 native_session_unused,
                 mailbox: None,
+                native_use_evidence: None,
             })
             .unwrap(),
         )
@@ -10424,6 +10427,7 @@ async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
                     latest_ordinal,
                     state_digest,
                     subagent_queue_changed,
+                    guardian_queue_changed: false,
                 },
         } => (latest_ordinal, state_digest, subagent_queue_changed),
         other => panic!("expected an observed change, got {other:?}"),
@@ -10431,14 +10435,23 @@ async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
     let (ordinal, digest) = current();
 
     let started = tokio::time::Instant::now();
-    let quiet = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest))
+    let quiet = unix::wait_for_change(&relay, None, None, &feed, &mut 0, ordinal, Some(&digest))
         .await
         .unwrap();
     assert_eq!(observed(quiet), (ordinal, digest.clone(), false));
     assert_eq!(started.elapsed(), mj_core::relay::RELAY_CHANGE_WAIT_BOUND);
 
     let started = tokio::time::Instant::now();
-    let wait = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest));
+    let mut guardian_generation = 0;
+    let wait = unix::wait_for_change(
+        &relay,
+        None,
+        None,
+        &feed,
+        &mut guardian_generation,
+        ordinal,
+        Some(&digest),
+    );
     let record = async {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         relay
@@ -10455,7 +10468,7 @@ async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
     assert_ne!(changed_digest, digest);
     assert_eq!(started.elapsed(), std::time::Duration::from_secs(1));
 
-    let stale = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest))
+    let stale = unix::wait_for_change(&relay, None, None, &feed, &mut 0, ordinal, Some(&digest))
         .await
         .unwrap();
     assert_eq!(
@@ -10468,11 +10481,99 @@ async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
     // idle until their bound instead of waking each other.
     let (ordinal, digest) = current();
     let started = tokio::time::Instant::now();
+    let mut second_guardian_generation = 0;
     let (first, second) = tokio::join!(
-        unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest)),
-        unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest)),
+        unix::wait_for_change(
+            &relay,
+            None,
+            None,
+            &feed,
+            &mut guardian_generation,
+            ordinal,
+            Some(&digest)
+        ),
+        unix::wait_for_change(
+            &relay,
+            None,
+            None,
+            &feed,
+            &mut second_guardian_generation,
+            ordinal,
+            Some(&digest)
+        ),
     );
     assert_eq!(observed(first.unwrap()).0, ordinal);
     assert_eq!(observed(second.unwrap()).0, ordinal);
     assert_eq!(started.elapsed(), mj_core::relay::RELAY_CHANGE_WAIT_BOUND);
+}
+
+#[test]
+fn antigravity_connected_with_hook_publishes_steering_and_enables_automatic_steering() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    {
+        let mut locked = relay.lock().unwrap();
+        locked.set_turn_verdict_harness(mj_core::config::HarnessKind::Antigravity);
+        locked.set_steering_delivery_mode(mj_core::config::HarnessKind::Antigravity, true);
+    }
+    let mut in_flight = BTreeMap::new();
+    unix::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::Connected {
+            agent_name: Some("antigravity".into()),
+            agent_version: Some("1.5.11".into()),
+            protocol_version: Some(ProtocolVersion::V1),
+            capabilities: Some(Box::new(AgentCapabilities::default())),
+            agent_info: Some(Implementation::new("antigravity", "1.5.11")),
+            steering_supported: Some(false),
+        },
+    )
+    .unwrap();
+
+    let mut locked = relay.lock().unwrap();
+    assert_eq!(locked.operational_state().steering_supported, Some(true));
+    // Verify automatic steering is enabled by starting a turn and queueing a follow-up prompt.
+    locked.set_acp_ready(true);
+    locked
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "agy-conv-connected".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let submit = |relay: &mut DurableRelay, id: &str, text: &str| {
+        let resp = relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: id.into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: mj_core::relay::RelayRequest::Submit {
+                command_id: id.into(),
+                command: mj_core::relay::RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::Text(TextContent::new(text))],
+                },
+            },
+        });
+        assert!(
+            matches!(resp.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+            "{resp:?}"
+        );
+    };
+    submit(&mut locked, "agy-connected-first", "first");
+    let claimed = locked.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    submit(&mut locked, "agy-connected-steer", "steer me");
+    assert!(locked.claim_pending_commands(true).unwrap().is_empty());
+    let drained = locked.drain_mailbox("PostToolBatch", None).unwrap();
+    assert!(matches!(
+        drained,
+        mj_core::relay::RelayResponsePayload::MailboxDrained {
+            lease_id: Some(_),
+            text: Some(ref t),
+            count: 1,
+            ..
+        } if t.contains("steer me")
+    ));
 }

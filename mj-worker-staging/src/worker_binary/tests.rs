@@ -5353,6 +5353,8 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
+        supervisor: false,
+        supervisors_enabled: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -5525,6 +5527,8 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
+        supervisor: false,
+        supervisors_enabled: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -6704,5 +6708,30 @@ fn golden_session_instructions_are_appended_once_to_each_fresh_native_stage() {
         assert!(actual.contains(mj_core::project_memory::MEMORY_GUIDANCE));
         // Permit cleanup on platforms whose read-only attribute prevents removal.
         std::fs::set_permissions(&instruction_path, original_permissions).unwrap();
+    }
+}
+
+#[test]
+fn session_state_instructions_are_appended_once_for_every_harness() {
+    let text = mj_core::session_keep::SESSION_STATE_INSTRUCTIONS;
+    assert!(text.contains("## Keeping your work across suspend and move"));
+    assert!(text.contains("$MJ_KEEP_DIR"));
+    assert!(text.contains("Git-ignored files are never kept."));
+    for harness in mj_core::config::HarnessKind::ALL {
+        let stage = tempfile::tempdir().unwrap();
+        let path = stage.path().join(harness.agent_instructions_file());
+        std::fs::write(&path, "existing\n").unwrap();
+        append_session_state_instructions(harness, stage.path()).unwrap();
+        append_session_state_instructions(harness, stage.path()).unwrap();
+        let actual = std::fs::read_to_string(&path).unwrap();
+        assert!(actual.starts_with("existing\n"), "{harness:?}");
+        assert_eq!(
+            actual
+                .matches("## Keeping your work across suspend and move")
+                .count(),
+            1,
+            "{harness:?}\n{actual}"
+        );
+        assert!(actual.contains(text), "{harness:?}");
     }
 }

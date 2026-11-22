@@ -505,6 +505,58 @@ pub(crate) async fn run_server(
                                 if reply.send(result).is_err() { tracing::debug!("container upgrade preview client disconnected"); }
                             });
                         }
+                        crate::server::ClientStateRequest::SuspendPreflight { session_id, dry_run, without_checkpoint, reply } => {
+                            let runtime = daemon_runtime.clone();
+                            move_preparation_jobs.spawn(async move {
+                                let result = runtime.suspend_preflight(session_id, dry_run, without_checkpoint).await.map_err(|e| format!("{e:#}"));
+                                if reply.send(result).is_err() { tracing::debug!("suspend preflight client disconnected"); }
+                            });
+                        }
+                        crate::server::ClientStateRequest::PurgeUntracked { request, mut reply } => {
+                            let runtime = daemon_runtime.clone();
+                            // This arm takes no upgrade-gate admission. The
+                            // purge future stays alive after a disconnect so
+                            // the blocking rewrite sees the cancel flag, stops,
+                            // and drops its session admission when it joins.
+                            move_preparation_jobs.spawn(async move {
+                                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                let flag = cancel.clone();
+                                let operation = std::panic::AssertUnwindSafe(runtime.purge_untracked(request, flag));
+                                let mut operation = std::pin::pin!(futures::FutureExt::catch_unwind(operation));
+                                // `closed()` borrows `reply` until this block ends, including
+                                // the binding `pin!` shadows. Send only after that borrow ends.
+                                let result = {
+                                    let disconnect = reply.closed();
+                                    tokio::pin!(disconnect);
+                                    loop {
+                                        tokio::select! {
+                                            biased;
+                                            () = &mut disconnect, if !cancel.load(std::sync::atomic::Ordering::Acquire) => {
+                                                cancel.store(true, std::sync::atomic::Ordering::Release);
+                                            }
+                                            result = &mut operation => break result,
+                                        }
+                                    }
+                                };
+                                let result = match result {
+                                    Ok(result) => result,
+                                    Err(payload) => {
+                                        let message = payload
+                                            .downcast_ref::<&str>()
+                                            .copied()
+                                            .map(str::to_owned)
+                                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                                            .unwrap_or_else(|| "unknown panic".to_owned());
+                                        Err(crate::server::api::PurgeUntrackedFailure::Internal(format!(
+                                            "purge untracked panicked: {message}"
+                                        )))
+                                    }
+                                };
+                                if reply.send(result).is_err() {
+                                    tracing::debug!("purge untracked client disconnected");
+                                }
+                            });
+                        }
 
                         crate::server::ClientStateRequest::Read { client_id, session_id, reply } => {
                             let workspace = workspace_of(&session_id);
@@ -1087,7 +1139,22 @@ pub(crate) async fn run_server(
                                             repository_preflight: None,
                                         }, control.lifecycle.clone().expect("Resume has a lifecycle control")))??)
                                     }
-                                    ControllerAction::Suspend { session_id, acknowledge_unpublished_work } => Some(mj_core::runtime::block_on(daemon_runtime.start_suspend_session_controlled(session_id.clone(), *acknowledge_unpublished_work, false, control.lifecycle.clone().expect("Suspend has a lifecycle control")))??),
+                                    ControllerAction::Suspend {
+                                        session_id,
+                                        discard_untracked,
+                                        abort_operations,
+                                        without_checkpoint,
+                                        confirm_no_checkpoint,
+                                    } => Some(mj_core::runtime::block_on(daemon_runtime.start_suspend_session_controlled(
+                                        session_id.clone(),
+                                        mj_core::suspend_consent::SuspendConsent {
+                                            discard_untracked: discard_untracked.clone(),
+                                            abort_operations: abort_operations.clone(),
+                                            without_checkpoint: *without_checkpoint,
+                                            confirm_no_checkpoint: *confirm_no_checkpoint,
+                                        },
+                                        control.lifecycle.clone().expect("Suspend has a lifecycle control"),
+                                    ))??),
                                     _ => None,
                                 };
                                 if let Some(mut started) = lifecycle {

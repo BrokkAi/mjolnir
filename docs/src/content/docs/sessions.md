@@ -190,7 +190,7 @@ The daemon shuts down gracefully, but detached workers keep running. Starting `m
 
 ## Checkpoints
 
-Suspend saves a verified recovery checkpoint before releasing the environment. Running sessions do not receive automatic recovery copies. To save a recovery point, suspend the session and resume it when you want to continue.
+Suspend saves a verified recovery checkpoint before releasing the environment. The checkpoint keeps Git state only: branches, tags, stashes, commits, staged and unstaged changes to tracked files, and linked worktrees inside the checkout. Untracked files are lost unless they are `git add`ed first. Git-ignored files are never kept. `$MJ_KEEP_DIR` (`.mj/keep/<session-id>/`) is not saved on suspend; a Move to another machine copies it, and an in-place Move leaves the checkout on disk. Suspending a raw checkout also leaves that checkout on disk. Running sessions do not receive automatic recovery copies. To save a recovery point, suspend the session and resume it when you want to continue.
 
 Mjolnir verifies the archive byte-for-byte against the target's SHA-256 and verifies its internal manifest and payload hashes before using it. Credentials and live GitHub tokens are not written into checkpoints.
 
@@ -207,12 +207,13 @@ Select a live session, press `prefix+:`, and choose **Suspend session**. Suspend
 
 If checkpoint creation or verification fails, suspension refuses teardown and
 reports the failure. The session and its sub-agents keep running. Retry
-suspension after resolving it. When a recovery copy
-exists, the terminal also offers **Discard changes since checkpoint…**. A second
-confirmation shows the copy's timestamp and explains that newer work may be lost.
-The daemon verifies the selected recovery copy again before releasing the environment.
-Discarding changes stops the session's sub-agents the same way, just before
-the session goes back to that copy.
+suspension after resolving it. When checkpointing itself cannot complete (for
+example, because the target or repository is broken), choose **Suspend without
+checkpoint…** (`mj suspend --without-checkpoint`). The confirmation shows the
+age of the previous checkpoint that Resume will return to — or warns when no
+prior checkpoint exists, so the session cannot be resumed. Stopping without a
+checkpoint releases the environment on a best-effort basis and reports any
+unreachable resources as warnings.
 
 ### Parked sub-agents
 
@@ -397,13 +398,18 @@ stopped, and asks you to confirm it:
   `git push` will go;
 - how many commits are not on the remote yet, because those travel inside the
   checkpoint;
-- how many staged, unstaged, and untracked files are copied in, and their size;
+- staged and unstaged changes to tracked files, which travel with that Git state;
+- that untracked files and Git-ignored files are not kept;
 - whether the checkout stays behind on this machine.
 
-What travels is the checkout's own content: commits on no remote branch, and
-staged, unstaged, and untracked files. What does not travel is anything Git
-ignores—build output, `.env` files, `node_modules`—and anything outside the
-checkout. Install steps and files elsewhere on the host are not migrated.
+What travels is the checkout's Git state: commits on no remote branch, staged
+and unstaged changes to tracked files, and linked worktrees inside the
+checkout. `$MJ_KEEP_DIR` travels when the session is moved to another machine;
+suspend does not save it. Untracked files are lost unless they are `git add`ed
+first. Git-ignored files—build output, `.env` files, `node_modules`—are never
+kept, and anything outside the checkout stays behind. Install steps and files
+elsewhere on the host are not migrated. An in-place move keeps the environment,
+so those files stay on disk.
 
 The branch rule follows the checkout. A managed clone arrives on its selected
 or default branch. A session opened directly on your own checkout arrives on
@@ -447,7 +453,9 @@ says so: "Only the harness and profile are
 replaced; the environment and workspace are kept." When the target changes to a different machine or runtime,
 Move tears the source down and rebuilds the environment from the checkpoint,
 which does not migrate a running process, installed packages, container layers,
-or files outside the declared workspace. Either way the old harness process
+or files outside the declared workspace. That checkpoint keeps Git state only.
+Untracked and Git-ignored files are not kept. `$MJ_KEEP_DIR` is copied to the
+destination and is not part of a suspend checkpoint. Either way the old harness process
 stops, so running process memory is lost.
 
 A Move that rebuilds the environment stops the session's sub-agents the same

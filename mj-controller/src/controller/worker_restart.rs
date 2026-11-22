@@ -398,6 +398,213 @@ impl Controller {
             .await
     }
 
+    /// Upgrade an older worker in place before an OriginDelta suspend instead
+    /// of falling back to version-2 capture. Unlike `upgrade_session_worker`,
+    /// this interrupts any running turn first and fails clearly (rather than
+    /// returning `Deferred`) if the worker cannot be reserved idle.
+    pub(super) async fn upgrade_session_worker_for_suspend(
+        &self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+    ) -> Result<()> {
+        let (backend, worker_root) = self.worker_placement(session_id)?;
+        let reconnect = targets::reconnect_plan(&backend, session_id)?
+            .commands
+            .into_iter()
+            .next()
+            .context("reconnect plan is empty")?;
+        let installed = mj_core::worker_build::worker_build_id().to_owned();
+        if crate::database::container_upgrade_owns_target(session_id)? {
+            anyhow::bail!(
+                "cannot upgrade older worker before suspend: container upgrade owns target"
+            );
+        }
+        // Worker-upgrade preparation can download a managed harness and take
+        // minutes; release daemon handoff admission until the swap itself.
+        executor.begin_resumable_work()?;
+        let prepared = (|| -> Result<_> {
+            let worker = WorkerInstall::for_target(&backend, executor)
+                .context("resolve the worker this controller would install")?;
+            let launch = self.current_worker_launch_config(session_id, &backend)?;
+            if let Some(session) = self.state.sessions.get(session_id)
+                && session.build_cache.is_some()
+            {
+                self.prepare_build_cache_links(session, &backend, &launch, executor)
+                    .context("prepare shared machine cache configuration before worker upgrade")?;
+            }
+            prepare_managed_harness_for_upgrade(executor, &backend, session_id, &worker, &launch)
+                .context("prepare the current managed harness before replacing the worker")?;
+            let staging = stage_worker_binary_for_upgrade(executor, &backend, session_id, &worker)
+                .context("stage the current worker while the old worker remains available")?;
+            Ok((launch, staging))
+        })();
+        executor.end_resumable_work("prepare worker upgrade for suspend")?;
+        let (launch, staging) = prepared?;
+
+        let owner = crate::worker_lifecycle::require(session_id)?;
+        let target = self.state.sessions[session_id]
+            .target
+            .as_ref()
+            .context("worker upgrade has no target")?;
+        owner.verify_target(target)?;
+        if crate::database::container_upgrade_owns_target(session_id)? {
+            anyhow::bail!(
+                "cannot upgrade older worker before suspend: container upgrade owns target"
+            );
+        }
+        if crate::database::load_worker_restart(session_id)?.is_some() {
+            anyhow::bail!(
+                "cannot upgrade older worker before suspend: another worker restart is already in progress"
+            );
+        }
+
+        let handle = manager
+            .wait_for_session(session_id, UPGRADE_LEASE_TIMEOUT)
+            .await?;
+        // Interrupt any running turn before attempting the atomic idle lease.
+        {
+            let mut lease = handle.lease_connection(admission).await?;
+            if lease.connection_mut().sync().await?.operational.execution
+                == mj_core::relay::RelayExecutionState::Running
+            {
+                lease
+                    .connection_mut()
+                    .submit(
+                        crate::session_manager::new_command_id("suspend-upgrade-interrupt")?,
+                        mj_core::relay::RelayCommand::CancelTurn,
+                    )
+                    .await?;
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while std::time::Instant::now() < deadline {
+                    if lease.connection_mut().sync().await?.operational.execution
+                        != mj_core::relay::RelayExecutionState::Running
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+            lease.release();
+        }
+
+        let harness = self.state.sessions[session_id].harness_kind;
+        let swap = crate::upgrade::activity_unless_draining("worker swap for suspend")
+            .context("cannot upgrade older worker before suspend while daemon is draining")?;
+        let Some(mut lease) =
+            super::IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, harness).await?
+        else {
+            anyhow::bail!("cannot upgrade older worker before suspend: worker is not idle");
+        };
+        if !lease.verify_for_upgrade().await? {
+            anyhow::bail!("cannot upgrade older worker before suspend: worker is no longer idle");
+        }
+
+        let operation_id = owner.operation_id().to_owned();
+        let intent = crate::database::WorkerRestartIntent {
+            operation_id: operation_id.clone(),
+            target: *self.state.sessions[session_id]
+                .target
+                .clone()
+                .context("worker restart has no durable target")?,
+            desired_build: installed.clone(),
+        };
+        {
+            crate::database::begin_worker_restart(session_id, &intent)?;
+            let pre_stop = (|| -> Result<()> {
+                install_staged_worker_binary(&owner, &staging, executor, &backend, session_id)
+                    .context("install the prepared worker under its idle reservation")?;
+                crate::database::advance_worker_restart(
+                    session_id,
+                    &operation_id,
+                    crate::database::WorkerRestartPhase::Swapping,
+                )?;
+                Ok(())
+            })();
+            if let Err(error) = pre_stop {
+                if let Err(cleanup) =
+                    crate::database::finish_worker_restart(session_id, &operation_id)
+                {
+                    tracing::warn!(
+                        %session_id,
+                        %cleanup,
+                        "could not clear worker restart intent after pre-stop failure"
+                    );
+                }
+                return Err(error);
+            }
+            stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
+                .context(RESTART_FOR_UPGRADE.stop)
+                .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
+            tracing::info!(
+                %session_id,
+                worker_root = %worker_root,
+                "suspend worker upgrade confirmed old process tree stopped"
+            );
+            replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
+                .context("install the worker launch configuration under its idle reservation")
+                .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
+            start_worker_durably(
+                &owner,
+                target,
+                executor,
+                &backend,
+                &worker_root,
+                &self.config.github,
+            )
+            .context(RESTART_FOR_UPGRADE.start)
+            .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
+        }
+        // The process now owns boot/journal recovery. Waiting for its socket
+        // is resumable, and must not hold daemon replacement for minutes.
+        drop(swap);
+
+        let mut connection = connect_started_worker_with_timeout(
+            &reconnect,
+            session_id,
+            executor,
+            &backend,
+            &worker_root,
+            WORKER_RESTART_TIMEOUT,
+        )
+        .await
+        .context(RESTART_FOR_UPGRADE.connect)
+        .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
+        if connection.snapshot().worker_build.as_deref() != Some(&installed) {
+            return Err(
+                anyhow::anyhow!("replacement worker reported an unexpected build")
+                    .context(WorkerRestartLeftNoWorker),
+            );
+        }
+        if connection.snapshot().operational.checkpoint_only
+            != (launch.run_mode == mj_core::worker_launch::WorkerRunMode::CheckpointOnly)
+        {
+            return Err(
+                anyhow::anyhow!("replacement worker reported an unexpected execution mode")
+                    .context(WorkerRestartLeftNoWorker),
+            );
+        }
+        let project_memory = match self.project_memory_sync_target(session_id) {
+            Ok(target) => target,
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "project memory will not be synchronized after worker upgrade"
+                );
+                None
+            }
+        };
+        connection.set_project_memory_target(project_memory);
+        crate::database::finish_worker_restart(session_id, &operation_id)?;
+        wait_for_native_session(&mut connection, executor, harness)
+            .await
+            .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
+        lease.finish_replacement(connection);
+        Ok(())
+    }
+
     /// Stop the worker, install the binary this controller would provision,
     /// start it and reconnect to the session it recovers.
     pub(super) async fn restart_worker_with_installed_binary(

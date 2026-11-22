@@ -803,7 +803,6 @@ fn the_detach_chord_quits_without_mutating_any_dashboard_modal() {
     confirm.mode = Mode::Confirm(dialogs::ConfirmDialog::new(
         dialogs::Confirmation::ForceDestroy {
             session_id: "session-1".into(),
-            delete_branch_available: false,
         },
     ));
 
@@ -3726,7 +3725,7 @@ fn idle_suspension_runs_immediately_and_working_suspension_warns() {
         dashboard.dispatch_command(CommandId::SuspendSession),
         DashboardAction::Suspend {
             session_id: "session-1".into(),
-            acknowledge_unpublished_work: false,
+            consent: mj_core::suspend_consent::SuspendConsent::default(),
         }
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
@@ -3758,7 +3757,7 @@ fn idle_suspension_runs_immediately_and_working_suspension_warns() {
         dashboard.handle_key(key(KeyCode::Char('s'))),
         DashboardAction::Suspend {
             session_id: "session-1".into(),
-            acknowledge_unpublished_work: true,
+            consent: mj_core::suspend_consent::SuspendConsent::default(),
         }
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
@@ -3804,7 +3803,7 @@ fn idle_managed_clone_suspension_requires_publication_confirmation() {
         dashboard.handle_key(key(KeyCode::Char('s'))),
         DashboardAction::Suspend {
             session_id: "session-1".into(),
-            acknowledge_unpublished_work: true,
+            consent: mj_core::suspend_consent::SuspendConsent::default(),
         }
     );
 }
@@ -4610,7 +4609,7 @@ fn parent_suspension_warns_only_about_subagents_still_at_their_task() {
         dashboard.dispatch_command(CommandId::SuspendSession),
         DashboardAction::Suspend {
             session_id: parent.clone(),
-            acknowledge_unpublished_work: false,
+            consent: mj_core::suspend_consent::SuspendConsent::default(),
         }
     );
 
@@ -4747,7 +4746,7 @@ fn working_session_suspension_confirms_and_cancel_is_safe() {
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::Suspend {
             session_id: "session-1".into(),
-            acknowledge_unpublished_work: true,
+            consent: mj_core::suspend_consent::SuspendConsent::default(),
         }
     );
 }

@@ -6,12 +6,12 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
-/// Revision 147 is breaking: it adds `sessions.supervisors` and
+/// Revision 151 is breaking: it adds `sessions.supervisors` and
 /// `supervisor_preference`, and supervisor children write `supervisor: true` in
 /// `record_json` (which older readers reject via `deny_unknown_fields`), while
 /// older writers drop `sessions.supervisors`.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 147;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 151;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2814,10 +2814,107 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;"
         ))?;
     }
+    // Breaking: checkpoint archives now carry worker-owned native-session-use
+    // evidence in their canonical session (archive schema 15). Older daemons
+    // reject that field (`deny_unknown_fields`), so they cannot read or resume
+    // sessions suspended by this daemon. Refuse their reads and writes. No
+    // table changes.
+    if version < 146 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 146 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (146, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 146;
+             COMMIT;",
+        )?;
+    }
+    // Breaking: persists typed suspend consent (`closing_consent`) on `sessions`
+    // when entering `Closing`. Older daemons do not read this column, so crash
+    // recovery on a pre-147 daemon would checkpoint a `without_checkpoint` close
+    // or discard without the user's `Shown` consent list.
+    if version < 147 {
+        let add_col = if !super::legacy_schema::table_has_column(
+            connection,
+            "sessions",
+            "closing_consent",
+        )? {
+            "ALTER TABLE sessions ADD COLUMN closing_consent TEXT CHECK(closing_consent IS NULL OR json_valid(closing_consent));"
+        } else {
+            ""
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_col}
+             UPDATE schema_compatibility SET minimum_compatible_version = 147 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (147, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 147;
+             COMMIT;"
+        ))?;
+    }
+    // Compatible: adds the `host_snapshot_cache` table to track host-side
+    // snapshot archive copies for resume reuse, Destroy cleanup, and 48-hour
+    // expiry. Older revision-147 daemons ignore the new table and no existing
+    // schema or data changes.
+    if version < 148 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS host_snapshot_cache (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 session_id TEXT NOT NULL,
+                 host TEXT NOT NULL,
+                 sha256 TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 written_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS host_snapshot_cache_host_sha256
+             ON host_snapshot_cache(host, sha256);
+             CREATE INDEX IF NOT EXISTS host_snapshot_cache_session
+             ON host_snapshot_cache(session_id);
+             CREATE INDEX IF NOT EXISTS host_snapshot_cache_written_at
+             ON host_snapshot_cache(written_at);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (148, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 148;
+             COMMIT;",
+        )?;
+    }
+    // Breaking: replaces `MoveOperation` shape (cross-target/in-place phases,
+    // transport grants, in-place state) and adds `ec2_move_grants` and
+    // `daemon_instance_metadata`. Older daemons decode `MoveOperation` with
+    // `deny_unknown_fields` and treat decode failure as no intent, risking
+    // overlooking active moves and their grants.
+    if version < 149 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS ec2_move_grants (
+                 security_group_id TEXT NOT NULL,
+                 cidr_ip TEXT NOT NULL,
+                 port INTEGER NOT NULL,
+                 state TEXT NOT NULL,
+                 users_json TEXT NOT NULL CHECK(json_valid(users_json)),
+                 absent_checks INTEGER NOT NULL DEFAULT 0,
+                 attempt_id INTEGER NOT NULL DEFAULT 0,
+                 updated_at TEXT NOT NULL,
+                 PRIMARY KEY (security_group_id, cidr_ip, port)
+             );
+             CREATE TABLE IF NOT EXISTS daemon_instance_metadata (
+                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                 instance_id TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );
+             UPDATE schema_compatibility SET minimum_compatible_version = 149 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (149, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 149;
+             COMMIT;",
+        )?;
+    }
     // Compatible: older readers ignore the new nullable columns. Older writers
     // name columns explicitly, so a category this build records survives their
-    // inserts and updates. The compatibility floor stays at 145.
-    if version < 146 {
+    // inserts and updates. The compatibility floor stays at 149.
+    if version < 150 {
         let transaction =
             Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
         if !legacy_schema::table_has_column(&transaction, "session_turn_selections", "category")? {
@@ -2830,16 +2927,16 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         }
         transaction.execute_batch(
             "INSERT INTO schema_migrations(version, applied_at)
-                 VALUES (146, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-             PRAGMA user_version=146;",
+                 VALUES (150, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=150;",
         )?;
         transaction.commit()?;
     }
     // Breaking: older writers drop `sessions.supervisors` on update and older
     // readers reject `supervisor: true` in `subagent_sessions.record_json` due
-    // to `deny_unknown_fields`. Raise `minimum_compatible_version` to 147 in
+    // to `deny_unknown_fields`. Raise `minimum_compatible_version` to 151 in
     // the same transaction.
-    if version < 147 {
+    if version < 151 {
         let transaction =
             Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
         if !legacy_schema::table_has_column(&transaction, "sessions", "supervisors")? {
@@ -2853,11 +2950,11 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
                  enabled INTEGER NOT NULL
              );
              UPDATE schema_compatibility
-                 SET minimum_compatible_version = 147
+                 SET minimum_compatible_version = 151
                  WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
-                 VALUES (147, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-             PRAGMA user_version=147;",
+                 VALUES (151, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=151;",
         )?;
         if !legacy_schema::table_has_column(&transaction, "session_contexts", "profile_id")? {
             transaction
@@ -5390,7 +5487,7 @@ mod reader_tests {
         for session in [&parent, &old_child, &new_child, &top, &legacy_writer] {
             save_session_to(&path, session).unwrap();
         }
-        stamp_schema_version(&path, 145);
+        stamp_schema_version(&path, 149);
 
         let connection = Connection::open(&path).unwrap();
         connection
@@ -5411,7 +5508,7 @@ mod reader_tests {
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         let migrated: i64 = connection
             .query_row(
-                "SELECT count(*) FROM schema_migrations WHERE version = 146",
+                "SELECT count(*) FROM schema_migrations WHERE version = 150",
                 [],
                 |row| row.get(0),
             )
@@ -6028,6 +6125,36 @@ mod reader_tests {
     }
 
     #[test]
+    fn native_use_archive_migration_fences_revision_145() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let conn = open_writer(&path).unwrap();
+        drop(conn);
+
+        stamp_schema_version(&path, 145);
+        let previous = read_schema_state(&Connection::open(&path).unwrap()).unwrap();
+        assert_eq!(previous.revision, 145);
+        assert_eq!(previous.minimum_compatible, Some(145));
+        previous.ensure_supported_by(145).unwrap();
+
+        let upgraded = open_writer(&path).unwrap();
+        let schema = read_schema_state(&upgraded).unwrap();
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(matches!(
+            schema
+                .ensure_supported_by(145)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible
+            } if minimum_compatible >= 146
+        ));
+    }
+
+    #[test]
     fn compatible_failure_receipts_are_invalidated_by_failure_writers() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
@@ -6358,9 +6485,7 @@ mod reader_tests {
             "source_resource_allocation":null, "destination_target":null,
             "destination_native_session_id":null, "destination_store_id":null,
             "configuration_fingerprint":"kept", "checkpoint":null, "recovery_session":recovery,
-            "workspace_transfer":{"assessment":mj_core::move_workspace::WorkspaceAssessment::default(),
-                "source":transfer_source,"source_stage":"/source","controller_stage":"/controller","phase":"planned"},
-            "prepared_destination":prepared, "queue":"start", "phase":"preparing",
+            "prepared_destination":prepared, "queue":"start", "phase":"capturing",
             "queue_admission_started":false, "queue_admission_finished":false,
             "cancellation_requested":false, "created_at":"created", "updated_at":"updated", "error":null
         });
@@ -6385,7 +6510,6 @@ mod reader_tests {
         preparing["operation_id"] = "preparing-size-move".into();
         preparing["selection"]["session_id"] = "partial".into();
         preparing["recovery_session"] = serde_json::Value::Null;
-        preparing["workspace_transfer"] = serde_json::Value::Null;
         preparing["prepared_destination"] = serde_json::Value::Null;
         preparing["source_resource_allocation"] =
             serde_json::json!({"kind":"container","cpus":2,"memory_bytes":4_u64 << 30});
@@ -6463,18 +6587,6 @@ mod reader_tests {
                 memory_bytes: 700 << 20
             })
         );
-        assert_eq!(
-            moved
-                .workspace_transfer
-                .as_ref()
-                .unwrap()
-                .source
-                .resource_allocation,
-            Some(SessionResourceAllocation::Container {
-                cpus: 6,
-                memory_bytes: 4 << 30
-            })
-        );
         let expected_snapshot = Some(SessionResourceAllocation::Container {
             cpus: 3,
             memory_bytes: 6 << 30,
@@ -6484,14 +6596,6 @@ mod reader_tests {
                 .recovery_session
                 .as_ref()
                 .unwrap()
-                .target_runtime
-                .as_deref()
-                .unwrap(),
-            moved
-                .workspace_transfer
-                .as_ref()
-                .unwrap()
-                .source
                 .target_runtime
                 .as_deref()
                 .unwrap(),
@@ -6511,12 +6615,10 @@ mod reader_tests {
         let retained: SessionRecord = serde_json::from_str(&retained).unwrap();
         assert_eq!(
             retained.resource_allocation,
-            moved
-                .workspace_transfer
-                .as_ref()
-                .unwrap()
-                .source
-                .resource_allocation
+            Some(SessionResourceAllocation::Container {
+                cpus: 6,
+                memory_bytes: 4 << 30
+            })
         );
         assert_eq!(
             retained
@@ -7325,6 +7427,124 @@ mod reader_tests {
                 .chain()
                 .any(|cause| cause.downcast_ref::<StoreSchemaMismatch>().is_some()),
             "a reused connection checks compatibility like a new one: {error:#}"
+        );
+    }
+
+    #[test]
+    fn closing_consent_migration_persists_consent_and_refuses_revision_146() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        {
+            let connection = open_writer(&path).unwrap();
+            connection
+                .execute_batch(
+                    "ALTER TABLE sessions DROP COLUMN closing_consent;
+                     UPDATE schema_compatibility SET minimum_compatible_version = 146 WHERE singleton = 1;
+                     DELETE FROM schema_migrations WHERE version >= 147;
+                     PRAGMA user_version = 146;",
+                )
+                .unwrap();
+        }
+        forget_verified_schema(&path);
+        let connection = open_writer(&path).unwrap();
+        assert!(
+            super::legacy_schema::table_has_column(&connection, "sessions", "closing_consent")
+                .unwrap(),
+            "migration 147 must add sessions.closing_consent"
+        );
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        let err = state.ensure_supported_by(146).unwrap_err();
+        let mismatch = err.downcast_ref::<StoreSchemaMismatch>().unwrap();
+        assert_eq!(
+            mismatch.reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
+            }
+        );
+    }
+
+    #[test]
+    fn host_snapshot_cache_migration_148_creates_table() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        {
+            let connection = open_writer(&path).unwrap();
+            connection
+                .execute_batch(
+                    "DROP TABLE host_snapshot_cache;
+                     UPDATE schema_compatibility SET minimum_compatible_version = 147 WHERE singleton = 1;
+                     DELETE FROM schema_migrations WHERE version >= 148;
+                     PRAGMA user_version = 147;",
+                )
+                .unwrap();
+        }
+        forget_verified_schema(&path);
+        let connection = open_writer(&path).unwrap();
+        let table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'host_snapshot_cache')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            table_exists,
+            "migration 148 must create host_snapshot_cache"
+        );
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+    }
+
+    #[test]
+    fn move_origin_delta_migration_149_adds_grants_and_refuses_revision_148() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        {
+            let connection = open_writer(&path).unwrap();
+            connection
+                .execute_batch(
+                    "DROP TABLE ec2_move_grants;
+                     DROP TABLE daemon_instance_metadata;
+                     UPDATE schema_compatibility SET minimum_compatible_version = 147 WHERE singleton = 1;
+                     DELETE FROM schema_migrations WHERE version >= 149;
+                     PRAGMA user_version = 148;",
+                )
+                .unwrap();
+        }
+        forget_verified_schema(&path);
+        let connection = open_writer(&path).unwrap();
+        let has_grants: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='ec2_move_grants'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_grants, 1, "migration 149 must create ec2_move_grants");
+        let has_meta: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='daemon_instance_metadata'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            has_meta, 1,
+            "migration 149 must create daemon_instance_metadata"
+        );
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        let err = state.ensure_supported_by(148).unwrap_err();
+        let mismatch = err.downcast_ref::<StoreSchemaMismatch>().unwrap();
+        assert_eq!(
+            mismatch.reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
+            }
         );
     }
 }

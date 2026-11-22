@@ -42,11 +42,68 @@ struct WorkerArgs {
     command: WorkerCommand,
 }
 
+#[derive(Debug, Args)]
+struct AuthorizedKeysArgs {
+    #[command(subcommand)]
+    command: AuthorizedKeysCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthorizedKeysCommand {
+    /// Install a restricted temporary Move key under an exclusive flock.
+    Install {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        public_key: String,
+    },
+    /// Remove a temporary Move key by its operation ID.
+    Remove {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        operation_id: String,
+    },
+    /// Remove stale `mj-move-*` keys not listed in `--keep-operation`.
+    Reconcile {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long = "keep-operation")]
+        keep_operations: Vec<String>,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum WorkerCommand {
-    /// Move-only inventory and disk-backed workspace transfer utilities.
+    /// Locked `~/.ssh/authorized_keys` editor for direct Move transfers.
     #[command(hide = true)]
-    MoveWorkspace,
+    AuthorizedKeys(AuthorizedKeysArgs),
+    /// Write a framed Move stream (archive + optional `.mj/keep/` tar) to stdout.
+    #[command(hide = true)]
+    ExportMoveStream {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        keep_dir: Option<PathBuf>,
+        #[arg(long = "skip")]
+        skip: Vec<PathBuf>,
+    },
+    /// Receive and verify a framed Move stream from stdin.
+    #[command(hide = true)]
+    ReceiveMoveStream {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        expected_sha256: String,
+        #[arg(long)]
+        keep_dir: Option<PathBuf>,
+    },
     /// Print `alive`, `starting` or `dead` for the worker that owns a root,
     /// decided by the lock on its `worker.lock`.
     #[command(hide = true)]
@@ -82,6 +139,15 @@ enum WorkerCommand {
         #[arg(long = "child-session")]
         child_sessions: Vec<String>,
     },
+    /// Print `alive` or `dead` for a recorded worker process identity in this
+    /// target's PID namespace.
+    #[command(hide = true)]
+    IdentityAlive {
+        #[arg(long)]
+        pid: u32,
+        #[arg(long)]
+        start: u64,
+    },
     /// Print this worker's compatibility identity. The controller asks an
     /// image's worker this before linking a session to it.
     #[command(hide = true)]
@@ -116,6 +182,12 @@ enum WorkerCommand {
     /// Build a target-side archive for verified controller transfer.
     ExportCheckpoint {
         /// Export specification path, or `-` to read it from standard input.
+        #[arg(long)]
+        spec: PathBuf,
+    },
+    /// Run read-only workspace inventory and optional dry-run size estimate on the target.
+    SuspendPreflight {
+        /// Preflight specification path, or `-` to read it from standard input.
         #[arg(long)]
         spec: PathBuf,
     },
@@ -167,6 +239,8 @@ enum WorkerCommand {
         socket: PathBuf,
         #[arg(long, value_parser = ["PostToolUse", "PostToolBatch"])]
         event: String,
+        #[arg(long, default_value = "standard", value_parser = ["standard", "antigravity"])]
+        format: String,
     },
     /// Exchange one mailbox lease request for a durable harness inbox.
     MailboxRequest {
@@ -656,9 +730,60 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         WorkerCommand::AcpSupervisor { spec } => {
             run_acp_supervisor(AcpSupervisorSpec::read(&spec)?).await
         }
-        WorkerCommand::MoveWorkspace => {
-            let command = serde_json::from_reader(std::io::stdin().lock())?;
-            println!("{}", mj_worker::move_workspace::execute(command)?);
+        WorkerCommand::AuthorizedKeys(args) => match args.command {
+            AuthorizedKeysCommand::Install {
+                path,
+                operation_id,
+                from,
+                command,
+                public_key,
+            } => mj_worker::authorized_keys::install_key(
+                &path,
+                &operation_id,
+                &from,
+                &command,
+                &public_key,
+            ),
+            AuthorizedKeysCommand::Remove { path, operation_id } => {
+                mj_worker::authorized_keys::remove_key(&path, &operation_id).map(|_| ())
+            }
+            AuthorizedKeysCommand::Reconcile {
+                path,
+                keep_operations,
+            } => {
+                let keep = keep_operations.into_iter().collect();
+                let removed = mj_worker::authorized_keys::reconcile_keys(&path, &keep)?;
+                println!("{removed}");
+                Ok(())
+            }
+        },
+        WorkerCommand::ExportMoveStream {
+            archive,
+            keep_dir,
+            skip,
+        } => {
+            let mut stdout = std::io::stdout().lock();
+            mj_checkpoint::move_stream::write_move_stream(
+                &mut stdout,
+                &archive,
+                keep_dir.as_deref(),
+                &skip,
+            )?;
+            Ok(())
+        }
+        WorkerCommand::ReceiveMoveStream {
+            archive,
+            expected_sha256,
+            keep_dir,
+        } => {
+            let mut stdin = std::io::stdin().lock();
+            let receipt = mj_checkpoint::move_stream::receive_move_stream(
+                &mut stdin,
+                &archive,
+                &expected_sha256,
+                keep_dir.as_deref(),
+            )?;
+            println!("{}", serde_json::to_string(&receipt)?);
             Ok(())
         }
         WorkerCommand::Liveness { root } => {
@@ -698,8 +823,18 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
                 anyhow::bail!("managed checkout quiescence requires Linux or macOS");
             }
         }
+        WorkerCommand::IdentityAlive { pid, start } => {
+            let alive = mj_core::worker_suspend::WorkerIdentity { pid, start }.is_alive()?;
+            println!("{}", if alive { "alive" } else { "dead" });
+            Ok(())
+        }
         WorkerCommand::BuildId => {
             println!("{}", mj_core::worker_build::worker_build_id());
+            Ok(())
+        }
+        WorkerCommand::SuspendPreflight { spec } => {
+            let result = mj_worker::checkpoint::suspend_preflight_from_spec_file(&spec)?;
+            println!("{}", serde_json::to_string(&result)?);
             Ok(())
         }
         WorkerCommand::ExportCheckpoint { spec } => {
@@ -758,8 +893,16 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             _root: _,
             history_socket,
         } => mj_worker::memory_mcp::run_mcp_stdio(history_socket),
-        WorkerCommand::MailboxHook { socket, event } => {
-            mj_worker::mailbox_hook::run(&socket, &event)
+        WorkerCommand::MailboxHook {
+            socket,
+            event,
+            format,
+        } => {
+            let format = match format.as_str() {
+                "antigravity" => mj_worker::mailbox_hook::HookOutputFormat::Antigravity,
+                _ => mj_worker::mailbox_hook::HookOutputFormat::Standard,
+            };
+            mj_worker::mailbox_hook::run_with_format(&socket, &event, format)
         }
         WorkerCommand::MailboxRequest { socket } => mj_worker::mailbox_hook::request(&socket),
 

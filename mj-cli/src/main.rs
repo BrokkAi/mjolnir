@@ -194,12 +194,16 @@ enum Command {
     Sessions(api_commands::SessionsArgs),
     /// Save a recovery copy and release the environment for later Resume.
     Suspend(api_commands::SuspendArgs),
+    /// Remove legacy untracked checkpoint payloads from stopped sessions.
+    PurgeUntracked(api_commands::PurgeUntrackedArgs),
     /// Permanently destroy a session, its environment, and recovery archive.
     Destroy(api_commands::DestroyArgs),
     /// Read recent cleanup notices, including after a session was destroyed.
     Notices(api_commands::NoticesArgs),
     /// Resume a stopped session from its checkpoint.
     Resume(api_commands::ResumeArgs),
+    /// Restart a running session's agent (replaces pre-release workers in place).
+    Restart(api_commands::SessionArgs),
     /// Cancel the turn a session is running.
     InterruptTurn(api_commands::SessionArgs),
     /// Review a session's committed work, or show the review it has open.
@@ -335,12 +339,18 @@ struct DaemonStopArgs {
     /// daemon running and is named.
     #[arg(long)]
     suspend_sessions: bool,
-    /// Confirm suspending sessions whose saved Git work is not verified as
-    /// pushed.
+    /// Discard untracked files, nested repositories, untracked stashes, and
+    /// `.mj/keep/` contents when suspending sessions.
     #[arg(long, requires = "suspend_sessions")]
-    acknowledge_unpublished_work: bool,
+    discard_untracked: bool,
 }
 
+/// Move a session to another target or profile.
+///
+/// Cross-target moves keep only Git state (branches, tags, stashes, commits,
+/// staged and unstaged changes to tracked files, and linked worktrees inside the
+/// checkout) plus scratch in `$MJ_KEEP_DIR`. Untracked files are lost unless you
+/// `git add` them first; Git-ignored files are never kept.
 #[derive(Debug, Args)]
 #[command(group(
     ArgGroup::new("destination")
@@ -381,18 +391,22 @@ struct MoveArgs {
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_model: Option<String>,
+    /// Discard untracked files, nested repositories, and untracked stashes on cross-target Move.
+    #[arg(long)]
+    discard_untracked: bool,
+    /// Abort any in-progress Git operation before moving.
+    #[arg(long)]
+    abort_operation: bool,
+    /// Inspect what would be moved and what would be lost without changing anything.
+    #[arg(long)]
+    dry_run: bool,
     /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_effort: Option<String>,
-    /// Inspect the transfer and return its preparation without moving anything.
-    #[arg(long)]
-    prepare: bool,
-    /// Explicitly accept a workspace transfer of at least 1 GB.
-    #[arg(long)]
-    allow_large_transfer: bool,
-    /// Leave an untracked path at the source (repeatable REPOSITORY:PATH).
-    #[arg(long = "exclude")]
-    exclusions: Vec<String>,
+    /// Skip a relative path under `.mj/keep/<session-id>/` during cross-target Move (repeatable).
+    /// Skipped paths are deleted when a managed source is retired, or kept on a raw checkout.
+    #[arg(long = "skip")]
+    skip_keep_paths: Vec<std::path::PathBuf>,
     /// Session to move. The session identity is retained by the operation.
     #[arg(long)]
     session: String,
@@ -437,7 +451,7 @@ struct MoveArgs {
     clear_resources: bool,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum MoveQueue {
     Discard,
     Start,
@@ -802,7 +816,7 @@ async fn await_stopping_session(session_id: &str) -> Result<&'static str> {
 /// stopped, so running the command again picks up only what is left. The
 /// sessions are those active when it is asked: one another client starts
 /// meanwhile is not among them. Returns how many sessions it stopped.
-async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usize> {
+async fn suspend_all_sessions(discard_untracked: bool) -> Result<usize> {
     // Workers outlive a stopped daemon, so this starts one when none is
     // running: only a daemon can suspend them.
     let sessions = active_sessions(&mut daemon::connect_or_start().await?).await?;
@@ -827,7 +841,17 @@ async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usiz
                     async {
                         daemon::connect_existing()
                             .await?
-                            .suspend_session_with_ack(id, acknowledge_unpublished_work)
+                            .suspend_session_with_consent(
+                                id,
+                                mj_core::suspend_consent::SuspendConsent {
+                                    discard_untracked: if discard_untracked {
+                                        mj_core::suspend_consent::UntrackedConsent::Any
+                                    } else {
+                                        mj_core::suspend_consent::UntrackedConsent::None
+                                    },
+                                    ..Default::default()
+                                },
+                            )
                             .await
                     }
                     .await
@@ -920,6 +944,8 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Export(_)) => "export",
         Some(Command::Sessions(_)) => "sessions",
         Some(Command::Suspend(_)) => "suspend",
+        Some(Command::Restart(_)) => "restart",
+        Some(Command::PurgeUntracked(_)) => "purge-untracked",
         Some(Command::Destroy(_)) => "destroy",
         Some(Command::Notices(_)) => "notices",
         Some(Command::Resume(_)) => "resume",
@@ -1265,6 +1291,12 @@ async fn run_command(
         Some(Command::Suspend(args)) => api_commands::suspend(args)
             .await
             .map(|()| DashboardExit::Normal),
+        Some(Command::Restart(args)) => api_commands::restart_session(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::PurgeUntracked(args)) => api_commands::purge_untracked(args)
+            .await
+            .map(|()| DashboardExit::Normal),
         Some(Command::Destroy(args)) => api_commands::destroy(args)
             .await
             .map(|()| DashboardExit::Normal),
@@ -1343,7 +1375,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         .map(|choice| choice == "enabled")
         .or_else(|| oracle_choice.as_ref().map(|_| true));
     if !args.yes
-        && !args.prepare
+        && !args.dry_run
         && (!std::io::IsTerminal::is_terminal(&std::io::stdin())
             || !std::io::IsTerminal::is_terminal(&std::io::stdout()))
     {
@@ -1408,24 +1440,21 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         oracle: oracle_enabled,
         supervisors: args.supervisors.as_deref().map(|choice| choice == "enabled"),
         oracle_choice,
-        workspace: mj_core::move_workspace::WorkspaceSelection {
-            exclusions: args
-                .exclusions
-                .iter()
-                .map(|entry| {
-                    let (repository, path) = entry
-                        .split_once(':')
-                        .context("--exclude requires REPOSITORY:PATH")?;
-                    let path = mj_core::move_workspace::WorkspacePath {
-                        repository: repository.into(),
-                        path: path.into(),
-                    };
-                    path.validate()?;
-                    Ok(path)
-                })
-                .collect::<Result<Vec<_>>>()?,
-            acknowledge_large_transfer: args.allow_large_transfer,
+        consent: mj_core::suspend_consent::SuspendConsent {
+            discard_untracked: if args.discard_untracked {
+                mj_core::suspend_consent::UntrackedConsent::Any
+            } else {
+                mj_core::suspend_consent::UntrackedConsent::None
+            },
+            abort_operations: if args.abort_operation {
+                mj_core::suspend_consent::OperationConsent::Any
+            } else {
+                mj_core::suspend_consent::OperationConsent::None
+            },
+            without_checkpoint: false,
+            confirm_no_checkpoint: false,
         },
+        skip_keep_paths: args.skip_keep_paths.clone(),
         session_id: args.session.clone(),
         profile_id: args.profile.clone(),
         target_template_id: args.target.clone(),
@@ -1450,8 +1479,32 @@ async fn move_session(args: MoveArgs) -> Result<()> {
             return Err(with_clear_resources_hint(error, sized_by_flags)).context("prepare move");
         }
     };
-    if args.prepare {
-        println!("{}", serde_json::to_string_pretty(&preparation)?);
+    if args.dry_run {
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&preparation)?);
+        } else {
+            if let Some(route) = preparation.route_preview {
+                println!("Route: {}", route.label());
+            }
+            if !preparation.skip_keep_sizes.is_empty() {
+                println!("Skipped .mj/keep/ paths (deleted when managed source is retired; kept on raw checkout):");
+                for (path, bytes) in &preparation.skip_keep_sizes {
+                    println!(
+                        "  {} ({})",
+                        path.display(),
+                        mj_core::move_workspace::format_bytes(*bytes)
+                    );
+                }
+            }
+            if let Some(preflight) = &preparation.suspend_preflight {
+                println!(
+                    "Untracked files: {}, nested repositories: {}, untracked stashes: {}",
+                    preflight.untracked.len(),
+                    preflight.nested_repositories.len(),
+                    preflight.untracked_stashes.len()
+                );
+            }
+        }
         return Ok(());
     }
     if let Some(preview) = preparation.container_upgrade.clone() {
@@ -1486,20 +1539,14 @@ async fn move_session(args: MoveArgs) -> Result<()> {
     {
         eprintln!("{}", mj_core::state::EC2_MOVE_PREPARATION_NOTICE);
     }
-    if let Some(workspace) = &preparation.workspace {
-        use mj_core::move_workspace::format_bytes;
-        eprintln!(
-            "Workspace transfer: {}",
-            format_bytes(preparation.selection.workspace.included_bytes(workspace))
-        );
-        for root in &workspace.roots {
-            eprintln!("  {}", root.label());
-        }
-        if let Err(error) = preparation.selection.workspace.validate(workspace) {
-            if args.json {
-                print_move_json(&move_error_outcome(&preparation, error.to_string()))?;
-            }
-            return Err(with_large_transfer_hint(error));
+    if !args.json && !preparation.skip_keep_sizes.is_empty() {
+        eprintln!("Skipped .mj/keep/ paths (deleted when managed source is retired; kept on raw checkout):");
+        for (path, bytes) in &preparation.skip_keep_sizes {
+            eprintln!(
+                "  {} ({})",
+                path.display(),
+                mj_core::move_workspace::format_bytes(*bytes)
+            );
         }
     }
     let pending = preparation.queued_commands.len();
@@ -1622,16 +1669,6 @@ async fn move_session(args: MoveArgs) -> Result<()> {
 fn with_daemon_handoff_move_hint(error: anyhow::Error) -> anyhow::Error {
     if error.is::<mj_client::daemon::DaemonTransportLost>() {
         error.context("the daemon connection ended while the Move was running, usually a daemon upgrade or restart; an accepted Move continues under the next daemon, so do not start another one: watch the session, and run `mj move` again with the same options only if it stays disconnected")
-    } else {
-        error
-    }
-}
-
-/// Names the flags that resolve a refusal only when the refusal is about
-/// consent to a large transfer; other selection failures are not fixed by them.
-fn with_large_transfer_hint(error: anyhow::Error) -> anyhow::Error {
-    if error.is::<mj_core::move_workspace::LargeTransferConsentRequired>() {
-        error.context("use --prepare to inspect files, --allow-large-transfer to include all eligible data, or --exclude REPOSITORY:PATH to leave selected files at the source")
     } else {
         error
     }
@@ -2503,7 +2540,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 "stop the Mjolnir daemon",
             )?;
             if stop.suspend_sessions {
-                let stopped = suspend_all_sessions(stop.acknowledge_unpublished_work).await?;
+                let stopped = suspend_all_sessions(stop.discard_untracked).await?;
                 daemon::stop_instance().await?;
                 match stopped {
                     0 => println!("Mjolnir daemon stopped; no sessions were active."),
@@ -2980,30 +3017,6 @@ mod tests {
     use super::*;
     use mj_controller::controller::Controller;
     use mj_core::state::{SessionRecord, SessionState, State};
-
-    // Hard-won: 0475c51230: Launch finding C-2 found large-transfer consent flags incorrectly added to every move refusal; this checks they appear only for that consent error.
-    #[test]
-    fn move_error_hint_names_consent_flags_only_for_large_transfer_consent() {
-        use mj_core::move_workspace::{WorkspaceAssessment, WorkspaceSelection};
-        let blocked = WorkspaceAssessment {
-            blockers: vec!["These local targets share the source worker storage.".into()],
-            ..Default::default()
-        };
-        let error = WorkspaceSelection::default()
-            .validate(&blocked)
-            .unwrap_err();
-        let shown = format!("{:#}", with_large_transfer_hint(error));
-        assert!(!shown.contains("--allow-large-transfer"), "{shown}");
-        assert!(shown.contains("share the source worker storage"), "{shown}");
-
-        let large = WorkspaceAssessment {
-            required_bytes: mj_core::move_workspace::LARGE_TRANSFER_BYTES,
-            ..Default::default()
-        };
-        let error = WorkspaceSelection::default().validate(&large).unwrap_err();
-        let shown = format!("{:#}", with_large_transfer_hint(error));
-        assert!(shown.contains("--allow-large-transfer"), "{shown}");
-    }
 
     // Hard-won: 0475c51230: Launch finding C-7 found the refusal say “1 queued command require”; this checks singular and plural counts agree.
     #[test]
