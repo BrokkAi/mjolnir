@@ -188,13 +188,13 @@ impl Controller {
                 super::IdleWorkspaceLease::reserve_connection_for_upgrade(
                     &mut connection,
                     harness,
-                    WorkerReplacement::Explicit,
+                    WorkerReplacement::Other,
                 )
                 .await?
                 && super::IdleWorkspaceLease::verify_reserved_connection(
                     &mut connection,
                     harness,
-                    WorkerReplacement::Explicit,
+                    WorkerReplacement::Other,
                     &command_id,
                     &cursor,
                 )
@@ -413,7 +413,6 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
-        replacement: WorkerReplacement,
     ) -> Result<()> {
         let (backend, worker_root) = self.worker_placement(session_id)?;
         let reconnect = targets::reconnect_plan(&backend, session_id)?
@@ -502,7 +501,7 @@ impl Controller {
             admission,
             &handle,
             harness,
-            replacement,
+            WorkerReplacement::Other,
         )
         .await?
         else {

@@ -23,8 +23,13 @@ impl IdleWorkspaceLease {
         handle: &ManagedSessionHandle,
         harness: HarnessKind,
     ) -> Result<Option<Self>> {
-        Self::acquire_for_replacement(admission, handle, harness, WorkerReplacement::Automatic)
-            .await
+        Self::acquire_for_replacement(
+            admission,
+            handle,
+            harness,
+            WorkerReplacement::AutomaticUpgrade,
+        )
+        .await
     }
 
     pub(in crate::controller) async fn acquire_for_replacement(
@@ -260,7 +265,7 @@ impl IdleWorkspaceLease {
                         lease,
                         command_id,
                         harness,
-                        replacement: WorkerReplacement::Automatic,
+                        replacement: WorkerReplacement::Other,
                         ready_cursor,
                         _worker_owner: worker_owner,
                     };

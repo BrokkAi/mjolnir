@@ -1453,13 +1453,19 @@ async fn explicit_suspend_can_reserve_an_idle_legacy_antigravity_worker() {
         &admission,
         &handle,
         HarnessKind::Antigravity,
-        mj_core::activity::WorkerReplacement::Explicit,
+        mj_core::activity::WorkerReplacement::Other,
     )
     .await
     .unwrap()
     .expect("explicit Suspend can reserve the quiet old worker");
     assert!(lease.verify_for_upgrade().await.unwrap());
     lease.release().await.unwrap();
+    wait_until_the_actor_serves_again(&handle).await;
+    let mut write = IdleWorkspaceLease::acquire(&admission, &handle, HarnessKind::Antigravity)
+        .await
+        .expect("an idle legacy worker can still admit a workspace write");
+    write.verify().await.unwrap();
+    write.release().await.unwrap();
     channels.shutdown.shutdown().await.unwrap();
 }
 

@@ -1047,11 +1047,6 @@ impl Controller {
                         if let Some(manager) = manager {
                             self.upgrade_session_worker_for_suspend(
                                 admission, session_id, executor, manager,
-                                if exclusivity == LatchExclusivity::HoldThroughClose {
-                                    mj_core::activity::WorkerReplacement::Explicit
-                                } else {
-                                    mj_core::activity::WorkerReplacement::Automatic
-                                },
                             )
                             .await
                         } else {

@@ -173,9 +173,13 @@ impl Controller {
             let handle = manager
                 .wait_for_session(session_id, PARK_ACTOR_TIMEOUT)
                 .await?;
-            let Some(mut lease) =
-                IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, session.harness_kind)
-                    .await?
+            let Some(mut lease) = IdleWorkspaceLease::acquire_for_replacement(
+                admission,
+                &handle,
+                session.harness_kind,
+                mj_core::activity::WorkerReplacement::Other,
+            )
+            .await?
             else {
                 return Ok(ParkOutcome::Busy);
             };

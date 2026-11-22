@@ -8116,9 +8116,13 @@ fn a_codex_session_is_replaceable_again_once_the_restarted_adapter_reports() {
     let state = relay.operational_state();
     assert!(!state.safe_to_replace(HarnessKind::Codex));
     assert!(
-        mj_core::activity::replacement_blockers(&state.facts(), HarnessKind::Codex)
-            .iter()
-            .any(|reason| reason.contains("has not reported goal and execution state"))
+        mj_core::activity::replacement_blockers(
+            &state.facts(),
+            HarnessKind::Codex,
+            mj_core::activity::WorkerReplacement::AutomaticUpgrade
+        )
+        .iter()
+        .any(|reason| reason.contains("has not reported goal and execution state"))
     );
 
     configure(&mut relay);

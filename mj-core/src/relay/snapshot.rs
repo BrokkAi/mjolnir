@@ -1176,7 +1176,7 @@ impl RelayOperationalState {
     /// Whether a controller may replace this worker without losing work.
     #[must_use]
     pub fn safe_to_replace(&self, harness: HarnessKind) -> bool {
-        self.safe_to_replace_for(harness, WorkerReplacement::Automatic)
+        self.safe_to_replace_for(harness, WorkerReplacement::Other)
     }
 
     #[must_use]
@@ -1205,15 +1205,10 @@ impl RelayOperationalState {
         harness: HarnessKind,
         purpose: crate::activity::MovePurpose,
     ) -> bool {
-        match purpose {
-            crate::activity::MovePurpose::Manual => {
-                self.safe_to_replace_for(harness, WorkerReplacement::Explicit)
-            }
-            crate::activity::MovePurpose::IdleReplacement => self.safe_to_replace(harness),
-            crate::activity::MovePurpose::QuotaRetry => {
-                crate::activity::safe_to_move(&self.facts(), harness, purpose)
-            }
+        if purpose == crate::activity::MovePurpose::Manual {
+            return self.safe_to_replace(harness);
         }
+        crate::activity::safe_to_move(&self.facts(), harness, purpose)
     }
 
     /// Terminal startup failure; this worker cannot retry preparation in place.

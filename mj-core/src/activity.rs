@@ -674,14 +674,14 @@ pub fn is_quiet(facts: &ActivityFacts) -> bool {
 /// Older workers can appear quiet even when they cannot report native work.
 #[must_use]
 pub fn safe_to_replace(facts: &ActivityFacts, harness: HarnessKind) -> bool {
-    safe_to_replace_for(facts, harness, WorkerReplacement::Automatic)
+    safe_to_replace_for(facts, harness, WorkerReplacement::Other)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkerReplacement {
-    Automatic,
-    /// The user requested the operation that will stop this worker.
-    Explicit,
+    AutomaticUpgrade,
+    /// An explicit replacement or another operation that needs idle admission.
+    Other,
 }
 
 #[must_use]
@@ -714,7 +714,7 @@ fn replacement_provider_blocker(
         HarnessKind::Kimi if facts.background_work_known != Some(true) => {
             Some("Kimi background-agent state is not synchronized")
         }
-        _ if replacement == WorkerReplacement::Automatic
+        _ if replacement == WorkerReplacement::AutomaticUpgrade
             && legacy_antigravity_worker(harness, facts.background_work_known) =>
         {
             Some(
@@ -734,25 +734,23 @@ fn replacement_provider_blocker(
 pub enum MovePurpose {
     Manual,
     QuotaRetry,
-    /// Background replacement that closes an idle source worker.
-    IdleReplacement,
 }
 
 /// Shared interruption decision for Move preparation and source-lease validation.
 #[must_use]
-pub fn safe_to_move(facts: &ActivityFacts, harness: HarnessKind, purpose: MovePurpose) -> bool {
-    let replacement = match purpose {
-        MovePurpose::Manual => WorkerReplacement::Explicit,
-        MovePurpose::QuotaRetry | MovePurpose::IdleReplacement => WorkerReplacement::Automatic,
-    };
-    safe_to_replace_for(facts, harness, replacement)
+pub fn safe_to_move(facts: &ActivityFacts, harness: HarnessKind, _purpose: MovePurpose) -> bool {
+    safe_to_replace(facts, harness)
 }
 
 /// What keeps [`safe_to_replace`] false, one name per cause, so a caller that
 /// declines to replace a worker can say why. Empty exactly when
 /// [`safe_to_replace`] is true.
 #[must_use]
-pub fn replacement_blockers(facts: &ActivityFacts, harness: HarnessKind) -> Vec<&'static str> {
+pub fn replacement_blockers(
+    facts: &ActivityFacts,
+    harness: HarnessKind,
+    replacement: WorkerReplacement,
+) -> Vec<&'static str> {
     let mut blockers = Vec::new();
     if facts.checkpoint_barrier {
         blockers.push("a checkpoint barrier is held");
@@ -773,11 +771,7 @@ pub fn replacement_blockers(facts: &ActivityFacts, harness: HarnessKind) -> Vec<
             blockers.push("work is in flight");
         }
     }
-    blockers.extend(replacement_provider_blocker(
-        facts,
-        harness,
-        WorkerReplacement::Automatic,
-    ));
+    blockers.extend(replacement_provider_blocker(facts, harness, replacement));
     blockers
 }
 

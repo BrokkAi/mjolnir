@@ -193,7 +193,11 @@ fn a_restarted_codex_adapter_blocks_replacement_until_it_reports_again() {
         ..ActivityFacts::default()
     };
     assert!(!safe_to_replace(&restarted, HarnessKind::Codex));
-    let blockers = replacement_blockers(&restarted, HarnessKind::Codex);
+    let blockers = replacement_blockers(
+        &restarted,
+        HarnessKind::Codex,
+        WorkerReplacement::AutomaticUpgrade,
+    );
     assert_eq!(blockers.len(), 1);
     assert!(blockers[0].contains("has not reported goal and execution state"));
     // The same facts do not block a harness that has no goal state.
@@ -204,7 +208,14 @@ fn a_restarted_codex_adapter_blocks_replacement_until_it_reports_again() {
         ..restarted
     };
     assert!(safe_to_replace(&reported, HarnessKind::Codex));
-    assert!(replacement_blockers(&reported, HarnessKind::Codex).is_empty());
+    assert!(
+        replacement_blockers(
+            &reported,
+            HarnessKind::Codex,
+            WorkerReplacement::AutomaticUpgrade
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -249,8 +260,9 @@ fn replacement_blockers_agree_with_safe_to_replace() {
             HarnessKind::Antigravity,
         ] {
             assert_eq!(
-                replacement_blockers(facts, harness).is_empty(),
-                safe_to_replace(facts, harness),
+                replacement_blockers(facts, harness, WorkerReplacement::AutomaticUpgrade)
+                    .is_empty(),
+                safe_to_replace_for(facts, harness, WorkerReplacement::AutomaticUpgrade),
                 "{harness:?} {facts:?}"
             );
         }
@@ -530,12 +542,11 @@ fn antigravity_replacement_waits_for_an_authoritative_empty_task_inventory() {
     state.execution = RelayExecutionState::Idle;
     state.acp_ready = Some(true);
     // A pre-tracking worker leaves the field absent even when a job is live.
-    // Only an explicit operation can authorize replacing a quiet legacy worker.
-    assert!(!state.safe_to_replace(harness));
-    assert!(state.safe_to_replace_for(harness, WorkerReplacement::Explicit));
+    // Only an automatic binary upgrade requires a reported inventory.
+    assert!(!state.safe_to_replace_for(harness, WorkerReplacement::AutomaticUpgrade));
+    assert!(state.safe_to_replace(harness));
     assert!(state.safe_to_move(harness, MovePurpose::Manual));
-    assert!(!state.safe_to_move(harness, MovePurpose::IdleReplacement));
-    assert!(!state.safe_to_move(harness, MovePurpose::QuotaRetry));
+    assert!(state.safe_to_move(harness, MovePurpose::QuotaRetry));
 
     state.background_work_known = Some(true);
     state.inferred_idle_since_ms = Some(NOW);
@@ -566,16 +577,16 @@ fn antigravity_replacement_waits_for_an_authoritative_empty_task_inventory() {
     ));
     assert!(state.has_work_in_flight());
     assert!(!state.safe_to_replace(harness));
-    assert!(!state.safe_to_replace_for(harness, WorkerReplacement::Explicit));
+    assert!(!state.safe_to_replace_for(harness, WorkerReplacement::AutomaticUpgrade));
 
     // Losing the observation is not evidence that the task finished.
     state.background_commands.truncate(1);
     state.background_work_known = Some(false);
     assert!(!state.safe_to_replace(harness));
-    assert!(!state.safe_to_replace_for(harness, WorkerReplacement::Explicit));
+    assert!(!state.safe_to_replace_for(harness, WorkerReplacement::AutomaticUpgrade));
 
     state.background_work_known = Some(true);
-    assert!(state.safe_to_replace(harness));
+    assert!(state.safe_to_replace_for(harness, WorkerReplacement::AutomaticUpgrade));
 }
 
 #[test]
@@ -786,7 +797,9 @@ fn durable_goal_intent_allows_replacement_without_discarding_actual_work() {
         assert!(safe_to_replace(&goal, harness));
         assert!(safe_to_move(&goal, harness, MovePurpose::Manual));
         assert_eq!(routine_checkpoint_wait(&goal, harness), None);
-        assert!(replacement_blockers(&goal, harness).is_empty());
+        assert!(
+            replacement_blockers(&goal, harness, WorkerReplacement::AutomaticUpgrade).is_empty()
+        );
     }
     type AddWork = fn(&mut ActivityFacts);
     let work: &[AddWork] = &[

@@ -166,7 +166,7 @@ pub(in crate::controller) enum LatchExclusivity {
 impl LatchExclusivity {
     pub(in crate::controller) fn close_purpose(self) -> Option<mj_core::activity::MovePurpose> {
         match self {
-            Self::HoldThroughIdleClose => Some(mj_core::activity::MovePurpose::IdleReplacement),
+            Self::HoldThroughIdleClose => Some(mj_core::activity::MovePurpose::Manual),
             Self::HoldThroughQuotaClose => Some(mj_core::activity::MovePurpose::QuotaRetry),
             _ => None,
         }
