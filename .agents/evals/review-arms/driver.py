@@ -181,6 +181,22 @@ def codex_turn_model(usage, command, model, effort, *, pages=(), rollouts=()):
     return model
 
 
+def _matches_codex_prompt(content, prompt):
+    # codex-acp renders Mjolnir's embedded resource using this exact framing.
+    prefix = 'mj://prompt-context\n<context ref="mj://prompt-context">\n'
+    suffix = "\n</context>"
+    matching_parts = 0
+    for part in content:
+        text = part.get("text")
+        if part.get("type") != "text" or not isinstance(text, str):
+            return False
+        if text == prompt:
+            matching_parts += 1
+        elif not (text.startswith(prefix) and text.endswith(suffix)):
+            return False
+    return matching_parts == 1
+
+
 def _codex_turn_context(usage, command, pages, rollouts):
     sid = usage["session_id"]
     turns = [row for row in usage["turns"] if row["command_id"] == command]
@@ -221,9 +237,7 @@ def _codex_turn_context(usage, command, pages, rollouts):
                           and payload.get("thread_id") == thread
                           and payload["item"].get("type") == "UserMessage"
                           and start <= payload["completed_at_ms"] < end):
-                        content = payload["item"]["content"]
-                        if (len(content) == 1 and content[0]["type"] == "text"
-                                and content[0]["text"] == blocks[0]["text"]):
+                        if _matches_codex_prompt(payload["item"]["content"], blocks[0]["text"]):
                             native_turns.append(payload["turn_id"])
                 # The command identifies its transcript prompt. Exact text and the
                 # host's turn interval identify a unique native UserMessage.

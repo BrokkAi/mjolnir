@@ -484,6 +484,7 @@ class ModelIdentity(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, f"{TERRA}/high"):
             model_usage(usage, "call", 1, TERRA, "claude-sonnet-5-5")
 
+    # Hard-won: 0674966cf: mailbox context made a valid Codex prompt fail the turn join.
     def test_codex_null_usage_effort_requires_the_exact_native_turn_context(self):
         sid, command, native_id = "a" * 32, "fidelity-command", "codex-turn"
         content = [{"type": "text", "text": "The same prompt may be retried."}]
@@ -494,18 +495,34 @@ class ModelIdentity(unittest.TestCase):
         pages = [{"session_id": sid, "items": [{"stable_id": f"user:{command}", "role": "user",
                   "position": 33, "created_at_ms": 100, "body": {"content": content}}]}]
         meta = {"type": "session_meta", "payload": {"id": "thread", "cwd": f"/workspace/{sid}/engine-trees"}}
+        prompt_context = {"type": "text", "text_elements": [],
+                          "text": 'mj://prompt-context\n<context ref="mj://prompt-context">\n'
+                                  "<untrusted-mailbox-events>\nProject tools are being installed.\n"
+                                  "</untrusted-mailbox-events>\n</context>"}
         message = {"type": "event_msg", "payload": {
             "type": "item_completed", "thread_id": "thread", "turn_id": native_id, "completed_at_ms": 105,
-            "item": {"type": "UserMessage", "id": "item", "content": content}}}
+            "item": {"type": "UserMessage", "id": "item", "content": [prompt_context, *content]}}}
         context = {"type": "turn_context", "payload": {"turn_id": native_id, "model": TERRA, "effort": "high"}}
 
         def with_payload(row, **fields):
             return {**row, "payload": {**row["payload"], **fields}}
 
+        def with_content(parts):
+            return with_payload(message, item={**message["payload"]["item"], "content": parts})
+
         earlier_message = with_payload(message, turn_id="earlier", completed_at_ms=98)
         earlier_context = with_payload(context, turn_id="earlier")
+        other_message = with_payload(message, turn_id="earlier", completed_at_ms=160)
+        unknown = {**prompt_context, "text": prompt_context["text"] + "\ntrailing text"}
+        different_prompt = {**content[0], "text": content[0]["text"][:-1] + "!"}
         cases = (
             ("matching", [earlier_message, earlier_context, message, context], None),
+            ("unknown part", [with_content([unknown, *content]), context], "missing or ambiguous"),
+            ("different prompt", [with_content([prompt_context, different_prompt]), context],
+             "missing or ambiguous"),
+            ("duplicate prompt part", [with_content([prompt_context, *content, *content]), context],
+             "missing or ambiguous"),
+            ("two matching messages", [message, context, other_message, earlier_context], "missing or ambiguous"),
             ("effort", [message, with_payload(context, effort="low")], "selected .*low"),
             ("model", [message, with_payload(context, model="gpt-6.1-sol")], "selected .*sol"),
             ("missing", [message], "missing or ambiguous"),
