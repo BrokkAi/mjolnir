@@ -8259,7 +8259,7 @@ fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
 }
 
 #[test]
-fn migration_147_raises_compatibility_floor_and_persists_supervisors_preference() {
+fn supervisors_preference_survives_reopen_and_profile_rename() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("supervisors.sqlite3");
     let mut record = session("sup-parent", "project");
@@ -8271,8 +8271,11 @@ fn migration_147_raises_compatibility_floor_and_persists_supervisors_preference(
     save_new_session_to(&path, &record, None, true, false).unwrap();
     let conn = open(&path).unwrap();
     let schema = schema::read_schema_state(&conn).unwrap();
-    assert_eq!(schema.revision, 147);
-    assert_eq!(schema.minimum_compatible, Some(147));
+    assert_eq!(schema.revision, SCHEMA_VERSION);
+    assert_eq!(
+        schema.minimum_compatible,
+        Some(schema::MINIMUM_COMPATIBLE_VERSION)
+    );
     let state = load_state_from(&path).unwrap();
     assert!(state.sessions[&record.id].supervisors);
     assert_eq!(

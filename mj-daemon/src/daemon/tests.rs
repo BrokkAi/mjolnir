@@ -2706,11 +2706,16 @@ async fn equivalent_lifecycle_requests_join_one_daemon_operation() {
     ));
     assert!(futures::poll!(&mut waiting_second).is_pending());
     let cancel = LifecycleControl::default();
+    let without_checkpoint = serde_json::to_string(&mj_core::suspend_consent::SuspendConsent {
+        without_checkpoint: true,
+        ..Default::default()
+    })
+    .unwrap();
     let mut cancelled_wait = Box::pin(state.start_or_join_lifecycle_controlled(
         "session-1".into(),
         LifecycleKind::Suspend,
         None,
-        None,
+        Some(without_checkpoint),
         Some(cancel.clone()),
         |_, _, _, _session_admission| async { panic!("cancelled queued work ran") },
     ));
@@ -8175,42 +8180,38 @@ esac
         Cancel,
         StaleCancel,
     }
-    for (retained_workspace, restart, sealed, origin) in [
-        (false, false, true, Origin::Suspend),
-        (true, false, true, Origin::Suspend),
-        (false, true, true, Origin::Suspend),
-        (true, true, true, Origin::Suspend),
-        (true, false, false, Origin::Suspend),
-        (true, true, false, Origin::Suspend),
-        (true, true, true, Origin::Cancel),
-        (true, true, true, Origin::StaleCancel),
-    ] {
+    for (index, (in_place, restart, sealed, has_prepared_destination, origin)) in [
+        (false, false, true, false, Origin::Suspend),
+        (true, false, true, false, Origin::Suspend),
+        (false, true, true, true, Origin::Suspend),
+        (true, true, true, false, Origin::Suspend),
+        (false, false, false, false, Origin::Suspend),
+        (false, true, false, false, Origin::Suspend),
+        (false, true, true, true, Origin::Cancel),
+        (false, true, true, true, Origin::StaleCancel),
+        (false, false, true, true, Origin::Suspend),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let requested_close = origin == Origin::Suspend;
         let root = tempfile::tempdir().unwrap();
-        let id = match origin {
-            Origin::Cancel => "15420000000000000000000000000007",
-            Origin::StaleCancel => "15420000000000000000000000000008",
-            Origin::Suspend => match (retained_workspace, restart, sealed) {
-                (false, false, true) => "15420000000000000000000000000001",
-                (true, false, true) => "15420000000000000000000000000002",
-                (false, true, true) => "15420000000000000000000000000003",
-                (true, true, true) => "15420000000000000000000000000004",
-                (_, false, false) => "15420000000000000000000000000005",
-                (_, true, false) => "15420000000000000000000000000006",
-            },
-        };
+        let id = format!("1542{:028}", index + 1);
+        let id = id.as_str();
         let source_root = root.path().join("source").join(id);
         let mut destination_root = root.path().join("destination").join(id);
         std::fs::create_dir_all(&source_root).unwrap();
-        std::fs::create_dir_all(&destination_root).unwrap();
+        if !in_place {
+            std::fs::create_dir_all(&destination_root).unwrap();
+            std::fs::write(
+                destination_root.join("clone.partial"),
+                "unfinished checkout",
+            )
+            .unwrap();
+        }
         std::fs::write(
             source_root.join("uncheckpointed-work"),
             "keep source workspace",
-        )
-        .unwrap();
-        std::fs::write(
-            destination_root.join("clone.partial"),
-            "unfinished checkout",
         )
         .unwrap();
         let checkpoint = mj_controller::controller::test_support::write_checkpoint_gate_archive(
@@ -8227,7 +8228,7 @@ esac
         let mut operation = mj_core::state::MoveOperation {
             quota_stop_reason: None,
             quota_continuation: None,
-            prepared_destination: (retained_workspace && sealed).then(|| {
+            prepared_destination: has_prepared_destination.then(|| {
                 let mut runtime = mj_core::state::TargetRuntimeSettings::from(
                     &mj_core::config::TargetTemplate::LocalBare,
                 );
@@ -8267,7 +8268,7 @@ esac
             deferred_environment_changes: Vec::new(),
             source_snapshot: None,
             source_checkpoint_only: false,
-            in_place: retained_workspace,
+            in_place,
             operation_id: format!("mid-clone-{id}"),
             selection: mj_core::state::MoveSelection {
                 session_id: id.into(),
@@ -8309,9 +8310,11 @@ esac
         mj_controller::database::save_move_operation(&operation).unwrap();
         let mut destination = source.clone();
         destination.state = SessionState::Provisioning;
-        destination.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-            worker_root: destination_root.clone(),
-        }));
+        if !in_place {
+            destination.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+                worker_root: destination_root.clone(),
+            }));
+        }
         mj_controller::database::save_resumed_session(&destination, None).unwrap();
         if restart {
             operation.phase = mj_core::state::MovePhase::Cancelled;
@@ -8320,7 +8323,7 @@ esac
             destination.state = SessionState::Closing;
             mj_controller::database::save_lifecycle_session(&destination).unwrap();
         }
-        if requested_close && restart && sealed {
+        if requested_close && restart && sealed && !in_place {
             // Restore can publish Running just before Move records StartingQueue.
             // Closing and that destination's readiness must become durable together.
             destination.state = SessionState::Running;
@@ -8342,6 +8345,20 @@ esac
                 destination.target.as_deref()
             );
             let mut controller = Controller::load().unwrap();
+            let mut committed = saved_move.clone();
+            committed.phase = mj_core::state::MovePhase::DestinationOwns;
+            mj_controller::database::save_move_operation(&committed).unwrap();
+            assert!(
+                !controller
+                    .settle_superseded_move_for_close(
+                        id,
+                        &RefusingExecutor("a committed destination must never be rolled back"),
+                        None,
+                    )
+                    .await
+                    .unwrap()
+            );
+            mj_controller::database::save_move_operation(&saved_move).unwrap();
             assert!(
                 !controller
                     .settle_superseded_move_for_close(
@@ -8425,7 +8442,7 @@ esac
                 .await
                 .unwrap();
         }
-        if requested_close && restart && retained_workspace && sealed {
+        if requested_close && restart && has_prepared_destination {
             let connection =
                 rusqlite::Connection::open(mj_controller::database::database_path()).unwrap();
             connection.execute_batch("CREATE TRIGGER reject_move_settlement BEFORE UPDATE OF operation_json ON session_moves
@@ -8498,10 +8515,9 @@ esac
             let kept = mj_controller::database::load_session_record(id)
                 .unwrap()
                 .unwrap();
-            assert_eq!(kept.state, SessionState::Error);
-            assert_eq!(kept.target, source.target);
+            assert_ne!(kept.state, SessionState::Stopped);
+            assert_eq!(kept.checkpoint.as_deref(), Some(&checkpoint));
             assert!(source_root.join("uncheckpointed-work").exists());
-            assert!(!destination_root.exists());
             let kept_move = mj_controller::database::load_move_operation(id)
                 .unwrap()
                 .unwrap();
@@ -8583,7 +8599,10 @@ esac
             tokio::time::timeout(Duration::from_secs(30), state.suspend_session(id.into()))
                 .await
                 .unwrap();
-        assert_eq!(result.is_err(), retained_workspace, "{result:?}");
+        assert!(
+            result.is_err(),
+            "the source needs repair before it can suspend ({id})"
+        );
         if let Some(active_move) = active_move {
             assert!(
                 RuntimeState::wait_lifecycle_result(active_move)
@@ -8593,19 +8612,12 @@ esac
         }
         let stored = mj_controller::database::load_state().unwrap();
         let record = &stored.sessions[id];
-        assert_eq!(
-            record.state,
-            if retained_workspace {
-                SessionState::Error
-            } else {
-                SessionState::Stopped
-            }
-        );
+        assert_eq!(record.state, SessionState::Error, "{id}");
         assert!(checkpoint.archive_path.exists());
         assert_eq!(record.checkpoint.as_deref(), Some(&checkpoint));
         assert_eq!(
             destination_root.exists(),
-            !sealed,
+            !sealed && !in_place,
             "an unsealed source keeps every placement; a sealed source permits destination cleanup ({id})"
         );
         let settled = mj_controller::database::load_move_operation(id)
@@ -8618,7 +8630,7 @@ esac
                 .contains(&settled.operation_id),
             "terminal outcome must consume Suspend intent"
         );
-        if retained_workspace && sealed {
+        if has_prepared_destination {
             assert!(matches!(
                 settled.prepared_destination.as_ref().unwrap().state,
                 mj_core::state::PreparedDestinationState::Released
@@ -8653,7 +8665,7 @@ esac
             );
             assert!(message.contains("Resume the session"), "{message}");
             assert!(message.contains("Reference "), "{message}");
-        } else if retained_workspace {
+        } else {
             assert_eq!(record.target, source.target);
             assert_eq!(
                 std::fs::read_to_string(source_root.join("uncheckpointed-work")).unwrap(),
@@ -8663,9 +8675,30 @@ esac
             assert!(message.contains("source workspace was kept"), "{message}");
             assert!(message.contains("Resume the session"), "{message}");
             assert!(message.contains("Reference "), "{message}");
-        } else {
-            assert!(record.target.is_none());
-            assert!(!source_root.exists());
+            let environment = mj_controller::database::session_environment(id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                environment.placement.target,
+                source.target.as_deref().cloned()
+            );
+            assert_eq!(
+                environment.phase,
+                mj_controller::database::EnvironmentPhase::Active
+            );
+            if !in_place {
+                let environments = mj_controller::database::worker_environments(id).unwrap();
+                let provisional = environments
+                    .iter()
+                    .find(|environment| {
+                        environment.placement.target.as_ref() == destination.target.as_deref()
+                    })
+                    .expect("the provisional destination has a ledger entry");
+                assert_eq!(
+                    provisional.phase,
+                    mj_controller::database::EnvironmentPhase::Reclaimed
+                );
+            }
         }
     }
     // Historical Moves must not turn a workerless cleanup into interrupted
@@ -9398,6 +9431,15 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
     }));
+    parent.project = Some(Arc::new(mj_core::repository::ProjectBundleSnapshot {
+        bundle: mj_controller::controller::test_support::local_bundle(&checkout),
+        identities: BTreeMap::from([(
+            "project".into(),
+            mj_core::repository::RepositoryIdentity::Local(checkout.clone()),
+        )]),
+        network_sources: BTreeMap::new(),
+        plain_directories: BTreeSet::from(["project".into()]),
+    }));
     parent.project_directory = Some(checkout);
     if recovery_copy == ParentRecoveryCopy::Installed {
         parent.checkpoint = Some(Box::new(
@@ -9535,7 +9577,7 @@ async fn serve_live_session(
 const STAND_IN_EXPORT: &str = "MJ_TEST_STAND_IN_EXPORT";
 
 /// The worker's `export-checkpoint`, run from this test binary for the
-/// stand-in worker of [`live_clone_with_an_unpushed_commit`], because unit
+/// stand-in worker of the quiesced clone fixture, because unit
 /// tests have no worker binary. It does nothing unless that stand-in runs it.
 #[cfg(unix)]
 #[test]
@@ -9557,7 +9599,7 @@ struct LiveClone {
     _source: tempfile::TempDir,
     _directory: tempfile::TempDir,
     checkout: PathBuf,
-    worker_root: PathBuf,
+    origin: PathBuf,
     unpushed_commit: String,
     relay_root: PathBuf,
     channels: mj_controller::session_manager::SessionManagerChannels,
@@ -9566,20 +9608,64 @@ struct LiveClone {
 
 #[cfg(unix)]
 impl LiveClone {
-    /// Whether the session's relay was sealed by a close.
-    fn sealed(&self) -> bool {
-        relay_sealed(&self.relay_root)
+    /// Recover suspension, then restore the checkpoint into a clean origin seed.
+    async fn suspend_and_restore(&self, workspace: &Path) -> PathBuf {
+        use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
+        use mj_controller::controller::test_support::test_git;
+
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            self.state.recover_suspension(LATCH_RELAY_SESSION.into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let record = mj_controller::database::load_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, SessionState::Stopped, "{record:?}");
+        assert!(record.target.is_none());
+        assert!(relay_sealed(&self.relay_root));
+        assert!(
+            !self.checkout.exists(),
+            "suspend must release the original clone"
+        );
+
+        let checkpoint = record.checkpoint.unwrap();
+        let archive =
+            mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path).unwrap();
+        let [repository] = archive.repositories.as_slice() else {
+            panic!("expected a single archived repository");
+        };
+        assert!(repository.metadata.origin_delta.is_some());
+        let restored = workspace.join(&repository.metadata.relative_destination);
+        std::fs::create_dir_all(restored.parent().unwrap()).unwrap();
+        test_git(
+            workspace,
+            &[
+                "clone",
+                self.origin.to_str().unwrap(),
+                restored.to_str().unwrap(),
+            ],
+        );
+        mj_checkpoint::checkpoint::restore_repositories(
+            &checkpoint.archive_path,
+            workspace,
+            &mj_checkpoint::archive::SystemGit,
+        )
+        .unwrap();
+        restored
     }
 }
 
-/// A live session on an isolated clone whose last commit is not on the
-/// clone's origin, served by the stand-in relay. Its stand-in worker runs the
-/// real checkpoint export, so a suspend checks the clone's publication against
-/// a real archive and a real origin.
+/// A managed clone with an unpublished commit. Suspend recovery starts after
+/// the durable quiescence receipt and checkpoint-only worker boot. The relay
+/// is a stand-in, while capture runs the real worker exporter.
 #[cfg(unix)]
-async fn live_clone_with_an_unpushed_commit() -> LiveClone {
+async fn quiesced_clone_with_an_unpushed_commit() -> LiveClone {
     use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
     use mj_controller::controller::test_support::{committed_repository, test_git};
+    use mj_core::worker_suspend as wire;
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -9597,6 +9683,7 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
         format!(
             "#!/bin/sh\n\
              [ \"$2\" = stop ] && exit 0\n\
+             [ \"$2\" = liveness ] && {{ printf 'alive\\n'; exit 0; }}\n\
              [ \"$2\" = proxy ] && {{ {proxy}; exit 0; }}\n\
              [ \"$1 $2\" = 'worker export-checkpoint' ] || \
              {{ echo \"the stand-in worker only exports: $*\" >&2; exit 2; }}\n\
@@ -9641,7 +9728,7 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
 
     let workspace = mj_controller::database::create_workspace("Clone suspension").unwrap();
     session.workspace_id = workspace.id.clone();
-    session.state = SessionState::Running;
+    session.state = SessionState::Closing;
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
     session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
@@ -9653,12 +9740,60 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
     )
     .unwrap();
 
+    let controller = Controller::load().unwrap();
+    let backend = mj_controller::targets::backend_locator(
+        session.target.as_deref().unwrap(),
+        &session,
+        &controller.config,
+    )
+    .unwrap();
+    let mut launch = mj_controller::worker_launch::current_worker_launch_config(
+        &controller.config,
+        &controller.state,
+        LATCH_RELAY_SESSION,
+        &backend,
+    )
+    .unwrap();
+    launch.run_mode = mj_core::worker_launch::WorkerRunMode::CheckpointOnly;
+    std::fs::write(
+        worker_root.join("launch.json"),
+        serde_json::to_vec(&launch).unwrap(),
+    )
+    .unwrap();
+    let operation = new_command_id("test-suspend").unwrap();
+    wire::write(&worker_root, wire::ACCEPTED, &operation).unwrap();
+    wire::write(
+        &worker_root,
+        wire::REQUEST,
+        &wire::SuspendRequest {
+            operation: operation.clone(),
+            // A process with a different birth identity cannot be the
+            // original quiesced worker, even when its PID has been reused.
+            worker: wire::WorkerIdentity {
+                pid: std::process::id(),
+                start: 0,
+            },
+            checkout: checkout.clone(),
+            child_sessions: Vec::new(),
+        },
+    )
+    .unwrap();
+    wire::write(
+        &worker_root,
+        wire::RECEIPT,
+        &wire::SuspendReceipt {
+            operation,
+            error: None,
+        },
+    )
+    .unwrap();
+
     let (channels, state) = serve_live_session(&relay_root, false).await;
     LiveClone {
         _source: source,
         _directory: directory,
         checkout,
-        worker_root,
+        origin,
         unpushed_commit,
         relay_root,
         channels,
@@ -9666,114 +9801,66 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
     }
 }
 
-/// R2-3 and R13-5: a suspend of a live clone with unpushed work, sent
-/// without the acknowledgement, is refused by the controller's own check
-/// after its checkpoint, not only by the API's early refusal. The daemon
-/// closes a live session through the route that finishes an interrupted
-/// close, which acknowledged on the caller's behalf. The refused session is
-/// running again, not left `Closing` for the next start to close, with its
-/// relay open and its checkout and target in place, and a suspend that
-/// acknowledges then goes through.
+/// Suspend must preserve commits available only in the session clone.
 #[cfg(unix)]
-// Hard-won: f1145012: a live clone with unpushed work was suspended without acknowledgement.
 #[tokio::test]
-async fn a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushed_work() {
-    use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
-    if !in_isolated_live_parent_test(
-        "a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushed_work",
-    ) {
+async fn suspend_recovery_preserves_a_clones_unpushed_work() {
+    use mj_controller::controller::test_support::test_git;
+    if !in_isolated_live_parent_test("suspend_recovery_preserves_a_clones_unpushed_work") {
         return;
     }
     let _writer = mj_controller::database::install_isolated_test_writer();
-    let clone = live_clone_with_an_unpushed_commit().await;
-
-    let refusal = tokio::time::timeout(
-        Duration::from_secs(60),
-        clone
-            .state
-            .suspend_session(LATCH_RELAY_SESSION.to_owned()),
-    )
-    .await
-    .unwrap()
-    .expect_err("a suspend without the acknowledgement must be refused");
-    assert!(
-        format!("{refusal:#}").contains("acknowledge_unpublished_work"),
-        "the refusal names the acknowledgement: {refusal:#}"
-    );
-    let stored = mj_controller::database::load_state().unwrap();
-    let record = &stored.sessions[LATCH_RELAY_SESSION];
-    assert_eq!(record.state, SessionState::Running, "{record:?}");
-    assert!(record.target.is_some(), "{record:?}");
-    assert!(!clone.sealed(), "a refused suspend must not seal the relay");
-    assert!(clone.worker_root.is_dir());
+    let clone = quiesced_clone_with_an_unpushed_commit().await;
+    let workspace = tempfile::tempdir().unwrap();
+    let restored = clone.suspend_and_restore(workspace.path()).await;
     assert_eq!(
-        mj_controller::controller::test_support::test_git(&clone.checkout, &["rev-parse", "HEAD"]),
+        test_git(&restored, &["rev-parse", "HEAD"]),
         clone.unpushed_commit
     );
-
-    // An internal suspend (workspace close, recovery, a sub-agent's
-    // teardown) acknowledges on its own, as a caller with the flag does.
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        clone.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let stored = mj_controller::database::load_state().unwrap();
-    let record = &stored.sessions[LATCH_RELAY_SESSION];
-    assert_eq!(record.state, SessionState::Stopped, "{record:?}");
-    assert!(clone.sealed());
+    assert_eq!(
+        std::fs::read_to_string(restored.join("session.txt")).unwrap(),
+        "work\n"
+    );
     clone.channels.shutdown.shutdown().await.unwrap();
 }
 
-/// Mjolnir's own review refs are never pushed, and a review baseline names a
-/// bare tree. A clone whose work is all published still suspends without the
-/// acknowledgement when it carries them.
+/// A published clone can suspend with private review refs. Durable review
+/// refs return on restore, while the obsolete review-baseline pin is omitted.
 #[cfg(unix)]
-// Hard-won: 02208d7b9: review refs saved in the checkpoint made every reviewed clone read as unpublished.
 #[tokio::test]
-async fn a_suspend_without_the_acknowledgement_ignores_review_refs_on_a_published_clone() {
-    use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
+async fn suspend_recovery_preserves_a_published_clones_durable_review_refs() {
     use mj_controller::controller::test_support::test_git;
     if !in_isolated_live_parent_test(
-        "a_suspend_without_the_acknowledgement_ignores_review_refs_on_a_published_clone",
+        "suspend_recovery_preserves_a_published_clones_durable_review_refs",
     ) {
         return;
     }
     let _writer = mj_controller::database::install_isolated_test_writer();
-    let clone = live_clone_with_an_unpushed_commit().await;
+    let clone = quiesced_clone_with_an_unpushed_commit().await;
     test_git(
         &clone.checkout,
         &["push", "origin", "HEAD:refs/heads/session"],
     );
     let tree = test_git(&clone.checkout, &["rev-parse", "HEAD^{tree}"]);
+    let reviewed = format!("refs/mj/reviewed/{tree}");
     test_git(
         &clone.checkout,
         &["update-ref", "refs/mj/review-baseline", &tree],
     );
     test_git(
         &clone.checkout,
-        &[
-            "update-ref",
-            &format!("refs/mj/reviewed/{tree}"),
-            &clone.unpushed_commit,
-        ],
+        &["update-ref", &reviewed, &clone.unpushed_commit],
     );
 
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        clone
-            .state
-            .suspend_session(LATCH_RELAY_SESSION.to_owned()),
-    )
-    .await
-    .unwrap()
-    .expect("published work needs no acknowledgement");
-    let stored = mj_controller::database::load_state().unwrap();
-    let record = &stored.sessions[LATCH_RELAY_SESSION];
-    assert_eq!(record.state, SessionState::Stopped, "{record:?}");
-    assert!(clone.sealed());
+    let workspace = tempfile::tempdir().unwrap();
+    let restored = clone.suspend_and_restore(workspace.path()).await;
+    assert_eq!(
+        test_git(&restored, &["rev-parse", &reviewed]),
+        clone.unpushed_commit
+    );
+    assert!(
+        test_git(&restored, &["for-each-ref", "refs/mj/review-baseline"]).is_empty()
+    );
     clone.channels.shutdown.shutdown().await.unwrap();
 }
 
@@ -9947,11 +10034,11 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
             discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
             without_checkpoint: true,
-            confirm_no_checkpoint: true,
+            confirm_no_checkpoint: false,
         })
         .await
         .unwrap_err();
-    assert!(format!("{rejected:#}").contains("SHA changed"));
+    assert!(format!("{rejected:#}").contains("No verified checkpoint exists"));
     let unchanged = mj_controller::database::load_state().unwrap();
     assert_eq!(
         unchanged.sessions[LATCH_RELAY_SESSION].state,
@@ -9981,7 +10068,7 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
                 discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
                 abort_operations: mj_core::suspend_consent::OperationConsent::None,
                 without_checkpoint: true,
-            confirm_no_checkpoint: true,
+                confirm_no_checkpoint: false,
             }),
     )
     .await
@@ -9990,13 +10077,30 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
     let accepted = mj_controller::database::load_state().unwrap();
     assert_eq!(
         accepted.sessions[LATCH_RELAY_SESSION].state,
-        SessionState::Destroying
+        SessionState::Closing
+    );
+    assert_eq!(
+        mj_controller::database::load_closing_consent(LATCH_RELAY_SESSION).unwrap(),
+        Some(mj_core::suspend_consent::SuspendConsent {
+            without_checkpoint: true,
+            ..Default::default()
+        })
     );
     assert_eq!(
         accepted.sessions[LATCH_RELAY_SESSION].checkpoint.as_ref(),
         Some(&checkpoint)
     );
     assert!(accepted.sessions.contains_key(WORKING_CHILD));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !parent.state.owner().lifecycle[LATCH_RELAY_SESSION]
+            .control
+            .is_committed()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("Suspend never committed to stopping the held child");
     assert!(
         parent
             .state
@@ -10039,9 +10143,9 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
 // Hard-won: #1507: an accepted Discard failure disappeared when its observer left.
 #[cfg(unix)]
 #[tokio::test]
-async fn accepted_discard_failure_is_published_without_an_observer() {
+async fn accepted_suspend_failure_is_published_without_an_observer() {
     use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
-    const NAME: &str = "accepted_discard_failure_is_published_without_an_observer";
+    const NAME: &str = "accepted_suspend_failure_is_published_without_an_observer";
     if !in_isolated_live_parent_test(NAME) {
         return;
     }
@@ -10083,8 +10187,8 @@ async fn accepted_discard_failure_is_published_without_an_observer() {
             session_id: LATCH_RELAY_SESSION.into(),
             discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
             abort_operations: mj_core::suspend_consent::OperationConsent::None,
-            without_checkpoint: true,
-            confirm_no_checkpoint: true,
+            without_checkpoint: false,
+            confirm_no_checkpoint: false,
         })
         .await
         .unwrap();
@@ -10094,7 +10198,7 @@ async fn accepted_discard_failure_is_published_without_an_observer() {
         .unwrap();
     let accepted =
         mj_controller::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
-    assert_eq!(accepted.state, SessionState::Destroying);
+    assert_eq!(accepted.state, SessionState::Closing);
     assert_eq!(accepted.checkpoint.as_ref(), Some(&checkpoint));
     drop(started);
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -10103,7 +10207,7 @@ async fn accepted_discard_failure_is_published_without_an_observer() {
         }
     })
     .await
-    .expect("Discard never joined the held child stop");
+    .expect("Suspend never joined the held child stop");
     // No initiating result or acceptance observer remains when teardown fails.
     release.notify_one();
     assert!(
@@ -10122,12 +10226,13 @@ async fn accepted_discard_failure_is_published_without_an_observer() {
         }
     })
     .await
-    .expect("Discard failure was not persisted without an observer");
+    .expect("Suspend failure was not persisted without an observer");
     let public = retained.public_error().unwrap();
     assert!(public.starts_with(mj_core::state::CLOSE_FAILURE_PREFIX));
     assert!(public.contains(&receipt.operation_id));
     assert!(!public.contains("held child teardown diagnostic"));
-    assert_eq!(retained.state, SessionState::Destroying);
+    assert_eq!(retained.state, SessionState::Running);
+    assert!(!relay_sealed(&parent.relay_root));
     assert_eq!(retained.checkpoint.as_ref(), Some(&checkpoint));
     assert_eq!(retained.target, accepted.target);
     // Stored timestamps have second precision; publication may share the ACK second.
@@ -10172,19 +10277,24 @@ async fn discard_intent_recovers_without_checkpointing_and_reconciles_children()
         )
         .await
         .unwrap();
-    let mut controller = Controller::load().unwrap();
-    let checkpoint = controller.state.sessions[LATCH_RELAY_SESSION]
-        .checkpoint
-        .clone()
+    let mut closing = mj_controller::database::load_session_record(LATCH_RELAY_SESSION)
+        .unwrap()
         .unwrap();
-    mj_controller::controller::test_support::worker_test_scope(LATCH_RELAY_SESSION, || {
-        controller.suspend_without_checkpoint(LATCH_RELAY_SESSION, true, &ProcessExecutor)
-    })
-    .unwrap();
+    let checkpoint = closing.checkpoint.clone().unwrap();
+    let consent = mj_core::suspend_consent::SuspendConsent {
+        without_checkpoint: true,
+        ..Default::default()
+    };
+    closing.state = SessionState::Closing;
+    mj_controller::database::save_suspension_intent(&closing, None, Some(&consent)).unwrap();
     let durable = Controller::load().unwrap();
     assert_eq!(
         durable.state.sessions[LATCH_RELAY_SESSION].state,
-        SessionState::Destroying
+        SessionState::Closing
+    );
+    assert_eq!(
+        mj_controller::database::load_closing_consent(LATCH_RELAY_SESSION).unwrap(),
+        Some(consent)
     );
     assert!(interrupted_suspend_session_ids(&durable).contains(&LATCH_RELAY_SESSION.to_owned()));
     assert!(durable.state.sessions.contains_key(WORKING_CHILD));
@@ -10203,7 +10313,7 @@ async fn discard_intent_recovers_without_checkpointing_and_reconciles_children()
     ));
     tokio::time::timeout(
         Duration::from_secs(60),
-        restarted.suspend_session(LATCH_RELAY_SESSION.into()),
+        restarted.recover_suspension(LATCH_RELAY_SESSION.into()),
     )
     .await
     .unwrap()

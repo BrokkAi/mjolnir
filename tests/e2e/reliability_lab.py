@@ -1326,15 +1326,22 @@ pull_policy = "never"
             "review-started", session_id=session_id, seconds=round(time.monotonic() - started, 3)
         )
 
-        # The review's empty commit is unpublished work, which the viewer
-        # confirms the same way when it suspends.
-        status, _ = self.request(
+        # The review commit remains in the clone; preflight confirms the
+        # inventory before the viewer submits typed suspend consent.
+        status, preflight = self.request(
+            "GET", f"/api/v1/sessions/{session_id}/suspend-preflight"
+        )
+        if status != 200 or not isinstance(preflight, dict):
+            raise ScenarioFailure(f"suspend preflight returned {status}: {preflight!r}")
+        if any(preflight.get(key) for key in ("untracked", "nested_repositories", "untracked_stashes", "keep_dir_entries")):
+            raise ScenarioFailure(f"expected clean suspend inventory: {preflight!r}")
+        status, value = self.request(
             "POST",
             "/api/actions",
-            {"action": "suspend", "session_id": session_id, "acknowledge_unpublished_work": True},
+            {"action": "suspend", "session_id": session_id, "discard_untracked": "None", "abort_operations": "None", "without_checkpoint": False},
         )
         if status != 202:
-            raise ScenarioFailure(f"close action returned {status}")
+            raise ScenarioFailure(f"close action returned {status}: {value!r}")
         self.record_action("close", session_id=session_id)
         self.wait_snapshot(
             lambda value: (self.session(value, session_id) or {}).get("state") == "suspended",
@@ -1574,11 +1581,11 @@ pull_policy = "never"
             raise ScenarioFailure(f"wait did not explain the unanswered turn: {report!r}")
         self.record_action("unanswered-turn", session_id=session_id, report=report)
 
-        status, _ = self.request(
+        status, value = self.request(
             "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
-            raise ScenarioFailure(f"close action returned {status}")
+            raise ScenarioFailure(f"close action returned {status}: {value!r}")
         self.wait_snapshot(
             lambda value: (self.session(value, session_id) or {}).get("state") == "suspended",
             "suspended unanswered-prompt session",

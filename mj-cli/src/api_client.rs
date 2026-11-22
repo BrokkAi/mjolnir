@@ -1582,10 +1582,15 @@ mod tests {
             .unwrap();
         assert_eq!(older.session_id, "session-1");
         assert_eq!(older.warning, None);
-        for body in bodies.lock().unwrap().iter() {
-            let body: serde_json::Value = serde_json::from_str(body).unwrap();
-            assert_eq!(body["acknowledge_active_subagents"], true, "{body}");
-        }
+        let bodies = bodies.lock().unwrap();
+        let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        assert_eq!(first["discard_untracked"], "None");
+        assert_eq!(first["abort_operations"], "None");
+        assert_eq!(first["without_checkpoint"], false);
+        let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        assert_eq!(second["discard_untracked"], "Any");
+        assert_eq!(second["abort_operations"], "None");
+        assert_eq!(second["without_checkpoint"], false);
     }
 
     #[tokio::test]

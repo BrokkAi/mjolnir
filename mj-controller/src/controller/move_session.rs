@@ -917,7 +917,7 @@ impl Controller {
         {
             return Ok(false);
         }
-        let retained_source = operation.retains_source_environment();
+        let retained_source = operation.retains_source_environment() && source.target.is_some();
         let clone_prerequisite = if !retained_source {
             let verified = operation
                 .checkpoint
@@ -936,21 +936,94 @@ impl Controller {
         self.cleanup_prepared_move_destination(&mut operation, executor)
             .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
         if retained_source {
-            let reason =
-                anyhow::Error::new(super::lifecycle::LifecycleFailureReason::RetainedMoveSource);
-            let persist = |record: &mj_core::state::SessionRecord, environment: Option<&str>| {
+            if operation.in_place {
+                let reason =
+                    anyhow::Error::new(super::lifecycle::LifecycleFailureReason::RetainedMoveSource);
+                self.retain_failed_in_place_move_with_persist(
+                    session_id,
+                    &source,
+                    reason,
+                    |record| {
+                        crate::database::settle_superseded_move_source(
+                            record,
+                            None,
+                            &operation.operation_id,
+                        )
+                    },
+                )?;
+            } else {
+                let source_environment =
+                    crate::database::move_source_environment(&operation.operation_id)?
+                        .context("superseded Move has no durable source environment")?;
+                let source_target = source
+                    .target
+                    .as_deref()
+                    .context("Move source has no target")?;
+                ensure!(
+                    source_environment.owner_session_id == session_id
+                        && source_environment.phase == crate::database::EnvironmentPhase::Active
+                        && source_environment
+                            .placement
+                            .target
+                            .as_ref()
+                            .is_some_and(|target| target.same_resource(source_target)),
+                    "superseded Move no longer owns its retained source"
+                );
+                let current = &self.state.sessions[session_id];
+                if let Some(current_target) = current.target.as_deref()
+                    && !current_target.same_resource(source_target)
+                {
+                    // A crash during provisioning can leave the session bound to
+                    // a partial destination. Retire it under its own ledger entry
+                    // before rebinding the session to the retained source.
+                    let destination = crate::database::session_environment(session_id)?
+                        .context("superseded Move has no durable destination environment")?;
+                    ensure!(
+                        destination.id != source_environment.id
+                            && destination.owner_session_id == session_id
+                            && destination
+                                .placement
+                                .target
+                                .as_ref()
+                                .is_some_and(|target| target.same_resource(current_target)),
+                        "superseded Move no longer owns its provisional destination"
+                    );
+                    if let (Some(source), Some(destination)) = (
+                        &source_environment.placement.managed_worktree,
+                        &destination.placement.managed_worktree,
+                    ) {
+                        ensure!(
+                            source.worktree_root != destination.worktree_root
+                                || !source.target.same_location(&destination.target),
+                            "provisional Move destination still names the source checkout"
+                        );
+                    }
+                    super::environment::retire_owned_environment(
+                        destination,
+                        &self.config,
+                        executor,
+                        super::BranchDisposition::Keep,
+                        super::CheckoutDisposition::Remove,
+                    )
+                    .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
+                }
+                let mut retained = source;
+                retained
+                    .resource_allocation
+                    .clone_from(&current.resource_allocation);
+                retained.additional_mounts.clone_from(&current.additional_mounts);
+                retained.state = SessionState::Error;
+                retained.last_error = Some(
+                    super::lifecycle::LifecycleFailureReason::RetainedMoveSource.to_string(),
+                );
+                retained.updated_at = now();
                 crate::database::settle_superseded_move_source(
-                    record,
-                    environment,
+                    &retained,
+                    Some(&source_environment.id),
                     &operation.operation_id,
-                )
-            };
-            self.retain_failed_in_place_move_with_persist(
-                session_id,
-                &source,
-                reason,
-                |record| persist(record, None),
-            )?;
+                )?;
+                self.state.sessions.insert(session_id.to_owned(), retained);
+            }
         } else {
             // The environment ledger owns both identities, even when the
             // failed provisioning left only a partial destination checkout.
@@ -967,7 +1040,9 @@ impl Controller {
                 )
                 .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
             }
-            if let Some(environment) = &source_environment {
+            if source.target.is_some()
+                && let Some(environment) = &source_environment
+            {
                 super::environment::retire_owned_environment_with_clone_prerequisite(
                     environment.clone(),
                     &self.config,

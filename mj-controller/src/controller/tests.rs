@@ -3727,7 +3727,8 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     assert!(
         error
             .to_string()
-            .contains("sub-agents cannot spawn other sub-agents")
+            .contains("sub-agent sessions cannot spawn their own sub-agents"),
+        "{error:#}"
     );
     controller
         .state

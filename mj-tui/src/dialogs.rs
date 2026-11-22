@@ -451,6 +451,12 @@ impl ConfirmDialog {
         self.session_name = Some(name.to_owned());
         self
     }
+
+    /// Rebuilds the dialog's button focus state after `confirmation` changes
+    /// its buttons (for example when suspend preflight arrives).
+    pub(crate) fn refresh_form(&mut self) {
+        self.form = confirmation_form(&self.confirmation);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

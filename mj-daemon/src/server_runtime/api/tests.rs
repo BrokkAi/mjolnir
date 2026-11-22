@@ -457,6 +457,12 @@ fn spawn_with() -> mj_core::subagent::SubagentToolRequest {
 // Hard-won: 435b4ed9: model selection sent a child to a nearly exhausted profile despite an enabled profile with quota.
 #[tokio::test]
 async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the_model() {
+    if !isolated_spawn_test(
+        "spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the_model",
+    ) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
     let (backend, exports) = selection_backend(SAME_MODELS, None).await;
 
     let result = backend
@@ -613,6 +619,10 @@ async fn set_review_baseline_dispatch_forwards_parent_commit_and_path_to_export(
 /// the answer nor stops a spawn from using the others.
 #[tokio::test]
 async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
+    if !isolated_spawn_test("a_profile_that_cannot_be_discovered_is_left_out_not_fatal") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
     let offers: &[(&str, &[&str])] = &[("parent", &["luna"]), ("deepseek", &["flash"])];
     let (backend, exports) = selection_backend(offers, None).await;
 
@@ -621,9 +631,14 @@ async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
     assert_eq!(candidates.offered.len(), 2);
 
     refill_parent(&backend);
-    backend
+    let result = backend
         .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
+    assert!(
+        result.is_error && result.message.contains("registration recorded"),
+        "{}",
+        result.message
+    );
     assert_eq!(exports.registered().profile_id, "parent");
 }
 
@@ -1187,6 +1202,10 @@ async fn reviewer_ready_candidates_do_not_trigger_stalled_muse_refresh() {
 
 #[tokio::test]
 async fn spawn_refuses_a_model_no_enabled_profile_offers() {
+    if !isolated_spawn_test("spawn_refuses_a_model_no_enabled_profile_offers") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
     catalog
@@ -1226,6 +1245,10 @@ async fn spawn_refuses_a_model_no_enabled_profile_offers() {
 /// own: the one harness launch is shared.
 #[tokio::test]
 async fn spawn_over_a_cold_catalogue_waits_for_the_background_discovery() {
+    if !isolated_spawn_test("spawn_over_a_cold_catalogue_waits_for_the_background_discovery") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
     catalog.sync(&authenticated_test_config(&[(
@@ -2867,6 +2890,10 @@ fn child_login_mailbox_report() -> mj_core::mailbox::SubagentFinishedReport {
 // Hard-won: 1b077959: refused credentials allowed ten more doomed children to spawn on the same profile.
 #[tokio::test]
 async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
+    if !isolated_spawn_test("spawn_refuses_a_profile_whose_login_is_known_to_be_refused") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
         home.path().join("auth.json"),
@@ -2916,9 +2943,14 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
     );
 
     refill_parent(&backend);
-    backend
+    let result = backend
         .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
+    assert!(
+        result.is_error && result.message.contains("registration recorded"),
+        "{}",
+        result.message
+    );
     assert_eq!(exports.registered().profile_id, "parent");
 }
 
@@ -6156,18 +6188,30 @@ fn delivered_prompts(
 
 const PARKED_TEST_CHILD: &str = "MJ_PARKED_SUBAGENT_TEST_CHILD";
 
+fn isolated_parked_test(test: &str) -> bool {
+    isolated_subagent_test(test, PARKED_TEST_CHILD, "queued-subagent-input")
+}
+
+fn isolated_spawn_test(test: &str) -> bool {
+    isolated_subagent_test(
+        test,
+        "MJ_SPAWN_SUBAGENT_TEST_CHILD",
+        "spawn-subagent-selection",
+    )
+}
+
 /// Run the named test alone, with a store of its own. Returns whether this
 /// process is that run.
-fn isolated_parked_test(test: &str) -> bool {
-    if std::env::var_os(PARKED_TEST_CHILD).is_some() {
+fn isolated_subagent_test(test: &str, marker: &str, instance: &str) -> bool {
+    if std::env::var_os(marker).is_some() {
         return true;
     }
     let directory = tempfile::tempdir().unwrap();
     mj_controller::controller::test_support::IsolatedTest::new(
         mj_controller::controller::test_support::test_name(module_path!(), test),
     )
-    .env(PARKED_TEST_CHILD, "1")
-    .env("MJ_INSTANCE", "queued-subagent-input")
+    .env(marker, "1")
+    .env("MJ_INSTANCE", instance)
     .isolated_store(directory.path())
     .run();
     false
