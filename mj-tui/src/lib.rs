@@ -626,6 +626,10 @@ pub enum DashboardAction {
         profile_id: String,
     },
     OpenResumeDialog,
+    OpenFilteredResumeDialog {
+        query: String,
+        state: Option<SessionStateFilter>,
+    },
     ImportSession {
         profile_id: String,
         native_session_id: String,

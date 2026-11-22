@@ -309,6 +309,28 @@ impl DashboardState {
             || self.sessions_text.matches.contains_key(&session.id)
     }
 
+    /// Matching live sessions outside the workspace shown by the Sessions pane.
+    pub(crate) fn sessions_other_workspace_matches(&self) -> usize {
+        let Some(filter) = self.sessions_filter.as_ref() else {
+            return 0;
+        };
+        if self.child_workspace.is_some()
+            || (filter.query.value().trim().is_empty() && filter.state.is_none())
+        {
+            return 0;
+        }
+        self.state
+            .sessions
+            .values()
+            .filter(|session| {
+                Some(session.workspace_id.as_str()) != self.active_workspace_id()
+                    && session.state.is_active()
+                    && self.is_listed_top_level_session(session, &session.workspace_id)
+                    && self.session_matches_filter(session, filter)
+            })
+            .count()
+    }
+
     /// Whether the lower-cased `query` is in the session's name, id, project,
     /// profile, target, or branch.
     pub(crate) fn session_matches_metadata(&self, session: &SessionRecord, query: &str) -> bool {

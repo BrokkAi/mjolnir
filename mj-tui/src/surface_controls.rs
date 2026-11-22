@@ -29,6 +29,7 @@ pub(crate) enum SurfaceControl {
     ClearSessionsFilter,
     /// The `Filter:` input on the Sessions action row; a click starts typing.
     SessionsFilterInput,
+    MoreWorkspaceMatches,
     PanePin(PaneId),
     PinHere(PaneId),
     SessionPin(usize),
@@ -192,6 +193,17 @@ impl DashboardState {
                     self.clear_sessions_filter();
                     DashboardAction::None
                 }
+                SurfaceControl::MoreWorkspaceMatches => {
+                    if self.sessions_other_workspace_matches() > 0 {
+                        let filter = self.sessions_filter.as_ref().expect("active filter");
+                        DashboardAction::OpenFilteredResumeDialog {
+                            query: filter.query.value().to_owned(),
+                            state: filter.state,
+                        }
+                    } else {
+                        DashboardAction::None
+                    }
+                }
                 SurfaceControl::SessionsFilterInput => {
                     self.begin_sessions_filter();
                     DashboardAction::None
@@ -339,7 +351,33 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
         x = x.saturating_add(width + 1);
     }
     drop(form);
-    render_sessions_filter_input(frame, area, x, dashboard);
+    let count = dashboard.sessions_other_workspace_matches();
+    let label = format!(" {count} more ");
+    let width = Line::raw(&label).width() as u16;
+    // Reserve space before laying out the field, so the button remains visible
+    // even when the pane is too narrow for the filter input.
+    let more = count > 0 && area.right().saturating_sub(x) >= width;
+    let input_row = if more {
+        let rect = Rect::new(area.right() - width, area.y, width, 1);
+        let control = SurfaceControl::MoreWorkspaceMatches;
+        let mut form = dashboard.surface_form.borrow_mut();
+        form.register(control, ControlKind::Button, rect, true);
+        let style = if form.is_armed(control) {
+            theme::focus_control()
+        } else {
+            theme::actionable().patch(theme::raised())
+        };
+        frame.render_widget(Paragraph::new(label).style(style), rect);
+        Rect::new(
+            area.x,
+            area.y,
+            rect.x.saturating_sub(area.x + 1),
+            area.height,
+        )
+    } else {
+        area
+    };
+    render_sessions_filter_input(frame, input_row, x, dashboard);
 }
 
 /// The label before the Sessions filter's text field.
@@ -1345,6 +1383,72 @@ mod tests {
             (140, 40),
         );
         writeln!(output, "filter active: false").expect("write clear state");
+
+        let mut elsewhere = running_session();
+        elsewhere.id = "other-workspace".into();
+        elsewhere.workspace_id = "elsewhere".into();
+        elsewhere.title = "remote needle".into();
+        elsewhere.acp_session_title = None;
+        let mut cross = dashboard_with_session(elsewhere);
+        *cross.active_workspace_id = Some("current".into());
+        *cross.sessions_filter = Some(crate::SessionsFilter {
+            query: "needle".into(),
+            state: None,
+            editing: true,
+        });
+        assert_eq!(cross.sessions_other_workspace_matches(), 1);
+        let lines = append_state(
+            &mut output,
+            "matching sessions in another workspace offer Open with the same search",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("1 more")),
+            "{}",
+            lines.join("\n")
+        );
+        cross
+            .state
+            .sessions
+            .get_mut("other-workspace")
+            .unwrap()
+            .title = "unrelated title".into();
+        let lines = append_state(
+            &mut output,
+            "no other workspace matches hides the button",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(!lines.iter().any(|line| line.contains("1 more")));
+        let (request_id, _) = cross.next_sessions_text_search().unwrap();
+        let matches = vec![mj_client::daemon::SessionTextMatch {
+            session_id: "other-workspace".into(),
+            kind: mj_client::daemon::SessionTextMatchKind::User,
+        }];
+        cross.apply_sessions_text(request_id, Ok(matches.clone()));
+        let lines = append_state(
+            &mut output,
+            "conversation-only match in another workspace offers Open",
+            &mut cross,
+            (140, 40),
+        );
+        let position = point(&lines, "1 more");
+        let action = click(&mut cross, position);
+        let DashboardAction::OpenFilteredResumeDialog { query, state } = action else {
+            panic!("expected filtered Open action, got {action:?}");
+        };
+        cross.show_resume_dialog(1, Vec::new());
+        cross.set_resume_filter(query, state);
+        let (request_id, query) = cross.next_wiki_search().unwrap();
+        assert_eq!(query, "needle");
+        cross.apply_resume_text_search_result(request_id, Ok(matches));
+        append_state(
+            &mut output,
+            "Open keeps the workspace search and shows the other workspace match",
+            &mut cross,
+            (140, 40),
+        );
 
         let mut readline = dashboard_with_session(running_session());
         readline.focus_sessions();

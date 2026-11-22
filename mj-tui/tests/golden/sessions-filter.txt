@@ -556,6 +556,174 @@ query/cursor: ("nomatch", 7); hidden sessions: 0; row: "│ Create   Open   Filt
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 filter active: false
 
+=== matching sessions in another workspace offer Open with the same search (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions · /needle × ─────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: needle ___  1 more ││                                                                                            │
+│› · remote needle                       ◇ ⋯ ││                                                                                            │
+│  Idle  podman  codex-1                     ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
+│                                            ││                         Select a session to open its conversation.                         │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ No conversation open ──────────────────────────────────────────────────────────────────────╮
+│                                            ││No conversation open.                                                                       │
+│                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
+
+=== no other workspace matches hides the button (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions · /needle × ─────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: needle ____________││                                                                                            │
+│› · unrelated title                     ◇ ⋯ ││                                                                                            │
+│  Idle  podman  codex-1                     ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                                                                            │
+│                                            ││                         Select a session to open its conversation.                         │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ No conversation open ──────────────────────────────────────────────────────────────────────╮
+│                                            ││No conversation open.                                                                       │
+│                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
+
+=== conversation-only match in another workspace offers Open (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions · /needle × ─────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: needle ___  1 more ││                                                                                            │
+│⠁ Syncing session index…                    ││                                                                                            │
+│› · unrelated title                     ◇ ⋯ ││                                                                                            │
+│  Idle  podman  codex-1                     ││                                                                                            │
+│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                                                                            │
+│                                            ││                         Select a session to open its conversation.                         │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ No conversation open ──────────────────────────────────────────────────────────────────────╮
+│                                            ││No conversation open.                                                                       │
+│                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││OPENAI                                                                                      │
+│                                            ││  codex-1: refreshing…                                                                      │
+│                                            ││  codex-2: refreshing…                                                                      │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
+
+=== Open keeps the workspace search and shows the other workspace match (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions · /needle × ─────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create                                                                                                                                   │
+│⠁ Syncin                                                                                                                                  │
+│› · unre  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
+│  Idle    │                                                                                                                   │           │
+│  │ No m  │  Live   Mjolnir · 0   Import · 0   Archived · 0                                                                   │           │
+│  │       │                                                                                                                   │           │
+│          │ Search: needle                                                                                                    │           │
+│          │                                                                                                                   │           │
+│          │ ╭ 1 match · ⠁ Syncing session index… ───────────────────────────────────────────────────────────────────────────╮ │           │
+│          │ │  WORKSPACE                 LAST ACTIVE     SESSION                                                            │ │           │
+│          │ │elsewhere                 Aug 9, 2026     ? unrelated title                                                    │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
+│          │                                                                                                                   │           │
+│          │ ╭ Transcript · no hits ─────────────────────────────────────────────────────────────────────────────────────────╮ │  ─────────╯
+│          │ │Loading the matching passages…                                                                                 │ │  ─────────╮
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
+│          │                                                                                                                   │  ─────────╯
+│          │                                                                                                                   │  ── ▁   ▄ ╮
+│          │                                         hel · Publication status unknown                                          │           │
+│          │                                                                                                                   │           │
+│          │   Cancel     Open                                                                                                 │           │
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
+│                                                                                                                                          │
+│                                                                                                                                 ─────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
+
 === readline Left (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │

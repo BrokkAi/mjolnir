@@ -1310,6 +1310,16 @@ impl DashboardState {
         // the search box from there.
     }
 
+    /// Seed Open with the workspace filter before its first background search.
+    pub fn set_resume_filter(&mut self, query: String, state: Option<crate::SessionStateFilter>) {
+        if let Some(dialog) = resume_dialog_mut(&mut self.mode) {
+            dialog.search = TextInput::from_value(query);
+            dialog.live_state = state;
+        }
+        self.rebuild_resume_rows();
+        self.resync_resume_selection();
+    }
+
     /// One session's record: the live one from the runtime feed, or else a
     /// stopped one loaded on demand for the resume dialog, `mj go`, or an
     /// import. The feed carries only live sessions.
