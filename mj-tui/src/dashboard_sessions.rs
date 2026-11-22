@@ -1316,8 +1316,21 @@ impl DashboardState {
                 let identity = self
                     .profile_capabilities
                     .model_id(&self.config, &choice.model);
-                mj_core::model_catalog::offer(&profile_choices.models, &identity, &choice.model)
-                    .is_some()
+                let Some(offer) = mj_core::model_catalog::offer(
+                    &profile_choices.models,
+                    &identity,
+                    &choice.model,
+                ) else {
+                    return false;
+                };
+                match choice.effort.as_deref() {
+                    None => true,
+                    Some(requested) => matches!(
+                        entry.efforts.get(&offer.value),
+                        Some(mj_core::profile_capabilities::CapabilityState::Ready(efforts))
+                            if efforts.iter().any(|effort| effort.value == requested)
+                    ),
+                }
             });
             if matches_primary {
                 candidates.push(id);
@@ -1341,17 +1354,26 @@ impl DashboardState {
             return (1, prefer_rank, u8::MAX, u8::MAX, id);
         };
         if quota.error.is_some() {
-            return (3, prefer_rank, u8::MAX, u8::MAX, id);
+            return (4, prefer_rank, u8::MAX, u8::MAX, id);
         }
         if quota.is_usage_priced() {
-            return (2, prefer_rank, u8::MAX, u8::MAX, id);
+            return (3, prefer_rank, u8::MAX, u8::MAX, id);
         }
         let primary = quota.summary_window().and_then(quota_remaining_percent);
         let five_hour = quota.five_hour_window().and_then(quota_remaining_percent);
         if weekly_quota_exhausted(quota) || primary == Some(0) || five_hour == Some(0) {
-            return (3, prefer_rank, u8::MAX, u8::MAX, id);
+            return (4, prefer_rank, u8::MAX, u8::MAX, id);
         }
         match primary {
+            // Subscriptions at the 1% reserve floor rank behind unknown quota,
+            // matching `profile_scheduler`'s reserve-floor tiering.
+            Some(primary) if primary <= 1 || five_hour.is_some_and(|v| v <= 1) => (
+                2,
+                prefer_rank,
+                100u8.saturating_sub(primary),
+                100u8.saturating_sub(five_hour.unwrap_or(100)),
+                id,
+            ),
             Some(primary) => (
                 0,
                 prefer_rank,
