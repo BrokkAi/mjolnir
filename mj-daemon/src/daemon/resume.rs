@@ -672,22 +672,34 @@ impl RuntimeState {
         kind: LifecycleKind,
         requested_session_id: Option<&str>,
     ) -> Result<()> {
-        let results = futures::future::join_all(children.into_iter().map(|child_id| {
-            let requested = requested_session_id.map_or_else(|| child_id.clone(), str::to_owned);
-            async move {
-                // A sub-agent borrows its parent's worker and never owns a
-                // managed worktree, so it has no branch of its own to keep.
-                self.destroy_indexed_tree(
-                    child_id.clone(),
-                    BranchDisposition::Keep,
-                    kind,
-                    requested,
-                )
-                .await
-                .with_context(|| format!("stop sub-agent {child_id}"))
-            }
-        }))
-        .await;
+        use futures::stream::StreamExt as _;
+
+        // Bound fan-out to the host's logical parallelism: a tree with 1,700+
+        // subagents otherwise spawns that many concurrent lifecycle threads,
+        // `Controller::load()` copies and worker-stop subprocesses at once (#1640).
+        let concurrency = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(4);
+        let results = futures::stream::iter(children)
+            .map(|child_id| {
+                let requested =
+                    requested_session_id.map_or_else(|| child_id.clone(), str::to_owned);
+                async move {
+                    // A sub-agent borrows its parent's worker and never owns a
+                    // managed worktree, so it has no branch of its own to keep.
+                    self.destroy_indexed_tree(
+                        child_id.clone(),
+                        BranchDisposition::Keep,
+                        kind,
+                        requested,
+                    )
+                    .await
+                    .with_context(|| format!("stop sub-agent {child_id}"))
+                }
+            })
+            .buffer_unordered(concurrency)
+            .collect::<Vec<_>>()
+            .await;
         let failures: Vec<String> = results
             .into_iter()
             .filter_map(|result| result.err().map(|error| format!("{error:#}")))
@@ -763,7 +775,12 @@ impl RuntimeState {
 
                     let exists = blocking({
                         let session_id = session_id.clone();
-                        move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
+                        move || {
+                            Ok(
+                                mj_controller::database::read_durable_session_record(&session_id)?
+                                    .is_some(),
+                            )
+                        }
                     })
                     .await?;
                     if !exists {
