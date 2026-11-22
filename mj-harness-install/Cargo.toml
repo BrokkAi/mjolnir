@@ -60,5 +60,8 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [target.'cfg(unix)'.dev-dependencies]
 tiny_http.workspace = true

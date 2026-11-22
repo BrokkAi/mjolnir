@@ -22,9 +22,9 @@ After this plan lands, switching between `-p` packages, `mbx test`, `mbx clippy`
 - [x] (2026-11-22 14:20Z) Milestone 0b (+ Tier 1c): Unified workspace and external dependency features across 12 crates (`axum`, `chrono`, `getrandom`, `libc`, `jsonc-parser`, `serde_json`, `url`, `tokio`, `serde`, `tokio-util`, `reqwest`, `image`), moved `github-history` tokenization/`ettin-tokenizer.json` to `mj-github-relevance`, replaced library `test-hooks`/`test-support`/`test-identity`/`golden` features with strict production defaults + `#[cfg(test)] mj_core::enable_test_fixtures_on_startup!()`, enabled `--features brokk-mjolnir/test-hooks` across Linux/macOS/Windows CI, verified single framed `\0MJ-WORKER-BUILD:` stamp and `MJ_TEST_GLIDE_ENDPOINT` gating on built `mj-worker` binaries, enforced feature unification in `scripts/check-crate-boundaries.mjs`, and pushed to `origin/master` (`afffdbc19`).
 - [x] (2026-11-22 14:22Z) Milestone 1d: Decoupled `mj-server` completely from `mj-controller` (normal and dev), moving `LifecycleFailureReason`, `ViewerMoveRecovery`, `RegisterSubagentRequest`, `subagent_has_handed_back`, `validate_resource_allocation`, `resolve_target_input_path`, host Git identity helpers, and `ImageBuilds` to their owning crates (`283/283` server tests, `230/230` session-runtime tests).
 - [x] (2026-11-22 14:27Z) Milestone 1a + 1e: Extracted `brokk-mj-microvm` (`mj-microvm/`), `brokk-mj-worker-mcp` (`mj-worker-mcp/`), and `brokk-mj-worker-review` (`mj-worker-review/`) out of `mj-worker` (`1,005 → 1,005` tests preserved).
-- [ ] Milestone 1b: Extract `brokk-mj-harness-install` (`mj-harness-install/`) out of `mj-core`, register on crates.io, validate, review, commit, and push.
+- [x] (2026-11-22 14:40Z) Milestone 1b: Extracted `brokk-mj-harness-install` (`mj-harness-install/`) out of `mj-core` (`700 → 650 core + 50 installer` tests, removed `rustls`, `ruzstd`, `tar`, `tiny_http` from `mj-core`, updated `Containerfile.agent-dev` `COPY` lines 359 & 364, `worker-build-inputs.txt`, `publish-agent-dev-image.yml`, and Go asset sync).
 - [x] (2026-11-22 14:25Z) Milestone 1f: Extracted `brokk-mj-github-watch` (`mj-github-watch/`) out of `mj-daemon` behind `GithubWatchHost` (`20/0/1` tests preserved, removed direct `axum` from `mj-daemon`).
-- [ ] Milestone 2: Measure post-split `mbx` build/test timings, dispatch `.github/workflows/nightly.yml` for macOS/Windows lanes, clean up any temporary worktrees, and record final outcomes.
+- [x] (2026-11-22 14:54Z) Milestone 2: Measured post-split `mbx` build/test timings, verified 34-package feature unification, and removed all temporary worktrees (holding push of Tier 1 commits and `nightly.yml` dispatch pending crates.io owner/Trusted-Publishing registration for the 5 new crates).
 
 ## Surprises & Discoveries
 
@@ -218,4 +218,22 @@ Validate with `mbx test -p brokk-mj-github-watch -p brokk-mj-daemon`, `mbx clipp
 
 ## Outcomes & Retrospective
 
-*(To be updated as each milestone completes and after Milestone 2 measurements.)*
+All Tier 0 and Tier 1 changes are implemented, verified, and reviewed on `master`:
+
+- **Tier 0 shipped to `origin/master`:**
+  - Milestone 0a (`8bc74e2af`): Cut seven unnecessary normal/dev workspace edges (`mj-chat -> mj-worker`, `mj-worker -> mj-controller`, `mj-worker -> mj-build-cache`, `mj-build-cache -> mj-import`, `mj-targets -> mj-client`, `mj-worker-staging -> mj-client`, `mj-store -> mj-review` demoted to dev-dep) and repointed `mj-worker-bin/tests/` from `mj-controller` to versionless `mj-targets` (cutting 11 workspace crates from `brokk-mj-worker` test builds).
+  - Milestone 0b + Tier 1c (`afffdbc19`): Moved `github-history` tokenization (`ettin-tokenizer.json` + tokenizer functions) out of `mj-core` and `mj-transcript` into `mj-github-relevance`; eliminated `test-hooks`, `test-support`, `test-identity`, `golden`, and `github-history` across all library crates (keeping `test-hooks = []` strictly on leaf binaries `mj-cli` and `mj-worker-bin`, with strict production defaults and `#[cfg(test)] mj_core::enable_test_fixtures_on_startup!()` for deterministic single-test isolation); unified 12 direct workspace dependencies across all 34 packages and enforced the policy in `scripts/check-crate-boundaries.mjs`.
+
+- **Tier 1 committed and verified on `master` (5 new crates):**
+  - Milestone 1d (`7be289ff7`): Decoupled `mj-server` completely from `mj-controller` (zero normal or dev edges; `283/283` server tests, `230/230` session-runtime tests).
+  - Milestone 1f (`262f5a2b3`): Extracted `brokk-mj-github-watch` (`4,039` LOC, `20/0/1` tests) out of `mj-daemon`, removing direct `axum` from `mj-daemon`.
+  - Milestone 1a + 1e (`a6cdb466e`): Extracted `brokk-mj-microvm` (`10,136` LOC, `28/0/2` tests), `brokk-mj-worker-mcp` (`3,841` LOC, `44/0/0` tests), and `brokk-mj-worker-review` (`2,204` LOC, `29/0/0` tests) out of `brokk-mj-worker-runtime` (`1,005 → 1,005` tests preserved).
+  - Milestone 1b (`a81e998bf` + Windows `tempfile` dev-dep fix): Extracted `brokk-mj-harness-install` (`5,171` LOC, `700 → 650 core + 50 installer` tests) out of `mj-core`, removing `rustls`, `ruzstd`, `tar`, and `tiny_http` from `mj-core`.
+
+- **Measured post-split metrics (`a81e998bf`):**
+  - Longest normal-dependency serial chain shortened from **14 crates → 12 crates**, and `mj-server` now builds in parallel with `mj-controller`.
+  - Feature unification across all 34 packages: **1 single resolved feature set** each for `brokk-mj-core` (empty), `tokio`, `serde`, `serde_json`, `tokio-util`, `jsonc-parser`, `image`, `axum`, `chrono`, `getrandom 0.3`, `libc`, and `url`. Remaining transitive feature differences come from third-party crates (`reqwest` via `brokk-anvil-client` default TLS/cookies/form/multipart and `mbx-cache-core` `zstd`, plus `getrandom` 0.2/0.4), which still cause separate `mj_core` `check -p` cache entries between CLI and worker builds until upstream crates align.
+  - Isolated per-crate compile actions (non-hit `mbx` timings): `mj_harness_install` **0.77 s lib / 1.44 s test**, `mj_microvm` **2.39 s lib / 2.75 s test**, `mj_worker_mcp` **1.43 s lib / 2.12 s test**, `mj_worker_review` **0.24 s lib / 0.64 s test**, `mj_github_watch` **0.30 s lib / 2.08 s test**, `mj_worker` runtime down to **10.53 s lib / 24.72 s test** (from 13.9 s / 28–30 s), and warm `mbx test --no-run` hits in **0.24 s** (`mj_core` / `mj_harness_install`).
+
+- **Remaining step before pushing Tier 1 to `origin/master`:**
+  - `scripts/register-crate.py brokk-mj-github-watch` reserved the `0.0.0` name on crates.io, then hit `HTTP 403` on `PUT /owners` because the local `~/.cargo/credentials.toml` token lacks `change-owners` and `trusted-publishing` scopes. Complete `scripts/register-crate.py` with a scoped token for all five new crates (`brokk-mj-github-watch`, `brokk-mj-microvm`, `brokk-mj-worker-mcp`, `brokk-mj-worker-review`, `brokk-mj-harness-install`), push `master`, and dispatch `.github/workflows/nightly.yml` on `master` to verify macOS and Windows CI lanes.
