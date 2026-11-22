@@ -1003,6 +1003,121 @@ async fn restart_harness_in_place_response(
     let updated_claude_login_path = (updated_harness == HarnessKind::Claude)
         .then(|| mj_core::credentials::claude_oauth_login_path(&launch_config.environment))
         .flatten();
+    let (boundary_mailbox_hook_available, updated_mailbox_delivery_mode) = if let Ok(endpoint) =
+        &updated_credentials
+    {
+        let hook_root = relay_root.to_path_buf();
+        let hook_session_id = launch_config.session_id.clone();
+        let hook_home = endpoint.home.clone();
+        match updated_harness {
+            HarnessKind::Claude => {
+                let available = match tokio::time::timeout(
+                    LOCAL_PREPARATION_STEP_TIMEOUT,
+                    mj_core::runtime::spawn_blocking(move || {
+                        super::subagents::configure_claude_mailbox_hook(
+                            &hook_root,
+                            &hook_session_id,
+                            &hook_home,
+                        )
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(Ok(available))) => available,
+                    Ok(Ok(Err(error))) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            error = format!("{error:#}"),
+                            "could not verify Claude mailbox hook during in-place harness restart"
+                        );
+                        false
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            error = %error,
+                            "Claude mailbox hook task failed during in-place harness restart"
+                        );
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            "Claude mailbox hook verification timed out during in-place harness restart"
+                        );
+                        false
+                    }
+                };
+                (available, None)
+            }
+            HarnessKind::Antigravity => {
+                let available = match tokio::time::timeout(
+                    LOCAL_PREPARATION_STEP_TIMEOUT,
+                    mj_core::runtime::spawn_blocking(move || {
+                        super::subagents::configure_antigravity_mailbox_hook(
+                            &hook_root,
+                            &hook_session_id,
+                            &hook_home,
+                        )
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(Ok(available))) => available,
+                    Ok(Ok(Err(error))) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            error = format!("{error:#}"),
+                            "could not verify Antigravity mailbox hook during in-place harness restart"
+                        );
+                        false
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            error = %error,
+                            "Antigravity mailbox hook task failed during in-place harness restart"
+                        );
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            session_id = %launch_config.session_id,
+                            "Antigravity mailbox hook verification timed out during in-place harness restart"
+                        );
+                        false
+                    }
+                };
+                let mode = if available {
+                    mj_core::mailbox::MailboxDeliveryMode::ToolBoundary
+                } else {
+                    mj_core::mailbox::MailboxDeliveryMode::TurnBoundary
+                };
+                (available, Some(mode))
+            }
+            HarnessKind::Codex => {
+                let mode = match tokio::time::timeout(
+                    LOCAL_PREPARATION_STEP_TIMEOUT,
+                    mj_core::runtime::spawn_blocking(move || {
+                        mj_core::codex_provider::codex_provider(&hook_home, None)
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(Ok(provider))) => {
+                        Some(mj_core::mailbox::MailboxDeliveryMode::for_codex_provider(
+                            provider.as_ref(),
+                        ))
+                    }
+                    _ => None,
+                };
+                (false, mode)
+            }
+            _ => (false, None),
+        }
+    } else {
+        (false, None)
+    };
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     let body = match commands
         .send(CommandRequest::ReloadLaunchConfig {
@@ -1028,7 +1143,11 @@ async fn restart_harness_in_place_response(
                     let mut relay = relay.lock().expect("relay state lock poisoned");
                     relay.set_turn_verdict_harness(updated_harness);
                     relay.authentication_login_path = updated_claude_login_path;
-                    relay.set_steering_delivery_mode(updated_harness, false);
+                    relay.set_steering_delivery_mode(
+                        updated_harness,
+                        boundary_mailbox_hook_available,
+                    );
+                    relay.update_mailbox_delivery_mode(updated_mailbox_delivery_mode);
                     relay.set_harness_turn_policy(harness_turn_policy_for(updated_harness));
                     relay.set_background_work_policy(background_work_policy_for(updated_harness));
                     relay.login_identity.clone()
@@ -5029,7 +5148,7 @@ mod preparation_tests {
                 _ => None,
             }
         });
-        let dest_home = root.path().join("dest-claude-home");
+        let dest_home = root.path().join("profile");
         std::fs::create_dir_all(&dest_home).unwrap();
         let dest_cred_bytes = br#"{"claudeAiOauth":{"accessToken":"reloaded-tok"}}"#;
         let dest_marker =
@@ -5060,6 +5179,7 @@ mod preparation_tests {
         updated_launch
             .environment
             .insert("EXCLUDED_SECRET".into(), "must-strip".into());
+        relay.lock().unwrap().set_steering_supported(Some(true));
         let ok_response = restart_harness_in_place_response(
             RelayRequestEnvelope {
                 request_id: "r-restart-ok".into(),
@@ -5114,6 +5234,11 @@ mod preparation_tests {
         assert_eq!(
             relay.lock().unwrap().authentication_login_path.as_deref(),
             Some(dest_marker.as_path())
+        );
+        assert_eq!(
+            relay.lock().unwrap().operational_state().steering_supported,
+            Some(true),
+            "in-place restart into a private staged Claude home must preserve hook-backed steering"
         );
         assert_eq!(
             reloaded_env.get("MJ_TARGET_MARKER").map(String::as_str),

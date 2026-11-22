@@ -1566,6 +1566,13 @@ impl DurableRelay {
         self.mailbox_delivery_mode = Some(mode);
     }
 
+    pub(crate) fn update_mailbox_delivery_mode(
+        &mut self,
+        mode: Option<mj_core::mailbox::MailboxDeliveryMode>,
+    ) {
+        self.mailbox_delivery_mode = mode;
+    }
+
     /// The relay-owned turn boundary shared by command promotion, checkpoint
     /// admission, and background-work accounting. Activity classification
     /// also presents an in-progress `/clear` as a turn, but that command must

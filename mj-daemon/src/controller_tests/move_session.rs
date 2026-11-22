@@ -1069,6 +1069,48 @@ fn in_place_move_restores_source_profile_files_when_worker_refuses_restart() {
                 "clearing store fence re-admits credential sync after source restoration"
             );
 
+            // On a retry where a prior attempt already held the store (e.g. lost
+            // RestartHarnessInPlace reply while the original restart may still be in
+            // flight), a worker refusal MUST NOT overwrite destination files or clear
+            // the credential fence.
+            let live_store_id = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap()
+                .operational_state()
+                .store_id
+                .expect("store_id");
+            operation.in_place_expected_store_id = Some(live_store_id.clone());
+            let retry_err = fixture
+                .controller
+                .execute_move(
+                    &mj_controller::controller::test_support::session_admission(
+                        LATCH_RELAY_SESSION,
+                    ),
+                    &mut operation,
+                    None,
+                    &recording_executor(),
+                    &channels.control,
+                    MoveSourceRelay::default(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{retry_err:#}").contains("cannot restart harness in place"),
+                "{retry_err:#}"
+            );
+            let settings_after_retry: serde_json::Value = serde_json::from_slice(
+                &fs::read(fixture.worker_root.join("profile/settings.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                settings_after_retry["profile"], "destination",
+                "retry refusal must leave staged destination files alone in case prior restart is still in flight"
+            );
+            assert_eq!(
+                operation.in_place_expected_store_id.as_deref(),
+                Some(live_store_id.as_str()),
+                "retry refusal must keep credential sync fenced"
+            );
+
             // Clearing the refusal lets a retry succeed cleanly.
             fs::remove_file(&reject_marker).unwrap();
             fixture

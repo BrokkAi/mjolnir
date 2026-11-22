@@ -3562,17 +3562,27 @@ impl Controller {
                         .await;
                         if let Err(err) = restart_result {
                             self.state.sessions.insert(id.clone(), previous_session);
-                            // Restore source profile files only when we know the
-                            // replacement harness did not start (`!rpc_sent`, or
-                            // a non-Internal worker refusal such as InvalidState).
-                            // Ambiguous transport/Internal failures leave disk
-                            // untouched and keep credential sync fenced.
-                            let safe_to_restore_source_files = !rpc_sent
-                                || err
-                                    .downcast_ref::<crate::worker_client::RelayRejected>()
-                                    .is_some_and(|rejected| {
-                                        rejected.0.code != mj_core::relay::RelayErrorCode::Internal
-                                    });
+                            // Restore source profile files only on a fresh attempt
+                            // where no earlier attempt could have an in-flight
+                            // restart (`!had_prior_expected_store_id`) AND we know
+                            // this call did not start the replacement harness
+                            // (`!rpc_sent`, or a non-Internal worker refusal other
+                            // than an already-in-progress restart). Retries after
+                            // an ambiguous failure and ambiguous transport/Internal
+                            // errors leave disk untouched and keep credential sync
+                            // fenced.
+                            let safe_to_restore_source_files = !had_prior_expected_store_id
+                                && (!rpc_sent
+                                    || err
+                                        .downcast_ref::<crate::worker_client::RelayRejected>()
+                                        .is_some_and(|rejected| {
+                                            rejected.0.code
+                                                != mj_core::relay::RelayErrorCode::Internal
+                                                && !rejected
+                                                    .0
+                                                    .message
+                                                    .contains("already in progress")
+                                        }));
                             if safe_to_restore_source_files {
                                 match self.prepare_worker_files_for(
                                     &id,
