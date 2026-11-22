@@ -15,7 +15,7 @@ from .engine.prompt import TERRA_TOOLS, assert_blind, semantics_only, turn_promp
 from .engine.runner import SealedRunner
 from .engine.snapshot import blob_reader, manifest_sources, prepared_snapshot
 from .engine.validation import canonical, decode
-from .fidelity import CENSUS, ROOT, gate_report, load_inputs, measure, sample, sha, validate_decisions
+from .fidelity import CENSUS, ROOT, gate_report, is_repair_stall, load_inputs, measure, sample, sha, validate_decisions
 from .fidelity_symbols import touched_symbols
 
 
@@ -247,14 +247,14 @@ class StopRequested(Exception):
 
 def checkpointed_answer(engine, directory, commit, text, *, fresh=False):
     receipt = directory / ("fresh-engine.json" if fresh else "engine.json")
-    if receipt.exists():
-        return json.loads(receipt.read_bytes())
-    response = engine.answer(commit, text, fresh=fresh)
+    saved = receipt.exists()
+    response = json.loads(receipt.read_bytes()) if saved else engine.answer(commit, text, fresh=fresh)
     status = response["status"]
-    if status != "ok":
+    if status != "ok" and not is_repair_stall(response):
         error = EngineQuotaHold if status == "quota_hold" else RuntimeError
         raise error(f"{directory.name}: engine {status}: {response.get('message', '')}")
-    driver.save(receipt, response)
+    if not saved:
+        driver.save(receipt, response)
     return response
 
 

@@ -686,6 +686,11 @@ class EngineTests(unittest.TestCase):
         runner = FakeRunner(["{\"", broken, "{\"", broken, payload()])
         result = self.engine(runner).answer(COMMIT, QUERY)
         self.assertEqual(result["status"], "engine_error")
+        self.assertEqual(result["failure"], "repair_stalled")
+        self.assertEqual(result["repair_error_counts"], [
+            {"session": session["session"], "previous": 1, "current": 1}
+            for session in result["provenance"]["retired_sessions"]
+        ])
         self.assertIn("expected a row kind and a fields object", result["message"])
         self.assertIn("invalid JSON", runner.turns[1][2][0])
         self.assertEqual(len(runner.launches), 2)
@@ -695,6 +700,25 @@ class EngineTests(unittest.TestCase):
         result = self.engine(runner).answer(COMMIT, QUERY)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(len(runner.turns), 5)
+
+    def test_isolation_voids_cannot_count_as_repair_stalls(self):
+        class ViolatingRunner(FakeRunner):
+            def turn(self, sid, query, catalogue, menu, errors, directory):
+                output, record, errors = super().turn(sid, query, catalogue, menu, errors, directory)
+                if output is None:
+                    raise IsolationFailure("violated policy", record)
+                return output, record, errors
+
+        stalled = ["{}", "{}"]
+        for inputs in ([None, None], [None, *stalled], [*stalled, None]):
+            with self.subTest(inputs=inputs), TemporaryDirectory(dir=self.cache) as cache:
+                runner = ViolatingRunner(inputs)
+                engine = self.engine(runner)
+                engine.cache = Path(cache)
+                result = engine.answer(COMMIT, QUERY)
+                self.assertEqual(result["status"], "engine_error")
+                self.assertEqual(len(runner.launches), 2)
+                self.assertNotIn("failure", result)
 
     def test_retry_then_success_sorts_and_retains_open_coverage(self):
         first = {"kind": "structural_match", "primary_site": span(line=1), "fields": {}}

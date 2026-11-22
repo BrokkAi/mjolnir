@@ -251,7 +251,7 @@ class EnginePhase(unittest.TestCase):
                          for fresh in ([False, True] if query.key in self.fresh else [False])]
         self.calls = []
         self.gold_calls = []
-        self.hold_at = None
+        self.failures = {}
         self.stop_at = None
         self.identity = {"manifest_sha256": digest, "engine_inputs_sha256": "b" * 64}
         engine = SimpleNamespace(
@@ -282,8 +282,8 @@ class EnginePhase(unittest.TestCase):
             stop_on, request = self.stop_at
             if call == stop_on:
                 request.touch()
-        if call == self.hold_at:
-            return {"status": "quota_hold", "message": "fixture hold"}
+        if call in self.failures:
+            return self.failures[call]
         login = "claude4" if fresh else "claude5"
         return {"status": "ok", "rows": self.rows,
                 "provenance": {"login_profile": login, "engine_profile": f"{login}-engine"}}
@@ -334,13 +334,13 @@ class EnginePhase(unittest.TestCase):
 
     def test_quota_hold_resumes_the_unanswered_stability_reask(self):
         held = self.expected.index((self.queries[1].text, True))
-        self.hold_at = self.expected[held]
+        self.failures[self.expected[held]] = {"status": "quota_hold", "message": "fixture hold"}
         status, output = self.run_phase(self.root, "--phase", "engine")
         self.assertEqual(status, 1)
         self.assertEqual(output[-1]["status"], "quota_hold")
         self.assertEqual(self.calls, self.expected[:held + 1])
         self.calls.clear()
-        self.hold_at = None
+        self.failures.clear()
         self.assertEqual(self.run_phase(self.root, "--phase", "engine")[0], 0)
         self.assertEqual(self.calls, self.expected[held:])
         directory = next(self.root.rglob(f"{self.queries[1].key}/fresh-engine.json")).parent
@@ -349,6 +349,58 @@ class EnginePhase(unittest.TestCase):
             self.assertEqual(provenance, {"login_profile": login, "engine_profile": f"{login}-engine"})
         self.assertEqual(self.gold_calls, [])
         self.assertFalse((self.root / "fidelity/gate-report.json").exists())
+
+    def test_double_stalls_resume_from_zero_row_receipts_and_count_against_the_gate(self):
+        reasked, decisive, documented = self.queries[1], self.queries[-2], self.queries[-1]
+        failure = {"status": "engine_error", "failure": "repair_stalled", "message": "invalid rows",
+                   "rows": [], "repair_error_counts": [{"session": "first", "previous": 2, "current": 3},
+                                                       {"session": "second", "previous": 2, "current": 2}]}
+        self.failures.update({(reasked.text, True): failure, (decisive.text, False): failure,
+                              (documented.text, False): failure})
+        # Stop after checkpointing the decisive failure. Resume through the documented query.
+        request = self.root / "fidelity/stop-requested"
+        self.stop_at = ((decisive.text, False), request)
+        self.assertEqual(self.run_phase(self.root, "--phase", "engine")[0], 3)
+        self.assertEqual(self.calls, self.expected[:-2])
+        for query, receipt in ((reasked, "fresh-engine.json"), (decisive, "engine.json")):
+            path = next(self.root.rglob(f"{query.key}/{receipt}"))
+            self.assertEqual(json.loads(path.read_bytes()), failure)
+        request.unlink()
+        self.calls.clear()
+        self.assertEqual(self.run_phase(self.root, "--phase", "engine")[0], 0)
+        self.assertEqual(self.calls, self.expected[-2:])
+
+        self.assertEqual(self.run_phase(self.root, "--terra-profile", "fixture")[0], 1)
+        self.assertEqual(self.calls, self.expected[-2:])
+        report = json.loads((self.root / "fidelity/gate-report.json").read_bytes())
+        step = report["steps"][decisive.step]
+        self.assertEqual(report["engine_failure_count"], 3)
+        self.assertEqual(step["engine_failure_count"], 2)
+        self.assertEqual(report["documented"]["engine_failure_count"], 1)
+        self.assertEqual(report["documented"]["by_step"]["function"]["engine_failure_count"], 1)
+        self.assertEqual(report["engine_failures"], [
+            {"query_key": query.key, "step": step_name, "stratum": query.stratum, "fresh": fresh,
+             "reason": "repair_stalled", "repair_error_counts": failure["repair_error_counts"]}
+            for query, step_name, fresh in ((reasked, reasked.step, True), (decisive, decisive.step, False),
+                                            (documented, "function", False))
+        ])
+        self.assertEqual(step["metrics"]["random"]["stability_n"], 1)
+        self.assertEqual(step["metrics"]["random"]["stability_jaccard"], 0.0)
+        accuracy = step["metrics"]["decisive"]
+        self.assertEqual((accuracy["gold"], accuracy["returned"], accuracy["recall"]), (2, 0, 0.0))
+        self.assertEqual(report["prescience_pooled"], {"gap": 0.0, "interval": [0.0, 0.0],
+                                                     "decisive_n": 1, "pass": True})
+
+    def test_other_engine_errors_stop_without_a_receipt(self):
+        self.failures[(self.queries[0].text, False)] = {"status": "engine_error"}
+        for failure in ("engine session failed transcript isolation audit", "verifier digest changed"):
+            with self.subTest(failure=failure):
+                self.failures[(self.queries[0].text, False)]["message"] = failure
+                self.calls.clear()
+                with self.assertRaisesRegex(RuntimeError, f"engine engine_error: {failure}"):
+                    self.run_phase(self.root, "--phase", "engine")
+                self.assertEqual(self.calls, self.expected[:1])
+                self.assertFalse(list(self.root.rglob("engine.json")))
 
     def test_stop_request_finishes_the_current_query_before_stopping(self):
         request = self.root / "fidelity/stop-requested"

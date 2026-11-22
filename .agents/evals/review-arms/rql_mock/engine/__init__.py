@@ -25,6 +25,7 @@ from .verifier import verify
 ROOT = Path(os.environ.get("REVIEW_ARMS_ENGINE_ROOT", "/mnt/optane/review-arms-pilot"))
 CONFIG = ROOT / "engine.json"
 DOCUMENT_KEYS = ("catalogue", "steps", "menu", "eligible_labels")
+REPAIR_STALLED = "repair_stalled"
 
 
 def frozen_inputs(manifest_path):
@@ -246,6 +247,7 @@ class Engine:
                         provenance["tokens"][counter] = previous + tokens
 
                 provenance["retired_sessions"] = []
+                stalls = []
                 for attempt in range(2):
                     runner, sid = self.session(commit, snapshot, active / "session.json")
                     login = runner.login._asdict()
@@ -299,6 +301,8 @@ class Engine:
                                 break
                             # The verifier first runs when normalization succeeds.
                             if not repair_progress(previous_errors.get(stage), normalized):
+                                stalls.append({"session": sid, "previous": len(previous_errors[stage]),
+                                               "current": len(normalized)})
                                 raise RepairStalled("; ".join(errors))
                             previous_errors[stage] = normalized
                             provenance["validation_retries"] += 1
@@ -315,7 +319,10 @@ class Engine:
                         provenance["retired_sessions"].append(
                             {"session": sid, **login, "reason": f"repair stalled: {error}"})
                         if attempt:
-                            return response("engine_error", message=str(error))
+                            result = response("engine_error", message=str(error))
+                            if len(stalls) == 2:
+                                result.update(failure=REPAIR_STALLED, repair_error_counts=stalls)
+                            return result
                     except TurnFailure as error:
                         add_turn(error.record)
                         raise

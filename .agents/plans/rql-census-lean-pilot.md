@@ -71,6 +71,8 @@ The study plan says *what* is measured and *why*. This ExecPlan says how the har
 
 - 2026-11-21: a repair round counts as progress when it has fewer distinct errors than the round before, not only when its errors are a strict subset of the last round's. This matches the user's "repairing until the output verifies or stops improving". In the live gate, a repair that cut 51 unaccounted candidates to 36 depth errors was stopped as a stall under the subset rule, and the query ended the run. The count must strictly fall, so every loop still ends; a round that only swaps errors stops, and the query gets its one fresh session. The engine and the judges share the rule (`driver.repair_progress`).
 
+- 2026-11-22: the user decided that a fidelity query whose repair loop stalls in both sessions counts as an engine failure with zero rows. A guarded-paths query with about 600 candidates exhausted both sessions because the repairs omitted `calls`, `continuation` and `held`. The gate checkpoints these failures for base answers and re-asks, continues to the next query, and lists each failure by query key, step and stratum with per-step and pooled counts. Missed gold rows count against recall, precision sees no returned rows, the prescience calculation uses zero engine rows as usual, and a failed re-ask scores zero stability. Quota holds, isolation voids, and other engine or infrastructure errors still stop the gate. Writers still receive `engine_error`. Failure receipts belong to the fidelity run, and accepted answers keep their existing engine cache keys.
+
 ## Outcomes & Retrospective
 
 (none yet)
