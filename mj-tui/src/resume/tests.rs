@@ -296,38 +296,57 @@ fn dialog_focus(dashboard: &DashboardState) -> ResumeFocus {
 
 #[test]
 fn incomplete_move_resume_row_opens_same_destination_retry_controls() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    dashboard.set_move_operations([incomplete_move()]);
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    switch_to_hel(&mut dashboard);
+    for live in [false, true] {
+        let mut dashboard = DashboardState::new(
+            config(),
+            state_with(vec![stopped_session()]),
+            BTreeMap::new(),
+        );
+        dashboard.set_move_operations([incomplete_move()]);
+        if live {
+            dashboard.set_active_workspace(Some("searching-workspace".into()));
+            serve_attention(
+                &mut dashboard,
+                &["session-1"],
+                mj_core::attention::SessionAttention::NeedsInput,
+            );
+            publish_fixture_verdicts(&mut dashboard);
+        }
+        open_resume_dialog(&mut dashboard, 1, Vec::new());
+        if live {
+            resume_dialog_mut(&mut dashboard.mode)
+                .unwrap()
+                .form
+                .get_mut()
+                .focus(ResumeFocus::Sessions);
+        } else {
+            switch_to_hel(&mut dashboard);
+        }
 
-    let row = dashboard
-        .resume_rows()
-        .iter()
-        .find(|row| row.session_id() == Some("session-1"))
-        .expect("stopped session remains in resume rows");
-    assert!(row.move_recovery.is_some());
-    assert_eq!(
-        crate::dialogs::confirmation_buttons(&Confirmation::RecoverMove {
-            operation: Box::new(incomplete_move()),
-        }),
-        &["Cancel", "Open transcript", "Retry move"]
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert!(matches!(
-        dashboard.mode,
-        Mode::Confirm(ConfirmDialog {
-            confirmation: Confirmation::RecoverMove { .. },
-            ..
-        })
-    ));
+        let row = dashboard
+            .resume_rows()
+            .iter()
+            .find(|row| row.session_id() == Some("session-1"))
+            .expect("stopped session remains in resume rows");
+        assert!(row.move_recovery.is_some());
+        assert_eq!(
+            crate::dialogs::confirmation_buttons(&Confirmation::RecoverMove {
+                operation: Box::new(incomplete_move()),
+            }),
+            &["Cancel", "Open transcript", "Retry move"]
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert!(matches!(
+            dashboard.mode,
+            Mode::Confirm(ConfirmDialog {
+                confirmation: Confirmation::RecoverMove { .. },
+                ..
+            })
+        ));
+    }
 }
 
 #[test]

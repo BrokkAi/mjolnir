@@ -1486,9 +1486,10 @@ mod tests {
         cross.sessions_filter.as_mut().unwrap().query = "needlex".into();
         assert_eq!(cross.sessions_other_workspace_matches(), 0);
         cross.next_sessions_text_search().unwrap();
+        cross.refresh_sessions_text_search().unwrap();
         let lines = append_state(
             &mut output,
-            "prefix conversation matches do not count while the longer query is pending",
+            "prefix conversation matches do not count when sync refreshes the longer query",
             &mut cross,
             (140, 40),
         );
@@ -1585,6 +1586,33 @@ mod tests {
             &mut cross,
             (140, 40),
         );
+
+        let mut single = cross.config.clone();
+        single.profiles.retain(|id, _| id == "codex-1");
+        single.targets.clear();
+        single
+            .targets
+            .insert("machine".into(), mj_core::config::TargetTemplate::LocalBare);
+        cross.set_config(single);
+        {
+            let session = cross.state.sessions.get_mut("other-workspace").unwrap();
+            session.target_template_id = "machine".into();
+            session.project_directory = Some("/srv/project".into());
+        }
+        cross.show_resume_dialog(2, Vec::new());
+        cross.set_resume_filter(String::new(), None);
+        let action = cross.handle_key(key(KeyCode::Enter));
+        let DashboardAction::PreflightResumeRepositories { launch } = action else {
+            panic!("single bare target must preflight immediately: {action:?}");
+        };
+        assert!(
+            matches!(launch.as_ref(), DashboardAction::ResumeSession { workspace_id, .. } if workspace_id == "elsewhere")
+        );
+        writeln!(
+            output,
+            "single bare target preflight preserves matched workspace: elsewhere"
+        )
+        .unwrap();
 
         let mut readline = dashboard_with_session(running_session());
         readline.focus_sessions();

@@ -1189,6 +1189,15 @@ impl DashboardState {
                     .moves
                     .get(session_id)
                     .or_else(|| self.move_operations.get(session_id)),
+                (ResumeRowKey::Live(session_id), _)
+                    if self
+                        .state
+                        .sessions
+                        .get(session_id)
+                        .is_some_and(|session| !session.state.is_active()) =>
+                {
+                    self.move_operations.get(session_id)
+                }
                 _ => None,
             }
             .filter(|operation| operation.offers_retry())
@@ -2165,6 +2174,12 @@ impl DashboardState {
             self.notices.set(format!("Cannot {action}: {reason}"));
             return DashboardAction::None;
         }
+        if let Some(operation) = row.move_recovery {
+            self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::RecoverMove {
+                operation: Box::new(operation),
+            }));
+            return DashboardAction::None;
+        }
         match row.key {
             ResumeRowKey::Live(session_id) => {
                 let Some((workspace_id, active)) = self
@@ -2178,21 +2193,11 @@ impl DashboardState {
                 };
                 self.cancel_modal();
                 if !active {
-                    let action = self.begin_resume_for(&session_id);
-                    if let Mode::Resume(wizard) = &mut self.mode {
-                        wizard.workspace_id = workspace_id;
-                    }
-                    return action;
+                    return self.begin_resume_in_workspace(&session_id, workspace_id);
                 }
                 self.focus_session_anywhere(&workspace_id, &session_id)
             }
             ResumeRowKey::Hel(session_id) => {
-                if let Some(operation) = row.move_recovery {
-                    self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::RecoverMove {
-                        operation: Box::new(operation),
-                    }));
-                    return DashboardAction::None;
-                }
                 if self.session_record(&session_id).is_none() {
                     // The dialog lists rows, not records. Fetch the one picked
                     // and open the wizard when it arrives.

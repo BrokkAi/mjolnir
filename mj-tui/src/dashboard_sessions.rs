@@ -112,6 +112,8 @@ pub(crate) struct SessionsTextSearch {
     pub(crate) asked: String,
     /// A search is out and has not answered.
     pub(crate) pending: Option<SessionsTextQuery>,
+    /// The query that produced `matches`, independent of an in-flight refresh.
+    answered_query: String,
     matches: BTreeMap<String, SessionTextMatchKind>,
 }
 
@@ -330,8 +332,7 @@ impl DashboardState {
             return 0;
         }
         let query = filter.query.value().trim().to_lowercase();
-        let current_answer = self.sessions_text.asked.to_lowercase() == query
-            && self.sessions_text.pending != Some(SessionsTextQuery::Typed);
+        let current_answer = self.sessions_text.answered_query.to_lowercase() == query;
         self.state
             .sessions
             .values()
@@ -458,6 +459,7 @@ impl DashboardState {
         self.sessions_text.pending = None;
         match result {
             Ok(matches) => {
+                self.sessions_text.answered_query = self.sessions_text.asked.clone();
                 self.sessions_text.matches = matches
                     .into_iter()
                     .map(|found| (found.session_id, found.kind))
