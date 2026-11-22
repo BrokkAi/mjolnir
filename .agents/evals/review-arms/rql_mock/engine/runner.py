@@ -470,10 +470,13 @@ class SealedRunner:
             save_json(directory / "usage.json", self.capture_usage(sid, expected_model))
             result = self.audit_transcript(transcript, sid, s, capture_label="final")
             save_json(directory / "audit.json", result)
-            empty_failed_turn = failed_turn and not any(page["items"] for page in pages)
-            if (not empty_failed_turn
-                    and any(hit["kind"] == "missing-or-unreadable-transcript" for hit in result["hits"])):
-                raise RuntimeError("the audit could not read the captured transcript")
+            capture_failure_kinds = {"missing-codex-rollout"}
+            # A failed turn can have a complete transcript with zero items.
+            if not (failed_turn and not any(page["items"] for page in pages)):
+                capture_failure_kinds.add("missing-or-unreadable-transcript")
+            capture_failures = capture_failure_kinds.intersection(hit["kind"] for hit in result["hits"])
+            if capture_failures:
+                raise RuntimeError(f"audit evidence capture failed: {', '.join(sorted(capture_failures))}")
             if require_clean_audit and not result["passed"]:
                 raise RuntimeError("the stored transcript did not pass the audit")
             hashes = file_digests(directory)

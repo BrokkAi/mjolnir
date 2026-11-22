@@ -1353,6 +1353,12 @@ class RetirementTests(unittest.TestCase):
             def capture_pilot_rollouts(self, directory, sid, *, reuse_existing, directory_name):
                 assert harness == "codex" and sid == SESSION and not reuse_existing
                 self.rollout_calls += 1
+                if scenario == "rollout":
+                    error = subprocess.CalledProcessError(1, ["podman", "exec"])
+                    with patch.object(driver, "session_container_id", return_value="fixture-container"), \
+                            patch.object(driver.subprocess, "run", side_effect=error):
+                        return driver.capture_pilot_rollouts(
+                            directory, sid, reuse_existing=reuse_existing, directory_name=directory_name)
                 dst = directory / directory_name
                 dst.mkdir()
                 words = ["ls"] if self.clean else ["curl", "https://example.invalid"]
@@ -1378,14 +1384,15 @@ class RetirementTests(unittest.TestCase):
             return rows
 
         adapter.run_turn = run_turn
-        for scenario in ("turn", "audit", "output", "transcript", "codex", "claude", "incomplete", "changed"):
+        for scenario in ("turn", "audit", "output", "rollout", "transcript", "codex", "claude",
+                         "incomplete", "changed"):
             with self.subTest(scenario=scenario), TemporaryDirectory() as root:
                 directory = Path(root)
                 harness = "claude" if scenario == "claude" else "codex"
                 model = fidelity_live.SONNET if harness == "claude" else fidelity_live.TERRA
                 version = VERSION if harness == "claude" else model
                 result = {"session": SESSION, "turn": 1, "model": model, "version": version, "effort": "high"}
-                capture = FidelityCapture(directory, clean=scenario != "audit", models=())
+                capture = FidelityCapture(directory, clean=scenario not in ("audit", "rollout"), models=())
                 launches.clear()
 
                 def sealed():
@@ -1410,10 +1417,9 @@ class RetirementTests(unittest.TestCase):
                     self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, original)
                     continue
 
-                if scenario in ("turn", "audit", "output"):
-                    message = {"turn": "original fidelity turn error",
-                               "audit": "fidelity session failed the pilot audit",
-                               "output": "original output error"}[scenario]
+                if scenario in ("turn", "audit", "output", "rollout"):
+                    message = {"turn": "original fidelity turn error", "output": "original output error"}.get(
+                        scenario, "fidelity session failed the pilot audit")
                     with self.assertRaisesRegex((RuntimeError, ValueError), message) as error:
                         sealed()
                     if scenario == "turn":
@@ -1422,6 +1428,19 @@ class RetirementTests(unittest.TestCase):
                     self.assertEqual(json.loads((directory / "failed.json").read_text()),
                                      {"session_id": SESSION, "reason": message})
                     self.assertFalse((directory / "completed.json").exists())
+                    if scenario == "rollout":
+                        self.assertEqual(capture.rollout_calls, 2)
+                        for name in ("turn-1-audit.json", "audit.json"):
+                            verdict = json.loads((directory / name).read_bytes())
+                            self.assertFalse(verdict["passed"])
+                            self.assertIn("missing-codex-rollout", {hit["kind"] for hit in verdict["hits"]})
+                        self.assertTrue((directory / "rollout-capture-error.json").is_file())
+                        self.assertEqual(capture.argv, [])
+                        self.assertFalse((directory / "destroy-request.json").exists())
+                        self.assertFalse((directory / "destroy-receipt.json").exists())
+                        self.assertIn("session preserved: audit evidence capture failed: missing-codex-rollout",
+                                      " ".join(error.exception.__notes__))
+                        continue
                 else:
                     if scenario == "transcript":
                         with self.assertRaisesRegex(RuntimeError, "transcript unavailable"):
