@@ -1054,6 +1054,13 @@ impl Controller {
                     )
                 })
                 .context("stop retained worker before retry")?;
+                // Clear any OriginDelta quiescence wire files left by the
+                // abandoned Move so a later Suspend on the resumed source
+                // cannot adopt the Move's old request or receipt.
+                super::lifecycle::origin_delta::clear_suspend_records_at_target(
+                    &backend, session_id, executor,
+                )
+                .context("clear retained Move source suspend records before retry")?;
                 let mut retained = source;
                 retained
                     .resource_allocation

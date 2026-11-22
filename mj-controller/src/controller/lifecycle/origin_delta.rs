@@ -260,6 +260,26 @@ pub(in crate::controller) fn managed_origin_override(
     })
 }
 
+const ALL_SUSPEND_WIRE_FILES: &[&str] = &[
+    wire::ACCEPTED,
+    wire::REQUEST,
+    wire::RECEIPT,
+    wire::PROGRESS,
+    wire::RESTART,
+];
+
+/// Clear any OriginDelta suspend request, receipt, and progress wire files left
+/// in `backend`'s worker root for `session_id` so a subsequent Resume and later
+/// Suspend cannot mistake an abandoned Move's records for a fresh quiescence.
+pub(in crate::controller) fn clear_suspend_records_at_target(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<()> {
+    let root = targets::worker_root(backend, session_id)?;
+    remove_wire_files(backend, session_id, &root, ALL_SUSPEND_WIRE_FILES, executor)
+}
+
 impl OriginDeltaSuspend {
     /// Whether this suspend captures OriginDelta. An accepted suspend keeps
     /// the capture it started with, even after its worker has exited. A new
@@ -456,13 +476,7 @@ impl OriginDeltaSuspend {
             &self.backend,
             &self.session_id,
             &self.root,
-            &[
-                wire::ACCEPTED,
-                wire::REQUEST,
-                wire::RECEIPT,
-                wire::PROGRESS,
-                wire::RESTART,
-            ],
+            ALL_SUSPEND_WIRE_FILES,
             executor,
         )
     }
