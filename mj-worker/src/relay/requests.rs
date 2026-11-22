@@ -87,6 +87,18 @@ impl DurableRelay {
 
         let payload = match &envelope.request {
             RelayRequest::Hello { .. } => unreachable!(),
+            RelayRequest::AntigravityStop {
+                conversation_id,
+                fully_idle,
+                termination_reason,
+            } => {
+                self.antigravity_stop(
+                    conversation_id.as_deref(),
+                    *fully_idle,
+                    termination_reason.as_deref(),
+                )?;
+                RelayResponsePayload::AntigravityStopObserved
+            }
             RelayRequest::Attach {
                 after_ordinal,
                 after_digest,

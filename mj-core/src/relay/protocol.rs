@@ -268,6 +268,15 @@ pub enum RelayRequest {
         controller_version: String,
         supported: RelayVersionRange,
     },
+    /// Report an Antigravity native `Stop` hook firing to the owning worker.
+    AntigravityStop {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fully_idle: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        termination_reason: Option<String>,
+    },
     Attach {
         after_ordinal: u64,
         after_digest: String,
@@ -650,6 +659,7 @@ impl RelayRequest {
     pub const fn method_name(&self) -> &'static str {
         match self {
             Self::Hello { .. } => "hello",
+            Self::AntigravityStop { .. } => "antigravity_stop",
             Self::Attach { .. } => "attach",
             Self::Acknowledge { .. } => "acknowledge",
             Self::Submit { .. } => "submit",
@@ -719,6 +729,7 @@ impl RelayRequest {
     /// protocol 31.
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::AntigravityStop { .. } => super::RELAY_ANTIGRAVITY_STOP_HOOK_PROTOCOL,
             Self::AwsCredentialsState | Self::InstallAwsCredentials { .. } => {
                 super::RELAY_AWS_CREDENTIALS_PROTOCOL
             }
@@ -1007,6 +1018,7 @@ pub enum RelayResponseBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayResponsePayload {
+    AntigravityStopObserved,
     CommandRetentionUpdated,
     CommandRetentionState {
         legacy_pending: bool,

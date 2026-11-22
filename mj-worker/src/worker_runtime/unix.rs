@@ -1,8 +1,10 @@
+mod antigravity;
 mod dispatch;
 mod git_env;
 mod kimi;
 mod requests;
 mod supervisor;
+use antigravity::*;
 pub(crate) use dispatch::*;
 pub use git_env::*;
 pub(crate) use kimi::*;
@@ -116,6 +118,7 @@ struct HarnessPreparationSetup {
     session_git_config_include: Option<PathBuf>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
+    antigravity_task_home: Option<std::result::Result<PathBuf, String>>,
     resume_session: Option<String>,
     native_session_history: NativeSessionHistory,
     /// What a sub-agent's worker observes at the end of each turn.
@@ -479,6 +482,7 @@ fn start_bridge(
     relay: Arc<RelayCell>,
     dispatch_wakes: &mut Option<mpsc::Receiver<()>>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
+    antigravity_task_home: Option<std::result::Result<PathBuf, String>>,
     capture: Option<crate::work_facts::WorkObserver>,
     runtime: tokio::runtime::Handle,
     cancel: &CancellationToken,
@@ -536,6 +540,7 @@ fn start_bridge(
         commands_tx,
         user_shells,
         kimi_task_home.map(KimiTaskMonitor::new),
+        antigravity_task_home.map(AntigravityTaskMonitor::new),
         capture,
         HarnessStartup::new(),
     )));
@@ -1357,6 +1362,12 @@ pub async fn run_daemon_owned(
             .map(|endpoint| endpoint.home.clone())
             .map_err(Clone::clone)
     });
+    let antigravity_task_home = (config.harness == HarnessKind::Antigravity).then(|| {
+        credentials
+            .as_ref()
+            .map(|endpoint| endpoint.home.clone())
+            .map_err(Clone::clone)
+    });
     mj_core::config::create_owner_only_directory(&root)
         .with_context(|| format!("create worker root {}", root.display()))?;
     let socket = root.join("control.sock");
@@ -1430,12 +1441,14 @@ pub async fn run_daemon_owned(
     durable_relay.set_harness_turn_policy(match config.harness {
         HarnessKind::Claude => crate::relay::HarnessTurnPolicy::ClaudeAdapter,
         HarnessKind::Codex => crate::relay::HarnessTurnPolicy::CodexAdapter,
+        HarnessKind::Antigravity => crate::relay::HarnessTurnPolicy::Antigravity,
         _ => crate::relay::HarnessTurnPolicy::Disabled,
     });
     // Both adapters publish their background command lifecycle through AIR.
     durable_relay.set_background_work_policy(match config.harness {
         HarnessKind::Claude | HarnessKind::Codex => crate::relay::BackgroundWorkPolicy::AirTasks,
         HarnessKind::Kimi => crate::relay::BackgroundWorkPolicy::KimiTasks,
+        HarnessKind::Antigravity => crate::relay::BackgroundWorkPolicy::AntigravityTasks,
         _ => crate::relay::BackgroundWorkPolicy::HostedTerminals,
     });
     record_imported_native_identity(&config, &mut durable_relay)?;
@@ -1647,6 +1660,7 @@ pub async fn run_daemon_owned(
         session_git_config_include,
         credentials,
         kimi_task_home,
+        antigravity_task_home,
         resume_session,
         native_session_history,
         capture,
@@ -2238,6 +2252,7 @@ async fn prepare_and_start_harness(
         session_git_config_include,
         credentials,
         kimi_task_home,
+        antigravity_task_home,
         resume_session,
         native_session_history,
         capture,
@@ -2793,6 +2808,7 @@ async fn prepare_and_start_harness(
         relay,
         dispatch_wake_rx,
         kimi_task_home,
+        antigravity_task_home,
         capture,
         tokio::runtime::Handle::current(),
         cancel,
@@ -3497,9 +3513,11 @@ pub(super) async fn serve_client_with_memory(
                     | RelayRequest::ReserveIdle { .. }
                     | RelayRequest::ReleaseInPlaceMoveDispatch { .. }
             );
-            let mailbox_lease_changed = matches!(
+            let hook_activity_changed = matches!(
                 &envelope.request,
-                RelayRequest::DrainMailbox { .. } | RelayRequest::AckMailbox { .. }
+                RelayRequest::DrainMailbox { .. }
+                    | RelayRequest::AckMailbox { .. }
+                    | RelayRequest::AntigravityStop { .. }
             );
             let checkpoint_change = checkpoint_change(&envelope.request);
             let operation = envelope.request.method_name();
@@ -3572,7 +3590,7 @@ pub(super) async fn serve_client_with_memory(
                     None => {}
                 }
             }
-            if (wakes_dispatch && accepted) || mailbox_lease_changed {
+            if (wakes_dispatch && accepted) || hook_activity_changed {
                 wake_dispatch(&relay, &dispatch_wake)?;
             }
             overlay_preparation_state(&mut response, &current_preparation);

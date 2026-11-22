@@ -602,7 +602,9 @@ impl DurableRelay {
             "in-place harness restart for {operation_id} is no longer in flight"
         );
         let Some(hold) = self.snapshot.in_place_move_hold.as_mut() else {
-            bail!("in-place move dispatch hold disappeared before completing harness restart for {operation_id}");
+            bail!(
+                "in-place move dispatch hold disappeared before completing harness restart for {operation_id}"
+            );
         };
         anyhow::ensure!(
             hold.operation_id == operation_id,
@@ -947,13 +949,13 @@ impl DurableRelay {
                 None,
             )));
         }
-        // Stop is also accepted while Claude Code works on its own after a
-        // background task: the cancel interrupts the running cycle, and that
-        // cycle's result ends the turn (`claude_turn_result`). A Codex turn of
-        // this kind is a native goal, which has its own controls. An in-flight
-        // native resume is also a cancellable request, even without a prompt.
-        let claude_harness_turn = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
-            && self.snapshot.harness_turn.is_some();
+        // Claude and Antigravity can cancel a cycle they started on their own.
+        // Codex native goals have their own controls. An in-flight native
+        // resume is also cancellable without a prompt.
+        let cancellable_harness_turn = matches!(
+            self.harness_turns,
+            HarnessTurnPolicy::ClaudeAdapter | HarnessTurnPolicy::Antigravity
+        ) && self.snapshot.harness_turn.is_some();
         if let RelayCommand::Cancel = command
             && self
                 .snapshot
@@ -971,7 +973,7 @@ impl DurableRelay {
                         }
                     )
             })
-            && !claude_harness_turn
+            && !cancellable_harness_turn
             && self
                 .snapshot
                 .capacity_retry
@@ -2774,6 +2776,9 @@ impl DurableRelay {
                 count: 0,
                 contexts: Vec::new(),
             });
+        }
+        if self.harness_turns == HarnessTurnPolicy::Antigravity && hook_event == "PostToolBatch" {
+            self.antigravity_pre_invocation(conversation_id)?;
         }
         if hook_event == "PostToolUse"
             && self.mailbox_delivery_mode

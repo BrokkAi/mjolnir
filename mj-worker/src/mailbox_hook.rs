@@ -4,7 +4,7 @@
 use anyhow::Context;
 use anyhow::{Result, bail};
 use serde_json::json;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 /// Let a harness retain leased input before acknowledging it. Reuse the same
@@ -19,7 +19,10 @@ pub fn request(socket: &Path) -> Result<()> {
         ),
         "expected a mailbox drain or acknowledgement"
     );
-    write_stdout(&serde_json::to_value(send_request(socket, request)?)?)
+    write_output(
+        &mut std::io::stdout().lock(),
+        &serde_json::to_value(send_request(socket, request)?)?,
+    )
 }
 
 /// Output format expected by the calling harness's hook contract.
@@ -39,19 +42,61 @@ pub fn run(socket: &Path, hook_event: &str) -> Result<()> {
 
 /// Consume one harness hook request using the specified hook output format.
 pub fn run_with_format(socket: &Path, hook_event: &str, format: HookOutputFormat) -> Result<()> {
-    let mut stdin = std::io::stdin().lock();
+    run_hook(
+        socket,
+        hook_event,
+        format,
+        std::io::stdin().lock(),
+        &mut std::io::stdout().lock(),
+    )
+}
+
+fn run_hook(
+    socket: &Path,
+    hook_event: &str,
+    format: HookOutputFormat,
+    mut stdin: impl Read,
+    stdout: &mut impl Write,
+) -> Result<()> {
     let hook_input = match serde_json::from_reader::<_, HookInput>(&mut stdin) {
         Ok(input) => input,
         Err(error) if error.is_io() => {
-            return write_empty_with_diagnostic(&format!("could not consume hook input: {error}"));
+            return write_empty_with_diagnostic(
+                stdout,
+                &format!("could not consume hook input: {error}"),
+            );
         }
         Err(_) => HookInput::default(),
     };
     if let Err(error) = std::io::copy(&mut stdin, &mut std::io::sink()) {
-        return write_empty_with_diagnostic(&format!("could not consume hook input: {error}"));
+        return write_empty_with_diagnostic(
+            stdout,
+            &format!("could not consume hook input: {error}"),
+        );
     }
     if is_subagent_hook_input(&hook_input) {
-        return write_stdout(&json!({}));
+        return write_output(stdout, &json!({}));
+    }
+
+    if format == HookOutputFormat::Antigravity && hook_event == "Stop" {
+        return match send_request(
+            socket,
+            mj_core::relay::RelayRequest::AntigravityStop {
+                conversation_id: hook_input.conversation_id,
+                fully_idle: hook_input.fully_idle,
+                termination_reason: hook_input.termination_reason,
+            },
+        ) {
+            Ok(mj_core::relay::RelayResponsePayload::AntigravityStopObserved) => {
+                write_output(stdout, &json!({}))
+            }
+            Ok(other) => {
+                write_empty_with_diagnostic(stdout, &format!("worker refused Stop: {other:?}"))
+            }
+            Err(error) => {
+                write_empty_with_diagnostic(stdout, &format!("could not observe Stop: {error:#}"))
+            }
+        };
     }
 
     let conversation_id = match format {
@@ -78,7 +123,7 @@ pub fn run_with_format(socket: &Path, hook_event: &str, format: HookOutputFormat
                     ]
                 }),
             };
-            write_stdout(&output)?;
+            write_output(stdout, &output)?;
             if let Err(error) = acknowledge(socket, &lease_id) {
                 mj_core::diagnostic_stderr!(
                     "Mjolnir mailbox hook: could not acknowledge delivered events: {error:#}"
@@ -86,9 +131,11 @@ pub fn run_with_format(socket: &Path, hook_event: &str, format: HookOutputFormat
             }
             Ok(())
         }
-        Ok((None, 0, None)) => write_stdout(&json!({})),
-        Ok(_) => write_empty_with_diagnostic("worker returned an incomplete mailbox lease"),
-        Err(error) => write_empty_with_diagnostic(&format!("could not drain mailbox: {error:#}")),
+        Ok((None, 0, None)) => write_output(stdout, &json!({})),
+        Ok(_) => write_empty_with_diagnostic(stdout, "worker returned an incomplete mailbox lease"),
+        Err(error) => {
+            write_empty_with_diagnostic(stdout, &format!("could not drain mailbox: {error:#}"))
+        }
     }
 }
 
@@ -98,6 +145,10 @@ struct HookInput {
     agent_id: Option<String>,
     #[serde(default, rename = "conversationId")]
     conversation_id: Option<String>,
+    #[serde(default, rename = "fullyIdle")]
+    fully_idle: Option<bool>,
+    #[serde(default, rename = "terminationReason")]
+    termination_reason: Option<String>,
 }
 
 fn is_subagent_hook_input(input: &HookInput) -> bool {
@@ -198,16 +249,117 @@ fn send_request(
     )
 }
 
-fn write_stdout(value: &serde_json::Value) -> Result<()> {
+fn write_output(stdout: &mut impl Write, value: &serde_json::Value) -> Result<()> {
     let mut output = serde_json::to_vec(value)?;
     output.push(b'\n');
-    let mut stdout = std::io::stdout().lock();
     stdout.write_all(&output)?;
     stdout.flush()?;
     Ok(())
 }
 
-fn write_empty_with_diagnostic(message: &str) -> Result<()> {
+fn write_empty_with_diagnostic(stdout: &mut impl Write, message: &str) -> Result<()> {
     mj_core::diagnostic_stderr!("Mjolnir mailbox hook: {message}");
-    write_stdout(&json!({}))
+    write_output(stdout, &json!({}))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use mj_core::relay::{
+        RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
+        RelayResponsePayload,
+    };
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn mailbox_hook_antigravity_stop_observes_main_conversation_and_stays_passive() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("control.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "no Stop request arrived"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept Stop request: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let envelope: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            assert!(matches!(
+                envelope.request,
+                RelayRequest::AntigravityStop {
+                    conversation_id: Some(id),
+                    fully_idle: Some(false),
+                    termination_reason: Some(reason),
+                } if id == "main" && reason == "USER_CANCELED"
+            ));
+            serde_json::to_writer(
+                &mut stream,
+                &RelayResponseEnvelope {
+                    request_id: envelope.request_id,
+                    protocol_version: envelope.protocol_version,
+                    body: RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::AntigravityStopObserved,
+                    },
+                },
+            )
+            .unwrap();
+            stream.write_all(b"\n").unwrap();
+            listener
+        });
+
+        let mut output = Vec::new();
+        run_hook(
+            &socket,
+            "Stop",
+            HookOutputFormat::Antigravity,
+            br#"{"conversationId":"main","fullyIdle":false,"terminationReason":"USER_CANCELED"}"#
+                .as_slice(),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output, b"{}\n");
+
+        let listener = server.join().unwrap();
+        output.clear();
+        run_hook(
+            &socket,
+            "Stop",
+            HookOutputFormat::Antigravity,
+            br#"{"conversationId":"main","fullyIdle":true,"agent_id":"subagent"}"#.as_slice(),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output, b"{}\n");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        drop(listener);
+        output.clear();
+        run_hook(
+            &socket,
+            "Stop",
+            HookOutputFormat::Antigravity,
+            br#"{"conversationId":"main","fullyIdle":false}"#.as_slice(),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output, b"{}\n");
+    }
 }

@@ -1,4 +1,53 @@
 use super::*;
+use crate::acp::antigravity_tasks::{AntigravityRunStatus, AntigravitySnapshot};
+
+#[derive(Default)]
+pub(super) struct AntigravityWorkState {
+    acp_epoch_active: bool,
+    stale_step_indices: Option<BTreeSet<i64>>,
+    summary_commit_gen: u64,
+    summary_status: Option<AntigravityRunStatus>,
+    summary_not_fully_idle: bool,
+    summary_has_running_subagents: bool,
+    summary_busy_started_at_ms: Option<i64>,
+    hook_not_fully_idle_gen: Option<u64>,
+    hook_not_fully_idle_started_at_ms: Option<i64>,
+    hook_idle_gen: Option<u64>,
+    warned_missing_fully_idle: bool,
+    harness_turn_saw_running: bool,
+    pending_turn_settle: Option<String>,
+    running_tasks: Vec<BackgroundCommand>,
+    task_first_seen_ms: BTreeMap<i64, i64>,
+}
+
+impl AntigravityWorkState {
+    fn append_commands(&self, commands: &mut Vec<BackgroundCommand>, turn_in_flight: bool) {
+        commands.extend(self.running_tasks.iter().cloned());
+        if !self.running_tasks.is_empty() || !self.acp_epoch_active {
+            return;
+        }
+        let summary_fresh = self.hook_idle_gen != Some(self.summary_commit_gen);
+        let summary_reports_bg = summary_fresh
+            && ((self.summary_not_fully_idle && !turn_in_flight)
+                || self.summary_has_running_subagents);
+        if self.hook_not_fully_idle_gen.is_some() || summary_reports_bg {
+            let (id, command) = if self.summary_has_running_subagents {
+                ("subagent", "Antigravity subagent running")
+            } else {
+                ("pending", "Antigravity background task")
+            };
+            commands.push(BackgroundCommand {
+                id: background_task_id("antigravity", id),
+                command: command.into(),
+                started_at_ms: self
+                    .hook_not_fully_idle_started_at_ms
+                    .or(self.summary_busy_started_at_ms)
+                    .expect("background evidence has a start time"),
+                can_stop: false,
+            });
+        }
+    }
+}
 
 fn background_task_id(kind: &str, provider_id: &str) -> String {
     format!("{kind}:{provider_id}")
@@ -144,7 +193,11 @@ impl DurableRelay {
     /// Choose where commands the agent left running are read from.
     pub fn set_background_work_policy(&mut self, policy: BackgroundWorkPolicy) {
         self.background_work = policy;
-        self.background_work_known = (policy == BackgroundWorkPolicy::KimiTasks).then_some(false);
+        self.background_work_known = matches!(
+            policy,
+            BackgroundWorkPolicy::KimiTasks | BackgroundWorkPolicy::AntigravityTasks
+        )
+        .then_some(false);
     }
 
     /// Commands the agent left running with nothing waiting on them, oldest
@@ -207,6 +260,10 @@ impl DurableRelay {
                     })
                     .map(|(_, task)| task.command.clone()),
             );
+        }
+        if self.background_work == BackgroundWorkPolicy::AntigravityTasks {
+            self.antigravity_work
+                .append_commands(&mut commands, turn_in_flight);
         }
         commands.sort_by(|left, right| {
             left.started_at_ms
@@ -570,6 +627,213 @@ impl DurableRelay {
         Ok(())
     }
 
+    pub(super) fn forget_antigravity_state(&mut self) {
+        self.antigravity_work = AntigravityWorkState::default();
+        if self.background_work == BackgroundWorkPolicy::AntigravityTasks {
+            self.background_work_known = Some(false);
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn reset_antigravity_state(&mut self) -> Result<()> {
+        self.forget_antigravity_state();
+        self.persist_activity_transition()
+    }
+
+    fn matches_antigravity_conversation(&self, conversation_id: Option<&str>) -> bool {
+        conversation_id
+            .filter(|id| !id.is_empty())
+            .is_some_and(|id| self.snapshot.native_session_id.as_deref() == Some(id))
+    }
+
+    pub(super) fn antigravity_prompt_started(&mut self) {
+        if self.harness_turns == HarnessTurnPolicy::Antigravity {
+            self.antigravity_work.acp_epoch_active = true;
+        }
+    }
+
+    pub(super) fn antigravity_pre_invocation(
+        &mut self,
+        conversation_id: Option<&str>,
+    ) -> Result<()> {
+        if !self.matches_antigravity_conversation(conversation_id) {
+            return Ok(());
+        }
+        self.antigravity_work.acp_epoch_active = true;
+        self.antigravity_work.hook_idle_gen = None;
+        if self.can_open_harness_turn() {
+            self.antigravity_work.harness_turn_saw_running = false;
+            self.antigravity_work.pending_turn_settle = None;
+            self.open_harness_turn_if_allowed()?;
+        }
+        self.persist_activity_transition()
+    }
+
+    pub(super) fn antigravity_stop(
+        &mut self,
+        conversation_id: Option<&str>,
+        fully_idle: Option<bool>,
+        termination_reason: Option<&str>,
+    ) -> Result<()> {
+        if (self.background_work != BackgroundWorkPolicy::AntigravityTasks
+            && self.harness_turns != HarnessTurnPolicy::Antigravity)
+            || !self.matches_antigravity_conversation(conversation_id)
+        {
+            return Ok(());
+        }
+
+        let work = &mut self.antigravity_work;
+        work.acp_epoch_active = true;
+        if fully_idle == Some(true) {
+            work.hook_not_fully_idle_gen = None;
+            work.hook_not_fully_idle_started_at_ms = None;
+            work.hook_idle_gen = Some(work.summary_commit_gen);
+        } else {
+            work.hook_not_fully_idle_gen = Some(work.summary_commit_gen);
+            work.hook_not_fully_idle_started_at_ms
+                .get_or_insert_with(epoch_millis);
+            work.hook_idle_gen = None;
+            if fully_idle.is_none() && !work.warned_missing_fully_idle {
+                tracing::warn!(
+                    session_id = %self.snapshot.session_id,
+                    "Antigravity Stop hook omitted fullyIdle; treating background work as pending"
+                );
+                work.warned_missing_fully_idle = true;
+            }
+        }
+
+        // This must publish under the relay lock before the hook is acknowledged
+        // and ACP is free to finish the prompt.
+        self.note_background_work()?;
+        self.persist_activity_transition()?;
+        if self.snapshot.active_prompt.is_none()
+            && self.snapshot.autonomous_harness_turn().is_some()
+        {
+            let reason = match termination_reason {
+                Some("USER_CANCELED") => "cancelled",
+                Some("ERROR") => "error",
+                _ => "end_turn",
+            };
+            self.antigravity_work.pending_turn_settle = Some(reason.into());
+        }
+        Ok(())
+    }
+
+    pub fn antigravity_snapshot_changed(&mut self, snapshot: AntigravitySnapshot) -> Result<()> {
+        if self.background_work != BackgroundWorkPolicy::AntigravityTasks {
+            return Ok(());
+        }
+        self.background_work_known = Some(true);
+        let work = &mut self.antigravity_work;
+        work.summary_commit_gen += u64::from(snapshot.summary_commit_changed);
+        let indices: BTreeSet<_> = snapshot
+            .running_tasks
+            .iter()
+            .map(|task| task.step_index)
+            .collect();
+        if !work.acp_epoch_active {
+            work.stale_step_indices.get_or_insert(indices);
+            return self.persist_activity_transition();
+        }
+
+        if let Some(stale) = &mut work.stale_step_indices {
+            stale.retain(|index| indices.contains(index));
+        }
+        work.task_first_seen_ms
+            .retain(|index, _| indices.contains(index));
+        work.running_tasks.clear();
+        for task in snapshot.running_tasks {
+            if work
+                .stale_step_indices
+                .as_ref()
+                .is_some_and(|stale| stale.contains(&task.step_index))
+            {
+                continue;
+            }
+            let first_seen = work
+                .task_first_seen_ms
+                .entry(task.step_index)
+                .or_insert_with(epoch_millis);
+            work.running_tasks.push(BackgroundCommand {
+                id: background_task_id("antigravity", &task.id),
+                started_at_ms: task.started_at_ms.unwrap_or(*first_seen),
+                command: task.command,
+                can_stop: false,
+            });
+        }
+
+        if let Some(summary) = snapshot.summary {
+            work.summary_status = Some(summary.status);
+            work.summary_not_fully_idle = summary.not_fully_idle;
+            work.summary_has_running_subagents = summary.has_running_subagents;
+            if summary.not_fully_idle || summary.has_running_subagents || summary.status.is_active()
+            {
+                work.summary_busy_started_at_ms
+                    .get_or_insert_with(epoch_millis);
+            } else {
+                work.summary_busy_started_at_ms = None;
+            }
+            if work
+                .hook_idle_gen
+                .is_some_and(|generation| work.summary_commit_gen > generation)
+            {
+                work.hook_idle_gen = None;
+            }
+            if work
+                .hook_not_fully_idle_gen
+                .is_some_and(|generation| work.summary_commit_gen > generation)
+                && work.summary_status == Some(AntigravityRunStatus::Idle)
+                && !work.summary_not_fully_idle
+                && work.running_tasks.is_empty()
+            {
+                work.hook_not_fully_idle_gen = None;
+                work.hook_not_fully_idle_started_at_ms = None;
+            }
+
+            if self.snapshot.active_prompt.is_none()
+                && self.snapshot.autonomous_harness_turn().is_some()
+            {
+                if summary.status.is_active() {
+                    work.harness_turn_saw_running = true;
+                } else if work.harness_turn_saw_running
+                    && work.summary_status == Some(AntigravityRunStatus::Idle)
+                    && work.pending_turn_settle.is_none()
+                {
+                    work.pending_turn_settle = Some("end_turn".into());
+                }
+            }
+        }
+        self.note_background_work()?;
+        self.persist_activity_transition()
+    }
+
+    pub fn antigravity_tasks_unavailable(&mut self) -> Result<()> {
+        if self.background_work == BackgroundWorkPolicy::AntigravityTasks {
+            self.background_work_known = Some(false);
+            self.persist_activity_transition()?;
+        }
+        Ok(())
+    }
+
+    pub fn has_pending_antigravity_turn_settle(&self) -> bool {
+        self.antigravity_work.pending_turn_settle.is_some()
+    }
+
+    pub fn settle_pending_antigravity_harness_turn(&mut self) -> Result<bool> {
+        if self.worker_writes_held() {
+            return Ok(false);
+        }
+        if let Some(reason) = self.antigravity_work.pending_turn_settle.take()
+            && self.snapshot.active_prompt.is_none()
+            && self.snapshot.autonomous_harness_turn().is_some()
+        {
+            self.settle_harness_turn(Some("antigravity".into()), &reason)?;
+            self.antigravity_work.harness_turn_saw_running = false;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// A background task the harness will answer with a turn of its own just
     /// settled. Until that turn opens, the session is not quiet.
     pub(super) fn note_task_settled(&mut self) {
@@ -777,6 +1041,7 @@ impl DurableRelay {
     /// piece of in-memory process state a harness reports is cleared here, so
     /// a restart and a closed terminal set cannot disagree about it.
     pub(super) fn forget_harness_processes(&mut self) {
+        self.forget_antigravity_state();
         self.pending_native_resumes.clear();
         self.air_tasks.clear();
         self.claude_pending_stops.clear();
