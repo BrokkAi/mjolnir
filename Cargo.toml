@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-worker-launch", "mj-profile-catalog", "mj-session-runtime", "mj-review-host", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
-default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-worker-launch", "mj-profile-catalog", "mj-session-runtime", "mj-review-host", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
+members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-worker-launch", "mj-profile-catalog", "mj-session-runtime", "mj-review-host", "mj-github-relevance", "mj-github-watch", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
+default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-worker-launch", "mj-profile-catalog", "mj-session-runtime", "mj-review-host", "mj-github-relevance", "mj-github-watch", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
 # inherits it with `version.workspace = true`, so all package versions
@@ -43,6 +43,7 @@ mj-session-types = { path = "mj-session-types", package = "brokk-mj-session-type
 mj-store = { path = "mj-store", package = "brokk-mj-store", version = "2.73.0" }
 mj-accounts = { path = "mj-accounts", package = "brokk-mj-accounts", version = "2.73.0" }
 mj-github-relevance = { path = "mj-github-relevance", package = "brokk-mj-github-relevance", version = "2.73.0" }
+mj-github-watch = { path = "mj-github-watch", package = "brokk-mj-github-watch", version = "2.73.0" }
 mj-import = { path = "mj-import", package = "brokk-mj-import", version = "2.73.0" }
 mj-sessionwiki = { path = "mj-sessionwiki", package = "brokk-mj-sessionwiki", version = "2.73.0" }
 mj-build-cache = { path = "mj-build-cache", package = "brokk-mj-build-cache", version = "2.73.0" }

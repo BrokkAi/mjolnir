@@ -49,6 +49,7 @@ COPY mj-session-runtime/ mj-session-runtime/
 COPY mj-review-host/ mj-review-host/
 COPY mj-profile-catalog/ mj-profile-catalog/
 COPY mj-github-relevance/ mj-github-relevance/
+COPY mj-github-watch/ mj-github-watch/
 COPY mj-controller/ mj-controller/
 COPY mj-setup/ mj-setup/
 COPY mj-server/ mj-server/

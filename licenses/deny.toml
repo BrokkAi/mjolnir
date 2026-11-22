@@ -58,6 +58,7 @@ exceptions = [
     { crate = "brokk-mj-review-host", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-profile-catalog", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-github-relevance", allow = ["GPL-3.0-only"] },
+    { crate = "brokk-mj-github-watch", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-controller", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-setup", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-server", allow = ["GPL-3.0-only"] },

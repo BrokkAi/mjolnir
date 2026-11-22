@@ -185,8 +185,10 @@ it or introduce a dependency between sibling branches.
 - `brokk-mj-github-relevance` (`mj-github-relevance/`, library
   `mj_github_relevance`) is the on-device classifier that decides which GitHub
   events matter to a session, with the download of its weights and runtime.
-  It needs only the foundation, and only the daemon uses it, so its inference
-  dependencies stay out of every other crate's build.
+  The GitHub watcher calls it to classify items for each session.
+- `brokk-mj-github-watch` (`mj-github-watch/`, library `mj_github_watch`) polls
+  GitHub, classifies items, and records progress and mailbox events in the
+  store. The daemon supplies live configuration, credentials, and public notices.
 - `brokk-mj-controller` (`mj-controller/`, library `mj_controller`) is the
   daemon side below the daemon process itself. It owns the database,
   provisions targets, and manages sessions. It uses the foundation and client

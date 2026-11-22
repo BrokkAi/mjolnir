@@ -50,9 +50,9 @@ pub use mj_session_runtime::checkpoint_transfer;
 pub use mj_store::recovery_gate;
 pub use mj_targets::image_pull_gate;
 
+pub use mj_core::github_rate_limit;
 pub use mj_session_runtime::github_app;
 pub use mj_session_runtime::github_credential;
-pub mod github_rate_limit;
 pub use mj_store::mailbox_outbox;
 pub use mj_store::upgrade;
 pub use mj_store::web_push;

@@ -22,6 +22,7 @@ pub mod elicitation;
 pub mod event_outcome;
 pub mod file_lock;
 pub mod github_item;
+pub mod github_rate_limit;
 pub mod github_reference;
 pub mod go;
 pub mod goal;
