@@ -448,12 +448,36 @@ def test_pathlib_join_write_to_other_file_preserves_script_history(tmp_path, wri
     "Path().write_text('x')",
     "open(root / '.rql-engine-{own}/build.py', Path('r'))",
     "for name in ['output.json']: (root / name).write_text('x')",
+    "(root / 'alias/build.py').write_text('x')",
+    "(root / 'alias/../.rql-engine-{own}/output.json').write_text('x')",
+    "(Path('/tmp') / 'output.json').write_text('x')",
+    "match Path('{checkout}/.rql-engine-{own}'):\n    case root:\n        (root / 'build.py').write_text('x')",
+    "match [Path('{checkout}/.rql-engine-{own}')]:\n    case [*root]:\n        (root / 'output.json').write_text('x')",
+    "match {{'a': 1}}:\n    case {{**root}}:\n        (root / 'output.json').write_text('x')",
+    "try:\n    pass\nexcept Exception as root:\n    (root / 'output.json').write_text('x')",
+    "match object():\n    case Path:\n        (root / 'output.json').write_text('x')",
 ])
 def test_pathlib_write_to_self_or_unproven_expression_still_invalidates_script(tmp_path, write_stmt):
     checkout = f"/workspace/{OWN}/engine-trees"
-    (tmp_path / "pre-inventory.json").write_text(json.dumps({"cwd": checkout, "tracked_paths": []}))
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({
+        "cwd": checkout, "tracked_paths": ["alias"], "tracked_symlinks": ["alias"],
+    }))
     script = f"{checkout}/.rql-engine-{OWN}/build.py"
     source = f"from pathlib import Path\nroot = Path({checkout!r})\n" + write_stmt.format(own=OWN, checkout=checkout)
+    report = audit_calls(tmp_path, [
+        shell(f"cat > {script} <<'EOF'\n{source}\nEOF", name="exec_command", status="completed"),
+        shell(f"python {script}", name="exec_command", status="failed"),
+        shell(f"python3 {script}", name="exec_command", status="failed"),
+    ], cwd=checkout, terminal_results={1: [{"exit_code": 0}], 2: [{"exit_code": 127}], 3: [{"exit_code": 1}]})
+    assert not report["passed"]
+    assert (3, "needs-inspection") in {(hit["seq"], hit["kind"]) for hit in report["hits"]}
+
+
+def test_tracked_write_without_symlink_inventory_invalidates_script(tmp_path):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({"cwd": checkout, "tracked_paths": ["alias"]}))
+    script = f"{checkout}/.rql-engine-{OWN}/build.py"
+    source = f"from pathlib import Path\nroot = Path({checkout!r})\n(root / 'alias/build.py').write_text('x')"
     report = audit_calls(tmp_path, [
         shell(f"cat > {script} <<'EOF'\n{source}\nEOF", name="exec_command", status="completed"),
         shell(f"python {script}", name="exec_command", status="failed"),

@@ -142,7 +142,7 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                                   own_workspace, engine)
     hits, calls = [], 0
     audited_engine_calls = {}
-    scripts, written = ScriptEvidence(checkout, tracked_paths), set()
+    scripts, written = ScriptEvidence(checkout, tracked_paths, tracked_symlinks), set()
     # Older transcript pages lack harness metadata. Use native card evidence
     # from any page so an opaque card cannot bypass the session's catalogue.
     antigravity = antigravity or any(
@@ -1716,10 +1716,16 @@ def interpreter_arguments(program, args):
 class ScriptEvidence(dict):
     """Confirmed contents and screened writes whose destinations started empty."""
 
-    def __init__(self, checkout=None, tracked=None):
+    def __init__(self, checkout=None, tracked=None, symlinks=None):
         super().__init__()
-        self.checkout = checkout if isinstance(checkout, str) and posixpath.isabs(checkout) else None
+        self.checkout = recorded_path(checkout, None) if isinstance(checkout, str) and posixpath.isabs(checkout) else None
         self.tracked = set(tracked) if isinstance(tracked, list) else None
+        self.symlinks = None
+        if isinstance(symlinks, list) and all(
+            isinstance(path, str) and "\0" not in path
+            and all(part not in {"", ".", ".."} for part in path.split("/")) for path in symlinks
+        ):
+            self.symlinks = frozenset(symlinks)
         self.fresh = {}
         self.opaque_paths = set()
         self.opaque = False
@@ -1743,25 +1749,42 @@ class ScriptEvidence(dict):
         if not paths:
             return False
         prefix = self.checkout.rstrip("/") + "/"
+        blocked = self.tracked | (self.symlinks or frozenset())
         for filename in paths:
             if not filename.startswith(prefix) or any(
                 filename == path or filename.startswith(path.rstrip("/") + "/") for path in self.opaque_paths
             ):
                 return False
             relative = filename.removeprefix(prefix)
-            if relative in self.tracked or any(
-                str(parent) in self.tracked for parent in pathlib.PurePosixPath(relative).parents
+            if relative in blocked or any(
+                str(parent) in blocked for parent in pathlib.PurePosixPath(relative).parents
             ):
                 return False
         return True
 
     def opaque_write(self, path, cwd):
         paths = resolve_paths(path, cwd)
-        if not paths or re.search(r"[*?\[]", path) or self.tracked is not None and any(
-            not posixpath.isabs(filename) for filename in paths
-        ):
+        if not paths or re.search(r"[*?\[]", path) or ".." in path.split("/"):
             self.clear()
             return
+        links = self.symlinks if self.symlinks is not None else self.tracked
+        if links is not None:
+            if not self.checkout:
+                self.clear()
+                return
+            prefix = self.checkout.rstrip("/") + "/"
+            for filename in paths:
+                if filename == "/dev/null":
+                    continue
+                if not posixpath.isabs(filename) or not filename.startswith(prefix):
+                    self.clear()
+                    return
+                relative = filename.removeprefix(prefix)
+                if relative in links or any(
+                    str(parent) in links for parent in pathlib.PurePosixPath(relative).parents
+                ):
+                    self.clear()
+                    return
         self.opaque_paths.update(paths)
         for key in tuple(self.fresh):
             locations = {key} if isinstance(key, str) else resolve_paths(key[1], key[0])
@@ -1906,8 +1929,18 @@ def interpreter_writes(scripts, program, source, cwd, argv):
         scripts.clear()
         return
 
-    stores = Counter(node.id for node in nodes if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store))
-    stores.update(node.arg for node in nodes if isinstance(node, ast.arg))
+    stores = Counter()
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            stores[node.id] += 1
+        elif isinstance(node, ast.arg):
+            stores[node.arg] += 1
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                               ast.MatchAs, ast.MatchStar, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+            if node.name is not None:
+                stores[node.name] += 1
+        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+            stores[node.rest] += 1
     bindings = {target.id: node.value for node in nodes if isinstance(node, ast.Assign)
                 for target in node.targets if isinstance(target, ast.Name) and stores[target.id] == 1}
     imports = {}
@@ -1920,13 +1953,26 @@ def interpreter_writes(scripts, program, source, cwd, argv):
                 if module not in understood:
                     scripts.clear()
                     return
-                imports[alias.asname or module] = alias.name if alias.asname else module
+                bound_name = alias.asname or module
+                target_name = alias.name if alias.asname else module
+                if bound_name in imports and imports[bound_name] != target_name:
+                    scripts.clear()
+                    return
+                imports[bound_name] = target_name
         elif isinstance(node, ast.ImportFrom):
             if node.level or not node.module or node.module.split(".")[0] not in understood:
                 scripts.clear()
                 return
             for alias in node.names:
-                imports[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+                if alias.name == "*":
+                    scripts.clear()
+                    return
+                bound_name = alias.asname or alias.name
+                target_name = f"{node.module}.{alias.name}"
+                if bound_name in imports and imports[bound_name] != target_name:
+                    scripts.clear()
+                    return
+                imports[bound_name] = target_name
 
     if stores.keys() & imports.keys() or any(
         isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del))
@@ -1985,8 +2031,8 @@ def interpreter_writes(scripts, program, source, cwd, argv):
             target = argument(node, 0, "path")
         elif method in {"write_text", "write_bytes", "touch", "unlink", "rmdir"}:
             target = node.func.value
-        elif name in PROCESS_CALLS | OPAQUE_CALLS | {"getattr", "globals", "locals", "__import__"} or (
-                python_may_relocate_links(node, name)
+        elif name in PROCESS_CALLS | OPAQUE_CALLS | {"getattr", "globals", "locals", "vars", "setattr", "__import__"} or (
+                python_may_relocate_links(node, name) or method == "hardlink_to"
                 or name.startswith(("builtins.", "io.", "shutil.", "tempfile.", "importlib.", "sys.argv.", "sys.path."))
                 or name.startswith(("os.", "posix.")) and not name.startswith("os.path.")):
             scripts.clear()
