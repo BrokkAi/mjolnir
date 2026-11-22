@@ -41,14 +41,14 @@ jobs:
           target/aarch64-apple-darwin/debug
 
     - name: Run Clippy lints
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy --all-targets --features brokk-mjolnir/test-hooks -- -D warnings
 
     # The runtime suite exercises Unix target paths, directory fsync, and Git
     # worktree byte preservation. This lane executes it on macOS.
     # `--no-fail-fast` reports every failing crate: one failure used to hide
     # the crates after it.
     - name: Run tests
-      run: cargo test --no-fail-fast
+      run: cargo test --no-fail-fast --features brokk-mjolnir/test-hooks
 
     # The voice worker is outside the default members and ships in the macOS
     # release, so this is its only macOS build before release.

@@ -5,18 +5,13 @@
 //! (`cache_host`). It builds on the targets and store crates and knows nothing
 //! of how a session is launched.
 
-// `test-support` compiles the test-only items for the tests of the crates
-// above, which use only some of them. The dead-code lints still run on normal
-// and test builds.
-#![cfg_attr(
-    all(feature = "test-support", not(test)),
-    allow(dead_code, unused_imports)
-)]
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
 
 // The moved modules name these by their old paths.
 pub(crate) use mj_store::database;
 pub(crate) use mj_targets::targets;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) use mj_targets::test_isolation;
 
 pub mod cache_host;

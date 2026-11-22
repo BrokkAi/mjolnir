@@ -3970,6 +3970,7 @@ mod profile_homes {
 // Hard-won: 7a9a7ec: rename released the config lock before migrating session rows.
 #[test]
 fn profile_rename_holds_configuration_through_reference_migration() {
+    mj_core::test_hooks::enable_test_hooks();
     const NAME: &str = "profile_rename_holds_configuration_through_reference_migration";
     const CHILD: &str = "MJ_PROFILE_RENAME_LOCK_CHILD";
     if std::env::var_os(CHILD).is_none() {

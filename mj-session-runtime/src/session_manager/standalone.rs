@@ -301,7 +301,7 @@ impl StandaloneSession {
         Ok(true)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub async fn connect_adopting(spec: &CommandSpec, session_id: &str) -> Result<Self> {
         let mut client = Self::prepare_adoption(spec, session_id).await?;
         let cut = if Self::adoption_needs_cut(&mut client, session_id).await? {
@@ -312,7 +312,7 @@ impl StandaloneSession {
         Self::connect_prepared_adopting(spec, session_id, client, cut).await
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     async fn connect_prepared_adopting(
         spec: &CommandSpec,
         session_id: &str,

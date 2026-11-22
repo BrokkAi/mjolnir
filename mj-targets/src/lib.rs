@@ -7,6 +7,9 @@
 //! runtime and the lifecycle operations can each build on it without building
 //! on each other.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 pub mod aws_assume_role;
 pub mod aws_credentials;
 pub mod command_checks;
@@ -17,7 +20,7 @@ pub mod tailscale;
 pub mod target_storage;
 pub mod targets;
 pub mod termination;
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub mod test_isolation;
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub mod test_log;

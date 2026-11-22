@@ -18,7 +18,6 @@ include = [
     "src/activity/eot_glide_questions.json",
     "src/activity/eot_glide_fresh_sample.json",
     "src/github_item/questions_v2.json",
-    "src/github_item/ettin-tokenizer.json",
     # OpenAI Codex guardian policy embedded by the guardian reviewers.
     "src/guardian/*.md",
     "src/guardian/OPENAI_CODEX_NOTICE.txt",
@@ -55,15 +54,6 @@ include = [
 [lib]
 name = "mj_core"
 
-[features]
-# Lets a test binary, which has no `main` to install one, read the build
-# identity compiled into this crate.
-test-identity = []
-github-history = ["dep:tokenizers"]
-default = []
-golden = []
-test-hooks = ["test-identity"]
-
 [lints]
 workspace = true
 
@@ -82,24 +72,23 @@ dirs.workspace = true
 flate2.workspace = true
 getrandom.workspace = true
 imbl.workspace = true
-jsonc-parser = { version = "0.34", features = ["serde"] }
+jsonc-parser.workspace = true
 libc.workspace = true
 memchr.workspace = true
 regex = "1"
-tokenizers = { version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
 reqwest.workspace = true
 httpdate = "1"
 ruzstd.workspace = true
 rustls.workspace = true
-serde = { workspace = true, features = ["rc"] }
+serde.workspace = true
 serde_ignored.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 similar = "2.7"
 tar.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true }
+tokio.workspace = true
+tokio-util.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true
@@ -120,6 +109,5 @@ windows-sys = { workspace = true, features = [
 
 
 [dev-dependencies]
-tempfile.workspace = true
 tiny_http = "0.12"
-tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true

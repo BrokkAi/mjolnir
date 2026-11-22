@@ -192,7 +192,7 @@ apple=no
 /// `platform`, `podman`, `docker`, `macos`, `container-version` and
 /// `container-status`. Tests across this crate stand in for a remote host,
 /// so they need the real framing rather than a second description of it.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub fn machine_probe_fixture(results: &[(&str, i32, &[u8], &str)]) -> Vec<u8> {
     const NAMES: [&str; 6] = [
         "platform",

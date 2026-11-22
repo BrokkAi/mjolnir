@@ -1,5 +1,5 @@
 use super::*;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use mj_core::usage::ProviderCost;
 use mj_core::usage::{TokenUsage, UsageScope, pricing};
 

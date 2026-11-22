@@ -13,12 +13,6 @@ name = "mj_worker_launch"
 # The crate has no doc tests; looking for them makes rustdoc compile it again.
 doctest = false
 
-[features]
-default = []
-test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks", "mj-store/test-hooks", "mj-build-cache/test-hooks", "mj-worker-staging/test-hooks"]
-# Exposes the shared test fixtures to the tests of the crates above.
-test-support = ["mj-core/test-hooks", "mj-targets/test-support", "mj-store/test-support", "mj-build-cache/test-support", "mj-worker-staging/test-support"]
-
 [lints]
 workspace = true
 
@@ -37,9 +31,5 @@ tempfile.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-mj-core = { workspace = true, features = ["test-hooks", "golden"] }
-mj-targets = { workspace = true, features = ["test-support"] }
-mj-store = { workspace = true, features = ["test-support"] }
-mj-build-cache = { workspace = true, features = ["test-support"] }
-mj-worker-staging = { workspace = true, features = ["test-support"] }
+
 tempfile.workspace = true

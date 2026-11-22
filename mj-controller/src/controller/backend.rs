@@ -631,7 +631,7 @@ fn verify_ssh_connectivity(ssh: &SshTarget, executor: &impl CommandExecutor) -> 
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn backend_bundle(
     bundle: &ProjectBundle,
     executor: &impl CommandExecutor,

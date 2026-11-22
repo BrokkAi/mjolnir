@@ -8,7 +8,7 @@ use futures::{TryStreamExt, stream};
 use serde_json::Value;
 
 use mj_checkpoint::archive::CanonicalSessionSnapshot;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use mj_checkpoint::archive::CanonicalTranscriptBody;
 use mj_transcript::handoff::{
     MODEL_HANDOFF_OPENING, RETAINED_CLOSE, RETAINED_OPEN, encode_handoff, reusable_handoff,
@@ -17,7 +17,7 @@ use mj_transcript::summary::{SummaryRole, TranscriptSummary};
 
 pub use mj_core::config::DEFAULT_CONTEXT_BYTES;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use mj_transcript::summary::HANDOFF_PLACEHOLDER;
 pub use mj_transcript::summary::{
     ARCHIVE_HANDOFF_PREAMBLE, HANDOFF_PREAMBLE, LEGACY_HANDOFF_PREAMBLE,

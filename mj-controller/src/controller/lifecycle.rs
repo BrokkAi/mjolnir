@@ -976,8 +976,11 @@ impl Controller {
         )?;
 
         if let Some(attempt) = origin_delta.as_mut() {
-            #[cfg(feature = "test-hooks")]
-            mj_core::runtime::off_async_worker(|| mj_core::test_hooks::reach_test_hook("origin_delta_after_preflight"))?;
+            if mj_core::test_hooks::test_hooks_enabled() {
+                mj_core::runtime::off_async_worker(|| {
+                    mj_core::test_hooks::reach_test_hook("origin_delta_after_preflight")
+                })?;
+            }
             // An accepted suspend owns this Closing record. The worker's
             // receipt carries the stop across a controller handoff.
             if let Some(reason) = attempt.restart_reason(executor)? {
@@ -3224,6 +3227,5 @@ fn apply_interrupted_close_error(
 #[cfg(test)]
 mod tests;
 // Shared with mj-daemon's tests through the `test-support` feature.
-#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_fixtures;

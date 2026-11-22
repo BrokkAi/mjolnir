@@ -8,6 +8,9 @@
 //! It deliberately has no provisioning or persistence side effects. Input is
 //! reduced to [`DashboardAction`] values for the controller to run.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};

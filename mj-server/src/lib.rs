@@ -6,4 +6,7 @@
 //! This is a separate crate so that an edit to the daemon does not recompile
 //! the server, and the two test suites build as separate units.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 pub mod server;

@@ -42,7 +42,6 @@ pub use subagent_park::{FAILED_STARTUP_CLEANUP_TIMEOUT, failed_launch_cleanup_ex
 mod subagents;
 pub use subagents::recover_registered_subagent_startup;
 // Shared fixtures; the `test-support` feature lends them to mj-daemon's tests.
-#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support;
 pub mod update;
@@ -1823,5 +1822,6 @@ pub fn config_only_controller(config: Config) -> Controller {
 #[cfg(test)]
 mod tests;
 
-#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
 pub use mbx::install::MBX_TEST_RELEASE_URL;

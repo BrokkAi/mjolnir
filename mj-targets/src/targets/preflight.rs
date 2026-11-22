@@ -1319,7 +1319,7 @@ pub(super) fn run_ssh_podman_probes(
 ///
 /// Tests across this crate stand in for a remote host, so they need the real
 /// framing rather than a second, drifting description of it.
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn ssh_podman_probe_fixture(probes: &[(&str, i32, &str, &str)]) -> Vec<u8> {
     let mut output = String::new();
     for (name, status, stdout, stderr) in probes {

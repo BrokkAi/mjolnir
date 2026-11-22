@@ -38,7 +38,7 @@ pub fn load_session_usage_report(
     )
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<SessionUsageReport> {
     load_with(
         path,

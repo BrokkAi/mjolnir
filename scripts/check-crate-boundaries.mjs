@@ -38,9 +38,40 @@ const allowed = {
   'brokk-mj-voice-worker': [],
 };
 const packages = new Set(metadata.packages.map(p => p.name));
+const testHookBinaries = new Set(['brokk-mjolnir', 'brokk-mj-worker']);
+const removedFeatures = ['test-support', 'test-identity', 'golden', 'github-history'];
+// Cargo metadata includes inherited dependency features and member additions.
+const unifiedFeatures = {
+  axum: [],
+  chrono: ['serde'],
+  getrandom: ['std'],
+  libc: ['extra_traits'],
+  'jsonc-parser': ['serde', 'cst'],
+  serde_json: ['float_roundtrip'],
+  url: ['serde'],
+  tokio: ['full', 'test-util'],
+  serde: ['derive', 'rc', 'alloc'],
+  'tokio-util': ['rt', 'compat', 'io', 'codec'],
+  reqwest: ['rustls-no-provider', 'blocking', 'json', 'query', 'stream'],
+  image: ['png', 'jpeg', 'webp'],
+};
 for (const pkg of metadata.packages) {
   assert(allowed[pkg.name], `Declare the architectural owner of ${pkg.name}`);
   assert.notEqual(path.dirname(pkg.manifest_path), root, 'The root manifest must be workspace-only');
+  for (const feature of removedFeatures) {
+    assert(!Object.hasOwn(pkg.features, feature), `${pkg.name}: remove feature ${feature}`);
+  }
+  if (Object.hasOwn(pkg.features, 'test-hooks')) {
+    assert(testHookBinaries.has(pkg.name), `${pkg.name}: only binary crates may declare test-hooks`);
+    assert.deepEqual(pkg.features['test-hooks'], [], `${pkg.name}: test-hooks must not forward features`);
+  }
+  for (const dep of pkg.dependencies) {
+    if (!Object.hasOwn(unifiedFeatures, dep.name)) continue;
+    assert.deepEqual(dep.features.toSorted(), unifiedFeatures[dep.name].toSorted(),
+      `${pkg.name}: use workspace features for ${dep.name}`);
+    assert.equal(dep.uses_default_features, !['reqwest', 'image'].includes(dep.name),
+      `${pkg.name}: use workspace defaults for ${dep.name}`);
+  }
   for (const dep of pkg.dependencies.filter(d => d.kind === 'dev' && packages.has(d.name))) {
     if (!allowed[pkg.name].includes(dep.name)) {
       assert(dep.path && dep.req === '*', `${pkg.name}: cross-runtime test fixture ${dep.name} must remain an unpublished, versionless path dependency`);

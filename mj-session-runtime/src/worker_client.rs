@@ -176,6 +176,5 @@ pub struct RelayClient {
 #[cfg(test)]
 mod tests;
 // Shared with mj-daemon's tests through the `test-support` feature.
-#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_fixtures;

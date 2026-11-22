@@ -15,7 +15,7 @@ pub enum SessionRelays {
     /// of its own to a live worker.
     Actors(SessionManagerControl),
     /// A connection of its own per session, for tests against fixture workers.
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     Direct,
 }
 
@@ -57,8 +57,7 @@ pub trait CredentialSyncRuntime: Send + Sync {
 }
 
 /// A test reader: the host's login is never known, so no session copy changes.
-#[cfg(any(test, feature = "test-support"))]
-pub fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::SlopcopLogin>> {
+pub(super) fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::SlopcopLogin>> {
     bail!("tests do not read the host's slopcop login")
 }
 
@@ -239,7 +238,7 @@ impl Drop for SessionTurn {
 
 impl SessionSteps {
     /// How many sessions the lock map has an entry for.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn tracked(&self) -> usize {
         self.0
             .lock()
@@ -296,7 +295,7 @@ pub struct CredentialSyncCoordinator {
 }
 
 impl CredentialSyncCoordinator {
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn spawn() -> Self {
         Self::spawn_inner(
             SessionRelays::Direct,
@@ -308,7 +307,7 @@ impl CredentialSyncCoordinator {
 
     /// A coordinator that retries a role-scoped session's AWS renewal after
     /// `retry` instead of after the sync interval.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn spawn_with_renewal_retry(retry: Duration) -> Self {
         Self::spawn_inner(SessionRelays::Direct, None, unknown_slopcop_login, retry)
     }
@@ -327,8 +326,7 @@ impl CredentialSyncCoordinator {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn spawn_inner(
+    fn spawn_inner(
         relays: SessionRelays,
         runtime: Option<Arc<dyn CredentialSyncRuntime>>,
         slopcop_login: SlopcopLoginSource,
@@ -385,7 +383,6 @@ impl CredentialSyncCoordinator {
             // say so here when they can take one again.
             let wakes = match &relays {
                 SessionRelays::Actors(manager) => Some(manager.credential_wakes.clone()),
-                #[cfg(any(test, feature = "test-support"))]
                 SessionRelays::Direct => None,
             };
             let mut owed = wakes.as_ref().map(|wakes| wakes.subscribe());
@@ -668,7 +665,7 @@ impl CredentialSyncCoordinator {
 
 /// What the coordinator does over time, once: the profile's pass, and one AWS
 /// cycle for each role-scoped session.
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(test, unix))]
 pub async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
@@ -756,7 +753,7 @@ fn queue_session(
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub async fn reconcile_profile_guarded(
     access: &SessionAccess<'_>,
     targets: &[CredentialSyncTarget],
@@ -1316,9 +1313,8 @@ fn joined_failures(failures: &[StepFailure]) -> Option<String> {
 // Without a daemon to say which sessions are current, a test run has every
 // session current on its thread, unless it sets this to false (then the
 // session records on disk decide).
-#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub static SESSIONS_ARE_CURRENT: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    pub(super) static SESSIONS_ARE_CURRENT: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 /// Whether the session is still the one this target describes. A lifecycle
@@ -1330,8 +1326,9 @@ async fn target_is_current(
     if let Some(runtime) = runtime {
         return runtime.credential_target_is_current(target);
     }
-    #[cfg(any(test, feature = "test-support"))]
-    if SESSIONS_ARE_CURRENT.with(std::cell::Cell::get) {
+    if (cfg!(test) || mj_core::test_hooks::test_fixtures_enabled())
+        && SESSIONS_ARE_CURRENT.with(std::cell::Cell::get)
+    {
         return Ok(true);
     }
     let candidate = target.clone();
@@ -1798,7 +1795,7 @@ pub struct RenewalTasks(BTreeMap<String, RenewalTask>);
 impl RenewalTasks {
     /// A task standing in for the session's renewal, as one that had been
     /// started for `target`.
-    #[cfg(all(any(test, feature = "test-support"), unix))]
+    #[cfg(all(test, unix))]
     pub fn with_task(
         target: &CredentialSyncTarget,
         handle: tokio::task::JoinHandle<()>,
@@ -1815,7 +1812,7 @@ impl RenewalTasks {
     }
 
     /// Whether the session has a renewal task that has not ended.
-    #[cfg(all(any(test, feature = "test-support"), unix))]
+    #[cfg(all(test, unix))]
     pub fn is_running(&self, session_id: &str) -> bool {
         self.0
             .get(session_id)
@@ -2246,7 +2243,7 @@ pub struct CanonicalLogin {
 }
 
 /// A login as read from where its store keeps it.
-#[cfg(all(unix, any(test, feature = "test-support")))]
+#[cfg(all(unix, test))]
 type LoginRead = Result<(CredentialSnapshot, Vec<u8>), String>;
 
 /// How the controller reads and writes a profile's login: its store
@@ -2273,7 +2270,7 @@ impl LoginAccess {
         }
     }
 
-    #[cfg(all(any(test, feature = "test-support"), unix))]
+    #[cfg(all(test, unix))]
     pub fn with_lock_marker(mut self, marker: std::path::PathBuf) -> Self {
         self.lock_marker = Some(marker);
         self
@@ -2379,7 +2376,7 @@ pub enum PassLogin {
     /// is reached is harmless: a pull rereads under the locks and installs
     /// only a strictly newer login, and a push of an older login is refused by
     /// the session for being older.
-    #[cfg(all(unix, any(test, feature = "test-support")))]
+    #[cfg(all(unix, test))]
     Keychain {
         read: Arc<LoginRead>,
         access: LoginAccess,
@@ -2593,7 +2590,7 @@ fn read_canonical_login(
     let kind = target.harness;
     let (access, credential, bytes) = match login {
         PassLogin::Shared(owner) => return owner.for_target(target),
-        #[cfg(all(unix, any(test, feature = "test-support")))]
+        #[cfg(all(unix, test))]
         PassLogin::Keychain { read, access } => {
             let (credential, bytes) = read.as_ref().clone().map_err(|error| anyhow!("{error}"))?;
             (access.clone(), credential, bytes)
@@ -2727,7 +2724,6 @@ pub async fn run_on_session(
                 Err(error) => Err(error),
             }
         }
-        #[cfg(any(test, feature = "test-support"))]
         SessionRelays::Direct => {
             let _queued = QueuedJob(hold);
             let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;

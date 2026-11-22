@@ -5,4 +5,7 @@
 //! production environment, which reads the daemon's own state; the host does
 //! not know the daemon.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 pub mod review_host;

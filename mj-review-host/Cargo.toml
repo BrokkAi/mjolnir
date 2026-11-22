@@ -27,14 +27,10 @@ mj-accounts.workspace = true
 anyhow.workspace = true
 futures = "0.3"
 serde_json.workspace = true
-tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true, features = ["compat", "io"] }
+tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-mj-core = { workspace = true, features = ["test-hooks", "golden"] }
-mj-targets = { workspace = true, features = ["test-support"] }
-mj-store = { workspace = true, features = ["test-support"] }
-mj-session-runtime = { workspace = true, features = ["test-support"] }
+mj-targets.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }

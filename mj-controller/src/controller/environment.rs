@@ -544,7 +544,7 @@ impl Reclamation {
 
 /// Roll back a checkout created during preparation, before any worker could
 /// receive it. This explicit authority is only for that construction path.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn cleanup_unstarted_checkout(
     executor: &impl CommandExecutor,
     checkout: &ManagedWorktree,

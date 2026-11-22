@@ -10,7 +10,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// `supervisor_preference`, and supervisor children write `supervisor: true` in
 /// `record_json` (which older readers reject via `deny_unknown_fields`), while
 /// older writers drop `sessions.supervisors`.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 151;
 
 pub(super) struct SchemaState {
@@ -156,22 +156,17 @@ pub(super) fn open(path: &Path) -> Result<Connection> {
 /// Open an existing database without permitting schema or data mutation.
 /// Client processes use this path so an accidental write fails locally
 /// instead of competing with the daemon's writer.
-#[cfg(not(any(test, feature = "test-support")))]
 pub(super) fn open_reader(path: &Path) -> Result<Reader> {
-    open_reader_strict(path)
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub(super) fn open_reader(path: &Path) -> Result<Reader> {
-    // Path-taking database helpers are migration fixtures in unit tests: they
-    // intentionally open old or not-yet-created schemas. Production query
-    // entry points compile against the strict reader above. The connection is
-    // writable but keeps SQLite's DEFERRED default, so a fixture read does not
-    // take the write lock. It is never pooled.
-    Ok(Reader {
-        connection: Some(open_writable(path)?),
-        home: None,
-    })
+    if cfg!(test) || mj_core::test_hooks::test_fixtures_enabled() {
+        // Migration fixtures intentionally read older or uninitialized
+        // schemas. The unpooled connection keeps SQLite's DEFERRED default.
+        Ok(Reader {
+            connection: Some(open_writable(path)?),
+            home: None,
+        })
+    } else {
+        open_reader_strict(path)
+    }
 }
 
 /// Idle read-only connections kept per database file. Each new connection
@@ -224,7 +219,7 @@ fn idle_readers() -> &'static Mutex<HashMap<PathBuf, Vec<IdleReader>>> {
     IDLE.get_or_init(Mutex::default)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 thread_local! {
     /// Read-only connections this thread opened rather than reused.
     static OPENED_READERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -287,7 +282,6 @@ impl Drop for Reader {
 /// a store that another build migrated is refused just the same. On a
 /// connection that has already parsed the schema that check is a few small
 /// queries; SQLite parses the schema again itself if it changed.
-#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 fn open_reader_strict(path: &Path) -> Result<Reader> {
     let identity = StoreIdentity::of(path);
     let reused = identity.and_then(|identity| {
@@ -307,7 +301,7 @@ fn open_reader_strict(path: &Path) -> Result<Reader> {
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
             .with_context(|| format!("open Mjolnir database read-only {}", path.display()))?;
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             OPENED_READERS.with(|opened| opened.set(opened.get() + 1));
             connection.busy_timeout(Duration::from_secs(5))?;
             connection.execute_batch(
@@ -379,7 +373,7 @@ fn verify_schema_once(path: &Path, connection: &Connection) -> Result<()> {
 /// Forget that this process verified a database's schema. Only tests need it:
 /// they simulate a store written by an older build by editing the schema of a
 /// database this process has already opened, which no controller can do.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn forget_verified_schema(path: &Path) {
     verified_schemas()
         .lock()
@@ -3656,7 +3650,7 @@ fn create_baseline_schema(connection: &Connection) -> Result<()> {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible: i64) {
     let connection = Connection::open(path).unwrap();
     let transaction = connection.unchecked_transaction().unwrap();
@@ -3680,7 +3674,7 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
 }
 
 /// Rewind environment ownership and remove indexes on the columns it added.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn drop_environment_schema(connection: &Connection) {
     // These historical fixtures also predate removal of the size columns.
     legacy_schema::ensure_session_container_override_columns(connection).unwrap();
@@ -3714,7 +3708,7 @@ pub(super) fn drop_environment_schema(connection: &Connection) {
         .unwrap();
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn drop_session_row_triggers(connection: &Connection) {
     drop_environment_schema(connection);
     connection
@@ -3731,7 +3725,7 @@ pub(super) fn drop_session_row_triggers(connection: &Connection) {
         .unwrap();
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn restore_github_v84_schema(connection: &Connection) {
     drop_session_row_triggers(connection);
     if !legacy_schema::table_has_column(connection, "github_watch_items", "timeline_at").unwrap() {
@@ -3760,7 +3754,7 @@ pub(super) fn restore_github_v84_schema(connection: &Connection) {
 /// and `active_group` columns and a single `push_findings` object return, and
 /// `open_reviews` goes, so a historical fixture has the shape older builds
 /// wrote. Does nothing to a store that already has that shape.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn restore_pre145_review_columns(connection: &Connection) {
     if !legacy_schema::table_has_column(connection, "turn_review_state", "open_reviews").unwrap() {
         return;
@@ -3781,7 +3775,7 @@ pub(super) fn restore_pre145_review_columns(connection: &Connection) {
 
 /// Rewinds the preference table in a current-schema database so an ad-hoc
 /// historical fixture has the singleton shape that existed before revision 101.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
     if !legacy_schema::table_has_column(connection, "subagent_preference", "profile_id").unwrap() {
         return;
@@ -3798,7 +3792,7 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
 }
 
 /// Historical fixtures must remove review columns introduced afterward.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
     if version < 145 {
         restore_pre145_review_columns(connection);
@@ -3866,7 +3860,7 @@ pub(super) fn restore_review_state_schema(connection: &Connection, version: i64)
 /// Historical fixtures must remove revision 116's prompt-history triggers and
 /// index. Revision 77 recreates `prompt_history`, and SQLite refuses that
 /// rename while triggers on other tables still name the dropped table.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn restore_pre116_prompt_history(connection: &Connection, version: i64) {
     if version < 116 {
         connection

@@ -1277,7 +1277,7 @@ fn checked(
     Ok(output)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn container_upgrade_test_plan(session_id: &str) -> RetainedContainer {
     let name = resource_name(session_id).unwrap();
     RetainedContainer {

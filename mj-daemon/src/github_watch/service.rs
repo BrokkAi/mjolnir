@@ -800,7 +800,7 @@ async fn build_session_evidence(
                 } else {
                     Vec::new()
                 };
-                mj_transcript::github_history::build_evidence(&pair.base, spans)
+                mj_github_relevance::github_history::build_evidence(&pair.base, spans)
                     .map(|(evidence, _)| evidence)
             })
             .collect()

@@ -1380,13 +1380,7 @@ mod tests {
         );
         assert!(rendered.contains("Please verify the <edge> case."));
         assert!(rendered.contains("session_id b6932a80-1234-5678-9abc-def012345678"));
-        #[cfg(feature = "golden")]
         crate::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "mailbox-events", &rendered);
-        #[cfg(not(feature = "golden"))]
-        assert_eq!(
-            rendered.trim_end(),
-            include_str!("../tests/golden/mailbox-events.txt").trim_end()
-        );
     }
 
     #[test]
