@@ -159,6 +159,70 @@ fn ssh_docker_registration_config() -> Config {
     config
 }
 
+// Hard-won: d64ca35d9: cross-target Move provisioned from the session's old checkpoint after capturing a new snapshot.
+#[test]
+fn move_provisioning_uses_the_captured_manifest_without_a_session_checkpoint() {
+    use crate::controller::test_support::{
+        checkpoint_test_session, write_network_checkpoint_archive,
+    };
+
+    const NAME: &str = "move_provisioning_uses_the_captured_manifest_without_a_session_checkpoint";
+    const CHILD: &str = "MJ_TEST_MOVE_PROVISION_MANIFEST";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), NAME))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "move-provision-manifest")
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::worker_build::test_worker_executable(),
+            )
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let checkpoint = write_network_checkpoint_archive(directory.path(), PROVISIONED_SESSION, 0);
+    let manifest = mj_checkpoint::archive::verify_archive_streaming(&checkpoint.archive_path)
+        .unwrap()
+        .manifest;
+    let mut session = checkpoint_test_session(PROVISIONED_SESSION);
+    session.state = SessionState::Provisioning;
+    session.target_template_id = "docker".into();
+    session.last_profile = "codex".into();
+    session.target = None;
+    session.checkpoint = None;
+    let config = ssh_docker_registration_config();
+    config.save().unwrap();
+    crate::database::save_session(&session).unwrap();
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: [(session.id.clone(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    let executor = RecordingExecutor::failing("verify SSH connectivity");
+    let error =
+        futures::executor::block_on(crate::controller::test_support::worker_test_scope_async(
+            PROVISIONED_SESSION,
+            controller.provision_session_with_failure_disposition(
+                PROVISIONED_SESSION,
+                &executor,
+                None,
+                ProvisioningFailureDisposition::Preserve,
+                Some(&manifest),
+            ),
+        ))
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("SSH connectivity test failed"),
+        "{error:#}"
+    );
+}
+
 /// Answers the Docker platform query as Docker Desktop and the host
 /// filesystem probe as ext4, which alone would keep the overlay.
 struct DockerDesktopExecutor;
@@ -472,6 +536,7 @@ fn stale_worker_fails_before_any_container_is_created() {
                 &executor,
                 None,
                 ProvisioningFailureDisposition::Discard,
+                None,
             ),
         ))
         .unwrap_err();
@@ -560,6 +625,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
                 &executor,
                 None,
                 ProvisioningFailureDisposition::Discard,
+                None,
             ),
         ))
         .unwrap_err();
@@ -1029,6 +1095,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
                 &executor,
                 None,
                 ProvisioningFailureDisposition::Discard,
+                None,
             ),
         ))
         .unwrap_err();

@@ -1664,7 +1664,6 @@ impl Controller {
         session_id: &str,
         previous: &SessionRecord,
         executor: &(impl CommandExecutor + Sync),
-        manager: &SessionManagerControl,
     ) -> Result<bool> {
         let Some(record) = self.state.sessions.get(session_id) else {
             return Ok(false);
@@ -1674,17 +1673,19 @@ impl Controller {
         }
         let attempt = OriginDeltaSuspend::load(self, session_id, executor)?;
         executor.notify_notice("Restarting the source agent in place after failed Move");
-        attempt
+        // The Move owns the source placement until rollback is published.
+        // The session manager intentionally excludes that placement while
+        // Move owns it. Prove worker readiness on the owner's connection.
+        let relay = attempt
             .start_worker(
                 self,
                 admission,
                 session_id,
                 executor,
-                Some(manager),
+                None,
                 mj_core::worker_launch::WorkerRunMode::Harness,
             )
-            .await?
-            .release();
+            .await?;
         let record = self
             .state
             .sessions
@@ -1693,6 +1694,7 @@ impl Controller {
         record.state = state_after_unsealed_close(previous);
         record.updated_at = now();
         self.persist_session_state(session_id)?;
+        relay.release();
         if let Err(cleanup) = attempt.clear_after_restart(executor) {
             tracing::warn!(
                 session_id,

@@ -2712,6 +2712,7 @@ impl Controller {
             }
             let utility_handoff = {
                 let _provisioning = ResumePhaseTimer::new(session_id, "provision destination");
+                let move_manifest = transferring_workspace.then_some(archive_manifest);
                 if let Some(config) = utility_config.as_ref() {
                     Some(
                         provision_with_cross_harness_handoff(
@@ -2723,6 +2724,7 @@ impl Controller {
                             &canonical_session,
                             native_prior.as_ref(),
                             context_bytes,
+                            move_manifest,
                         )
                         .context("prepare the cross-harness destination")?,
                     )
@@ -2732,6 +2734,7 @@ impl Controller {
                         executor,
                         github_token.as_deref(),
                         ProvisioningFailureDisposition::Preserve,
+                        move_manifest,
                     )
                     .await?;
                     None
@@ -3473,6 +3476,7 @@ fn provision_with_cross_harness_handoff(
     snapshot: &CanonicalSessionSnapshot,
     prior: Option<&crate::compaction::PriorCompaction>,
     context_bytes: usize,
+    move_manifest: Option<&mj_checkpoint::archive::ArchiveManifest>,
 ) -> Result<String> {
     let (_provision, handoff) = execute_joined_cross_harness_work(
         "cross-harness provisioning",
@@ -3488,6 +3492,7 @@ fn provision_with_cross_harness_handoff(
                     &provision_executor,
                     github_token,
                     ProvisioningFailureDisposition::Preserve,
+                    move_manifest,
                 ),
             )
         },

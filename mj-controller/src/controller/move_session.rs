@@ -332,7 +332,7 @@ pub fn record_finished_move_recovery(
             &failed_move_recovery(operation, state),
             &operation.operation_id,
         );
-        crate::database::save_move_outcome(operation, Some(&message))
+        crate::database::save_move_outcome(operation, Some(&message), false)
     } else {
         crate::database::save_move_operation(operation)
     }
@@ -1974,6 +1974,10 @@ impl Controller {
             result => result,
         };
         let session_id = operation.selection.session_id.clone();
+        let fail_closing_source = result.is_err()
+            && !operation.in_place
+            && operation.holds_source_environment()
+            && self.state.sessions[&session_id].state == SessionState::Closing;
         let mut last_error = self
             .state
             .sessions
@@ -2057,7 +2061,7 @@ impl Controller {
             }
         };
         operation.updated_at = now();
-        crate::database::save_move_outcome(operation, last_error.as_deref())?;
+        crate::database::save_move_outcome(operation, last_error.as_deref(), fail_closing_source)?;
         if !operation.is_active() && !operation.granted_keys.is_empty() {
             recovery::spawn_move_key_cleanup_background();
         }
@@ -2081,6 +2085,9 @@ impl Controller {
             .expect("Move outcome session");
         record.last_error = last_error;
         record.updated_at = operation.updated_at.clone();
+        if fail_closing_source {
+            record.state = SessionState::Error;
+        }
         Ok(outcome(
             &operation.operation_id,
             &operation.selection,
@@ -2331,7 +2338,7 @@ impl Controller {
                     if !operation.in_place
                         && matches!(
                             self.restart_retained_move_source(
-                                admission, &id, &previous, executor, manager,
+                                admission, &id, &previous, executor,
                             )
                             .await,
                             Ok(true)
@@ -2469,7 +2476,7 @@ impl Controller {
                         if destination_teardown_confirmed {
                             match self
                                 .restart_retained_move_source(
-                                    admission, &id, &previous, executor, manager,
+                                    admission, &id, &previous, executor,
                                 )
                                 .await
                             {
@@ -2737,7 +2744,7 @@ impl Controller {
                     let failure =
                         self.rollback_failed_resume(&id, previous, crate::database::move_source_environment(&operation.operation_id)?.as_ref(), false, cause, executor)?;
                     ensure!(
-                        self.state.sessions[&id].state == SessionState::Stopped,
+                        matches!(self.state.sessions[&id].state, SessionState::Stopped | SessionState::Closing),
                         "{failure:#}"
                     );
                 }
@@ -3203,13 +3210,13 @@ impl Controller {
                 operation.checkpoint_retained(),
                 "move has no verified snapshot"
             );
+            if operation.recovery_session.is_none() {
+                operation.recovery_session = Some(self.state.sessions[&id].clone());
+            }
             ensure!(
                 !executor.cancellation_requested(),
                 "move cancelled after source capture; snapshot and source environment retained"
             );
-            if operation.recovery_session.is_none() {
-                operation.recovery_session = Some(self.state.sessions[&id].clone());
-            }
             operation.phase = MovePhase::Transferring;
             operation.updated_at = now();
             crate::database::save_move_operation(operation)?;
@@ -3285,7 +3292,7 @@ impl Controller {
                     if destination_teardown_confirmed {
                         match self
                             .restart_retained_move_source(
-                                admission, &id, &previous, executor, manager,
+                                admission, &id, &previous, executor,
                             )
                             .await
                         {
