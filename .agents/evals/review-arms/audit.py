@@ -2586,7 +2586,7 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
 
 
 def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, single_commit=False,
-                cwd=None, home=None, allow_in_place_edits=False, engine=False):
+                cwd=None, home=None, allow_in_place_edits=False, engine=False, rollout_paths=None):
     """Screen pilot inputs; a needs-inspection hit prevents automatic acceptance."""
     try:
         pages = json.loads(transcript_path.read_text())
@@ -2609,6 +2609,8 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
         runtime = read_record(transcript_path.with_name("engine-runtime.json")) if engine else {}
         claude_code_version = (runtime.get("claude_code_version")
                                if isinstance(runtime, dict) and runtime.get("session_id") == own_workspace else None)
+        if rollout_paths is None:
+            rollout_paths = sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))
         result = scan(pages, own_workspace, commits=commits, allow_rql=allow_rql, single_commit=single_commit,
                       cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits, engine=engine,
                       antigravity=captured_antigravity(transcript_path),
@@ -2616,8 +2618,7 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
                       tracked_symlink_targets=before.get("tracked_symlink_targets"),
                       claude_code_version=claude_code_version,
                       tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
-                      rollout=rollout_commands(
-                          sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))))
+                      rollout=rollout_commands(rollout_paths))
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = {"tool_items": 0, "hits": [{"kind": "missing-or-unreadable-transcript", "snippet": str(error)}]}
     return dict(result, passed=all(hit["kind"] in PASSING_HIT_KINDS for hit in result["hits"]))

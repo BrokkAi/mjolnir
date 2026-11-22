@@ -409,14 +409,24 @@ class SealedRunner:
         return {"expected_provider_model": expected_model,
                 "reported_provider_models": models, "pages": pages}
 
-    def audit_transcript(self, path, sid, session):
-        from audit import audit_pilot
+    def audit_transcript(self, path, sid, session, *, capture_label):
+        from audit import ROLLOUT_DIRECTORY, audit_pilot
 
-        missing_rollout = (session.get("harness_kind") == "codex"
-                           and not self.driver.capture_pilot_rollouts(path.parent, sid))
+        rollout_paths = ()
+        rollout_dir = None
+        captured = False
+        if session.get("harness_kind") == "codex":
+            # Each audit gets an atomically published snapshot, including retries of the same turn.
+            rollout_dir = path.parent / f"{capture_label}-{ROLLOUT_DIRECTORY}-{uuid4().hex}"
+            captured = self.driver.capture_pilot_rollouts(
+                path.parent, sid, reuse_existing=False, directory_name=rollout_dir.name)
+            if captured:
+                rollout_paths = sorted(rollout_dir.glob("rollout-*.jsonl"))
         result = audit_pilot(path, sid, commits=(session["at"],), single_commit=True,
-                             engine=self.engine_only)
-        if missing_rollout:
+                             engine=self.engine_only, rollout_paths=rollout_paths)
+        if captured:
+            result["rollout_directory"] = rollout_dir.name
+        elif rollout_dir is not None:
             result["passed"] = False
             result["hits"].append({"kind": "missing-codex-rollout", "snippet": "see rollout-capture-error.json"})
         return result
@@ -458,7 +468,7 @@ class SealedRunner:
             transcript = directory / "transcript.json"
             save_json(transcript, pages)
             save_json(directory / "usage.json", self.capture_usage(sid, expected_model))
-            result = self.audit_transcript(transcript, sid, s)
+            result = self.audit_transcript(transcript, sid, s, capture_label="final")
             save_json(directory / "audit.json", result)
             empty_failed_turn = failed_turn and not any(page["items"] for page in pages)
             if (not empty_failed_turn
@@ -535,7 +545,7 @@ class SealedRunner:
         # the host-only collection so a voided answer remains inspectable.
         path = directory / f"turn-{turn}-transcript.json"
         self.driver.save(path, self.driver.transcript(sid))
-        result = self.audit_transcript(path, sid, self.driver.session(sid))
+        result = self.audit_transcript(path, sid, self.driver.session(sid), capture_label=f"turn-{turn}")
         self.driver.save(directory / f"turn-{turn}-audit.json", result)
         return result["passed"]
 

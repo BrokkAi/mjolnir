@@ -454,7 +454,7 @@ def retain_pilot_writer_failure(pilot, sid, error):
     d = pilot["path"]
     save(d / "transcript.json", driver.transcript(sid))
     save(d / "usage.json", mj("usage", "--session", sid))
-    driver.capture_pilot_rollouts(d, sid)
+    driver.capture_pilot_rollouts(d, sid, reuse_existing=True)
     verdict = pilot_audit(d, sid, bool(pilot["inputs"]["rql_tools"]))
     return driver.retain_pilot_session(d, sid, str(error),
                                        **({"void_reason": verdict["hits"]} if not verdict["passed"] else {}))

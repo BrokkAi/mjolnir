@@ -85,6 +85,7 @@ class LiveModels:
         identity = {"model": model, "effort": EFFORT, "profile": profile, **snapshot,
                     "inputs_sha256": sha(canonical([files, prompt(".scratch")]).encode())}
         sid = None
+        launched = False
         retiring = False
 
         def retire(*, failed_turn=False):
@@ -116,6 +117,7 @@ class LiveModels:
                 orphan = snapshot["orphan"]
                 sid = brief_driver.sealed_launch(self.config["bundle"], orphan, profile,
                                                 f"RQL fidelity {model}", base=orphan, effort=EFFORT)
+                launched = True
                 driver.save(state, {"session_id": sid})
                 output, record = self.run_turn(runner, sid, snapshot, directory, model, profile, files, prompt)
                 output_path.write_bytes(output)
@@ -128,12 +130,12 @@ class LiveModels:
             return checked, record
         except (Exception, KeyboardInterrupt) as error:
             failed = directory / "failed.json"
-            if sid is not None and not failed.exists():
+            if launched and not failed.exists():
                 try:
                     driver.save(failed, {"session_id": sid, "reason": str(error)})
                 except OSError as save_error:
                     error.add_note(f"Could not record fidelity session {sid} failure: {save_error}")
-            if sid is not None and not retiring:
+            if launched and not retiring:
                 try:
                     retire(failed_turn=True)
                 except Exception as retirement_error:

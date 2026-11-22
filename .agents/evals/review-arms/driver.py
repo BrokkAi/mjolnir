@@ -208,11 +208,11 @@ with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as bundle:
 """
 
 
-def capture_pilot_rollouts(d, sid):
+def capture_pilot_rollouts(d, sid, *, reuse_existing, directory_name=None):
     from audit import ROLLOUT_DIRECTORY
 
-    destination = d / ROLLOUT_DIRECTORY
-    if any(destination.glob("rollout-*.jsonl")):
+    destination = d / (directory_name or ROLLOUT_DIRECTORY)
+    if reuse_existing and any(destination.glob("rollout-*.jsonl")):
         return True
     try:
         if not re.fullmatch(r"[0-9a-f]{32}", sid):
@@ -254,7 +254,7 @@ def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allo
     launch = json.loads((d / "launch.json").read_text())
     if MJ_INSTANCE_ARGS != ("--instance", launch["instance"]) or launch["session_id"] != sid:
         raise ValueError("pilot teardown requires the recorded launch in a named instance")
-    if not capture_pilot_rollouts(d, sid):
+    if not capture_pilot_rollouts(d, sid, reuse_existing=True):
         try:
             sessions = mj("sessions", "--all")["sessions"]
             gone = all(row["id"] != sid or row.get("lifecycle") == "destroyed" for row in sessions)
