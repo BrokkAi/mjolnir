@@ -345,6 +345,28 @@ fn subagent_single_page_rejects_partly_configured_rows_and_handles_remove_and_na
         );
     }
 
+    // A background capability refresh with a discovery error must not clobber the active notice.
+    {
+        let mut unreachable_profiles = dashboard.profile_capabilities.profiles.clone();
+        for caps in unreachable_profiles.values_mut() {
+            caps.choices = CapabilityState::Failed("worker unavailable".into());
+        }
+        let saved = dashboard.profile_capabilities.clone();
+        dashboard.set_profile_capabilities(ProfileCapabilitiesSnapshot {
+            profiles: unreachable_profiles,
+        });
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(
+            dialog
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("Straightforward entry 1")),
+            "background discovery error overwrote active validation notice: {:?}",
+            dialog.notice
+        );
+        dashboard.set_profile_capabilities(saved);
+    }
+
     // Jumping away via search and trying to save still rejects and jumps back to the incomplete row.
     dashboard.handle_key(key(KeyCode::Char('/')));
     for ch in "theme".chars() {

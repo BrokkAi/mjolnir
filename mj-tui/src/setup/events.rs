@@ -299,7 +299,10 @@ impl DashboardState {
         ) else {
             return None;
         };
-        if unreachable.is_some() && dialog.path.first().is_some_and(|p| p == "subagents") {
+        if dialog.notice.is_none()
+            && unreachable.is_some()
+            && dialog.path.first().is_some_and(|p| p == "subagents")
+        {
             dialog.notice = unreachable;
         }
         dialog.prepare();
