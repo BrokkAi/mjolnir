@@ -243,6 +243,11 @@ impl DashboardState {
         else {
             return None;
         };
+        if profile_id.is_empty() {
+            // Fast-start recipes store a concrete profile id; do not overwrite
+            // them with an empty id from Auto or provider-balanced launches.
+            return None;
+        }
         let go = if self
             .go
             .as_ref()

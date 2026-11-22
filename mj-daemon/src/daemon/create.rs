@@ -90,6 +90,15 @@ impl RuntimeState {
                 .await
                 .map_err(|failure| anyhow::anyhow!(failure.message))?;
                 apply_chosen_profile(&mut request, &selected.profile_id);
+                if matches!(
+                    request.subagents,
+                    Some(mj_core::subagent::SubagentPolicy::Native)
+                ) && config
+                    .enabled_profile(&selected.profile_id)
+                    .is_some_and(|profile| !profile.kind.has_native_subagents())
+                {
+                    request.subagents = Some(mj_core::subagent::SubagentPolicy::None);
+                }
                 (None, Some(selected.reservation))
             } else {
                 anyhow::ensure!(

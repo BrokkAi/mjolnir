@@ -336,30 +336,15 @@ pub async fn resolve_provider_session_selection(
             ));
             continue;
         }
-        if let Some(policy) = subagents {
-            match policy {
-                mj_core::subagent::SubagentPolicy::Mjolnir { .. }
-                    if !candidate.harness.supports_delegation_tools() =>
-                {
-                    excluded.push(format!(
-                        "profile {} ({}) does not support Mjolnir sub-agent delegation",
-                        candidate.profile_id,
-                        candidate.harness.display_name()
-                    ));
-                    continue;
-                }
-                mj_core::subagent::SubagentPolicy::Native
-                    if !candidate.harness.has_native_subagents() =>
-                {
-                    excluded.push(format!(
-                        "profile {} ({}) does not support native sub-agents",
-                        candidate.profile_id,
-                        candidate.harness.display_name()
-                    ));
-                    continue;
-                }
-                _ => {}
-            }
+        if let Some(mj_core::subagent::SubagentPolicy::Mjolnir { .. }) = subagents
+            && !candidate.harness.supports_delegation_tools()
+        {
+            excluded.push(format!(
+                "profile {} ({}) does not support Mjolnir sub-agent delegation",
+                candidate.profile_id,
+                candidate.harness.display_name()
+            ));
+            continue;
         }
         let current_model = candidate
             .choices
@@ -420,6 +405,17 @@ pub async fn resolve_provider_session_selection(
             provider.display_name(),
             unhealthy.join("; ")
         )));
+    }
+    // When Native delegation is requested on a mixed-harness provider, prefer
+    // profiles with native sub-agents; if none in the provider have them (e.g.
+    // an Antigravity-only or DSH-only provider), keep them so the launch can
+    // fall back to None rather than failing.
+    if matches!(subagents, Some(mj_core::subagent::SubagentPolicy::Native))
+        && eligible
+            .iter()
+            .any(|(candidate, _, _)| candidate.harness.has_native_subagents())
+    {
+        eligible.retain(|(candidate, _, _)| candidate.harness.has_native_subagents());
     }
     let prefer = backend.quota_preferences().await?;
     let power_ranking = backend.power_ranking().await?;
