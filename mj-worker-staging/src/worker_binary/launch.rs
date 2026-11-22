@@ -119,11 +119,29 @@ pub fn apply_jev_settings(launch: &mut WorkerLaunchConfig, config: &mj_core::con
 /// `HarnessKind::supports_delegation_tools` holds can receive them at all.
 #[cfg(any(test, feature = "test-support"))]
 pub fn subagent_tools_enabled(session: &mj_core::state::SessionRecord, is_child: bool) -> bool {
+    let child = is_child.then(|| mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
+        child_session_id: session.id.clone(),
+        parent_session_id: String::new(),
+        task_name: String::new(),
+        profile_id: session.last_profile.clone(),
+        model: None,
+        effort: None,
+        working_directory: PathBuf::new(),
+        initial_prompt: String::new(),
+        request_key: String::new(),
+        created_at: String::new(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: true,
+        supervisor: false,
+    });
     session
         .subagents
         .clone()
         .unwrap_or_default()
-        .for_launch(session.harness_kind, is_child)
+        .for_launch(session.harness_kind, child.as_ref())
         .uses_mjolnir()
 }
 
@@ -455,6 +473,8 @@ pub fn worker_launch_config_with_checkout(
             subagents: mj_core::subagent::SubagentPolicy::Native,
             handback_tool: false,
             subagent_kind: None,
+            supervisor: false,
+            supervisors_enabled: false,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
             initial_model: None,

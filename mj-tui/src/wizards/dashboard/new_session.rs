@@ -329,6 +329,10 @@ impl DashboardState {
                 .subagents
                 .oracle_available()
                 .then_some(wizard.subagents.oracle),
+            supervisors: wizard
+                .subagents
+                .supervisors_available()
+                .then_some(wizard.subagents.supervisors),
             oracle_choice: wizard.subagents.oracle_choice.clone(),
             review: None,
             create_managed_worktree: Some(
@@ -341,7 +345,9 @@ impl DashboardState {
             workspace_id: wizard.workspace_id.clone(),
             // A profile that vanished after the launch was submitted is
             // refused by name by the controller.
-            profile_id: self.nth_offered_profile(wizard.profile).unwrap_or_default(),
+            profile_id: self
+                .new_wizard_profile_id(wizard.profile)
+                .unwrap_or_default(),
             bundle_id: if raw_project {
                 raw_project_context_id(&wizard.project_directory)
             } else {
@@ -488,13 +494,16 @@ impl DashboardState {
         let chooser = checkout.owner().unwrap_or(source);
         let policy = chooser.subagents.clone().unwrap_or_default();
         let mut delegation = subagents::SubagentDraft::new(policy.clone())
-            .with_oracle(chooser.oracle, chooser.oracle_choice.as_deref().cloned());
+            .with_oracle(chooser.oracle, chooser.oracle_choice.as_deref().cloned())
+            .with_supervisors(chooser.supervisors);
         delegation.refresh_create(
             &profile_id,
+            &target_template_id,
             &self.config,
             &self.profile_capabilities,
             &policy,
             chooser.oracle,
+            chooser.supervisors,
         );
         // The launch starts at once, so a choice the refresh could not keep is
         // reported, like the profile and workspace above. Native shown as None
@@ -522,6 +531,9 @@ impl DashboardState {
             remember_container_size: false,
             subagents: Some(delegation.selected()),
             oracle: delegation.oracle_available().then_some(delegation.oracle),
+            supervisors: delegation
+                .supervisors_available()
+                .then_some(delegation.supervisors),
             oracle_choice: delegation.oracle_choice.clone(),
             review: chooser.review.as_deref().cloned(),
             // Like the wizard, ask for a worktree only where one can exist,

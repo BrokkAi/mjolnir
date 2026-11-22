@@ -112,6 +112,7 @@ fn podman_controller(state: SessionState) -> Controller {
         mj_core::state::SessionRecord {
             oracle_choice: None,
             oracle: true,
+            supervisors: false,
             notifications_ignored: false,
             project: None,
             target_runtime: None,

@@ -106,6 +106,7 @@ pub(super) fn configure_claude_subagent_mcp(
         return match role {
             Some(
                 role @ (SubagentMcpRole::Parent
+                | SubagentMcpRole::Supervisor
                 | SubagentMcpRole::Child
                 | SubagentMcpRole::FetchOnly),
             ) => Err(anyhow::anyhow!(

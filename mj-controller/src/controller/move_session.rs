@@ -1333,6 +1333,16 @@ impl Controller {
             executor.notify_notice(mj_core::state::ORACLE_UNAVAILABLE_NOTICE);
         }
         let policy = move_subagent_policy(source, &selection);
+        let requested_supervisors = selection.supervisors.unwrap_or(source.supervisors);
+        if requested_supervisors && !policy.uses_mjolnir() {
+            if selection.supervisors == Some(true) {
+                return Err(mj_core::refusal::Refusal::precondition(
+                    "supervisors require Mjolnir delegation (--subagents mjolnir)",
+                )
+                .into());
+            }
+            selection.supervisors = Some(false);
+        }
         // An unchanged delegation policy on the same target mode has already
         // been admitted. Changing credentials for the same harness does not
         // change its eligible models, but a YOLO destination reads a different
@@ -2636,6 +2646,7 @@ impl Controller {
             if operation.selection.subagents.is_some()
                 || operation.selection.oracle.is_some()
                 || operation.selection.oracle_choice.is_some()
+                || operation.selection.supervisors.is_some()
             {
                 let session = self.state.sessions.get_mut(&id).unwrap();
                 if let Some(policy) = &operation.selection.subagents {
@@ -2646,6 +2657,9 @@ impl Controller {
                 }
                 if let Some(choice) = &operation.selection.oracle_choice {
                     session.oracle_choice = Some(Box::new(choice.clone()));
+                }
+                if let Some(supervisors) = operation.selection.supervisors {
+                    session.supervisors = supervisors;
                 }
                 crate::database::save_resumed_session(session, None)?;
             }
@@ -3076,13 +3090,16 @@ fn move_keeps_profile_and_policy(
             .oracle_choice
             .as_ref()
             .is_none_or(|choice| Some(choice) == source.oracle_choice.as_deref())
+        && selection
+            .supervisors
+            .is_none_or(|supervisors| supervisors == source.supervisors)
 }
 
 pub(crate) fn parent_tools_enabled(
     policy: &mj_core::subagent::SubagentPolicy,
     harness: mj_core::config::HarnessKind,
 ) -> bool {
-    policy.for_launch(harness, false).parent_role().is_some()
+    policy.for_launch(harness, None).parent_role().is_some()
 }
 
 pub(in crate::controller) fn move_children(
@@ -3090,9 +3107,9 @@ pub(in crate::controller) fn move_children(
     parent_session_id: &str,
 ) -> Vec<mj_core::subagent::InPlaceSubagent> {
     state
-        .subagents
-        .values()
-        .filter(|relation| relation.parent_session_id == parent_session_id)
+        .descendant_subagent_ids(parent_session_id)
+        .into_iter()
+        .filter_map(|child_id| state.subagents.get(&child_id))
         // These children are named to the primary after an in-place swap, and
         // the oracle is never named to it. A Move stops the oracle through the
         // ordinary stop path, so it needs no listing.

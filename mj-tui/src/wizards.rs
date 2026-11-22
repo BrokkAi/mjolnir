@@ -107,6 +107,7 @@ pub(crate) enum WizardControl {
     ReviewAttachments,
     Subagents,
     Oracle,
+    Supervisors,
     CreateManagedWorktree,
     UseSandboxedTarget,
     DiscardQueue,

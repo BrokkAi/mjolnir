@@ -482,6 +482,7 @@ fn merge_summary(target: &mut UsageSummary, source: &UsageSummary) -> Result<()>
 /// accounting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentPlacementRow {
+    pub session_id: String,
     pub profile_id: String,
     pub category: String,
     pub created_at_epoch_seconds: i64,
@@ -528,6 +529,7 @@ fn recent_placements_since(
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let mut stmt = connection.prepare(
         "SELECT
+            s.session_id,
             s.last_profile,
             COALESCE(sa.category, 'primary'),
             sc.created_at
@@ -543,17 +545,19 @@ fn recent_placements_since(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut placements = Vec::with_capacity(rows.len());
-    for (profile_id, category, created_at) in rows {
+    for (session_id, profile_id, category, created_at) in rows {
         let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&created_at) else {
             continue;
         };
         let ts = parsed.timestamp();
         if ts >= since_epoch_seconds {
             placements.push(RecentPlacementRow {
+                session_id,
                 profile_id,
                 category,
                 created_at_epoch_seconds: ts,
@@ -1238,11 +1242,13 @@ mod tests {
             rebuilt,
             vec![
                 RecentPlacementRow {
+                    session_id: "new-primary".into(),
                     profile_id: "codex1".into(),
                     category: "primary".into(),
                     created_at_epoch_seconds: base_ts + 10,
                 },
                 RecentPlacementRow {
+                    session_id: "new-child".into(),
                     profile_id: "codex1".into(),
                     category: "subtle".into(),
                     created_at_epoch_seconds: base_ts + 20,

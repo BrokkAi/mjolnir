@@ -767,11 +767,12 @@ pub fn session_launch_config(
     }
     apply_jev_settings(&mut launch, &config.jev);
     launch.agent_mailboxes_enabled = true;
+    let subagent_view = subagent.map(|child| child.to_record_view());
     launch.subagents = session
         .subagents
         .clone()
         .unwrap_or_default()
-        .for_launch(profile.kind, subagent.is_some());
+        .for_launch(profile.kind, subagent_view.as_ref());
     // Only a delegating parent's spawn tool reads this. Other sessions keep
     // the default, so their launch files do not change.
     launch.subtle_subagents = !launch.subagents.uses_mjolnir()
@@ -780,6 +781,9 @@ pub fn session_launch_config(
     // Registration decided whether this child can be given the tool.
     launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
     launch.subagent_kind = subagent.as_ref().map(|child| child.kind);
+    launch.supervisor = subagent.as_ref().is_some_and(|child| child.supervisor);
+    launch.supervisors_enabled =
+        subagent.is_none() && session.supervisors && launch.subagents.uses_mjolnir();
 
     // The child's harness opens on its spawn model instead of switching
     // to it from the profile default before the first turn (issue 1217).

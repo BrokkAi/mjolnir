@@ -178,6 +178,7 @@ pub fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> Mov
         operation_id: "move-source-recovery".into(),
         selection: MoveSelection {
             oracle: None,
+        supervisors: None,
             oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
@@ -603,6 +604,7 @@ pub fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind)
 pub fn in_place_operation(controller: &Controller, destination_profile: &str) -> MoveOperation {
     let selection = MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         workspace: Default::default(),

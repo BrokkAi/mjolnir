@@ -40,11 +40,12 @@ pub use secrets::*;
 pub use targets::*;
 pub use ui::*;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -778,12 +779,18 @@ impl Default for SubagentConfigInput {
 impl From<SubagentConfigInput> for SubagentConfig {
     fn from(input: SubagentConfigInput) -> Self {
         Self {
-            primary: input.primary.map_or_else(Vec::new, OneOrManyChoices::into_vec),
+            primary: input
+                .primary
+                .map_or_else(Vec::new, OneOrManyChoices::into_vec),
             straightforward: input
                 .straightforward
                 .map_or_else(Vec::new, OneOrManyChoices::into_vec),
-            subtle: input.subtle.map_or_else(Vec::new, OneOrManyChoices::into_vec),
-            oracle: input.oracle.map_or_else(Vec::new, OneOrManyChoices::into_vec),
+            subtle: input
+                .subtle
+                .map_or_else(Vec::new, OneOrManyChoices::into_vec),
+            oracle: input
+                .oracle
+                .map_or_else(Vec::new, OneOrManyChoices::into_vec),
             max_concurrent: input.max_concurrent,
         }
     }
@@ -868,6 +875,7 @@ impl SubagentConfig {
             crate::subagent::SubagentTaskType::Straightforward => &self.straightforward,
             crate::subagent::SubagentTaskType::Subtle => &self.subtle,
             crate::subagent::SubagentTaskType::Oracle => &self.oracle,
+            crate::subagent::SubagentTaskType::Supervisor => &self.primary,
         }
     }
 
@@ -1063,6 +1071,58 @@ impl Config {
         crate::hex::lower_hex(Sha256::digest(
             serde_json::to_vec(&inputs).expect("profile identities serialize"),
         ))
+    }
+
+    /// Whether a target with `execution_policy` can run depth-1 supervisors.
+    ///
+    /// True iff `subagents.max_concurrent >= 2`, `subagents.straightforward` is
+    /// configured, and at least one enabled profile matching a configured
+    /// `subagents.primary` choice supports delegation tools and is allowed to
+    /// run under `execution_policy`. When `offered_models` contains discovered
+    /// models for a profile, matching uses those models; otherwise it falls
+    /// back to provider matching so availability works before discovery.
+    pub fn supervisors_available_for_target(
+        &self,
+        offered_models: Option<&BTreeMap<String, Vec<String>>>,
+        execution_policy: ExecutionPolicy,
+    ) -> bool {
+        if self.subagents.max_concurrent < 2
+            || !self.subagents.is_configured()
+            || !self.subagents.primary_configured()
+        {
+            return false;
+        }
+        self.enabled_profiles().any(|(profile_id, profile)| {
+            if !profile.kind.supports_delegation_tools() {
+                return false;
+            }
+            if execution_policy != ExecutionPolicy::Unconstrained
+                && profile.kind.guardian() != GuardianReviewer::Harness
+            {
+                return false;
+            }
+            let discovered = offered_models
+                .and_then(|map| map.get(profile_id))
+                .filter(|models| !models.is_empty());
+            self.subagents.primary.iter().any(|choice| {
+                let model = choice.model.trim();
+                if model.is_empty() {
+                    return false;
+                }
+                if let Some(models) = discovered {
+                    let normalized = crate::model_catalog::normalize_model(model);
+                    models.iter().any(|offered| {
+                        crate::model_catalog::normalize_model(offered) == normalized
+                            || model_matches_scope(offered, model)
+                    })
+                } else {
+                    match crate::model_catalog::model_provider(model) {
+                        Some(choice_provider) => choice_provider == profile.quota_provider(),
+                        None => true,
+                    }
+                }
+            })
+        })
     }
 
     /// The models this configuration selects on profile `id`, whose efforts
@@ -2304,10 +2364,18 @@ impl Config {
         }
         reject_removed_profile_overrides(&contents)?;
         if loading::has_legacy_subagent_yolo_choices(&document) {
-            tracing::warn!(
-                config = %path.display(),
-                "ignoring removed [subagents.yolo.*] settings; Mjolnir now uses unified [[subagents.*]] lists across all targets, and the next save removes them"
-            );
+            static WARNED_YOLO_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+            let warned = WARNED_YOLO_PATHS.get_or_init(|| Mutex::new(HashSet::new()));
+            let first_warning = warned
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(path.to_path_buf());
+            if first_warning {
+                tracing::warn!(
+                    config = %path.display(),
+                    "ignoring removed [subagents.yolo.*] settings; Mjolnir now uses unified [[subagents.*]] lists across all targets, and the next save removes them"
+                );
+            }
         }
         let removed = drop_removed_harness_profiles(&mut document);
         let contents = if removed.is_empty() {

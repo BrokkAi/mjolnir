@@ -264,6 +264,7 @@ fn dashboard_with_live_sessions(count: usize, per_project: usize) -> DashboardSt
         config(),
         State {
             last_oracle_choices: Default::default(),
+            last_supervisor_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -935,11 +936,13 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: true,
+        supervisor: false,
     };
     let mut dashboard = DashboardState::new(
         config(),
         State {
             last_oracle_choices: Default::default(),
+            last_supervisor_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: [(child.id.clone(), relation)].into_iter().collect(),
@@ -1060,11 +1063,13 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
+        supervisor: false,
     };
     let mut dashboard = DashboardState::new(
         config(),
         State {
             last_oracle_choices: Default::default(),
+            last_supervisor_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: [(first_child.id.clone(), first_relation.clone())]
@@ -1101,6 +1106,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
+        supervisor: false,
     };
     dashboard.set_session_verdict(
         &second_child.id,
@@ -1111,6 +1117,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     );
     dashboard.set_state(State {
         last_oracle_choices: Default::default(),
+        last_supervisor_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: [
@@ -1573,6 +1580,7 @@ fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
         config(),
         State {
             last_oracle_choices: Default::default(),
+            last_supervisor_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -1776,6 +1784,7 @@ fn dashboard_with_conversations(count: usize) -> DashboardState {
         config(),
         State {
             last_oracle_choices: Default::default(),
+            last_supervisor_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -1810,6 +1819,7 @@ fn newly_ready_session_can_be_selected_after_state_refresh() {
         config(),
         State {
             last_oracle_choices: Default::default(),
+            last_supervisor_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -2242,6 +2252,7 @@ fn dashboard_with_attention_mix() -> DashboardState {
         config(),
         State {
             last_oracle_choices: Default::default(),
+            last_supervisor_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -4186,6 +4197,7 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
+            supervisor: false,
         },
     );
     assert!(

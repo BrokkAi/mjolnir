@@ -3085,6 +3085,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
 
     let selection = mj_core::state::MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         workspace: Default::default(),

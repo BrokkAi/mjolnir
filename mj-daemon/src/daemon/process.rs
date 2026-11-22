@@ -806,7 +806,7 @@ pub(super) async fn run_daemon_runtime(
                                 let Ok(_activity) = mj_controller::upgrade::activity("profile choice cache") else { return; };
                                 match mj_controller::controller::profile_config::observe(profile.clone(), build, raw, check).await {
                                     Ok(true) => {
-                                        if let Some(backend) = state.report_backend.get().and_then(std::sync::Weak::upgrade) {
+                                        if let Some(backend) = state.quota_report_backend() {
                                             backend.profile_catalog().reread_failed(&profile);
                                         }
                                     }

@@ -1013,6 +1013,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
+                supervisor: false,
             },
         );
     }
@@ -1204,6 +1205,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
+                supervisor: false,
             },
         );
     }

@@ -258,7 +258,7 @@ impl Controller {
                     .subagents
                     .clone()
                     .unwrap_or_default()
-                    .for_launch(profile.kind, false)
+                    .for_launch(profile.kind, None)
                     .parent_role()
                     .is_some();
             let (discard_queued_prompts, replay_queue) = match mode {

@@ -82,6 +82,13 @@ pub(super) fn save_new_session_to(
              ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
             params![session.last_profile, session.oracle],
         )?;
+        if policy.uses_mjolnir() {
+            tx.execute(
+                "INSERT INTO supervisor_preference(profile_id, enabled) VALUES(?1, ?2)
+                 ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
+                params![session.last_profile, session.supervisors],
+            )?;
+        }
     }
     tx.commit()?;
     Ok(())
@@ -1333,6 +1340,16 @@ pub(super) fn rename_profile_references_at(
     )?;
     tx.execute(
         "DELETE FROM oracle_preference WHERE profile_id = ?1",
+        [old_id],
+    )?;
+    tx.execute(
+        "INSERT INTO supervisor_preference(profile_id, enabled)
+         SELECT ?2, enabled FROM supervisor_preference WHERE profile_id = ?1
+         ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
+        params![old_id, new_id],
+    )?;
+    tx.execute(
+        "DELETE FROM supervisor_preference WHERE profile_id = ?1",
         [old_id],
     )?;
     tx.commit()?;

@@ -439,9 +439,101 @@ fn is_corrupted_interval(
 
 #[derive(Default)]
 struct QuotaTelemetryStoreInner {
-    snapshot: QuotaTelemetrySnapshot,
-    refresh_generation: u64,
-    pending_placements: Vec<(u64, String, RecentPlacement)>,
+    windows: BTreeMap<WindowKey, WindowTelemetry>,
+    durable_placements: BTreeMap<String, Vec<RecentPlacement>>,
+    category_stats: BTreeMap<String, CategoryBurnStats>,
+    next_reservation_id: u64,
+    in_flight: BTreeMap<u64, (String, RecentPlacement)>,
+    committed_pending: BTreeMap<String, (String, RecentPlacement)>,
+}
+
+impl QuotaTelemetryStoreInner {
+    fn build_snapshot(&self) -> QuotaTelemetrySnapshot {
+        let mut recent_placements = self.durable_placements.clone();
+        for (profile_id, placement) in self.committed_pending.values() {
+            recent_placements
+                .entry(profile_id.clone())
+                .or_default()
+                .push(placement.clone());
+        }
+        for (profile_id, placement) in self.in_flight.values() {
+            recent_placements
+                .entry(profile_id.clone())
+                .or_default()
+                .push(placement.clone());
+        }
+        QuotaTelemetrySnapshot {
+            windows: self.windows.clone(),
+            recent_placements,
+            category_stats: self.category_stats.clone(),
+        }
+    }
+}
+
+/// RAII handle for a tentative in-flight placement reservation created
+/// atomically during `QuotaTelemetryStore::draw_and_reserve`.
+///
+/// Dropping without calling [`Self::commit`] releases the reservation
+/// immediately so failed spawns/switches never leak reserved burn.
+pub struct PlacementReservation {
+    store: QuotaTelemetryStore,
+    reservation_id: u64,
+    committed: bool,
+}
+
+impl std::fmt::Debug for PlacementReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlacementReservation")
+            .field("reservation_id", &self.reservation_id)
+            .field("committed", &self.committed)
+            .finish()
+    }
+}
+
+impl PlacementReservation {
+    /// Reassign this tentative reservation to `new_profile_id` when an earlier
+    /// candidate fails async validation and selection falls through to the next.
+    pub fn reassign(&self, new_profile_id: &str) {
+        if self.committed {
+            return;
+        }
+        let mut guard = self
+            .store
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((profile_id, _)) = guard.in_flight.get_mut(&self.reservation_id) {
+            *profile_id = new_profile_id.to_owned();
+        }
+    }
+
+    /// Promote this tentative reservation to a committed placement. Passing
+    /// `Some(session_id)` enables exact deduplication on `refresh_from_store`.
+    pub fn commit(mut self, session_id: Option<String>) {
+        self.committed = true;
+        let mut guard = self
+            .store
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.in_flight.remove(&self.reservation_id) {
+            let key = session_id.unwrap_or_else(|| format!("__unkeyed-{}", self.reservation_id));
+            guard.committed_pending.insert(key, entry);
+        }
+    }
+}
+
+impl Drop for PlacementReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            let mut guard = self
+                .store
+                .inner
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.in_flight.remove(&self.reservation_id);
+        }
+    }
 }
 
 /// Shared, cheaply cloneable handle to the daemon's current
@@ -460,8 +552,59 @@ impl QuotaTelemetryStore {
         self.inner
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .snapshot
-            .clone()
+            .build_snapshot()
+    }
+
+    /// Atomically snapshot telemetry, draw/order `candidates`, and reserve
+    /// `candidates[0]` in-flight under a single short synchronous lock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_and_reserve<T: AsRef<crate::profile_scheduler::ScheduledCandidate>>(
+        &self,
+        candidates: &mut Vec<T>,
+        execution_policy: mj_core::config::ExecutionPolicy,
+        placement: crate::profile_scheduler::Placement,
+        category: Option<&str>,
+        ranking_anchor: Option<&str>,
+        prefer: &[String],
+        power_ranking: &crate::power_ranking::PowerRankingSnapshot,
+        now_seconds: i64,
+    ) -> anyhow::Result<Option<PlacementReservation>> {
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = guard.build_snapshot();
+        let ctx = crate::profile_scheduler::SchedulingContext {
+            execution_policy,
+            placement,
+            category,
+            ranking_anchor,
+            prefer,
+            telemetry: &snapshot,
+            power_ranking,
+            now_seconds,
+        };
+        crate::profile_scheduler::draw_scheduled_candidates(candidates, &ctx)?;
+        let Some(first) = candidates.first() else {
+            return Ok(None);
+        };
+        let reservation_id = guard.next_reservation_id;
+        guard.next_reservation_id = guard.next_reservation_id.saturating_add(1);
+        guard.in_flight.insert(
+            reservation_id,
+            (
+                first.as_ref().profile_id.clone(),
+                RecentPlacement {
+                    category: category.unwrap_or("primary").to_owned(),
+                    created_at_epoch_seconds: now_seconds,
+                },
+            ),
+        );
+        Ok(Some(PlacementReservation {
+            store: self.clone(),
+            reservation_id,
+            committed: false,
+        }))
     }
 
     pub fn replace_windows(&self, windows: BTreeMap<WindowKey, WindowTelemetry>) {
@@ -469,7 +612,7 @@ impl QuotaTelemetryStore {
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.snapshot.windows = windows;
+        guard.windows = windows;
     }
 
     pub fn replace_recent_placements(
@@ -480,7 +623,7 @@ impl QuotaTelemetryStore {
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.snapshot.recent_placements = placements;
+        guard.durable_placements = placements;
     }
 
     pub fn record_placement(&self, profile_id: &str, category: &str, created_at_epoch_seconds: i64) {
@@ -488,20 +631,41 @@ impl QuotaTelemetryStore {
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let generation = guard.refresh_generation;
-        let placement = RecentPlacement {
-            category: category.to_owned(),
-            created_at_epoch_seconds,
-        };
-        guard
-            .pending_placements
-            .push((generation, profile_id.to_owned(), placement.clone()));
-        guard
-            .snapshot
-            .recent_placements
-            .entry(profile_id.to_owned())
-            .or_default()
-            .push(placement);
+        let id = guard.next_reservation_id;
+        guard.next_reservation_id = guard.next_reservation_id.saturating_add(1);
+        guard.committed_pending.insert(
+            format!("__recorded-{id}"),
+            (
+                profile_id.to_owned(),
+                RecentPlacement {
+                    category: category.to_owned(),
+                    created_at_epoch_seconds,
+                },
+            ),
+        );
+    }
+
+    pub fn record_committed_placement(
+        &self,
+        session_id: &str,
+        profile_id: &str,
+        category: &str,
+        created_at_epoch_seconds: i64,
+    ) {
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.committed_pending.insert(
+            session_id.to_owned(),
+            (
+                profile_id.to_owned(),
+                RecentPlacement {
+                    category: category.to_owned(),
+                    created_at_epoch_seconds,
+                },
+            ),
+        );
     }
 
     pub fn replace_category_stats(&self, stats: BTreeMap<String, CategoryBurnStats>) {
@@ -509,29 +673,21 @@ impl QuotaTelemetryStore {
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.snapshot.category_stats = stats;
+        guard.category_stats = stats;
     }
 
-    /// Recompute `windows` and `recent_placements` from SQLite for the given
+    /// Recompute `windows` and `durable_placements` from SQLite for the given
     /// `(profile_id, cache_identity)` pairs. Safe to call on the 10-minute
     /// quota poller background task (never on the spawn hot path).
     ///
-    /// Increments `refresh_generation` before querying SQLite and merges any
-    /// in-memory placements stamped at or after that generation so concurrent
-    /// `record_placement` calls are never wiped by a background refresh.
+    /// Deduplicates `committed_pending` by `session_id` against the loaded
+    /// SQLite rows so a placement committed concurrently with a refresh is
+    /// never double-counted.
     pub fn refresh_from_store(
         &self,
         profiles: &[(String, String)],
         now_seconds: i64,
     ) -> anyhow::Result<()> {
-        let refresh_started_gen = {
-            let mut guard = self
-                .inner
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.refresh_generation = guard.refresh_generation.saturating_add(1);
-            guard.refresh_generation
-        };
         let since = u64::try_from(now_seconds)
             .unwrap_or(0)
             .saturating_sub(HISTORY_LOOKBACK_SECONDS);
@@ -543,9 +699,21 @@ impl QuotaTelemetryStore {
         }
         let placements_since = now_seconds.saturating_sub(HISTORY_LOOKBACK_SECONDS as i64);
         let rows = crate::database::load_recent_placements_since(placements_since)?;
-        let mut recent_placements: BTreeMap<String, Vec<RecentPlacement>> = BTreeMap::new();
+        self.apply_store_refresh(all_windows, rows, placements_since);
+        Ok(())
+    }
+
+    pub fn apply_store_refresh(
+        &self,
+        all_windows: BTreeMap<WindowKey, WindowTelemetry>,
+        rows: Vec<crate::database::RecentPlacementRow>,
+        placements_since: i64,
+    ) {
+        let mut seen_session_ids = std::collections::HashSet::with_capacity(rows.len());
+        let mut durable_placements: BTreeMap<String, Vec<RecentPlacement>> = BTreeMap::new();
         for row in rows {
-            recent_placements
+            seen_session_ids.insert(row.session_id);
+            durable_placements
                 .entry(row.profile_id)
                 .or_default()
                 .push(RecentPlacement {
@@ -557,18 +725,12 @@ impl QuotaTelemetryStore {
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard
-            .pending_placements
-            .retain(|(generation, _, _)| *generation >= refresh_started_gen);
-        for (_, profile_id, placement) in &guard.pending_placements {
-            recent_placements
-                .entry(profile_id.clone())
-                .or_default()
-                .push(placement.clone());
-        }
-        guard.snapshot.windows = all_windows;
-        guard.snapshot.recent_placements = recent_placements;
-        Ok(())
+        guard.committed_pending.retain(|session_id, (_, placement)| {
+            !seen_session_ids.contains(session_id)
+                && placement.created_at_epoch_seconds >= placements_since
+        });
+        guard.windows = all_windows;
+        guard.durable_placements = durable_placements;
     }
 
     /// Lazily refresh local category burn observations from SQLite (startup +
@@ -682,5 +844,119 @@ mod tests {
             wt.trailing_60m_pct_per_hour
         );
         assert_eq!(wt.second_to_last_clean_ts, Some(now - 600));
+    }
+
+    #[test]
+    fn draw_and_reserve_serializes_concurrent_draws_releases_on_drop_and_dedups_refresh() {
+        use crate::power_ranking::PowerRankingSnapshot;
+        use crate::profile_scheduler::{CandidateQuota, Placement, ScheduledCandidate};
+        use crate::quota::QuotaWindow;
+        use mj_core::config::{ExecutionPolicy, HarnessKind};
+
+        let store = QuotaTelemetryStore::new();
+        let now = 1_700_000_000;
+        let ranking = PowerRankingSnapshot::baseline();
+
+        let make_cand = move |id: &str, pct: u8| ScheduledCandidate {
+            profile_id: id.into(),
+            harness: HarnessKind::Codex,
+            model: "gpt-5.4".into(),
+            effort: Some("high".into()),
+            may_consume_credits: false,
+            quota: CandidateQuota::Subscription {
+                monthly_price_usd: Some(200),
+                windows: vec![QuotaWindow {
+                    label: "weekly".into(),
+                    remaining_percent: Some(pct),
+                    resets_at_epoch_seconds: Some(now + 7 * 86400),
+                    duration_seconds: Some(7 * 86400),
+                    model_scope: None,
+                    used: None,
+                    limit: None,
+                    resets: None,
+                }],
+                paid_credits: None,
+                refreshed_at_epoch_seconds: (now - 60) as u64,
+            },
+            cache_identity: Some(id.into()),
+        };
+
+        // 1. Uncommitted reservation is released immediately on Drop.
+        {
+            let mut cands = vec![make_cand("p1", 80)];
+            let reservation = store
+                .draw_and_reserve(
+                    &mut cands,
+                    ExecutionPolicy::Unconstrained,
+                    Placement::Child,
+                    Some("subtle"),
+                    None,
+                    &[],
+                    ranking,
+                    now,
+                )
+                .unwrap()
+                .expect("reservation");
+            assert_eq!(store.snapshot().recent_placements["p1"].len(), 1);
+            drop(reservation);
+        }
+        assert!(
+            store
+                .snapshot()
+                .recent_placements
+                .get("p1")
+                .is_none_or(Vec::is_empty),
+            "dropped reservation must be released immediately"
+        );
+
+        // 2. Concurrent draws serialize atomically and spill to peer once p1 is saturated.
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut cands = vec![make_cand("p1", 3), make_cand("p2", 80)];
+                barrier.wait();
+                let res = store
+                    .draw_and_reserve(
+                        &mut cands,
+                        ExecutionPolicy::Unconstrained,
+                        Placement::Child,
+                        Some("subtle"),
+                        None,
+                        &[],
+                        PowerRankingSnapshot::baseline(),
+                        now,
+                    )
+                    .unwrap()
+                    .expect("reservation");
+                (cands[0].profile_id.clone(), res)
+            }));
+        }
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let chosen: Vec<_> = results.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(chosen.len(), 2);
+        // Commit one with a real session_id and verify refresh deduplicates it.
+        let (first_profile, first_res) = results.into_iter().next().unwrap();
+        first_res.commit(Some("sess-dedup-1".into()));
+        assert_eq!(store.snapshot().recent_placements[&first_profile].len(), 1);
+
+        // 3. apply_store_refresh with the same session_id never double-counts.
+        store.apply_store_refresh(
+            BTreeMap::new(),
+            vec![crate::database::RecentPlacementRow {
+                session_id: "sess-dedup-1".into(),
+                profile_id: first_profile.clone(),
+                category: "subtle".into(),
+                created_at_epoch_seconds: now,
+            }],
+            now - 3600,
+        );
+        assert_eq!(
+            store.snapshot().recent_placements[&first_profile].len(),
+            1,
+            "committed_pending entry must be deduplicated by session_id on refresh"
+        );
     }
 }

@@ -689,6 +689,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: true,
+        supervisor: false,
             },
         )
         .unwrap();
@@ -1584,6 +1585,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: true,
+        supervisor: false,
             },
         )
         .unwrap();

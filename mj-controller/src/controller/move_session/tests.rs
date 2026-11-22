@@ -676,6 +676,7 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
         };
         let selection = MoveSelection {
             oracle: None,
+        supervisors: None,
             oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
@@ -765,6 +766,7 @@ fn move_configuration_fingerprint_changes_when_destination_changes() {
     };
     let selection = mj_core::state::MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
@@ -830,6 +832,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
             "unknown target",
             mj_core::state::MoveSelection {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
@@ -846,6 +849,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
             "unknown profile",
             mj_core::state::MoveSelection {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
@@ -862,6 +866,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
             "invalid resource allocation",
             mj_core::state::MoveSelection {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
@@ -881,6 +886,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
             "delegation policy the destination harness cannot run",
             mj_core::state::MoveSelection {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 // None is accepted on every harness (#1284); Mjolnir still
                 // needs the destination's delegation tools.
@@ -902,6 +908,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
             "unconfigured Mjolnir delegation",
             mj_core::state::MoveSelection {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
                     straightforward: None,
@@ -997,6 +1004,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 ),
                 mj_core::state::MoveSelection {
                     oracle: None,
+        supervisors: None,
                     oracle_choice: None,
                     subagents: None,
                     workspace: Default::default(),
@@ -1077,6 +1085,7 @@ fn only_an_explicit_oracle_request_without_a_model_is_turned_off_with_a_notice()
     let controller = Controller { config, state };
     let selection = |oracle, oracle_choice| mj_core::state::MoveSelection {
         oracle,
+        supervisors: None,
         oracle_choice,
         subagents: None,
         workspace: Default::default(),
@@ -1318,6 +1327,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     let mut controller = Controller { config, state };
     let selection = MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
@@ -1773,6 +1783,7 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
     };
     let selection = mj_core::state::MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
@@ -1912,6 +1923,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
     source.resource_allocation = None;
     let baseline = mj_core::state::MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
@@ -1961,6 +1973,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
             "another local bare target",
             mj_core::state::MoveSelection {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
@@ -1974,6 +1987,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
             "different target template",
             mj_core::state::MoveSelection {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
@@ -1987,6 +2001,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
             "different attached mounts",
             mj_core::state::MoveSelection {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
@@ -2000,6 +2015,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
             "different resource allocation",
             mj_core::state::MoveSelection {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
@@ -2013,6 +2029,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
             "clearing absent resources is a no-op",
             mj_core::state::MoveSelection {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),
@@ -2074,6 +2091,7 @@ fn a_move_that_only_changes_delegation_still_restarts_the_session() {
     source.subagents = Some(SubagentPolicy::Native);
     let same = mj_core::state::MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
@@ -2096,6 +2114,7 @@ fn a_move_that_only_changes_delegation_still_restarts_the_session() {
 
     let to_mjolnir = mj_core::state::MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: Some(SubagentPolicy::Mjolnir {
             straightforward: None,
@@ -2145,6 +2164,7 @@ fn in_place_move_retains_running_and_parked_children_and_roleless_refusal_names_
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
+        supervisor: false,
     };
     let state = State {
         sessions: [parent.clone(), running.clone(), parked.clone()]
@@ -2575,6 +2595,7 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     let mut controller = Controller { config, state };
     let selection = mj_core::state::MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
@@ -3235,6 +3256,7 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_partial_dir() {
     let controller = Controller { config, state };
     let selection = mj_core::state::MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
@@ -3641,6 +3663,7 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
+        supervisor: false,
     };
     crate::database::save_subagent_session(&child, &relation).unwrap();
     fixture
@@ -3846,6 +3869,7 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
+            supervisor: false,
         };
         crate::database::save_subagent_session(&child, &relation).unwrap();
         controller.state.sessions.insert(child.id.clone(), child);
@@ -5845,6 +5869,7 @@ fn in_place_move_retry_that_finds_its_handoff_gone_leaves_the_session_destroyabl
 fn a_refused_sealed_move_retry_names_what_differs_and_what_to_pass() {
     let sealed = mj_core::state::MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         workspace: mj_core::move_workspace::WorkspaceSelection {
@@ -5957,6 +5982,7 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
     };
     let selection = |target: &str, allocation, clear| mj_core::state::MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         workspace: Default::default(),
@@ -6706,6 +6732,7 @@ fn retired_ec2_move_is_rejected_before_source_interruption() {
     let controller = Controller { config, state };
     let selection = mj_core::state::MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         session_id: id.into(),
         target_template_id: Some("ec2".into()),

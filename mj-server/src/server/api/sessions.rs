@@ -318,6 +318,7 @@ pub(super) async fn start_session(
         no_later_history: request.no_later_history,
         subagents: request.subagents,
         oracle: request.oracle,
+        supervisors: request.supervisors,
         oracle_choice: request.oracle_choice,
         review: request.review.clone(),
         no_project_memory: request.no_project_memory,
@@ -360,19 +361,27 @@ pub(super) async fn start_session(
         ));
     };
 
-    backend.record_placement(&profile_id, "primary");
+    let (selected_model, selected_effort) = match model_selection {
+        Some(selection) => {
+            selection.reservation.commit(Some(session_id.clone()));
+            (Some(selection.model), selection.effort)
+        }
+        None => {
+            backend.quota_telemetry_store().record_committed_placement(
+                &session_id,
+                &profile_id,
+                "primary",
+                mj_core::clock::epoch_seconds() as i64,
+            );
+            (None, None)
+        }
+    };
     backend
         .start_followup(
             session_id.clone(),
             StartFollowup {
-                model: model_selection
-                    .as_ref()
-                    .map(|selection| selection.model.clone())
-                    .or(request.model),
-                effort: model_selection
-                    .as_ref()
-                    .and_then(|selection| selection.effort.clone())
-                    .or(request.effort),
+                model: selected_model.or(request.model),
+                effort: selected_effort.or(request.effort),
                 prompt: request.prompt,
                 ..Default::default()
             },
@@ -416,10 +425,14 @@ fn resolve_launch(
     let snapshot = state.snapshot_rx.borrow();
     let saved = saved_default(&state.preferences_path);
     let model_first = request.profile_id.is_none() && request.model.is_some();
+    let auto_primary = request.profile_id.is_none()
+        && request.model.is_none()
+        && request.effort.is_none()
+        && snapshot.primary_configured;
     let (profile_id, target_id) = resolve_launch_choices(
         request.profile_id.as_deref(),
         request.target_id.as_deref(),
-        !model_first,
+        !(model_first || auto_primary),
         snapshot.profiles.iter().map(|profile| profile.id.as_str()),
         snapshot
             .targets

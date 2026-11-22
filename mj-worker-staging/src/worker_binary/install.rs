@@ -122,6 +122,17 @@ pub fn append_subagent_policy(
     Ok(())
 }
 
+pub fn append_supervisor_policy(
+    harness: mj_core::config::HarnessKind,
+    destination: &Path,
+) -> Result<()> {
+    append_staged_instructions(
+        harness,
+        destination,
+        mj_core::subagent::supervisor_delegation_policy(),
+    )
+}
+
 /// Called only on a fresh profile stage, never on a retained session profile.
 pub fn append_composed_session_instructions(
     launch: &WorkerLaunchConfig,
@@ -135,6 +146,9 @@ pub fn append_composed_session_instructions(
     let text = mj_core::session_instructions::compose(&facts, index);
     if !text.is_empty() {
         append_staged_instructions(launch.harness, destination, &text)?;
+    }
+    if launch.supervisor {
+        append_supervisor_policy(launch.harness, destination)?;
     }
     Ok(())
 }

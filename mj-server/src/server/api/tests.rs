@@ -1689,6 +1689,7 @@ impl SubagentBackend for FakeBackend {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
+                supervisor: false,
             })
         })
     }
@@ -2803,7 +2804,6 @@ fn model_candidate_with_efforts(
 async fn bare_session_start_with_primary_forwards_model_and_effort_to_followup() {
     let directory = tempfile::tempdir().unwrap();
     let preferences_path = directory.path().join("go.json");
-    save_global_default(&preferences_path, "codex-1", "podman");
     let backend = Arc::new(FakeBackend {
         subagent_configuration: Some(mj_core::config::SubagentConfig {
             primary: vec![mj_core::config::SubagentChoice {
@@ -2823,10 +2823,13 @@ async fn bare_session_start_with_primary_forwards_model_and_effort_to_followup()
         }),
         ..FakeBackend::default()
     });
-    let (app, mut actions, _, _) =
-        api_app_with_preferences(backend.clone(), |_| {}, preferences_path);
+    let (app, mut actions, _, _) = api_app_with_preferences(
+        backend.clone(),
+        |snapshot| snapshot.primary_configured = true,
+        preferences_path,
+    );
     let response = mj_core::runtime::spawn(app.oneshot(start_request(
-        r#"{"bundle_id":"hel"}"#.into(),
+        r#"{"bundle_id":"hel","target_id":"podman"}"#.into(),
     )));
     let request = actions.recv().await.unwrap();
     assert!(matches!(
@@ -3059,6 +3062,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         request.action,
         ControllerAction::New {
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: true,
@@ -6402,6 +6406,7 @@ async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
                             noticed_turn: None,
                             reported_finish: None,
                             handback_tool: false,
+                            supervisor: false,
                         },
                     );
                 }
@@ -7992,6 +7997,7 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: true,
+        supervisor: false,
     };
     mj_controller::database::save_subagent_session(&child, &relation).unwrap();
     let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});

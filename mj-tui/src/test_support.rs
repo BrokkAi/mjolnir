@@ -433,6 +433,7 @@ pub(crate) fn stopped_session() -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,
@@ -488,6 +489,7 @@ pub(crate) fn stopped_session() -> SessionRecord {
 pub(crate) fn running_session() -> SessionRecord {
     SessionRecord {
         oracle: true,
+        supervisors: false,
         project: None,
         state: SessionState::Running,
         ..stopped_session()
@@ -595,6 +597,7 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
         config(),
         State {
             last_oracle_choices: Default::default(),
+            last_supervisor_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
@@ -778,6 +781,7 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
+        supervisor: false,
     };
     let mut dashboard = dashboard_with_session(parent.clone());
     let mut state = dashboard.state.clone();

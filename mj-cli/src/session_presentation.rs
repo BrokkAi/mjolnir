@@ -199,6 +199,7 @@ mod tests {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
+            supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,
@@ -504,6 +505,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
+            supervisor: false,
             },
         );
         state.sessions.insert(child.id.clone(), child);

@@ -984,6 +984,7 @@ fn adopted_session_record(
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,

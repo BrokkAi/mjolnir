@@ -82,7 +82,7 @@ pub(crate) async fn resolve(
             .await
         }
         .map_err(|error| anyhow::anyhow!("reviewer model {model:?}: {}", error.message))?;
-        backend.record_placement(&selected.profile_id, "reviewer");
+        selected.reservation.commit(None);
         selections.push(ResolvedReviewSettings {
             profile: selected.profile_id,
             main: ReviewModelSettings {
@@ -113,7 +113,7 @@ pub(crate) async fn resolve_choice(
     )
     .await
     .map_err(|error| anyhow::anyhow!("model {model:?}: {}", error.message))?;
-    backend.record_placement(&selected.profile_id, "brief_writer");
+    selected.reservation.commit(None);
     Ok(ResolvedReviewSettings {
         profile: selected.profile_id,
         main: ReviewModelSettings {

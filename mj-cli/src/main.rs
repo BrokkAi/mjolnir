@@ -357,6 +357,9 @@ struct MoveArgs {
     /// Oracle availability for this session.
     #[arg(long, value_parser = ["enabled", "disabled"])]
     oracle: Option<String>,
+    /// Supervisor sub-agent availability for this session (requires --subagents mjolnir).
+    #[arg(long, value_parser = ["enabled", "disabled"])]
+    supervisors: Option<String>,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -1403,6 +1406,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
     let selection = MoveSelection {
         subagents,
         oracle: oracle_enabled,
+        supervisors: args.supervisors.as_deref().map(|choice| choice == "enabled"),
         oracle_choice,
         workspace: mj_core::move_workspace::WorkspaceSelection {
             exclusions: args
@@ -3194,6 +3198,7 @@ mod tests {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
+            supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,

@@ -290,10 +290,14 @@ impl RuntimeState {
                     .active_child_session_ids(&parent_session_id)
                     .iter()
                     .map(|child_id| {
+                        let child_liveness = liveness
+                            .get(child_id)
+                            .cloned()
+                            .unwrap_or(mj_core::subagent::Liveness::Unknown);
                         mj_controller::controller::stopped_subagent(
                             &controller.state,
                             child_id,
-                            &liveness[child_id],
+                            &child_liveness,
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;

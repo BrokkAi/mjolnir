@@ -3198,6 +3198,7 @@ function freshDraft() {
   };
   draft.subagents = rememberedDelegationPolicy(draft.profileId);
   draft.oracle = rememberedOracleChoice(draft.profileId);
+  draft.supervisors = rememberedSupervisorChoice(draft.profileId);
   if (draft.subagents.mode === 'mjolnir' && !mjolnirAvailable(draft)) draft.subagents = { mode: 'native' };
   setNewTargetSizing(draft, draft.targetId);
   return draft;
@@ -3214,17 +3215,27 @@ function rememberedOracleChoice(profileId) {
   return snapshot?.last_oracle_choices?.[profileId] ?? true;
 }
 
+function rememberedSupervisorChoice(profileId) {
+  return snapshot?.last_supervisor_choices?.[profileId] ?? false;
+}
+
 function selectNewProfile(draft, profileId) {
   if (draft.profileId === profileId) return;
   draft.profileId = profileId;
   draft.subagents = rememberedDelegationPolicy(profileId);
   draft.oracle = rememberedOracleChoice(profileId);
+  draft.supervisors = rememberedSupervisorChoice(profileId);
   if (draft.subagents.mode === 'mjolnir' && !mjolnirAvailable(draft)) draft.subagents = { mode: 'native' };
 }
 
 
+function isAutoPrimaryProfile(draft = newDraft) {
+  return !draft?.profileId && snapshot?.primary_configured === true;
+}
+
 // Mirrors HarnessKind::supports_delegation_tools.
 function subagentChoiceApplies(draft = newDraft) {
+  if (isAutoPrimaryProfile(draft)) return true;
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
   return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode' || kind === 'antigravity';
 }
@@ -3247,12 +3258,21 @@ function targetOracleConfigured(draft) {
   return draftTarget(draft)?.oracle_configured ?? snapshot?.oracle_configured === true;
 }
 
+function targetSupervisorsAvailable(draft) {
+  return draftTarget(draft)?.supervisors_available === true;
+}
+
+function supervisorsChoiceApplies(draft = newDraft) {
+  return shownDelegation(draft, draft?.subagents)?.mode === 'mjolnir' && targetSupervisorsAvailable(draft);
+}
+
 function subagentSetupReason() {
   return "Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents";
 }
 
 // Every top-level session's message-only server carries ask_oracle, whatever its harness.
 function oracleChoiceApplies(draft = newDraft) {
+  if (isAutoPrimaryProfile(draft)) return true;
   return snapshot?.profiles.some(profile => profile.id === draft?.profileId) === true;
 }
 
@@ -3315,6 +3335,17 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
     oracleSelect.onchange = () => { draft.oracle = oracleSelect.value === 'enabled'; onChange(); rerender(); };
     oracleField.append(oracleSelect);
     body.append(oracleField);
+  }
+  if (supervisorsChoiceApplies(draft)) {
+    const supField = el('label', 'field field-checkbox');
+    const supInput = el('input');
+    supInput.type = 'checkbox';
+    supInput.id = `${prefix}-supervisors`;
+    supInput.checked = draft.supervisors === true;
+    supInput.disabled = draft.queueLocked === true;
+    supInput.onchange = () => { draft.supervisors = supInput.checked; onChange(); rerender(); };
+    supField.append(supInput, document.createTextNode('Supervisors'));
+    body.append(supField);
   }
   const field = el('label', 'field');
   field.append(document.createTextNode('Delegation'));
@@ -3496,6 +3527,11 @@ function renderNewForm() {
       field.append(el('span', '', 'Account'));
       const select = el('select');
       select.id = 'new-profile';
+      if (snapshot?.primary_configured === true) {
+        const autoOption = el('option', '', 'Auto (Primary)');
+        autoOption.value = '';
+        select.append(autoOption);
+      }
       for (const profile of offeredProfiles()) {
         const option = el('option', '', profile.label ?? profile.id);
         option.value = profile.id;
@@ -3504,6 +3540,10 @@ function renderNewForm() {
       select.value = newDraft.profileId;
       const description = el('div', 'dim');
       const describe = id => {
+        if (!id && snapshot?.primary_configured === true) {
+          description.textContent = 'Load-balanced across configured primary models';
+          return;
+        }
         const profile = snapshot.profiles.find(item => item.id === id);
         description.textContent = profile?.kind || profile?.harness_kind || '';
       };
@@ -4373,7 +4413,7 @@ async function advanceNew() {
   const steps = visibleSteps();
   const step = steps[newDraft.step];
   newError.textContent = '';
-  if (step.key === 'profile' && !offeredProfiles().some(p => p.id === newDraft.profileId)) {
+  if (step.key === 'profile' && !isAutoPrimaryProfile(newDraft) && !offeredProfiles().some(p => p.id === newDraft.profileId)) {
     newError.textContent = 'Choose an available account before continuing.';
     return;
   }
@@ -4425,7 +4465,7 @@ async function commitNew() {
   const body = {
     action: 'new',
     workspace_id: draft.workspaceId,
-    profile_id: newDraft.profileId,
+    profile_id: newDraft.profileId || null,
     bundle_id: newDraft.bundleId,
     target_id: newDraft.targetId,
     project_directory: bare ? newDraft.projectDirectory : null,
@@ -4434,6 +4474,7 @@ async function commitNew() {
     no_github_events: false,
   };
   if (oracleChoiceApplies(draft) && (targetOracleConfigured(draft) || draft.oracleChoice)) body.oracle = draft.oracle;
+  if (supervisorsChoiceApplies(draft)) body.supervisors = draft.supervisors === true;
   if (!bare) body.additional_mounts = mountEditorWire(draft.mountEditors[draft.targetId]);
   const kind = targetResourceKind(draft.targetId);
   const target = snapshot?.targets.find(item => item.id === draft.targetId);
@@ -5826,6 +5867,7 @@ async function prepareMove() {
         subagents: moveSubagentChange(draft),
         oracle: draft.oracle === draft.storedOracle ? null : draft.oracle,
         oracle_choice: JSON.stringify(draft.oracleChoice) === JSON.stringify(draft.storedOracleChoice) ? null : draft.oracleChoice,
+        supervisors: draft.supervisors === draft.storedSupervisors ? null : draft.supervisors === true,
       }),
     });
     if (draft.preparation.container_upgrade) {

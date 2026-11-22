@@ -1,9 +1,7 @@
-use mj_controller::profile_scheduler::{
-    Placement, ScheduledCandidate, SchedulingContext, draw_scheduled_candidates, guardian_eligible,
-};
+use mj_controller::profile_scheduler::{Placement, ScheduledCandidate, guardian_eligible};
 #[cfg(test)]
 use mj_controller::profile_scheduler::{
-    order_scheduled_candidates_by_draw, rank_scheduled_candidates,
+    SchedulingContext, order_scheduled_candidates_by_draw, rank_scheduled_candidates,
 };
 use mj_core::config::ExecutionPolicy;
 use mj_core::model_catalog;
@@ -58,6 +56,7 @@ pub(super) async fn spawn_subagent(
         .start_subagent(mj_controller::controller::RegisterSubagentRequest {
             no_github_credentials: request.no_github_credentials,
             kind: mj_core::subagent::SubagentKind::Worker,
+            supervisor: task_type == mj_core::subagent::SubagentTaskType::Supervisor,
             reviewer_launch: None,
             parent_session_id: parent_session_id.clone(),
             task_name: request.task_name,
@@ -76,7 +75,9 @@ pub(super) async fn spawn_subagent(
         })
         .await
         .map_err(|error| ApiFailure::conflict(format!("sub-agent creation failed: {error:#}")))?;
-    backend.record_placement(&selection.profile_id, task_type.id());
+    selection
+        .reservation
+        .commit(Some(relation.child_session_id.clone()));
     let session = await_session_record(&state, &relation.child_session_id).await?;
     Ok((
         StatusCode::CREATED,
@@ -88,6 +89,38 @@ pub(super) async fn spawn_subagent(
     ))
 }
 
+/// Shared RAII handle for an in-flight quota placement reservation.
+#[derive(Debug, Default, Clone)]
+pub struct ReservationSlot(
+    std::sync::Arc<std::sync::Mutex<Option<mj_controller::quota_telemetry::PlacementReservation>>>,
+);
+
+impl PartialEq for ReservationSlot {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ReservationSlot {}
+
+impl ReservationSlot {
+    pub fn new(reservation: Option<mj_controller::quota_telemetry::PlacementReservation>) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(reservation)))
+    }
+
+    pub fn reassign(&self, new_profile_id: &str) {
+        if let Some(reservation) = self.0.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            reservation.reassign(new_profile_id);
+        }
+    }
+
+    pub fn commit(&self, session_id: Option<String>) {
+        if let Some(reservation) = self.0.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            reservation.commit(session_id);
+        }
+    }
+}
+
 /// The profile, model and effort a spawn runs its child with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentSelection {
@@ -95,6 +128,7 @@ pub struct SubagentSelection {
     pub model: String,
     pub effort: Option<String>,
     pub fast_mode: bool,
+    pub reservation: ReservationSlot,
 }
 
 #[derive(Debug, Clone)]
@@ -183,10 +217,7 @@ pub async fn resolve_subagent_policy_selection(
         // A parent launched while subtle was configured can still ask for it.
         if task_type == mj_core::subagent::SubagentTaskType::Subtle
             && !config
-                .effective_choices(
-                    policy,
-                    mj_core::subagent::SubagentTaskType::Straightforward,
-                )
+                .effective_choices(policy, mj_core::subagent::SubagentTaskType::Straightforward)
                 .is_empty()
         {
             return Err(ApiFailure::conflict(
@@ -237,7 +268,7 @@ pub async fn resolve_oracle_selection(
 
 /// Load-balance a bare `mj new` session across configured `[[subagents.primary]]`
 /// choices.
-pub(crate) async fn resolve_primary_session_selection(
+pub async fn resolve_primary_session_selection(
     backend: &Arc<dyn SubagentBackend>,
     ranking_anchor: Option<&str>,
     choices: &[mj_core::config::SubagentChoice],
@@ -394,31 +425,40 @@ async fn resolve_choices_selection(
         )));
     }
     let prefer = backend.quota_preferences().await?;
-    let telemetry = backend.quota_telemetry().await?;
     let power_ranking = backend.power_ranking().await?;
     let (anchor, placement) = match source {
-        ModelProfileCandidateSource::Subagents { parent_profile } => {
-            (Some(parent_profile), Placement::Child)
-        }
+        ModelProfileCandidateSource::Subagents { parent_profile } => (
+            Some(parent_profile),
+            if category == Some("supervisor") {
+                Placement::Supervisor
+            } else {
+                Placement::Child
+            },
+        ),
         ModelProfileCandidateSource::Session { ranking_anchor } => {
             (ranking_anchor, Placement::TopLevel)
         }
-        ModelProfileCandidateSource::Reviewers
-        | ModelProfileCandidateSource::ReviewersReady => (None, Placement::Child),
+        ModelProfileCandidateSource::Reviewers | ModelProfileCandidateSource::ReviewersReady => {
+            (None, Placement::Child)
+        }
     };
-    let ctx = SchedulingContext {
+    let telemetry_store = backend.quota_telemetry_store();
+    let now_seconds = now_epoch_seconds();
+    let reservation = ReservationSlot::new(telemetry_store.draw_and_reserve(
+        &mut eligible,
         execution_policy,
         placement,
         category,
-        ranking_anchor: anchor,
-        prefer: &prefer,
-        telemetry: &telemetry,
-        power_ranking: &power_ranking,
-        now_seconds: now_epoch_seconds(),
-    };
-    draw_scheduled_candidates(&mut eligible, &ctx)?;
+        anchor,
+        &prefer,
+        &power_ranking,
+        now_seconds,
+    )?);
     let mut selection_errors = Vec::new();
-    for entry in &eligible {
+    for (idx, entry) in eligible.iter().enumerate() {
+        if idx > 0 {
+            reservation.reassign(&entry.candidate.profile_id);
+        }
         let efforts = match model_efforts(backend, &entry.candidate, &entry.model.value).await {
             Ok(efforts) => efforts,
             Err(error) => {
@@ -440,11 +480,13 @@ async fn resolve_choices_selection(
                 continue;
             }
         };
-        return Ok(selection(
+        let mut selected = selection(
             entry.candidate.profile_id.clone(),
             &entry.model.value,
             effort,
-        ));
+        );
+        selected.reservation = reservation;
+        return Ok(selected);
     }
     if !unhealthy.is_empty() && selection_errors.is_empty() {
         return Err(ApiFailure::conflict(format!(
@@ -719,7 +761,8 @@ async fn resolve_model_profile_selection_from(
         .into_iter()
         .filter_map(|candidate| {
             model_catalog::offer(&candidate.choices.models, &identity, model).map(|model| {
-                let scheduled = scheduled_candidate(&candidate, &identity, requested_effort.clone());
+                let scheduled =
+                    scheduled_candidate(&candidate, &identity, requested_effort.clone());
                 ModelCandidate {
                     candidate,
                     model,
@@ -740,6 +783,7 @@ async fn resolve_model_profile_selection_from(
         )));
     }
     let mut unhealthy = Vec::new();
+    let mut reservation_slot = ReservationSlot::default();
     if profile_id.is_none() {
         // Load balancing offers only profiles that may still run the model
         // from their own allowance (or credits they may spend) and satisfy the
@@ -798,32 +842,41 @@ async fn resolve_model_profile_selection_from(
             }
         });
         if offered.is_empty() {
-            return Err(all_unhealthy(model, &unhealthy, source.profile_description()));
+            return Err(all_unhealthy(
+                model,
+                &unhealthy,
+                source.profile_description(),
+            ));
         }
         let prefer = backend.quota_preferences().await?;
-        let telemetry = backend.quota_telemetry().await?;
         let power_ranking = backend.power_ranking().await?;
         let (anchor, placement) = match source {
-            ModelProfileCandidateSource::Subagents { parent_profile } => {
-                (Some(parent_profile), Placement::Child)
-            }
+            ModelProfileCandidateSource::Subagents { parent_profile } => (
+                Some(parent_profile),
+                if category == Some("supervisor") {
+                    Placement::Supervisor
+                } else {
+                    Placement::Child
+                },
+            ),
             ModelProfileCandidateSource::Session { ranking_anchor } => {
                 (ranking_anchor, Placement::TopLevel)
             }
             ModelProfileCandidateSource::Reviewers
             | ModelProfileCandidateSource::ReviewersReady => (None, Placement::Child),
         };
-        let ctx = SchedulingContext {
+        let telemetry_store = backend.quota_telemetry_store();
+        let now_seconds = now_epoch_seconds();
+        reservation_slot = ReservationSlot::new(telemetry_store.draw_and_reserve(
+            &mut offered,
             execution_policy,
             placement,
             category,
-            ranking_anchor: anchor,
-            prefer: &prefer,
-            telemetry: &telemetry,
-            power_ranking: &power_ranking,
-            now_seconds: now_epoch_seconds(),
-        };
-        draw_scheduled_candidates(&mut offered, &ctx)?;
+            anchor,
+            &prefer,
+            &power_ranking,
+            now_seconds,
+        )?);
     }
     let reviewer_source = matches!(
         source,
@@ -831,7 +884,10 @@ async fn resolve_model_profile_selection_from(
     );
     let mut offered_any_effort = false;
     let mut selection_errors = Vec::new();
-    for candidate in &offered {
+    for (idx, candidate) in offered.iter().enumerate() {
+        if idx > 0 {
+            reservation_slot.reassign(&candidate.profile_id);
+        }
         // A reviewer's effort is configured, not chosen: start with it as
         // configured and let the harness report a value it rejects, rather
         // than launching every candidate harness to list its efforts first.
@@ -857,11 +913,10 @@ async fn resolve_model_profile_selection_from(
                 }
                 EffortRequirement::Default | EffortRequirement::Any => None,
             };
-            return Ok(selection(
-                candidate.profile_id.clone(),
-                &candidate.model.value,
-                effort,
-            ));
+            let mut selected =
+                selection(candidate.profile_id.clone(), &candidate.model.value, effort);
+            selected.reservation = reservation_slot;
+            return Ok(selected);
         }
         let result = model_efforts(backend, &candidate.candidate, &candidate.model.value).await;
         let efforts = match result {
@@ -891,11 +946,9 @@ async fn resolve_model_profile_selection_from(
                 child_effort(&candidate.model.value, &efforts, None, inherited_effort)?
             }
         };
-        return Ok(selection(
-            candidate.profile_id.clone(),
-            &candidate.model.value,
-            effort,
-        ));
+        let mut selected = selection(candidate.profile_id.clone(), &candidate.model.value, effort);
+        selected.reservation = reservation_slot;
+        return Ok(selected);
     }
     if !unhealthy.is_empty() {
         return Err(all_unhealthy(
@@ -959,6 +1012,7 @@ fn selection(profile_id: String, model: &str, effort: Option<String>) -> Subagen
         model: model.to_owned(),
         effort,
         fast_mode: mj_core::codex_catalog::is_luna_model(model),
+        reservation: ReservationSlot::default(),
     }
 }
 
@@ -1329,7 +1383,10 @@ mod tests {
             .into_iter()
             .map(|candidate| {
                 let scheduled = scheduled_candidate(&candidate, model, None);
-                Wrapped { candidate, scheduled }
+                Wrapped {
+                    candidate,
+                    scheduled,
+                }
             })
             .collect();
         rank_scheduled_candidates(&mut wrapped, &ctx);
@@ -1370,7 +1427,10 @@ mod tests {
             .into_iter()
             .map(|candidate| {
                 let scheduled = scheduled_candidate(&candidate, model, None);
-                Wrapped { candidate, scheduled }
+                Wrapped {
+                    candidate,
+                    scheduled,
+                }
             })
             .collect();
         order_scheduled_candidates_by_draw(&mut wrapped, units, &ctx);
@@ -1538,7 +1598,6 @@ mod tests {
         );
     }
 
-
     // A top-level launch ranks a profile inside a five-hour window below
     // unwindowed and unknown quota but above paid credits and usage-priced
     // profiles, which bill per request; a five-hour window that has already
@@ -1629,7 +1688,6 @@ mod tests {
         );
         assert_eq!(ids(&for_opus), ["fable-profile", "other"]);
     }
-
 
     #[test]
     fn drawing_picks_in_proportion_to_subscription_dollars_and_quota_then_paid_balances() {
@@ -1753,7 +1811,9 @@ mod tests {
                     ModelProfileCandidateSource::Subagents {
                         parent_profile: "codex",
                     },
-                 ExecutionPolicy::Unconstrained, None)
+                    ExecutionPolicy::Unconstrained,
+                    None,
+                )
                 .await
             }
         };
@@ -2094,7 +2154,8 @@ mod tests {
                 subtle: None,
             },
             SubagentTaskType::Straightforward,
-         ExecutionPolicy::Unconstrained)
+            ExecutionPolicy::Unconstrained,
+        )
         .await
         .unwrap_err();
         for detail in [
@@ -2123,7 +2184,13 @@ mod tests {
         });
         let selected = tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"), ExecutionPolicy::Unconstrained, "reviewer"),
+            resolve_reviewer_model_profile_selection(
+                &backend,
+                "fixed",
+                Some("high"),
+                ExecutionPolicy::Unconstrained,
+                "reviewer",
+            ),
         )
         .await
         .unwrap()
@@ -2182,7 +2249,9 @@ mod tests {
             EffortRequirement::Exact("high"),
             None,
             ModelProfileCandidateSource::ReviewersReady,
-         ExecutionPolicy::Unconstrained, None)
+            ExecutionPolicy::Unconstrained,
+            None,
+        )
         .await
         .unwrap();
         assert_eq!(selected.profile_id, "subscription");
@@ -2213,7 +2282,9 @@ mod tests {
                 requirement,
                 None,
                 ModelProfileCandidateSource::ReviewersReady,
-             ExecutionPolicy::Unconstrained, None)
+                ExecutionPolicy::Unconstrained,
+                None,
+            )
             .await
             .unwrap();
             assert_eq!(selected.profile_id, "stalled-default");
@@ -2258,7 +2329,9 @@ mod tests {
                 EffortRequirement::Exact("high"),
                 None,
                 ModelProfileCandidateSource::ReviewersReady,
-             ExecutionPolicy::Unconstrained, None)
+                ExecutionPolicy::Unconstrained,
+                None,
+            )
             .await
             .unwrap();
             assert_eq!(selected.profile_id, "unknown");
@@ -2281,13 +2354,25 @@ mod tests {
                 unavailable: Vec::new(),
             },
         });
-        let selected = resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"), ExecutionPolicy::Unconstrained, "reviewer")
-            .await
-            .unwrap();
+        let selected = resolve_reviewer_model_profile_selection(
+            &backend,
+            "fixed",
+            Some("high"),
+            ExecutionPolicy::Unconstrained,
+            "reviewer",
+        )
+        .await
+        .unwrap();
         assert_eq!(selected.effort.as_deref(), Some("high"));
-        let error = resolve_reviewer_model_profile_selection(&backend, "missing", None, ExecutionPolicy::Unconstrained, "reviewer")
-            .await
-            .unwrap_err();
+        let error = resolve_reviewer_model_profile_selection(
+            &backend,
+            "missing",
+            None,
+            ExecutionPolicy::Unconstrained,
+            "reviewer",
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.message.contains("no enabled profile"),
             "{}",
@@ -2295,12 +2380,24 @@ mod tests {
         );
         let mut saw_different_profiles = false;
         for _ in 0..48 {
-            let first = resolve_reviewer_model_profile_selection(&backend, "no-effort", None, ExecutionPolicy::Unconstrained, "reviewer")
-                .await
-                .unwrap();
-            let second = resolve_reviewer_model_profile_selection(&backend, "no-effort", None, ExecutionPolicy::Unconstrained, "reviewer")
-                .await
-                .unwrap();
+            let first = resolve_reviewer_model_profile_selection(
+                &backend,
+                "no-effort",
+                None,
+                ExecutionPolicy::Unconstrained,
+                "reviewer",
+            )
+            .await
+            .unwrap();
+            let second = resolve_reviewer_model_profile_selection(
+                &backend,
+                "no-effort",
+                None,
+                ExecutionPolicy::Unconstrained,
+                "reviewer",
+            )
+            .await
+            .unwrap();
             assert_eq!(first.effort, None);
             assert_eq!(second.effort, None);
             saw_different_profiles |= first.profile_id != second.profile_id;
@@ -2374,7 +2471,8 @@ mod tests {
                         model: request.into(),
                         effort: Some("high".into()),
                     }),
-                 ExecutionPolicy::Unconstrained)
+                    ExecutionPolicy::Unconstrained,
+                )
                 .await
                 .unwrap();
                 assert_eq!(
@@ -2385,10 +2483,15 @@ mod tests {
                     ),
                     (expected, value, Some("high"))
                 );
-                let reviewer =
-                    resolve_reviewer_model_profile_selection(&backend, request, Some("high"), ExecutionPolicy::Unconstrained, "reviewer")
-                        .await
-                        .unwrap();
+                let reviewer = resolve_reviewer_model_profile_selection(
+                    &backend,
+                    request,
+                    Some("high"),
+                    ExecutionPolicy::Unconstrained,
+                    "reviewer",
+                )
+                .await
+                .unwrap();
                 assert_eq!(reviewer, selected);
             }
             let selected = resolve_subagent_policy_selection(
@@ -2399,7 +2502,8 @@ mod tests {
                     subtle: None,
                 },
                 SubagentTaskType::Straightforward,
-             ExecutionPolicy::Unconstrained)
+                ExecutionPolicy::Unconstrained,
+            )
             .await
             .unwrap();
             assert_eq!(
@@ -2443,7 +2547,8 @@ mod tests {
             "claude-exhausted",
             &policy,
             SubagentTaskType::Straightforward,
-         ExecutionPolicy::Unconstrained)
+            ExecutionPolicy::Unconstrained,
+        )
         .await
         .unwrap();
         assert_eq!(selected.profile_id, "codex-ready");
@@ -2493,7 +2598,8 @@ mod tests {
                     subtle: None,
                 },
                 task_type,
-             ExecutionPolicy::Unconstrained)
+                ExecutionPolicy::Unconstrained,
+            )
             .await
             .unwrap();
             assert_eq!(
@@ -2541,7 +2647,8 @@ mod tests {
             "parent",
             &any_policy,
             SubagentTaskType::Subtle,
-         ExecutionPolicy::Unconstrained)
+            ExecutionPolicy::Unconstrained,
+        )
         .await
         .unwrap();
         assert_eq!(selected.profile_id, "parent");
@@ -2550,7 +2657,8 @@ mod tests {
             "parent",
             &any_policy,
             SubagentTaskType::Subtle,
-         ExecutionPolicy::Unconstrained)
+            ExecutionPolicy::Unconstrained,
+        )
         .await
         .unwrap_err();
         assert!(
@@ -2583,7 +2691,8 @@ mod tests {
                 "parent",
                 &mixed_policy,
                 task_type,
-             ExecutionPolicy::Unconstrained)
+                ExecutionPolicy::Unconstrained,
+            )
             .await
             .unwrap();
             assert_eq!(
@@ -2603,7 +2712,8 @@ mod tests {
                 subtle: None,
             },
             SubagentTaskType::Subtle,
-         ExecutionPolicy::Unconstrained)
+            ExecutionPolicy::Unconstrained,
+        )
         .await
         .unwrap_err();
         assert!(error.message.contains("[subagents.subtle]"));
@@ -2636,7 +2746,8 @@ mod tests {
             "parent",
             &policy,
             SubagentTaskType::Subtle,
-         ExecutionPolicy::Unconstrained)
+            ExecutionPolicy::Unconstrained,
+        )
         .await
         .unwrap_err();
         assert!(
@@ -2649,7 +2760,8 @@ mod tests {
             "parent",
             &policy,
             SubagentTaskType::Straightforward,
-         ExecutionPolicy::Unconstrained)
+            ExecutionPolicy::Unconstrained,
+        )
         .await
         .unwrap();
         assert_eq!(selected.model, "no-effort");

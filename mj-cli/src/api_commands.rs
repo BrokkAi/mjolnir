@@ -150,6 +150,9 @@ pub(crate) struct NewArgs {
     /// Oracle availability for this session.
     #[arg(long, value_parser = ["enabled", "disabled"])]
     oracle: Option<String>,
+    /// Supervisor sub-agent availability for this session (requires --subagents mjolnir).
+    #[arg(long, value_parser = ["enabled", "disabled"])]
+    supervisors: Option<String>,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -1300,6 +1303,10 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         remember_container_size: false,
         subagents: new_subagent_policy(&args)?,
         oracle: args.oracle.as_deref().map(|choice| choice == "enabled"),
+        supervisors: args
+            .supervisors
+            .as_deref()
+            .map(|choice| choice == "enabled"),
         oracle_choice: oracle_override(
             args.subagent_oracle.as_deref(),
             args.subagent_oracle_effort.as_deref(),
@@ -1431,6 +1438,10 @@ async fn infer_new_session_inputs(
         None => None,
     };
     let selected_target = options.as_ref().and_then(|options| {
+        let auto_primary = args.profile.is_none()
+            && args.model.is_none()
+            && args.effort.is_none()
+            && options.primary_configured;
         let resolve = |need_profile| {
             resolve_launch_choices(
                 args.profile.as_deref(),
@@ -1445,7 +1456,7 @@ async fn infer_new_session_inputs(
                 options.default.as_ref(),
             )
         };
-        if let Err(choices) = resolve(args.model.is_none()) {
+        if let Err(choices) = resolve(args.model.is_none() && !auto_primary) {
             open.extend(choices.into_iter().map(|choice| {
                 choice.replacen("a profile_id", "--profile ID", 1).replacen(
                     "a target_id",
@@ -4118,6 +4129,7 @@ mod tests {
 
         let options = mj_daemon::server::api::LaunchOptions {
             revision: 1,
+            primary_configured: false,
             profiles: Vec::new(),
             targets: vec![
                 mj_daemon::server::api::LaunchTarget {

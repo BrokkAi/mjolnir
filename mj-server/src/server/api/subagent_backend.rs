@@ -50,6 +50,10 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { Ok(Default::default()) })
     }
 
+    fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
+        mj_controller::quota_telemetry::QuotaTelemetryStore::new()
+    }
+
     /// Current power-ranking snapshot (compiled baseline or cached fetch).
     fn power_ranking(
         &self,

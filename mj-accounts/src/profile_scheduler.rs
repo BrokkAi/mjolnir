@@ -154,6 +154,7 @@ impl AsRef<SubagentCandidate> for SubagentCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
     TopLevel,
+    Supervisor,
     Child,
 }
 
@@ -511,6 +512,9 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
     for item in raw_candidates {
         let cand = item.as_ref();
         if !guardian_eligible(cand.harness, ctx.execution_policy) {
+            continue;
+        }
+        if ctx.placement == Placement::Supervisor && !cand.harness.supports_delegation_tools() {
             continue;
         }
         let lookup = ctx
@@ -1393,6 +1397,73 @@ mod tests {
         assert_eq!(
             candidates.iter().map(|c| c.profile_id.as_str()).collect::<Vec<_>>(),
             vec!["paid-large", "paid-small", "api-cheap", "api-expensive"]
+        );
+    }
+
+    #[test]
+    fn supervisor_placement_excludes_harnesses_without_delegation_tools() {
+        let now = 1_700_000_000;
+        let telemetry = crate::quota_telemetry::QuotaTelemetrySnapshot::default();
+        let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
+        let ctx = SchedulingContext {
+            execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
+            placement: Placement::Supervisor,
+            category: Some("supervisor"),
+            ranking_anchor: None,
+            prefer: &[],
+            telemetry: &telemetry,
+            power_ranking: ranking,
+            now_seconds: now,
+        };
+        let mut candidates = vec![
+            scheduled_sub(
+                "kimi-1",
+                mj_core::config::HarnessKind::Kimi,
+                "k2",
+                None,
+                None,
+                vec![week_window(90, now + 3600)],
+                None,
+                false,
+            ),
+            scheduled_sub(
+                "grok-1",
+                mj_core::config::HarnessKind::Grok,
+                "grok-4",
+                None,
+                None,
+                vec![week_window(90, now + 3600)],
+                None,
+                false,
+            ),
+            scheduled_sub(
+                "muse-1",
+                mj_core::config::HarnessKind::Muse,
+                "muse",
+                None,
+                None,
+                vec![week_window(90, now + 3600)],
+                None,
+                false,
+            ),
+            scheduled_sub(
+                "codex-1",
+                mj_core::config::HarnessKind::Codex,
+                "gpt-5.4",
+                Some("high"),
+                Some(200),
+                vec![week_window(80, now + 3600)],
+                None,
+                false,
+            ),
+        ];
+        rank_scheduled_candidates(&mut candidates, &ctx);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.profile_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex-1"]
         );
     }
 }

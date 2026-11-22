@@ -520,6 +520,7 @@ mod tests {
             operation_id: "move-one".into(),
             selection: MoveSelection {
                 oracle: None,
+                supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),

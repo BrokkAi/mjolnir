@@ -1678,6 +1678,9 @@ pub struct SessionRecord {
     /// Records written before the choice existed allow it.
     #[serde(default = "default_oracle_enabled")]
     pub oracle: bool,
+    /// Whether this top-level session may spawn depth-1 supervisors.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub supervisors: bool,
     /// This session's own oracle model (`--subagent-oracle`), overriding
     /// `[subagents.oracle]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2634,6 +2637,9 @@ pub struct State {
     /// The most recent Oracle choice for each profile.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub last_oracle_choices: BTreeMap<String, bool>,
+    /// The most recent Supervisors choice for each profile.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_supervisor_choices: BTreeMap<String, bool>,
     pub version: u32,
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub sessions: SnapshotMap<String, SessionRecord>,
@@ -2656,6 +2662,7 @@ impl Default for State {
             operator_presence: OperatorPresence::default(),
             last_subagent_policies: Default::default(),
             last_oracle_choices: Default::default(),
+            last_supervisor_choices: Default::default(),
             sessions: SnapshotMap::new(),
             subagents: SnapshotMap::new(),
             mount_history: SnapshotMap::new(),
@@ -2680,6 +2687,13 @@ impl State {
             .get(profile_id)
             .copied()
             .unwrap_or(true)
+    }
+    /// The remembered Supervisors choice for a profile; disabled when it has none.
+    pub fn last_supervisor_choice_for(&self, profile_id: &str) -> bool {
+        self.last_supervisor_choices
+            .get(profile_id)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// The session whose record holds the review choice that governs
@@ -2884,33 +2898,56 @@ pub fn live_session_ids(
 }
 
 impl State {
-    /// Managed children that a parent suspend or Move stop hook must end,
-    /// including parked children and oracles.
+    /// All sub-agent descendants of `root_id` in BFS order, guarded against cycles.
+    #[must_use]
+    pub fn descendant_subagent_ids(&self, root_id: &str) -> Vec<String> {
+        let mut visited = std::collections::BTreeSet::new();
+        visited.insert(root_id.to_owned());
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(root_id.to_owned());
+        let mut descendants = Vec::new();
+        while let Some(parent_id) = queue.pop_front() {
+            let mut direct: Vec<&str> = self
+                .subagents
+                .values()
+                .filter(|child| child.parent_session_id == parent_id)
+                .map(|child| child.child_session_id.as_str())
+                .collect();
+            direct.sort_unstable();
+            for child_id in direct {
+                if visited.insert(child_id.to_owned()) {
+                    descendants.push(child_id.to_owned());
+                    queue.push_back(child_id.to_owned());
+                }
+            }
+        }
+        descendants
+    }
+
+    /// Managed descendants that a parent suspend or Move stop hook must end,
+    /// including parked children, depth-2 workers, and oracles.
     #[must_use]
     pub fn active_child_session_ids(&self, parent_session_id: &str) -> Vec<String> {
-        self.subagents
-            .values()
-            .filter(|child| child.parent_session_id == parent_session_id)
-            .filter(|child| {
+        self.descendant_subagent_ids(parent_session_id)
+            .into_iter()
+            .filter(|child_id| {
                 self.sessions
-                    .get(&child.child_session_id)
+                    .get(child_id)
                     .is_some_and(|session| session.state.is_active())
             })
-            .map(|child| child.child_session_id.clone())
             .collect()
     }
 
-    /// Whether a sub-agent of `parent_session_id` still has a target. A
-    /// child's worker, parked or live, runs in its parent's container, so
-    /// recreating that container would end it.
+    /// Whether any sub-agent descendant of `parent_session_id` still has a
+    /// target. A child's worker, parked or live, runs in its root's container,
+    /// so recreating that container would end it.
     #[must_use]
     pub fn subagents_occupy_container(&self, parent_session_id: &str) -> bool {
-        self.subagents
-            .values()
-            .filter(|child| child.parent_session_id == parent_session_id)
-            .any(|child| {
+        self.descendant_subagent_ids(parent_session_id)
+            .into_iter()
+            .any(|child_id| {
                 self.sessions
-                    .get(&child.child_session_id)
+                    .get(&child_id)
                     .is_some_and(|session| session.target.is_some())
             })
     }
@@ -3094,11 +3131,32 @@ impl State {
                 subagent.parent_session_id
             );
         }
-        if subagent.kind != crate::subagent::SubagentKind::Reviewer
-            && self.subagents.contains_key(&subagent.parent_session_id)
-        {
-            bail!("sub-agent {child_id:?} cannot belong to another sub-agent");
-        }
+        let parent_subagent =
+            self.subagents
+                .get(&subagent.parent_session_id)
+                .map(|parent| crate::subagent::SubagentRecord {
+                    kind: parent.kind,
+                    reviewer_launch: None,
+                    child_session_id: parent.child_session_id.clone(),
+                    parent_session_id: parent.parent_session_id.clone(),
+                    task_name: parent.task_name.clone(),
+                    profile_id: parent.profile_id.clone(),
+                    model: parent.model.clone(),
+                    effort: parent.effort.clone(),
+                    working_directory: parent.working_directory.clone(),
+                    initial_prompt: String::new(),
+                    request_key: parent.request_key.clone(),
+                    created_at: parent.created_at.clone(),
+                    noticed_turn: parent.noticed_turn,
+                    reported_finish: parent.reported_finish.clone(),
+                    handback_tool: parent.handback_tool,
+                    supervisor: parent.supervisor,
+                });
+        crate::subagent::validate_subagent_parent(
+            parent_subagent.as_ref(),
+            subagent.kind,
+            subagent.supervisor,
+        )?;
         // The shared checkout derivation validates the complete ownership
         // chain and rejects cycles for nested reviewer relationships.
         self.checkout(child_id)?;

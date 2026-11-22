@@ -74,6 +74,7 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
+        supervisor: false,
     };
     crate::database::save_subagent_session(&child, &relation).unwrap();
 
@@ -1411,6 +1412,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
         oracle_choice: None,
         oracle: true,
+        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: Some((&TargetTemplate::LocalBare).into()),

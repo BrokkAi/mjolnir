@@ -33,10 +33,8 @@ impl ControllerEnvironment {
         let runtime = self.runtime().await?;
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
-                if let Some(backend) = runtime.report_backend.get() {
-                    return backend
-                        .upgrade()
-                        .ok_or_else(|| "reviewer profile service stopped".to_owned());
+                if let Some(backend) = runtime.quota_report_backend() {
+                    return Ok(backend);
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
@@ -181,6 +179,7 @@ impl ReviewEnvironment for ControllerEnvironment {
                 mj_controller::controller::RegisterSubagentRequest {
                     no_github_credentials: false,
                     kind: mj_core::subagent::SubagentKind::Reviewer,
+                    supervisor: false,
                     reviewer_launch: Some(launch),
                     parent_session_id: session_id.to_owned(),
                     task_name: "review".to_owned(),
@@ -293,8 +292,8 @@ impl ReviewEnvironment for ControllerEnvironment {
                 choice,
                 mj_core::config::ExecutionPolicy::ConfiguredApprovals,
             )
-                .await
-                .map_err(|e| format!("{e:#}"))
+            .await
+            .map_err(|e| format!("{e:#}"))
         })
     }
 

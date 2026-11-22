@@ -21,6 +21,7 @@ pub(super) async fn options(State(state): State<ServerState>) -> Json<LaunchOpti
 pub(super) fn launch_options(snapshot: &ViewerSnapshot, preferences_path: &Path) -> LaunchOptions {
     LaunchOptions {
         revision: snapshot.revision,
+        primary_configured: snapshot.primary_configured,
         profiles: snapshot
             .profiles
             .iter()

@@ -2812,6 +2812,7 @@ mod tests {
             conversion: None,
             selection: mj_core::state::MoveSelection {
                 oracle: None,
+                supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 workspace: Default::default(),

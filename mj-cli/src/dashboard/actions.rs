@@ -1784,6 +1784,7 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
     let DashboardAction::MoveSession {
         subagents,
         oracle,
+        supervisors,
         oracle_choice,
         workspace_selection,
         session_id,
@@ -1805,6 +1806,7 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
             daemon
                 .prepare_move_session(MoveSelection {
                     oracle,
+                    supervisors,
                     oracle_choice,
                     subagents,
                     workspace: workspace_selection,

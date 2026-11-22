@@ -415,7 +415,8 @@ pub(super) async fn prepare(
                 &power_ranking,
             )? {
                 if child {
-                    state.quota_telemetry.record_placement(
+                    state.quota_telemetry.record_committed_placement(
+                        id,
                         &candidate.profile_id,
                         category,
                         now_ms / 1000,
@@ -427,7 +428,8 @@ pub(super) async fn prepare(
                 }
                 match state.prepare_quota_move(id, &candidate.profile_id).await {
                     Ok(request) => {
-                        state.quota_telemetry.record_placement(
+                        state.quota_telemetry.record_committed_placement(
+                            id,
                             &candidate.profile_id,
                             category,
                             now_ms / 1000,

@@ -268,10 +268,10 @@ pub struct RuntimeState {
     workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
     owner: Mutex<RuntimeStateOwner>,
-    /// Rebuilt by the delegation service at daemon startup; weak so the
-    /// backend's ExportRuntime reference does not form an Arc cycle.
+    /// Rebuilt by the delegation service when the API server starts; weak so
+    /// the backend's ExportRuntime reference does not form an Arc cycle.
     pub(crate) report_backend:
-        std::sync::OnceLock<std::sync::Weak<crate::server_runtime::api::ApiBackend>>,
+        Mutex<Option<std::sync::Weak<crate::server_runtime::api::ApiBackend>>>,
     pub(crate) rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
     pub(crate) credential_targets:
         Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,

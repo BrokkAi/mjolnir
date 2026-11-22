@@ -628,6 +628,11 @@ pub struct RuntimeMetadata {
     pub container_sizes: SnapshotMap<String, mj_core::state::HostContainerSize>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub last_oracle_choices: BTreeMap<String, bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_supervisor_choices: BTreeMap<String, bool>,
+    /// Whether each configured target can run depth-1 supervisors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub supervisors_available: BTreeMap<String, bool>,
     /// The browser reads this directly from the capture. Native paths may
     /// contain bytes JSON cannot represent.
     #[serde(skip)]

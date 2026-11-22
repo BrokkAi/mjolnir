@@ -6,10 +6,12 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
-/// Revision 146 adds nullable `category` columns. Older readers ignore them,
-/// and older writers name columns, so this floor stays 145.
+/// Revision 147 is breaking: it adds `sessions.supervisors` and
+/// `supervisor_preference`, and supervisor children write `supervisor: true` in
+/// `record_json` (which older readers reject via `deny_unknown_fields`), while
+/// older writers drop `sessions.supervisors`.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 145;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 147;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2833,6 +2835,32 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
+    // Breaking: older writers drop `sessions.supervisors` on update and older
+    // readers reject `supervisor: true` in `subagent_sessions.record_json` due
+    // to `deny_unknown_fields`. Raise `minimum_compatible_version` to 147 in
+    // the same transaction.
+    if version < 147 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        if !legacy_schema::table_has_column(&transaction, "sessions", "supervisors")? {
+            transaction.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN supervisors INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS supervisor_preference (
+                 profile_id TEXT PRIMARY KEY,
+                 enabled INTEGER NOT NULL
+             );
+             UPDATE schema_compatibility
+                 SET minimum_compatible_version = 147
+                 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (147, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=147;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -5428,6 +5456,7 @@ mod reader_tests {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
+            supervisor: false,
         };
         super::super::usage::record_child_accounting(&connection, &relation, Some("subtle"))
             .unwrap();

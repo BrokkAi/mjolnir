@@ -45,11 +45,72 @@ impl PostCreateWait {
 impl RuntimeState {
     pub(super) async fn start_create_session(
         self: &Arc<Self>,
-        request: CreateSessionRequest,
+        mut request: CreateSessionRequest,
     ) -> Result<RegisteredSession> {
+        let selection = if request.profile_id.is_empty() {
+            let config = self.owner().controller().config.clone();
+            anyhow::ensure!(
+                config.subagents.primary_configured(),
+                "Auto (Primary) requires at least one entry in [[subagents.primary]]"
+            );
+            let execution_policy = if config
+                .targets
+                .get(&request.target_template_id)
+                .is_some_and(|target| target.is_yolo())
+            {
+                mj_core::config::ExecutionPolicy::Unconstrained
+            } else {
+                mj_core::config::ExecutionPolicy::ConfiguredApprovals
+            };
+            let backend: Arc<dyn crate::server::api::SubagentBackend> = self
+                .quota_report_backend()
+                .ok_or_else(|| anyhow::anyhow!("session selection backend is unavailable"))?;
+            let selected = crate::server::api::resolve_primary_session_selection(
+                &backend,
+                None,
+                config.subagents.primary_choices(),
+                execution_policy,
+            )
+            .await
+            .map_err(|failure| anyhow::anyhow!(failure.message))?;
+            let default_empty_title = mj_core::state::default_session_title(
+                request.project_directory.as_deref(),
+                &request.bundle_id,
+                "",
+            );
+            if request.title.trim().is_empty()
+                || request.title.ends_with(" ()")
+                || request.title == default_empty_title
+            {
+                request.title = mj_core::state::default_session_title(
+                    request.project_directory.as_deref(),
+                    &request.bundle_id,
+                    &selected.profile_id,
+                );
+            }
+            request.profile_id = selected.profile_id.clone();
+            Some((selected, backend))
+        } else {
+            None
+        };
         let (registered, _, warning) = self
             .start_create_session_inner(request, LifecycleControl::default(), None)
             .await?;
+        if let Some((selected, backend)) = selection {
+            selected
+                .reservation
+                .commit(Some(registered.session.id.clone()));
+            backend
+                .start_followup(
+                    registered.session.id.clone(),
+                    crate::server::api::StartFollowup {
+                        model: Some(selected.model),
+                        effort: selected.effort,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
         if let Some(warning) = warning {
             self.push_notice(&registered.session.id, warning);
         }
@@ -205,6 +266,7 @@ impl RuntimeState {
         self.start_subagent_session(mj_controller::controller::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: relation.kind,
+            supervisor: relation.supervisor,
             reviewer_launch: relation.reviewer_launch.clone(),
             parent_session_id: relation.parent_session_id.clone(),
             task_name: relation.task_name.clone(),
@@ -470,6 +532,7 @@ impl RuntimeState {
                     no_later_history: request.no_later_history,
                     subagents: request.subagents,
                     oracle: request.oracle,
+                    supervisors: request.supervisors,
                     oracle_choice: request.oracle_choice,
                     review: request.review,
                     no_project_memory: request.no_project_memory,
@@ -1022,6 +1085,7 @@ mod delegation_replay_tests {
                 .last_subagent_policy_for("codex");
             let request = mj_client::daemon::CreateSessionRequest {
                 oracle: None,
+                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: remember,
                 remember_container_size: false,
@@ -1196,6 +1260,7 @@ mod delegation_replay_tests {
         });
         let request = mj_client::daemon::CreateSessionRequest {
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: false,
@@ -1287,6 +1352,7 @@ mod delegation_replay_tests {
                 .start_subagent_session(mj_controller::controller::RegisterSubagentRequest {
                     no_github_credentials: false,
                     kind: mj_core::subagent::SubagentKind::Worker,
+                    supervisor: false,
                     reviewer_launch: None,
                     parent_session_id: "parent".into(),
                     task_name: "must reuse original".into(),

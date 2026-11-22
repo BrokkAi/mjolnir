@@ -23,8 +23,8 @@ impl ApiBackend {
         let question = format!("Question:\n{message}");
         // A replay of a start that already chose its model starts it again
         // unchanged, as `spawn` does.
-        let selected = match prepared.and_then(|prepared| prepared.spawn.clone()) {
-            Some(selected) => selected,
+        let (selected, reservation) = match prepared.and_then(|prepared| prepared.spawn.clone()) {
+            Some(selected) => (selected, None),
             None => {
                 let primary = self
                     .exports
@@ -54,8 +54,7 @@ impl ApiBackend {
                 )
                 .await
                 .map_err(|failure| anyhow::anyhow!(failure.message))?;
-                self.exports
-                    .record_placement(&selection.profile_id, "oracle");
+                let reservation = Some(selection.reservation);
                 let selected = mj_controller::database::PreparedSpawn {
                     profile_id: selection.profile_id,
                     model: selection.model,
@@ -63,7 +62,7 @@ impl ApiBackend {
                     fast_mode: selection.fast_mode,
                     prompt: question.clone(),
                 };
-                if prepared.is_some() {
+                let selected = if prepared.is_some() {
                     blocking("persist selected oracle", {
                         let primary_id = primary_id.to_owned();
                         let request_id = request.request_id.clone();
@@ -76,13 +75,15 @@ impl ApiBackend {
                     .await?
                 } else {
                     selected
-                }
+                };
+                (selected, reservation)
             }
         };
         let started = self
             .start_subagent(mj_controller::controller::RegisterSubagentRequest {
                 no_github_credentials: false,
                 kind: SubagentKind::Oracle,
+                supervisor: false,
                 reviewer_launch: None,
                 parent_session_id: primary_id.to_owned(),
                 task_name: "oracle".into(),
@@ -98,7 +99,11 @@ impl ApiBackend {
             })
             .await;
         match started {
-            Ok(_) => {}
+            Ok(relation) => {
+                if let Some(reservation) = reservation {
+                    reservation.commit(Some(relation.child_session_id));
+                }
+            }
             // A concurrent first question registered the oracle first; this
             // one is an ordinary question to it.
             Err(error)
