@@ -626,7 +626,7 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 │  │      │                                                                                                  │         │
 │         │ Search:                                                                                          │         │
 │  · Cou  │                                                                                                  │         │
-│  Idle   │ ╭ Running sessions · every workspace · newest first · ? Syncing session index… ────────────────╮ │         │
+│  Idle   │ ╭ Live sessions · every workspace · newest first · ? Syncing session index… ───────────────────╮ │         │
 │  │ No   │ │  WORKSPACE                 LAST ACTIVE     SESSION                                           │ │         │
 │  │      │ │Default                   Aug 9, 2026     ? Sweep the hearth                                  │ │         │
 │         │ │Default                   Aug 9, 2026     ? Count the coins                                   │ │         │
@@ -751,9 +751,9 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │Create n  │                                                                                                                   │           │
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
-│          │ ╭ Running sessions · every workspace · newest first · Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090 ───────────╮ │           │
+│          │ ╭ Live sessions · every workspace · newest first · Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090 ──────────────╮ │           │
 │          │ │  WORKSPACE                 LAST ACTIVE     SESSION                                                            │ │           │
-│          │ │No running sessions                                                                                            │ │           │
+│          │ │No live sessions                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
@@ -788,7 +788,7 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │     │                                                                 │      │
 │     │ ╭ Syncing Claude Code 2/7 ▕███░░░░░░░▏ 1204/3090 ─────────────╮ │      │
 │     │ │  WORKSPACE            LAST ACTIVE     SESSION               │ │      │
-│     │ │No running sessions                                          │ │      │
+│     │ │No live sessions                                             │ │      │
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │      │
@@ -821,9 +821,9 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │Create n  │                                                                                                                   │           │
 │          │ Search:                                                                                                           │           │
 │          │                                                                                                                   │           │
-│          │ ╭ Running sessions · every workspace · newest first · Index sync failed: database is locked ────────────────────╮ │           │
+│          │ ╭ Live sessions · every workspace · newest first · Index sync failed: database is locked ───────────────────────╮ │           │
 │          │ │  WORKSPACE                 LAST ACTIVE     SESSION                                                            │ │           │
-│          │ │No running sessions                                                                                            │ │           │
+│          │ │No live sessions                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
@@ -858,7 +858,7 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │     │                                                                 │      │
 │     │ ╭ Index sync failed: database is locked ──────────────────────╮ │      │
 │     │ │  WORKSPACE            LAST ACTIVE     SESSION               │ │      │
-│     │ │No running sessions                                          │ │      │
+│     │ │No live sessions                                             │ │      │
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │      │
 │     │ │                                                             │ │      │

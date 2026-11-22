@@ -112,6 +112,8 @@ pub(crate) struct SessionsTextSearch {
     pub(crate) asked: String,
     /// A search is out and has not answered.
     pub(crate) pending: Option<SessionsTextQuery>,
+    /// The query that produced `matches`, independent of an in-flight refresh.
+    answered_query: String,
     matches: BTreeMap<String, SessionTextMatchKind>,
 }
 
@@ -309,6 +311,45 @@ impl DashboardState {
             || self.sessions_text.matches.contains_key(&session.id)
     }
 
+    /// The workspace rows Open can focus, shared with the cross-workspace count.
+    pub(crate) fn is_openable_workspace_session(&self, session: &SessionRecord) -> bool {
+        self.is_listed_top_level_session(session, &session.workspace_id)
+            && self.transition_kind(&session.id).is_none()
+    }
+
+    /// Matching workspace sessions not already shown by the Sessions pane.
+    pub(crate) fn sessions_other_workspace_matches(&self) -> usize {
+        self.session_order().other_workspace_matches()
+    }
+
+    pub(crate) fn derive_other_workspace_matches(&self) -> usize {
+        let Some(filter) = self.sessions_filter.as_ref() else {
+            return 0;
+        };
+        if self.child_workspace.is_some()
+            || (filter.query.value().trim().is_empty() && filter.state.is_none())
+        {
+            return 0;
+        }
+        let query = filter.query.value().trim().to_lowercase();
+        let current_answer = self.sessions_text.answered_query.to_lowercase() == query;
+        self.state
+            .sessions
+            .values()
+            .filter(|session| {
+                Some(session.workspace_id.as_str()) != self.active_workspace_id()
+                    && Some(session.id.as_str()) != self.selected_session_id()
+                    && self.is_openable_workspace_session(session)
+                    && filter
+                        .state
+                        .is_none_or(|state| state.admits(self.attention_level(&session.id)))
+                    && (query.is_empty()
+                        || self.session_matches_metadata(session, &query)
+                        || (current_answer && self.sessions_text.matches.contains_key(&session.id)))
+            })
+            .count()
+    }
+
     /// Whether the lower-cased `query` is in the session's name, id, project,
     /// profile, target, or branch.
     pub(crate) fn session_matches_metadata(&self, session: &SessionRecord, query: &str) -> bool {
@@ -418,6 +459,7 @@ impl DashboardState {
         self.sessions_text.pending = None;
         match result {
             Ok(matches) => {
+                self.sessions_text.answered_query = self.sessions_text.asked.clone();
                 self.sessions_text.matches = matches
                     .into_iter()
                     .map(|found| (found.session_id, found.kind))

@@ -29,6 +29,7 @@ pub(crate) enum SurfaceControl {
     ClearSessionsFilter,
     /// The `Filter:` input on the Sessions action row; a click starts typing.
     SessionsFilterInput,
+    MoreWorkspaceMatches,
     PanePin(PaneId),
     PinHere(PaneId),
     SessionPin(usize),
@@ -192,6 +193,17 @@ impl DashboardState {
                     self.clear_sessions_filter();
                     DashboardAction::None
                 }
+                SurfaceControl::MoreWorkspaceMatches => {
+                    if self.sessions_other_workspace_matches() > 0 {
+                        let filter = self.sessions_filter.as_ref().expect("active filter");
+                        DashboardAction::OpenFilteredResumeDialog {
+                            query: filter.query.value().to_owned(),
+                            state: filter.state,
+                        }
+                    } else {
+                        DashboardAction::None
+                    }
+                }
                 SurfaceControl::SessionsFilterInput => {
                     self.begin_sessions_filter();
                     DashboardAction::None
@@ -310,11 +322,37 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let count = dashboard.sessions_other_workspace_matches();
     let commands = session_actions(dashboard);
+    let regular_width = commands
+        .iter()
+        .map(|(_, label)| label.len() + 3)
+        .sum::<usize>()
+        + format!(" {count} more ").len()
+        + if dashboard.sessions_minimized() {
+            0
+        } else {
+            FILTER_LABEL.len() + usize::from(FILTER_FIELD_MIN) + 2
+        };
+    let compact = count > 0 && usize::from(area.width) < regular_width;
+    let padding = if compact { "" } else { " " };
+    let label = format!("{padding}{count} more{padding}");
+    let width = Line::raw(&label).width() as u16;
+    // Compact labels keep New, Open and the search handoff together in the
+    // minimized sidebar, where the filter input itself is hidden.
+    let more_area = (count > 0 && area.width >= width)
+        .then(|| Rect::new(area.right() - width, area.y, width, 1));
+    let buttons_right = more_area.map_or(area.right(), |rect| rect.x.saturating_sub(1));
     let mut x = area.x;
     for (id, label) in commands {
-        let width = Line::raw(label).width() as u16 + 2;
-        if x.saturating_add(width) > area.right() {
+        let label = if compact && id == CommandId::NewSessionWizard {
+            "New"
+        } else {
+            label
+        };
+        let label = format!("{padding}{label}{padding}");
+        let width = Line::raw(&label).width() as u16;
+        if x.saturating_add(width) > buttons_right {
             break;
         }
         let rect = Rect::new(x, area.y, width, 1);
@@ -335,11 +373,30 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
         } else {
             theme::muted().patch(theme::raised())
         };
-        frame.render_widget(Paragraph::new(format!(" {label} ")).style(style), rect);
+        frame.render_widget(Paragraph::new(label).style(style), rect);
         x = x.saturating_add(width + 1);
     }
     drop(form);
-    render_sessions_filter_input(frame, area, x, dashboard);
+    let input_row = if let Some(rect) = more_area {
+        let control = SurfaceControl::MoreWorkspaceMatches;
+        let mut form = dashboard.surface_form.borrow_mut();
+        form.register(control, ControlKind::Button, rect, true);
+        let style = if form.is_armed(control) {
+            theme::focus_control()
+        } else {
+            theme::actionable().patch(theme::raised())
+        };
+        frame.render_widget(Paragraph::new(label).style(style), rect);
+        Rect::new(
+            area.x,
+            area.y,
+            rect.x.saturating_sub(area.x + 1),
+            area.height,
+        )
+    } else {
+        area
+    };
+    render_sessions_filter_input(frame, input_row, x, dashboard);
 }
 
 /// The label before the Sessions filter's text field.
@@ -1345,6 +1402,217 @@ mod tests {
             (140, 40),
         );
         writeln!(output, "filter active: false").expect("write clear state");
+
+        let mut elsewhere = running_session();
+        elsewhere.id = "other-workspace".into();
+        elsewhere.workspace_id = "elsewhere".into();
+        elsewhere.title = "remote needle".into();
+        elsewhere.acp_session_title = None;
+        let mut cross = dashboard_with_session(elsewhere);
+        *cross.active_workspace_id = Some("current".into());
+        *cross.sessions_filter = Some(crate::SessionsFilter {
+            query: "needle".into(),
+            state: None,
+            editing: true,
+        });
+        let lines = append_state(
+            &mut output,
+            "selected session from another workspace is already displayed, not more",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(!lines.iter().any(|line| line.contains("1 more")));
+        cross.navigation.assign(cross.focused_pane(), None);
+        assert_eq!(cross.sessions_other_workspace_matches(), 1);
+        let lines = append_state(
+            &mut output,
+            "matching sessions in another workspace offer Open with the same search",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("1 more")),
+            "{}",
+            lines.join("\n")
+        );
+        for index in 1..10 {
+            let mut extra = cross.state.sessions.get("other-workspace").unwrap().clone();
+            extra.id = format!("extra-{index}");
+            cross.state.sessions.insert(extra.id.clone(), extra);
+        }
+        crate::test_support::publish_fixture_verdicts(&mut cross);
+        let lines = append_state(
+            &mut output,
+            "two digit match count keeps the filter input visible at 80 columns",
+            &mut cross,
+            (80, 40),
+        );
+        point(&lines, "10 more");
+        point(&lines, "Filter:");
+        for index in 1..10 {
+            cross.state.sessions.remove(&format!("extra-{index}"));
+        }
+        crate::test_support::publish_fixture_verdicts(&mut cross);
+        cross
+            .state
+            .sessions
+            .get_mut("other-workspace")
+            .unwrap()
+            .title = "unrelated title".into();
+        let lines = append_state(
+            &mut output,
+            "no other workspace matches hides the button",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(!lines.iter().any(|line| line.contains("1 more")));
+        let (request_id, _) = cross.next_sessions_text_search().unwrap();
+        let matches = vec![mj_client::daemon::SessionTextMatch {
+            session_id: "other-workspace".into(),
+            kind: mj_client::daemon::SessionTextMatchKind::User,
+        }];
+        cross.apply_sessions_text(request_id, Ok(matches.clone()));
+        let lines = append_state(
+            &mut output,
+            "conversation-only match in another workspace offers Open",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(lines.iter().any(|line| line.contains("1 more")));
+        let derivations = cross.session_view_derivations();
+        assert_eq!(cross.sessions_other_workspace_matches(), 1);
+        assert_eq!(cross.sessions_other_workspace_matches(), 1);
+        assert_eq!(cross.session_view_derivations(), derivations);
+        cross.sessions_filter.as_mut().unwrap().query = "needlex".into();
+        assert_eq!(cross.sessions_other_workspace_matches(), 0);
+        cross.next_sessions_text_search().unwrap();
+        cross.refresh_sessions_text_search().unwrap();
+        let lines = append_state(
+            &mut output,
+            "prefix conversation matches do not count when sync refreshes the longer query",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(!lines.iter().any(|line| line.contains("1 more")));
+        cross.sessions_filter.as_mut().unwrap().query = "needle".into();
+        let (request_id, _) = cross.next_sessions_text_search().unwrap();
+        cross.apply_sessions_text(request_id, Ok(matches.clone()));
+        cross
+            .session_verdicts
+            .get_mut("other-workspace")
+            .unwrap()
+            .transition = Some(mj_core::state::SessionTransitionKind::Moving);
+        let lines = append_state(
+            &mut output,
+            "transitioning match is unavailable in Open and not counted",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(!lines.iter().any(|line| line.contains("1 more")));
+        cross
+            .session_verdicts
+            .get_mut("other-workspace")
+            .unwrap()
+            .transition = None;
+        cross
+            .state
+            .sessions
+            .get_mut("other-workspace")
+            .unwrap()
+            .state = mj_core::state::SessionState::Stopped;
+        crate::test_support::serve_attention(
+            &mut cross,
+            &["other-workspace"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        crate::test_support::publish_fixture_verdicts(&mut cross);
+        let lines = append_state(
+            &mut output,
+            "stopped session needing attention remains an additional workspace match",
+            &mut cross,
+            (140, 40),
+        );
+        assert!(lines.iter().any(|line| line.contains("1 more")));
+        cross.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+        let lines = append_state(
+            &mut output,
+            "minimized pane retains the more button and its search handoff",
+            &mut cross,
+            (140, 40),
+        );
+        let open = point(&lines, "Open");
+        assert!(matches!(
+            click(&mut cross, open),
+            DashboardAction::OpenResumeDialog
+        ));
+        assert_eq!(
+            cross.sessions_filter.as_ref().unwrap().query.value(),
+            "needle"
+        );
+        let position = point(&lines, "1 more");
+        let action = click(&mut cross, position);
+        let DashboardAction::OpenFilteredResumeDialog { query, state } = action else {
+            panic!("expected filtered Open action, got {action:?}");
+        };
+        cross.show_resume_dialog(1, Vec::new());
+        cross.set_resume_filter(query, state);
+        let (request_id, query) = cross.next_wiki_search().unwrap();
+        assert_eq!(query, "needle");
+        cross.apply_resume_text_search_result(request_id, Ok(matches));
+        append_state(
+            &mut output,
+            "Open keeps the workspace search and shows the other workspace match",
+            &mut cross,
+            (140, 40),
+        );
+
+        crate::resume::resume_dialog_mut(&mut cross.mode)
+            .unwrap()
+            .form
+            .get_mut()
+            .focus(crate::resume::ResumeFocus::Sessions);
+        let action = cross.handle_key(key(KeyCode::Enter));
+        assert!(matches!(action, DashboardAction::None));
+        let Mode::Resume(wizard) = &cross.mode else {
+            panic!(
+                "stopped match must open the resume wizard: {:?}",
+                cross.mode
+            );
+        };
+        assert_eq!(wizard.workspace_id, "elsewhere");
+        append_state(
+            &mut output,
+            "Open on a stopped remote match starts resume in its own workspace",
+            &mut cross,
+            (140, 40),
+        );
+
+        let mut single = cross.config.clone();
+        single.profiles.retain(|id, _| id == "codex-1");
+        single.targets.clear();
+        single
+            .targets
+            .insert("machine".into(), mj_core::config::TargetTemplate::LocalBare);
+        cross.set_config(single);
+        {
+            let session = cross.state.sessions.get_mut("other-workspace").unwrap();
+            session.target_template_id = "machine".into();
+            session.project_directory = Some("/srv/project".into());
+        }
+        cross.show_resume_dialog(2, Vec::new());
+        cross.set_resume_filter(String::new(), None);
+        let action = cross.handle_key(key(KeyCode::Enter));
+        let DashboardAction::PreflightResumeRepositories { launch } = action else {
+            panic!("single bare target must preflight immediately: {action:?}");
+        };
+        assert!(
+            matches!(launch.as_ref(), DashboardAction::ResumeSession { workspace_id, .. } if workspace_id == "elsewhere")
+        );
+        writeln!(
+            output,
+            "single bare target preflight preserves matched workspace: elsewhere"
+        )
+        .unwrap();
 
         let mut readline = dashboard_with_session(running_session());
         readline.focus_sessions();

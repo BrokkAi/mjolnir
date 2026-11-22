@@ -129,25 +129,14 @@ def normalize_answer(answer, source):
     return errors
 
 
-def validate_staged(output, read_blob):
-    """Decode, normalize and validate a model's output against its pinned source.
-
-    Also returns the repair stage the errors belong to, as the engine's loop
-    counts them: "model-answer" for JSON and normalization errors, and
-    "normalized-answer" once normalization succeeds. Fixing one stage can expose
-    the next stage's errors, which is progress, not a stall."""
+def validate(output, read_blob):
+    """Decode, normalize and validate a model's output against its pinned source."""
     try:
         answer = decode(output)
     except (ValueError, RecursionError) as error:
-        return [], {}, [f"invalid JSON: {error}"], "model-answer"
+        return [], {}, [f"invalid JSON: {error}"]
     source = SourceEvidence(read_blob)
     errors = normalize_answer(answer, source)
     if errors:
-        return [], {}, errors, "model-answer"
-    return (*validate_answer(answer, source), "normalized-answer")
-
-
-def validate(output, read_blob):
-    """Decode, normalize and validate a model's output against its pinned source."""
-    rows, coverage, errors, _ = validate_staged(output, read_blob)
-    return rows, coverage, errors
+        return [], {}, errors
+    return validate_answer(answer, source)
