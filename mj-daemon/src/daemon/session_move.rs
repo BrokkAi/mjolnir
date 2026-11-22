@@ -1104,6 +1104,26 @@ mod admission_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
+
+    // Hard-won: #1639: committed LifecycleControl::interrupt() set the flag without waking shutdown_stopped().
+    #[tokio::test]
+    async fn committed_lifecycle_interrupt_wakes_shutdown_stopped() {
+        let control = Arc::new(super::super::LifecycleControl::default());
+        assert!(control.grant_commit());
+        let waiter = {
+            let control = control.clone();
+            mj_core::runtime::spawn(async move {
+                control.shutdown_stopped().await;
+            })
+        };
+        tokio::task::yield_now().await;
+        control.interrupt();
+        assert!(control.stopped_for_shutdown());
+        tokio::time::timeout(BOUND, waiter)
+            .await
+            .expect("interrupt() must wake shutdown_stopped() for committed lifecycles")
+            .unwrap();
+    }
 }
 
 #[cfg(all(test, unix))]

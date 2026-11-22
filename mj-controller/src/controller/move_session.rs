@@ -2232,7 +2232,8 @@ impl Controller {
         record.resource_allocation = latest.resource_allocation;
         record.additional_mounts = latest.additional_mounts;
         if result.is_err()
-            && ((!operation.in_place && !crate::upgrade::gate().is_open())
+            && ((!operation.in_place
+                && (executor.shutdown_interrupted() || !crate::upgrade::gate().is_open()))
                 || (operation.in_place
                     && operation.phase == MovePhase::Capturing
                     && (executor.shutdown_interrupted() || !crate::upgrade::gate().is_open())))
@@ -2747,9 +2748,11 @@ impl Controller {
                         // restart the source agent in place once destination
                         // teardown is confirmed so two workers can never run
                         // concurrently.
-                        let prepared_cleaned = match self
-                            .cleanup_prepared_move_destination(&mut operation, executor)
-                        {
+                        executor.begin_resumable_work()?;
+                        let cleanup_result =
+                            self.cleanup_prepared_move_destination(&mut operation, executor);
+                        executor.end_resumable_work("record Move recovery rollback")?;
+                        let prepared_cleaned = match cleanup_result {
                             Ok(()) => true,
                             Err(cleanup_err) => {
                                 tracing::warn!(
@@ -3486,7 +3489,10 @@ impl Controller {
             ) && operation.destination_target.is_none()
             {
                 // Cross-target Move stops child sessions before source capture.
-                executor.before_move_source_stop().await?;
+                executor.begin_resumable_work()?;
+                let stopped_children = executor.before_move_source_stop().await;
+                executor.end_resumable_work("start Move source capture")?;
+                stopped_children?;
                 ensure!(
                     !executor.cancellation_requested(),
                     "Move cancelled before source interruption"
@@ -3578,16 +3584,19 @@ impl Controller {
                 }
                 crate::database::save_resumed_session(session, None)?;
             }
+            executor.begin_resumable_work()?;
             let restore_result =
                 Box::pin(self.resume_session_for_cross_target_move(operation, executor)).await;
+            executor.end_resumable_work("commit Move destination ownership")?;
             if let Err(err) = restore_result {
                 // Before DestinationOwns, the source still owns the session.
                 // Tear down any prepared destination too, and ONLY restart the
                 // source agent in place once destination teardown is confirmed
                 // so two workers can never run concurrently.
-                let prepared_cleaned = match self
-                    .cleanup_prepared_move_destination(operation, executor)
-                {
+                executor.begin_resumable_work()?;
+                let cleanup_result = self.cleanup_prepared_move_destination(operation, executor);
+                executor.end_resumable_work("record Move rollback outcome")?;
+                let prepared_cleaned = match cleanup_result {
                     Ok(()) => true,
                     Err(cleanup_err) => {
                         tracing::warn!(
@@ -3676,13 +3685,16 @@ impl Controller {
         {
             executor.notify_notice("Retiring source environment");
             let _timing = MovePhaseTimer::new(id, "source environment retirement");
-            super::environment::retire_owned_environment(
+            executor.begin_resumable_work()?;
+            let retired = super::environment::retire_owned_environment(
                 source_env,
                 &self.config,
                 executor,
                 super::BranchDisposition::Keep,
                 super::CheckoutDisposition::Remove,
-            )?;
+            );
+            executor.end_resumable_work("record Move source retirement")?;
+            retired?;
         }
         operation.phase = MovePhase::SourceRetired;
         operation.updated_at = now();

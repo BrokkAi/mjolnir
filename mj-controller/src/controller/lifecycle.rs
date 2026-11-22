@@ -903,22 +903,33 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        let mut origin_delta = matches!(
+        let is_origin_delta = matches!(
             checkpoint_export_policy,
             CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
-        )
-        .then(|| OriginDeltaSuspend::load(self, session_id, executor))
-        .transpose()?;
+        );
+        let yield_origin_delta_preflight = move_intent.is_some() && is_origin_delta;
+        if yield_origin_delta_preflight {
+            executor.begin_resumable_work()?;
+        }
+        let origin_delta = is_origin_delta
+            .then(|| OriginDeltaSuspend::load(self, session_id, executor))
+            .transpose();
+        let preflight_result = match &origin_delta {
+            Ok(Some(attempt))
+                if !attempt.accepted()
+                    || (before_close.is_none() && !attempt.request_recorded()) =>
+            {
+                self.preflight_origin_delta_suspension(session_id, consent, executor)
+            }
+            _ => Ok(()),
+        };
+        if yield_origin_delta_preflight {
+            executor.end_resumable_work("persist Move source stop")?;
+        }
+        let mut origin_delta = origin_delta?;
         let legacy_closing_intent = previous.state == SessionState::Closing
             && origin_delta.as_ref().is_some_and(|attempt| !attempt.accepted());
-        if matches!(
-            checkpoint_export_policy,
-            CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
-        ) && origin_delta.as_ref().is_some_and(|attempt| {
-            !attempt.accepted() || (before_close.is_none() && !attempt.request_recorded())
-        }) && let Err(error) =
-            self.preflight_origin_delta_suspension(session_id, consent, executor)
-        {
+        if let Err(error) = preflight_result {
             let error = if legacy_closing_intent {
                 mj_core::refusal::Refusal::precondition(format!(
                     "suspend requested before the upgrade needs consent: {error:#}"
@@ -1171,6 +1182,10 @@ impl Controller {
                     ).await);
                 }
             });
+        }
+
+        let yield_capture = origin_delta.is_some() || move_intent.is_some();
+        if yield_capture {
             executor.begin_resumable_work()?;
         }
 
@@ -1196,8 +1211,12 @@ impl Controller {
                 &capture_consent,
             )
             .await;
-        if origin_delta.is_some() {
-            executor.end_resumable_work("record managed clone capture outcome")?;
+        if yield_capture {
+            executor.end_resumable_work(if origin_delta.is_some() {
+                "record managed clone capture outcome"
+            } else {
+                "record Move source capture outcome"
+            })?;
         }
         let mut latched = match checkpoint {
             Ok(latched) => latched,
