@@ -121,8 +121,7 @@ pub fn prune_stale_ec2_grant_users<S: Ec2GrantStore>(
             let remove = if let Some(record) = records.get_mut(&key) {
                 record.users.retain(|op| active_operation_ids.contains(op));
                 if record.users.is_empty()
-                    && record.state
-                        == super::transport::ec2_grant::Ec2GrantState::External
+                    && record.state == super::transport::ec2_grant::Ec2GrantState::External
                 {
                     true
                 } else {
@@ -164,12 +163,8 @@ pub fn reconcile_ec2_grants_live<S: Ec2GrantStore, C: Ec2SecurityGroupClient>(
             .map(|k| k.security_group_id.clone())
             .collect())
     })?;
-    let manager = Ec2GrantManager::new(
-        store,
-        client,
-        daemon_instance_id,
-        Ec2GrantConfig::default(),
-    );
+    let manager =
+        Ec2GrantManager::new(store, client, daemon_instance_id, Ec2GrantConfig::default());
     let mut total = ReconcileReport::default();
     for sg in security_groups {
         let report = manager.reconcile_group(&sg)?;
@@ -195,12 +190,8 @@ pub fn reconcile_ec2_grants_startup<S: Ec2GrantStore, C: Ec2SecurityGroupClient>
             .map(|k| k.security_group_id.clone())
             .collect())
     })?;
-    let manager = Ec2GrantManager::new(
-        store,
-        client,
-        daemon_instance_id,
-        Ec2GrantConfig::default(),
-    );
+    let manager =
+        Ec2GrantManager::new(store, client, daemon_instance_id, Ec2GrantConfig::default());
     let mut total = ReconcileReport::default();
     for sg in security_groups {
         let report =
@@ -586,9 +577,10 @@ mod tests {
                 port: u16,
                 cidr_ip: &str,
             ) -> std::result::Result<(), Ec2ApiError> {
-                self.rules.lock().unwrap().retain(|(sg, r)| {
-                    !(sg == group_id && r.cidr_ip == cidr_ip && r.port == port)
-                });
+                self.rules
+                    .lock()
+                    .unwrap()
+                    .retain(|(sg, r)| !(sg == group_id && r.cidr_ip == cidr_ip && r.port == port));
                 Ok(())
             }
         }

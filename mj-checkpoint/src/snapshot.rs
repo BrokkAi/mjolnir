@@ -101,10 +101,7 @@ pub fn scan_keep_dir(
                 stack.push(path);
                 continue;
             }
-            let relative = path
-                .strip_prefix(keep_dir)
-                .unwrap_or(&path)
-                .to_path_buf();
+            let relative = path.strip_prefix(keep_dir).unwrap_or(&path).to_path_buf();
             let bytes = metadata.len();
             total_bytes = total_bytes.saturating_add(bytes);
             entries.push(mj_core::suspend_consent::KeepDirEntry {
@@ -1591,8 +1588,12 @@ fn shared_source_skip_refs(
         return Ok((false, BTreeSet::new()));
     }
     let checkout_common_out = run_git(runner, checkout, ["rev-parse", "--git-common-dir"], &[])?;
-    let remote_common_out =
-        run_git(runner, &local_remote, ["rev-parse", "--git-common-dir"], &[])?;
+    let remote_common_out = run_git(
+        runner,
+        &local_remote,
+        ["rev-parse", "--git-common-dir"],
+        &[],
+    )?;
     if checkout_common_out.status != 0 || remote_common_out.status != 0 {
         return Ok((false, BTreeSet::new()));
     }
@@ -2018,10 +2019,7 @@ fn estimate_delta_with_source(
     let history_cutoff = matches!(source, ExclusionSource::Commits(_));
     let (remote, inventory_origin) = match source {
         ExclusionSource::Commits(_) => (String::new(), None),
-        ExclusionSource::Remote(url) => (
-            absolute_config_url(checkout, url)?,
-            Some(url.clone()),
-        ),
+        ExclusionSource::Remote(url) => (absolute_config_url(checkout, url)?, Some(url.clone())),
         ExclusionSource::Origin => {
             let configured = run_git(runner, checkout, ["remote", "get-url", "origin"], &[])?;
             let remote = if configured.status == 0 {
@@ -2298,9 +2296,7 @@ pub fn capture_session_snapshot(
             let repo_consent = consent.repositories.get(&repository.id).unwrap_or(&none);
             check_consent_inputs(raw, inputs, repo_consent)
                 .map_err(|error| session_error(&repository.id, error))?;
-            if !raw
-                && let Some(keep_dir) = &repository.keep_dir
-            {
+            if !raw && let Some(keep_dir) = &repository.keep_dir {
                 check_keep_dir_consent(
                     &repository_key(&repository.id),
                     keep_dir,
@@ -7136,7 +7132,12 @@ mod tests {
 
         let snapshot = r.capture(&CheckoutOwnership::Raw { launch: None });
         assert!(snapshot.metadata.refs.contains_key("refs/heads/main"));
-        assert!(snapshot.metadata.refs.contains_key("refs/heads/extra-branch"));
+        assert!(
+            snapshot
+                .metadata
+                .refs
+                .contains_key("refs/heads/extra-branch")
+        );
         assert!(snapshot.metadata.refs.contains_key("refs/tags/v-local"));
         assert!(snapshot.metadata.refs.contains_key("refs/notes/commits"));
         assert!(snapshot.metadata.refs.contains_key("refs/mj/durable-keep"));
@@ -7224,15 +7225,12 @@ mod tests {
             exclusions: ExclusionSource::Commits(vec![cutoff.clone()]),
             keep_dir: None,
         };
-        let snapshot = capture_session_snapshot(
-            &FileGit,
-            &[input],
-            &SessionCaptureConsent::default(),
-        )
-        .unwrap()
-        .repositories
-        .remove("repo")
-        .unwrap();
+        let snapshot =
+            capture_session_snapshot(&FileGit, &[input], &SessionCaptureConsent::default())
+                .unwrap()
+                .repositories
+                .remove("repo")
+                .unwrap();
 
         assert!(snapshot.metadata.history_cutoff);
         assert!(snapshot.metadata.origin_url.is_none());
@@ -7286,15 +7284,12 @@ mod tests {
             exclusions: ExclusionSource::Commits(vec![cutoff.clone()]),
             keep_dir: None,
         };
-        let snapshot = capture_session_snapshot(
-            &FileGit,
-            &[input],
-            &SessionCaptureConsent::default(),
-        )
-        .unwrap()
-        .repositories
-        .remove("repo")
-        .unwrap();
+        let snapshot =
+            capture_session_snapshot(&FileGit, &[input], &SessionCaptureConsent::default())
+                .unwrap()
+                .repositories
+                .remove("repo")
+                .unwrap();
         assert!(snapshot.metadata.prerequisites.contains(&cutoff));
 
         // Destination is an unrelated empty repo that DOES have `origin` pointing to `r.origin`
@@ -7315,7 +7310,10 @@ mod tests {
             "unexpected error: {err}"
         );
         let check = run_git(&FileGit, &dest, ["cat-file", "-e", &cutoff], &[]).unwrap();
-        assert_ne!(check.status, 0, "restore must not fetch missing prerequisites");
+        assert_ne!(
+            check.status, 0,
+            "restore must not fetch missing prerequisites"
+        );
     }
 
     #[test]
@@ -7323,8 +7321,18 @@ mod tests {
         let r = Repo::new();
         let sub_origin = r.temp.path().join("sub.git");
         let sub_src = r.temp.path().join("sub-src");
-        git(r.temp.path(), &["init", "--bare", "-b", "main", sub_origin.to_str().unwrap()]);
-        git(r.temp.path(), &["clone", sub_origin.to_str().unwrap(), sub_src.to_str().unwrap()]);
+        git(
+            r.temp.path(),
+            &["init", "--bare", "-b", "main", sub_origin.to_str().unwrap()],
+        );
+        git(
+            r.temp.path(),
+            &[
+                "clone",
+                sub_origin.to_str().unwrap(),
+                sub_src.to_str().unwrap(),
+            ],
+        );
         fs::write(sub_src.join("s.txt"), "sub\n").unwrap();
         git(&sub_src, &["add", "s.txt"]);
         git(&sub_src, &["commit", "-m", "sub base"]);
@@ -7387,14 +7395,30 @@ mod tests {
         // 1. Preflight sees a clean workspace (no untracked files, no keep-dir files).
         let inv = session_inventory(&FileGit, std::slice::from_ref(&input)).unwrap();
         assert!(inv["workspace"].untracked.is_empty());
-        assert!(scan_keep_dir(&inv["workspace"].checkout, &keep_dir).unwrap().0.is_empty());
+        assert!(
+            scan_keep_dir(&inv["workspace"].checkout, &keep_dir)
+                .unwrap()
+                .0
+                .is_empty()
+        );
 
         // 2. A file appears before the capture cut. Capture with UntrackedConsent::None refuses.
-        fs::write(r.checkout.join("late-scratch.txt"), "created after preflight\n").unwrap();
-        let err = capture_session_snapshot(&FileGit, std::slice::from_ref(&input), &SessionCaptureConsent::default())
-            .expect_err("capture must refuse untracked file created after clean preflight");
+        fs::write(
+            r.checkout.join("late-scratch.txt"),
+            "created after preflight\n",
+        )
+        .unwrap();
+        let err = capture_session_snapshot(
+            &FileGit,
+            std::slice::from_ref(&input),
+            &SessionCaptureConsent::default(),
+        )
+        .expect_err("capture must refuse untracked file created after clean preflight");
         assert!(
-            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            matches!(
+                err.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::Untracked(_))
+            ),
             "expected Untracked refusal, got: {err:#}"
         );
 
@@ -7406,7 +7430,11 @@ mod tests {
             path: inv2["workspace"].untracked[0].path.clone(),
             identity: inv2["workspace"].untracked[0].identity.clone(),
         };
-        fs::write(r.checkout.join("late-scratch.txt"), "different content and size!\n").unwrap();
+        fs::write(
+            r.checkout.join("late-scratch.txt"),
+            "different content and size!\n",
+        )
+        .unwrap();
         let stale_consent = SessionCaptureConsent {
             repositories: [(
                 "workspace".to_owned(),
@@ -7421,7 +7449,10 @@ mod tests {
         let err = capture_session_snapshot(&FileGit, std::slice::from_ref(&input), &stale_consent)
             .expect_err("capture must refuse when approved file identity changed");
         assert!(
-            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            matches!(
+                err.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::Untracked(_))
+            ),
             "expected Untracked refusal for changed identity, got: {err:#}"
         );
 
@@ -7445,7 +7476,10 @@ mod tests {
         )
         .expect_err("capture_session_snapshot must refuse unapproved keep_dir file");
         assert!(
-            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            matches!(
+                err.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::Untracked(_))
+            ),
             "expected Untracked refusal from capture_session_snapshot, got: {err:#}"
         );
         let err = check_keep_dir_consent(
@@ -7455,7 +7489,10 @@ mod tests {
         )
         .expect_err("keep-dir check must refuse unapproved keep file");
         assert!(
-            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            matches!(
+                err.downcast_ref::<SnapshotRefused>(),
+                Some(SnapshotRefused::Untracked(_))
+            ),
             "expected Untracked refusal for keep-dir file, got: {err:#}"
         );
     }

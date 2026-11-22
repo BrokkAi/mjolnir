@@ -186,9 +186,13 @@ where
         }
         // 3. Restart only the harness under the new launch configuration.
         if !operation.in_place_harness_restarted {
-            let launch_config = launch_config
-                .context("in-place Move requires a destination WorkerLaunchConfig")?;
-            relay.send_restart_harness(&operation.operation_id, &expected_store_id, launch_config)?;
+            let launch_config =
+                launch_config.context("in-place Move requires a destination WorkerLaunchConfig")?;
+            relay.send_restart_harness(
+                &operation.operation_id,
+                &expected_store_id,
+                launch_config,
+            )?;
             operation.in_place_harness_restarted = true;
             operation.updated_at = now();
             persist_op(operation)?;
@@ -418,7 +422,8 @@ mod tests {
     fn in_place_move_discard_and_deferred_mount_notice() {
         let mut op = sample_in_place_op(ResumeQueueDisposition::Discard);
         op.in_place_harness_restarted = true;
-        op.deferred_environment_changes.push("Additional mounts".to_owned());
+        op.deferred_environment_changes
+            .push("Additional mounts".to_owned());
         let mut relay = FakeInPlaceRelay::new(81, "store-A", &["cmd-1", "cmd-2"]);
         let mut committed_release = false;
 
@@ -440,9 +445,8 @@ mod tests {
         assert_eq!(op.phase, MovePhase::Completed);
         assert_eq!(relay.discarded, vec!["cmd-1", "cmd-2"]);
         assert_eq!(relay.released, 1);
-        assert!(notices
-            .iter()
-            .any(|n| n == "Additional mounts takes effect when this session's environment is next recreated"));
+        assert!(notices.iter().any(|n| n
+            == "Additional mounts takes effect when this session's environment is next recreated"));
     }
 
     #[test]
@@ -562,7 +566,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err2.to_string().contains("simulated persist held ids failure"),
+            err2.to_string()
+                .contains("simulated persist held ids failure"),
             "{err2}"
         );
         assert_eq!(

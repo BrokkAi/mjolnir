@@ -145,7 +145,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
-            supervisors: false,
+                supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,
@@ -862,7 +862,7 @@ fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-            supervisor: false,
+                supervisor: false,
             }
             .into(),
         );
@@ -1564,7 +1564,10 @@ fn embedded_viewer_warns_before_stopping_an_active_session() {
         viewer_source("function el(", "const bootStatus"),
         viewer_source("async function request(", "/// Read a response body"),
         viewer_source("function sessionById(", "function sessionInWorkspace("),
-        viewer_source("function buildShownSuspendConsent(", "function dialogControls("),
+        viewer_source(
+            "function buildShownSuspendConsent(",
+            "function dialogControls(",
+        ),
         viewer_source("async function runSessionAction", "sessions.onclick ="),
     ]
     .join("\n");
@@ -3358,7 +3361,7 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
          resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
             ControllerAction::New {
                 oracle: None,
-        supervisors: None,
+                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,

@@ -1068,7 +1068,11 @@ pub(super) fn plan_raw_to_workspace_from_origin_delta(
     };
     let retire = match session.managed_worktree.as_ref() {
         Some(worktree)
-            if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? =>
+            if path_exists_on_managed_target(
+                executor,
+                &worktree.target,
+                &worktree.worktree_root,
+            )? =>
         {
             Some((**worktree).clone())
         }
@@ -2941,7 +2945,11 @@ pub(super) fn restore_legacy_worktree_as_managed_clone(
                     SshTrafficClass::Control,
                     &checkout.target,
                     &staging,
-                    ["for-each-ref", "--format=%(refname)", "refs/mj-legacy-source/"],
+                    [
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        "refs/mj-legacy-source/",
+                    ],
                     "list temporary legacy source refs",
                 )) && refs.status == 0
                 {
@@ -3427,9 +3435,9 @@ fn remove_missing_linked_worktree_admin(
                 return Ok(());
             }
             let target_root = canonicalize_missing_path(&worktree.worktree_root);
-            for entry in std::fs::read_dir(&worktrees_dir).with_context(|| {
-                format!("read worktrees directory {}", worktrees_dir.display())
-            })? {
+            for entry in std::fs::read_dir(&worktrees_dir)
+                .with_context(|| format!("read worktrees directory {}", worktrees_dir.display()))?
+            {
                 let entry = entry?;
                 let admin_dir = entry.path();
                 if !admin_dir.is_dir() {

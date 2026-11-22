@@ -5,11 +5,11 @@ pub(in crate::controller) use destination::destroy_prepared_environment;
 #[cfg(test)]
 mod tests;
 // Shared with mj-daemon's move tests through the `test-support` feature.
+pub mod in_place;
+pub mod recovery;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_fixtures;
-pub mod in_place;
-pub mod recovery;
 pub mod transport;
 mod viewer_recovery;
 pub use viewer_recovery::ViewerMoveRecovery;
@@ -937,8 +937,9 @@ impl Controller {
             .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
         if retained_source {
             if operation.in_place {
-                let reason =
-                    anyhow::Error::new(super::lifecycle::LifecycleFailureReason::RetainedMoveSource);
+                let reason = anyhow::Error::new(
+                    super::lifecycle::LifecycleFailureReason::RetainedMoveSource,
+                );
                 self.retain_failed_in_place_move_with_persist(
                     session_id,
                     &source,
@@ -1011,11 +1012,12 @@ impl Controller {
                 retained
                     .resource_allocation
                     .clone_from(&current.resource_allocation);
-                retained.additional_mounts.clone_from(&current.additional_mounts);
+                retained
+                    .additional_mounts
+                    .clone_from(&current.additional_mounts);
                 retained.state = SessionState::Error;
-                retained.last_error = Some(
-                    super::lifecycle::LifecycleFailureReason::RetainedMoveSource.to_string(),
-                );
+                retained.last_error =
+                    Some(super::lifecycle::LifecycleFailureReason::RetainedMoveSource.to_string());
                 retained.updated_at = now();
                 crate::database::settle_superseded_move_source(
                     &retained,
@@ -1653,15 +1655,19 @@ impl Controller {
             source.target.as_deref().and_then(|src| {
                 let target_id = selection.target_template_id.as_deref()?;
                 self.config.targets.get(target_id).map(|dest| {
-                    if matches!(src, mj_core::state::TargetLocator::LocalBare { .. } | mj_core::state::TargetLocator::LocalPodman { .. } | mj_core::state::TargetLocator::LocalDocker { .. } | mj_core::state::TargetLocator::AppleContainer { .. })
-                        && matches!(
-                            dest,
-                            mj_core::config::TargetTemplate::LocalBare
-                                | mj_core::config::TargetTemplate::LocalPodman { .. }
-                                | mj_core::config::TargetTemplate::LocalDocker { .. }
-                                | mj_core::config::TargetTemplate::AppleContainer { .. }
-                        )
-                    {
+                    if matches!(
+                        src,
+                        mj_core::state::TargetLocator::LocalBare { .. }
+                            | mj_core::state::TargetLocator::LocalPodman { .. }
+                            | mj_core::state::TargetLocator::LocalDocker { .. }
+                            | mj_core::state::TargetLocator::AppleContainer { .. }
+                    ) && matches!(
+                        dest,
+                        mj_core::config::TargetTemplate::LocalBare
+                            | mj_core::config::TargetTemplate::LocalPodman { .. }
+                            | mj_core::config::TargetTemplate::LocalDocker { .. }
+                            | mj_core::config::TargetTemplate::AppleContainer { .. }
+                    ) {
                         mj_core::state::RoutePreview::SameHost
                     } else {
                         mj_core::state::RoutePreview::DirectOrDaemonStream
@@ -2262,7 +2268,11 @@ impl Controller {
             return;
         }
         let id = &operation.selection.session_id;
-        let session_target = self.state.sessions.get(id).and_then(|s| s.target.as_deref());
+        let session_target = self
+            .state
+            .sessions
+            .get(id)
+            .and_then(|s| s.target.as_deref());
         let mut candidates: Vec<&mj_core::state::TargetLocator> = Vec::new();
         if let Some(target) = operation.source_target.as_ref() {
             candidates.push(target);
@@ -3424,7 +3434,8 @@ impl Controller {
             return Ok(());
         }
         let id = &operation.selection.session_id;
-        if let Some(source_env) = crate::database::move_source_environment(&operation.operation_id)? {
+        if let Some(source_env) = crate::database::move_source_environment(&operation.operation_id)?
+        {
             executor.notify_notice("Retiring source environment");
             let _timing = MovePhaseTimer::new(id, "source environment retirement");
             super::environment::retire_owned_environment(
@@ -3465,7 +3476,10 @@ impl Controller {
                     self.cleanup_prepared_move_destination(&mut shim, executor)?;
                 }
                 if let Some(record) = self.state.sessions.get(session_id).cloned()
-                    && matches!(record.state, SessionState::Closing | SessionState::Destroying)
+                    && matches!(
+                        record.state,
+                        SessionState::Closing | SessionState::Destroying
+                    )
                 {
                     let worker_alive = record.target.as_deref().is_some_and(|locator| {
                         super::backend_locator(locator, &record, &self.config)
@@ -3499,7 +3513,9 @@ impl Controller {
                     crate::database::save_resumed_session(&updated, None)?;
                     self.state.sessions.insert(session_id.to_owned(), updated);
                 }
-                Ok(recovery::legacy_source_rollback_notice(&legacy.operation_id))
+                Ok(recovery::legacy_source_rollback_notice(
+                    &legacy.operation_id,
+                ))
             }
             recovery::MoveOwnership::Destination => {
                 if let Some(source_env) =
@@ -3821,9 +3837,7 @@ impl Controller {
         let mut skip_daemon_checkpoint_preflight = false;
         if bundle_move || preparation.is_some() {
             if let Some(snapshot) = operation.source_snapshot.as_deref() {
-                if bundle_move
-                    && let Some(manifest) = snapshot.manifest.as_ref()
-                {
+                if bundle_move && let Some(manifest) = snapshot.manifest.as_ref() {
                     current.validate_move_bundle_sources(operation, manifest, executor)?;
                     skip_daemon_checkpoint_preflight = manifest.repositories.iter().all(|repo| {
                         repo.metadata.origin_delta.is_some() || repo.metadata.remote_workspace
@@ -3854,7 +3868,11 @@ impl Controller {
                     .context("no move checkpoint")?;
                 let verified = verify_archive_streaming(&checkpoint.archive_path)?;
                 if bundle_move {
-                    current.validate_move_bundle_sources(operation, &verified.manifest, executor)?;
+                    current.validate_move_bundle_sources(
+                        operation,
+                        &verified.manifest,
+                        executor,
+                    )?;
                 }
                 if let Some(prepared) = preparation {
                     let actual: Vec<_> = verified
@@ -4103,14 +4121,12 @@ fn try_build_direct_peer_config(
         source_ssh_destination: src_ssh.destination.clone(),
         destination_host_key: dst_host_key,
         source_host_key: src_host_key,
-        source_stage_dir: std::path::PathBuf::from(&src_home)
-            .join(".cache/mjolnir/move-stage"),
+        source_stage_dir: std::path::PathBuf::from(&src_home).join(".cache/mjolnir/move-stage"),
         destination_stage_dir: std::path::PathBuf::from(&dst_home)
             .join(".cache/mjolnir/move-stage"),
         destination_authorized_keys: std::path::PathBuf::from(&dst_home)
             .join(".ssh/authorized_keys"),
-        source_authorized_keys: std::path::PathBuf::from(&src_home)
-            .join(".ssh/authorized_keys"),
+        source_authorized_keys: std::path::PathBuf::from(&src_home).join(".ssh/authorized_keys"),
         source_worker_bin: src_host_worker_bin,
         destination_worker_bin: dst_host_worker_bin,
         destination_ec2_grant: None,

@@ -1066,7 +1066,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
-            supervisors: false,
+        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,
@@ -8149,7 +8149,7 @@ impl ExportRuntime for OracleExports {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: true,
-            supervisor: false,
+                supervisor: false,
             };
             let mut session = parent_record(&id, &request.profile_id);
             session.oracle = false;

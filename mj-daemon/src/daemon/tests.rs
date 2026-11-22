@@ -8275,7 +8275,7 @@ esac
                 profile_id: Some("codex".into()),
                 target_template_id: Some("local".into()),
                 consent: Default::default(),
-            skip_keep_paths: Vec::new(),
+                skip_keep_paths: Vec::new(),
                 clear_resource_allocation: false,
                 additional_mounts: None,
                 resource_allocation: None,
@@ -9858,9 +9858,7 @@ async fn suspend_recovery_preserves_a_published_clones_durable_review_refs() {
         test_git(&restored, &["rev-parse", &reviewed]),
         clone.unpushed_commit
     );
-    assert!(
-        test_git(&restored, &["for-each-ref", "refs/mj/review-baseline"]).is_empty()
-    );
+    assert!(test_git(&restored, &["for-each-ref", "refs/mj/review-baseline"]).is_empty());
     clone.channels.shutdown.shutdown().await.unwrap();
 }
 

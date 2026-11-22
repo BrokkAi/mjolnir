@@ -396,8 +396,7 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
         assert!(moved.transfer_route.is_none());
         assert!(moved.restore_artifact().is_none());
         assert!(moved.in_place_harness_restarted);
-        let live_relay =
-            DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+        let live_relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
         let live_state = live_relay.operational_state();
         assert!(live_state.in_place_move_hold.is_none());
         assert!(live_state.goal.active());

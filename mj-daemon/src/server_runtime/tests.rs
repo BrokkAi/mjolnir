@@ -388,7 +388,7 @@ fn move_recovery_fixture() -> mj_core::state::MoveOperation {
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {
             oracle: None,
-        supervisors: None,
+            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -751,7 +751,7 @@ fn only_a_stopped_sub_agent_can_read_its_history() {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-            supervisor: false,
+                supervisor: false,
             }
             .into(),
         );
@@ -2165,7 +2165,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
-            supervisors: false,
+        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,

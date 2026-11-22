@@ -752,8 +752,12 @@ pub fn load_snapshot_pack_into_clone_cache(
     archive_path: &Path,
     executor: &impl CommandExecutor,
 ) -> Result<usize> {
-    let verified = verify_archive_streaming(archive_path)
-        .with_context(|| format!("inspect archive {} for clone cache pack load", archive_path.display()))?;
+    let verified = verify_archive_streaming(archive_path).with_context(|| {
+        format!(
+            "inspect archive {} for clone cache pack load",
+            archive_path.display()
+        )
+    })?;
     let pack_entries: Vec<(String, String)> = verified
         .manifest
         .repositories
@@ -773,8 +777,9 @@ pub fn load_snapshot_pack_into_clone_cache(
 
     let host_target = parse_host_cache_key(&host_cache_key(locator))?;
     let host_home = match &host_target {
-        HostCacheTarget::Local => std::env::var("HOME")
-            .context("resolve local HOME for clone cache")?,
+        HostCacheTarget::Local => {
+            std::env::var("HOME").context("resolve local HOME for clone cache")?
+        }
         HostCacheTarget::Ssh(ssh) => resolve_ssh_home(ssh, executor)?,
     };
 
@@ -1009,14 +1014,9 @@ mod tests {
             worker_root: temp.path().join("worker").to_string_lossy().into_owned(),
         };
 
-        let cached = publish_host_snapshot_cache(
-            "sess-1",
-            &locator,
-            &archive,
-            &sha,
-            &ProcessExecutor,
-        )
-        .unwrap();
+        let cached =
+            publish_host_snapshot_cache("sess-1", &locator, &archive, &sha, &ProcessExecutor)
+                .unwrap();
         assert!(cached.exists(), "published cache file must exist");
         #[cfg(unix)]
         {
@@ -1093,12 +1093,22 @@ mod tests {
         let locator = TargetLocator::LocalBare {
             worker_root: temp.path().join("worker").to_string_lossy().into_owned(),
         };
-        let path1 =
-            publish_host_snapshot_cache("sess-destroy", &locator, &archive1, &sha1, &ProcessExecutor)
-                .unwrap();
-        let path2 =
-            publish_host_snapshot_cache("sess-destroy", &locator, &archive2, &sha2, &ProcessExecutor)
-                .unwrap();
+        let path1 = publish_host_snapshot_cache(
+            "sess-destroy",
+            &locator,
+            &archive1,
+            &sha1,
+            &ProcessExecutor,
+        )
+        .unwrap();
+        let path2 = publish_host_snapshot_cache(
+            "sess-destroy",
+            &locator,
+            &archive2,
+            &sha2,
+            &ProcessExecutor,
+        )
+        .unwrap();
 
         // Also record a remote SSH copy for the same session on an unreachable host.
         let unreachable_ssh = SshTarget {
@@ -1198,7 +1208,10 @@ mod tests {
             &ProcessExecutor,
         )
         .unwrap();
-        assert!(loaded, "existing bare clone cache mirror must accept the pack");
+        assert!(
+            loaded,
+            "existing bare clone cache mirror must accept the pack"
+        );
 
         // Verify the commit object is now present in the clone cache mirror.
         let obj_type = git(&cache, &["cat-file", "-t", &commit_oid]);
@@ -1251,8 +1264,7 @@ mod tests {
         assert!(path_a.exists() && path_b.exists());
 
         // Destroying sess-a removes path_a without touching sess-b's path_b.
-        let warnings =
-            cleanup_session_host_snapshot_cache("sess-a", &ProcessExecutor).unwrap();
+        let warnings = cleanup_session_host_snapshot_cache("sess-a", &ProcessExecutor).unwrap();
         assert!(warnings.is_empty());
         assert!(!path_a.exists(), "destroyed session's copy must be removed");
         assert!(

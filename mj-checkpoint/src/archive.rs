@@ -2954,8 +2954,8 @@ use git::{
 mod purge;
 pub use purge::{
     ArchiveUntrackedPurgeKind, ArchiveUntrackedPurgeReport, PreparedUntrackedPurge,
-    StagedUntrackedPurge, StashUntrackedNote, archive_purge_not_cancelled,
-    prepare_untracked_purge, purge_untracked_from_archive, purge_was_cancelled,
+    StagedUntrackedPurge, StashUntrackedNote, archive_purge_not_cancelled, prepare_untracked_purge,
+    purge_untracked_from_archive, purge_was_cancelled,
 };
 
 #[cfg(test)]

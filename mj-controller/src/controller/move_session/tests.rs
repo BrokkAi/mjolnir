@@ -15,9 +15,7 @@ use mj_core::state::{
     TransferRoute,
 };
 
-use super::in_place::{
-    deferred_environment_change_notice, ensure_worker_supports_in_place_move,
-};
+use super::in_place::{deferred_environment_change_notice, ensure_worker_supports_in_place_move};
 use super::recovery::{
     MoveOwnership, classify_legacy_move_ownership, classify_move_ownership,
     legacy_source_rollback_notice,

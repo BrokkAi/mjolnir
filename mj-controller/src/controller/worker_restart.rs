@@ -580,10 +580,10 @@ impl Controller {
         if connection.snapshot().operational.checkpoint_only
             != (launch.run_mode == mj_core::worker_launch::WorkerRunMode::CheckpointOnly)
         {
-            return Err(
-                anyhow::anyhow!("replacement worker reported an unexpected execution mode")
-                    .context(WorkerRestartLeftNoWorker),
-            );
+            return Err(anyhow::anyhow!(
+                "replacement worker reported an unexpected execution mode"
+            )
+            .context(WorkerRestartLeftNoWorker));
         }
         let project_memory = match self.project_memory_sync_target(session_id) {
             Ok(target) => target,

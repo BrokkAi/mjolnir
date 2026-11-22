@@ -17,9 +17,9 @@ use mj_daemon::server::api::{
     API_VERSION, API_VERSION_HEADER, ApiSession, CreateWorkspaceRequest, CreateWorkspaceResponse,
     ExportRequest, GithubTokenResponse, MailboxEventRequest, MailboxEventResponse, PromptRequest,
     PromptResponse, PurgeUntrackedRequest, PurgeUntrackedResponse, PushedBranch,
-    ResumeSessionRequest, ResumeSessionResponse, SessionListResponse,
-    SessionMessageRequest, SessionMessageResponse, StartSessionRequest, StartSessionResponse,
-    SuspendSessionResponse, TranscriptResponse, WaitRequest, WaitResponse, WorkspaceListResponse,
+    ResumeSessionRequest, ResumeSessionResponse, SessionListResponse, SessionMessageRequest,
+    SessionMessageResponse, StartSessionRequest, StartSessionResponse, SuspendSessionResponse,
+    TranscriptResponse, WaitRequest, WaitResponse, WorkspaceListResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -941,8 +941,9 @@ impl ApiClient {
         if text.trim().is_empty() {
             Ok(serde_json::json!({ "session_id": session_id, "restarted": true }))
         } else {
-            Ok(serde_json::from_str(&text)
-                .unwrap_or_else(|_| serde_json::json!({ "session_id": session_id, "restarted": true })))
+            Ok(serde_json::from_str(&text).unwrap_or_else(
+                |_| serde_json::json!({ "session_id": session_id, "restarted": true }),
+            ))
         }
     }
 

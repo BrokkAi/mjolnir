@@ -2697,8 +2697,7 @@ fn compaction_drains_all_batches_past_non_shrinking_tool_rows() {
 
     // Batch size 1 forces multiple batches and starts on a >4 KiB tool row that
     // cannot shrink; the cursor must still advance and compact both later rows.
-    let retention =
-        compact_materialized_transcript_all_in(&database, "session-1", 20, 1).unwrap();
+    let retention = compact_materialized_transcript_all_in(&database, "session-1", 20, 1).unwrap();
     assert_eq!(retention.items, 2);
     assert!(!retention.remaining);
     assert!(retention.bytes > 128 * 1024);

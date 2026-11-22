@@ -260,13 +260,15 @@ pub fn prepare_untracked_purge(
             .iter()
             .all(|repository| repository.metadata.origin_delta.is_some());
     if origin_delta && uncompressed_reclaim == 0 {
-        return Ok(PreparedUntrackedPurge::Finished(ArchiveUntrackedPurgeReport {
-            kind: ArchiveUntrackedPurgeKind::AlreadyNewFormat,
-            bytes_reclaimed: 0,
-            stash_untracked_notes: Vec::new(),
-            warnings: Vec::new(),
-            schema_version,
-        }));
+        return Ok(PreparedUntrackedPurge::Finished(
+            ArchiveUntrackedPurgeReport {
+                kind: ArchiveUntrackedPurgeKind::AlreadyNewFormat,
+                bytes_reclaimed: 0,
+                stash_untracked_notes: Vec::new(),
+                warnings: Vec::new(),
+                schema_version,
+            },
+        ));
     }
     let (stash_untracked_notes, warnings) =
         match stash_untracked_notes(source_archive, &manifest, cancelled) {
@@ -277,34 +279,34 @@ pub fn prepare_untracked_purge(
             Err(error) => return Err(error),
         };
     if uncompressed_reclaim == 0 {
-        return Ok(PreparedUntrackedPurge::Finished(ArchiveUntrackedPurgeReport {
-            kind: ArchiveUntrackedPurgeKind::AlreadyClean,
-            bytes_reclaimed: 0,
-            stash_untracked_notes,
-            warnings,
-            schema_version,
-        }));
+        return Ok(PreparedUntrackedPurge::Finished(
+            ArchiveUntrackedPurgeReport {
+                kind: ArchiveUntrackedPurgeKind::AlreadyClean,
+                bytes_reclaimed: 0,
+                stash_untracked_notes,
+                warnings,
+                schema_version,
+            },
+        ));
     }
     if dry_run {
-        let bytes_reclaimed = match compressed_reclaim_estimate(
-            source_archive,
-            &manifest,
-            &empty,
-            cancelled,
-        ) {
-            Ok(bytes) => bytes,
-            Err(error) if purge_was_cancelled(&error) || cancelled() => {
-                return Ok(PreparedUntrackedPurge::Cancelled);
-            }
-            Err(error) => return Err(error),
-        };
-        return Ok(PreparedUntrackedPurge::Finished(ArchiveUntrackedPurgeReport {
-            kind: ArchiveUntrackedPurgeKind::DryRun,
-            bytes_reclaimed,
-            stash_untracked_notes,
-            warnings,
-            schema_version,
-        }));
+        let bytes_reclaimed =
+            match compressed_reclaim_estimate(source_archive, &manifest, &empty, cancelled) {
+                Ok(bytes) => bytes,
+                Err(error) if purge_was_cancelled(&error) || cancelled() => {
+                    return Ok(PreparedUntrackedPurge::Cancelled);
+                }
+                Err(error) => return Err(error),
+            };
+        return Ok(PreparedUntrackedPurge::Finished(
+            ArchiveUntrackedPurgeReport {
+                kind: ArchiveUntrackedPurgeKind::DryRun,
+                bytes_reclaimed,
+                stash_untracked_notes,
+                warnings,
+                schema_version,
+            },
+        ));
     }
     if cancelled() {
         return Ok(PreparedUntrackedPurge::Cancelled);
@@ -330,16 +332,13 @@ pub fn prepare_untracked_purge(
             });
         }
     };
-    let archive_sha256 = match super::verify_archive_streaming_unless(temporary.path(), cancelled)
-    {
+    let archive_sha256 = match super::verify_archive_streaming_unless(temporary.path(), cancelled) {
         Ok(verified) => verified.archive_sha256,
         Err(error) if purge_was_cancelled(&error) || cancelled() => {
             return Ok(PreparedUntrackedPurge::Cancelled);
         }
         Err(error) => {
-            return Err(error.context(
-                "purged archive failed verification and was removed",
-            ));
+            return Err(error.context("purged archive failed verification and was removed"));
         }
     };
     // One checkpoint archive is one file. Its untracked shards are ZIP
@@ -638,9 +637,9 @@ fn compressed_reclaim_estimate(
     for replacement in &planned {
         for name in &replacement.old_names {
             stop_if_cancelled(cancelled)?;
-            let entry = archive.by_name(name).with_context(|| {
-                format!("read compressed size of untracked entry '{name}'")
-            })?;
+            let entry = archive
+                .by_name(name)
+                .with_context(|| format!("read compressed size of untracked entry '{name}'"))?;
             removed = removed.saturating_add(entry.compressed_size());
         }
     }

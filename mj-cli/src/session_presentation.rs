@@ -89,9 +89,7 @@ pub(crate) fn apply_worker_activity(
 pub(crate) const fn lifecycle_kind(kind: RuntimeLifecycleKind) -> SessionOperationKind {
     match kind {
         RuntimeLifecycleKind::Create => SessionOperationKind::Launching,
-        RuntimeLifecycleKind::Suspend => {
-            SessionOperationKind::Suspending
-        }
+        RuntimeLifecycleKind::Suspend => SessionOperationKind::Suspending,
         RuntimeLifecycleKind::Resume => SessionOperationKind::Resuming,
         RuntimeLifecycleKind::Move => SessionOperationKind::Moving,
         RuntimeLifecycleKind::DestroyStopped
@@ -199,7 +197,7 @@ mod tests {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
-            supervisors: false,
+                supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,
@@ -506,7 +504,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-            supervisor: false,
+                supervisor: false,
             },
         );
         state.sessions.insert(child.id.clone(), child);

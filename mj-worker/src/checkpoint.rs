@@ -80,9 +80,10 @@ pub fn suspend_preflight_from_spec_file(
         if path == Path::new(EXPORT_SPEC_STDIN) {
             read_json_from(&mut std::io::stdin().lock(), "suspend preflight spec")?
         } else {
-            serde_json::from_slice(&fs::read(path).with_context(|| {
-                format!("read suspend preflight spec {}", path.display())
-            })?)
+            serde_json::from_slice(
+                &fs::read(path)
+                    .with_context(|| format!("read suspend preflight spec {}", path.display()))?,
+            )
             .context("decode suspend preflight spec")?
         };
     run_suspend_preflight(&spec, &SystemGit)
@@ -154,33 +155,34 @@ pub fn run_suspend_preflight(
                     }
                     Err(err) => {
                         git_delta_total = None;
-                        git_delta_unavailable = Some(format!("Git size estimate unavailable: {err}"));
+                        git_delta_unavailable =
+                            Some(format!("Git size estimate unavailable: {err}"));
                     }
                 }
             }
         }
 
         result.untracked.extend(inventory.untracked);
-        result.nested_repositories.extend(inventory.nested_repositories);
-        result.untracked_stashes.extend(
-            inventory
-                .untracked_stashes
-                .into_iter()
-                .map(|s| mj_core::suspend_consent::SuspendUntrackedStash {
+        result
+            .nested_repositories
+            .extend(inventory.nested_repositories);
+        result
+            .untracked_stashes
+            .extend(inventory.untracked_stashes.into_iter().map(|s| {
+                mj_core::suspend_consent::SuspendUntrackedStash {
                     checkout: s.checkout,
                     commit: s.value.commit,
                     message: s.value.message,
-                }),
-        );
+                }
+            }));
         if let Some(op) = inventory.operation {
             result.operations.push(op);
         }
         result.raw |= inventory.raw;
-        result.blockers.extend(
-            inventory
-                .blockers
-                .into_iter()
-                .map(|b| mj_core::suspend_consent::SuspendBlocker {
+        result
+            .blockers
+            .extend(inventory.blockers.into_iter().map(|b| {
+                mj_core::suspend_consent::SuspendBlocker {
                     kind: format!("{:?}", b.kind),
                     paths: b
                         .paths
@@ -188,8 +190,8 @@ pub fn run_suspend_preflight(
                         .map(|p| p.value.display().to_string())
                         .collect(),
                     remedy: b.remedy,
-                }),
-        );
+                }
+            }));
     }
 
     if spec.dry_run {

@@ -65,9 +65,9 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
             let submit_enabled = wizard.declare_review_extras(dashboard, &mut form);
             declare_review_controls(&mut form, can_attach, submit_enabled);
         }
-        WizardStep::Bundle
-        | WizardStep::NewBundle
-        | WizardStep::ProjectDirectory => wizard.declare_extra_step(dashboard, &mut form),
+        WizardStep::Bundle | WizardStep::NewBundle | WizardStep::ProjectDirectory => {
+            wizard.declare_extra_step(dashboard, &mut form)
+        }
     }
     form.end_frame(initial);
 }
