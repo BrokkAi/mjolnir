@@ -40,6 +40,11 @@ impl Default for GuardianEndpoint {
 }
 
 impl GuardianEndpoint {
+    #[cfg(test)]
+    pub(crate) fn pending_count(&self) -> usize {
+        self.pending.lock().expect("guardian queue poisoned").len()
+    }
+
     #[cfg(unix)]
     pub(crate) fn changes(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()

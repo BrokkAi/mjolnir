@@ -622,6 +622,7 @@ async fn guardian_relay_timeout_uses_the_away_answer_for_antigravity() {
         },
     );
     wait_for_guardian_request(&endpoint).await;
+    assert_eq!(endpoint.pending_count(), 1);
     tokio::time::pause();
     tokio::time::advance(GUARDIAN_REVIEW_TIMEOUT).await;
     tokio::time::resume();
@@ -656,7 +657,7 @@ async fn guardian_relay_timeout_uses_the_away_answer_for_antigravity() {
             json!({"command": "touch marker", "outcome": {"outcome": "selected", "optionId": "reject"}})
         ]
     );
-    assert!(endpoint.requests().is_empty());
+    assert_eq!(endpoint.pending_count(), 0);
     assert!(recorded(temp.path(), "reviewer_initialize").is_empty());
     runtime.abort();
 }

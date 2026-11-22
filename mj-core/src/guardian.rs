@@ -32,6 +32,10 @@ pub const GUARDIAN_REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
 /// Protocol 82's `AskPerson` also carries daemon failures. This reason
 /// identifies the explicit settings choice to continue with manual approval.
 pub const GUARDIAN_DISABLED_REASON: &str = "Mjolnir guardian is disabled in settings";
+pub const GUARDIAN_CONFIG_UNREADABLE: &str = "the daemon configuration file is unreadable";
+pub const GUARDIAN_CONFIG_INVALID_TOML: &str = "the daemon configuration contains invalid TOML";
+pub const GUARDIAN_CONFIG_NEEDS_UPGRADE: &str =
+    "the daemon configuration uses a newer schema. Upgrade Mjolnir";
 pub const MAX_PENDING_GUARDIAN_REVIEWS: usize = 8;
 
 /// Codex's security policy, inserted into the template below.
@@ -710,12 +714,15 @@ pub fn safe_daemon_guardian_failure_reason(reason: &str) -> &str {
         | "utility guardian inference failed (ContextLength)"
         | "utility guardian inference failed (Transport)"
         | "utility guardian inference failed (StructuredOutput)"
-        | "utility guardian inference failed (Provider)" => reason,
+        | "utility guardian inference failed (Provider)"
+        | "could not read configuration"
+        | GUARDIAN_CONFIG_UNREADABLE
+        | GUARDIAN_CONFIG_INVALID_TOML
+        | GUARDIAN_CONFIG_NEEDS_UPGRADE => reason,
         "could not load configuration" => reason,
         reason if reason.starts_with("could not load configuration:") => {
             "could not load configuration"
         }
-        "could not read configuration" => reason,
         reason if reason.starts_with("could not read configuration:") => {
             "could not read configuration"
         }

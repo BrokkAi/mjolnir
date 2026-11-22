@@ -1585,6 +1585,7 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
 #[tokio::test]
 async fn guardian_actor_cascades_requests_added_after_attachment() {
     use mj_core::guardian::{
+        GUARDIAN_CONFIG_INVALID_TOML, GUARDIAN_CONFIG_NEEDS_UPGRADE, GUARDIAN_CONFIG_UNREADABLE,
         GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
         WOLF_STAGE1_ALLOW_THRESHOLD,
     };
@@ -1695,7 +1696,19 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
         (
             "invalid-config",
             GuardianReviewOutcome::AskPerson {
-                reason: "could not load configuration".into(),
+                reason: GUARDIAN_CONFIG_INVALID_TOML.into(),
+            },
+        ),
+        (
+            "newer-config",
+            GuardianReviewOutcome::AskPerson {
+                reason: GUARDIAN_CONFIG_NEEDS_UPGRADE.into(),
+            },
+        ),
+        (
+            "unreadable-config",
+            GuardianReviewOutcome::AskPerson {
+                reason: GUARDIAN_CONFIG_UNREADABLE.into(),
             },
         ),
     ] {
@@ -1705,6 +1718,14 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
             "guardian-disabled" => guardian_off_config.save().unwrap(),
             "invalid-config" => {
                 mj_core::config::atomic_write(&config_path, b"invalid SECRET_DATA").unwrap();
+            }
+            "newer-config" => {
+                let config = format!("version = {}\n", mj_core::config::CONFIG_VERSION + 1);
+                mj_core::config::atomic_write(&config_path, config.as_bytes()).unwrap();
+            }
+            "unreadable-config" => {
+                std::fs::remove_file(&config_path).unwrap();
+                std::fs::create_dir(&config_path).unwrap();
             }
             _ => {
                 mj_core::config::atomic_write(&config_path, &valid_config).unwrap();

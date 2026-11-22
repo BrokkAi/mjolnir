@@ -1,5 +1,7 @@
 use super::*;
+use mj_core::config::ConfigLoadError;
 use mj_core::guardian::{
+    GUARDIAN_CONFIG_INVALID_TOML, GUARDIAN_CONFIG_NEEDS_UPGRADE, GUARDIAN_CONFIG_UNREADABLE,
     GUARDIAN_DISABLED_REASON, GUARDIAN_REVIEW_TIMEOUT, GuardianReviewOutcome,
     GuardianReviewRequest, GuardianReviewResult, MAX_PENDING_GUARDIAN_REVIEWS, Outcome,
     WOLF_STAGE1_ALLOW_THRESHOLD, safe_daemon_guardian_failure_reason,
@@ -1285,13 +1287,21 @@ async fn execute_guardian_review(
     );
     let cancel = tokio_util::sync::CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
+    let mut toml_location = None;
     let mut decision = tokio::time::timeout(GUARDIAN_REVIEW_TIMEOUT, async {
         let config = match mj_core::runtime::spawn_blocking(mj_core::config::Config::load).await {
             Ok(Ok(config)) => config,
             Ok(Err(error)) => {
-                return GuardianReviewOutcome::AskPerson {
-                    reason: format!("could not load configuration: {error:#}"),
+                let reason = match error.downcast_ref::<ConfigLoadError>() {
+                    Some(ConfigLoadError::Toml { location, .. }) => {
+                        toml_location = *location;
+                        GUARDIAN_CONFIG_INVALID_TOML
+                    }
+                    Some(ConfigLoadError::NewerSchema { .. }) => GUARDIAN_CONFIG_NEEDS_UPGRADE,
+                    None if error.is::<std::io::Error>() => GUARDIAN_CONFIG_UNREADABLE,
+                    None => "could not load configuration",
                 };
+                return GuardianReviewOutcome::AskPerson { reason: reason.into() };
             }
             Err(error) => {
                 return GuardianReviewOutcome::AskPerson {
@@ -1377,6 +1387,8 @@ async fn execute_guardian_review(
             tool_call_id = %request.tool_call_id,
             request_id = %request.request_id,
             reason = safe_reason,
+            toml_line = toml_location.map(|(line, _)| line),
+            toml_column = toml_location.map(|(_, column)| column),
             "daemon guardian review failed"
         );
         *reason = safe_reason.to_owned();
