@@ -342,7 +342,7 @@ impl Controller {
                     vec![
                         "sh".into(),
                         "-c".into(),
-                        "if [ -f \"$1\" ]; then cat -- \"$1\"; fi; printf '\\0'; if [ ! -L \"$2\" ] && [ -f \"$2\" ]; then cat -- \"$2\"; fi".into(),
+                        "set -e; if [ -e \"$1\" ] || [ -L \"$1\" ]; then cat -- \"$1\"; fi; printf '\\0'; if [ ! -L \"$2\" ] && [ -f \"$2\" ]; then cat -- \"$2\"; fi".into(),
                         "mj-pull-codex-login".into(),
                         ownership_path,
                         staged_path,

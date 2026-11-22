@@ -786,15 +786,6 @@ fn harness_turn_policy_for(harness: HarnessKind) -> crate::relay::HarnessTurnPol
     }
 }
 
-fn background_work_policy_for(harness: HarnessKind) -> crate::relay::BackgroundWorkPolicy {
-    match harness {
-        HarnessKind::Claude | HarnessKind::Codex => crate::relay::BackgroundWorkPolicy::AirTasks,
-        HarnessKind::Kimi => crate::relay::BackgroundWorkPolicy::KimiTasks,
-        HarnessKind::Antigravity => crate::relay::BackgroundWorkPolicy::AntigravityTasks,
-        _ => crate::relay::BackgroundWorkPolicy::HostedTerminals,
-    }
-}
-
 async fn restart_harness_in_place_response(
     envelope: RelayRequestEnvelope,
     commands: Option<&mpsc::Sender<CommandRequest>>,
@@ -1149,7 +1140,6 @@ async fn restart_harness_in_place_response(
                     );
                     relay.update_mailbox_delivery_mode(updated_mailbox_delivery_mode);
                     relay.set_harness_turn_policy(harness_turn_policy_for(updated_harness));
-                    relay.set_background_work_policy(background_work_policy_for(updated_harness));
                     relay.login_identity.clone()
                 };
                 if let Ok(endpoint) = &updated_credentials {
@@ -1738,7 +1728,12 @@ pub async fn run_daemon_owned(
     durable_relay.set_steering_delivery_mode(config.harness, false);
     durable_relay.set_harness_turn_policy(harness_turn_policy_for(config.harness));
     // Both adapters publish their background command lifecycle through AIR.
-    durable_relay.set_background_work_policy(background_work_policy_for(config.harness));
+    durable_relay.set_background_work_policy(match config.harness {
+        HarnessKind::Claude | HarnessKind::Codex => crate::relay::BackgroundWorkPolicy::AirTasks,
+        HarnessKind::Kimi => crate::relay::BackgroundWorkPolicy::KimiTasks,
+        HarnessKind::Antigravity => crate::relay::BackgroundWorkPolicy::AntigravityTasks,
+        _ => crate::relay::BackgroundWorkPolicy::HostedTerminals,
+    });
     record_imported_native_identity(&config, &mut durable_relay)?;
     let resume_session = select_resume_session(&config, &durable_relay);
     let native_session_history = durable_relay.native_session_history();
