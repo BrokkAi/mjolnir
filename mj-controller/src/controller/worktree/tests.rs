@@ -3139,6 +3139,49 @@ fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
     assert!(!worktree_root.exists());
 }
 
+// Hard-won: 90fc17a2b: managed clone removal left files in owner-read-only directories.
+#[cfg(unix)]
+#[test]
+fn clone_retirement_removes_read_only_directories_without_following_symlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let temp = tempfile::tempdir().unwrap();
+    let clone = temp.path().join("managed clone");
+    let read_only = clone.join("nested").join("read only");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&read_only).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(read_only.join("file"), "remove me").unwrap();
+    std::fs::write(outside.join("file"), "keep me").unwrap();
+    symlink(&outside, read_only.join("link")).unwrap();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o500)).unwrap();
+    std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let worktree = ManagedWorktree {
+        source_repository: temp.path().join("source"),
+        source_project_directory: temp.path().join("source"),
+        worktree_root: clone.clone(),
+        branch: "main".into(),
+        base_commit: None,
+        target: ManagedWorktreeTarget::Local,
+        kind: ManagedCheckoutKind::Clone,
+    };
+
+    let retired = super::super::environment::retire_checkout_for_test(
+        &ProcessExecutor,
+        &worktree,
+        CloneRetirementPrerequisite::None,
+    );
+    let outside_mode = std::fs::metadata(&outside).unwrap().permissions().mode();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o700)).unwrap();
+    retired.unwrap();
+    assert!(!clone.exists());
+    assert_eq!(outside_mode & 0o777, 0o500);
+    assert_eq!(
+        std::fs::read_to_string(outside.join("file")).unwrap(),
+        "keep me"
+    );
+}
+
 #[test]
 fn scoped_linked_worktree_removal_preserves_siblings_and_locked_registrations() {
     let temp = tempfile::tempdir().unwrap();

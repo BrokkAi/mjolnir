@@ -3343,13 +3343,27 @@ fn remove_managed_worktree_checkout(
     };
     if worktree.kind == ManagedCheckoutKind::Clone {
         if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? {
+            // Unlinking files requires write permission on their parent.
+            // A stopped clone can contain owner-read-only directories. Make
+            // those directories writable, without following symlinks or
+            // changing file modes, before removing the owned tree.
+            const REMOVE_CLONE: &str = r#"
+owner=$(id -u) || exit
+find -P "$1" -type d -user "$owner" ! -perm -0200 -exec chmod -- u+w {} + &&
+    exec rm -rf -- "$1"
+"#;
             execute_checked(
                 executor,
                 managed_target_command(
                     SshTrafficClass::Control,
                     &worktree.target,
-                    "rm",
-                    ["-rf", "--", &worktree.worktree_root.to_string_lossy()],
+                    "sh",
+                    [
+                        "-c",
+                        REMOVE_CLONE,
+                        "mj-remove-clone",
+                        &worktree.worktree_root.to_string_lossy(),
+                    ],
                 )
                 .purpose("remove managed clone after its worker stopped"),
             )?;
