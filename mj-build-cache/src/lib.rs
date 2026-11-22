@@ -5,6 +5,9 @@
 //! (`cache_host`). It builds on the targets and store crates and knows nothing
 //! of how a session is launched.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 // The moved modules name these by their old paths.
 pub(crate) use mj_store::database;
 pub(crate) use mj_targets::targets;

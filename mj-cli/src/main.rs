@@ -5,6 +5,9 @@
 //! [`server`] implements the daemon-owned phone control, [`pollers`] the background
 //! feeds both of them read, and [`import`] session adoption.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 // glibc retained tens of GiB of freed heap across the daemon's session tasks.
 // jemalloc also replaces `malloc` for C code (see the Cargo.toml feature).
 #[cfg(target_os = "linux")]

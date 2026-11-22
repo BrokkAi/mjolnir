@@ -1180,7 +1180,6 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
 }
 
 pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeState> {
-    mj_core::test_hooks::enable_test_fixtures();
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = remote.control.session_gate.clone();
     let upgrades =
@@ -16665,7 +16664,6 @@ fn adoption_waits_leave_the_blocking_pool_available() {
 }
 
 pub(super) fn isolate_runtime_feed_test(module: &str, name: &str) -> bool {
-    mj_core::test_hooks::enable_test_fixtures();
     const KEY: &str = "MJ_TEST_RUNTIME_FEED_ISOLATED";
     if std::env::var(KEY).ok().as_deref() == Some(name) {
         return false;

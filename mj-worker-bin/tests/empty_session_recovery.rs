@@ -1,6 +1,8 @@
 //! Exercise native recovery through a real, disposable worker process.
 #![cfg(unix)]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate, TextContent};
 use mj_core::relay::{
     RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION, RelayCommand, RelayCommandOutcome,
@@ -83,7 +85,6 @@ fn recover_native_session_from(
     missing_error: Option<serde_json::Value>,
     used: bool,
 ) {
-    mj_core::test_hooks::enable_test_fixtures();
     let original = if missing_error.is_some() {
         "missing-thread"
     } else {

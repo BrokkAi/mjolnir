@@ -2851,7 +2851,6 @@ mod tests {
     // Hard-won: ef16209e: restart reported success after another client relaunched the old executable.
     #[test]
     fn a_restart_onto_another_build_fails_and_names_both_builds() {
-        mj_core::test_hooks::enable_test_fixtures();
         let other = format!("1.0.0+{}", "b".repeat(40));
         let error = restart_verdict(99, &test_daemon_identity(&other), Some(false))
             .unwrap_err()

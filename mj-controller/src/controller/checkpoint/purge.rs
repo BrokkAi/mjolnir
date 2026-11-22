@@ -421,7 +421,6 @@ mod commit_pause {
 
     /// Block the next purge commit until [`PurgeCommitPause::release`].
     pub fn arm() -> PurgeCommitPause {
-        mj_core::test_hooks::enable_test_fixtures();
         let state = Arc::new(State {
             slot: Mutex::new(Slot {
                 entered: false,

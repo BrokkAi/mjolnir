@@ -8,6 +8,9 @@
 //! operations, the daemon) can be split into crates that each depend on the
 //! store without depending on each other.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 // The moved modules name these by their old paths.
 pub(crate) use mj_targets::targets;
 #[cfg(test)]

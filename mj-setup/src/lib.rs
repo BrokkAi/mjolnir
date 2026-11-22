@@ -6,6 +6,9 @@
 //! It sits above `mj-controller`, which it inspects and which does not use
 //! it, so an edit here rebuilds neither the controller nor its tests.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 // The moved modules name these by their old paths.
 pub(crate) use mj_accounts::{harness_auth, opencode_logins, quota, zai_usage};
 pub(crate) use mj_controller::controller;

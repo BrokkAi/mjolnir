@@ -3,6 +3,8 @@
 //! one small read, not a scan of every process on the machine. This file holds
 //! a single test so the thread count it measures belongs to this process alone.
 
+mj_core::enable_test_fixtures_on_startup!();
+
 #[cfg(target_os = "linux")]
 fn thread_count() -> usize {
     std::fs::read_dir("/proc/self/task").unwrap().count()

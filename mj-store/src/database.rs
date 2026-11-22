@@ -118,7 +118,6 @@ pub mod test_fixtures;
 mod tests;
 #[doc(hidden)]
 pub fn test_session(id: &str, bundle: &str) -> SessionRecord {
-    mj_core::test_hooks::enable_test_fixtures();
     SessionRecord {
         oracle_choice: None,
         oracle: true,

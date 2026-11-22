@@ -10,7 +10,6 @@ use std::process::Command;
 /// `module_path!()` carries the crate name, which libtest's filter does not.
 /// mj-daemon's tests use this too, so any crate name is stripped.
 pub fn test_name(module_path: &str, test: &str) -> String {
-    mj_core::test_hooks::enable_test_fixtures();
     let module = module_path
         .split_once("::")
         .map_or(module_path, |(_, module)| module);
@@ -42,7 +41,6 @@ impl IsolatedTest {
     const CHILD_STACK_BYTES: &'static str = "33554432";
 
     pub fn new(name: impl Into<String>) -> Self {
-        mj_core::test_hooks::enable_test_fixtures();
         let name = name.into();
         let mut command = Command::new(std::env::current_exe().expect("this test binary"));
         command

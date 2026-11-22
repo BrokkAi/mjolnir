@@ -1,7 +1,7 @@
 //! Crash-boundary hooks and subprocess fixtures for isolated tests.
 //!
 //! Runtime hooks and shared test fixtures stay inactive until explicitly
-//! enabled via [`enable_test_hooks`] or [`enable_test_fixtures`].
+//! enabled via [`enable_test_hooks`] or [`crate::enable_test_fixtures_on_startup!`].
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +28,33 @@ pub fn test_hooks_enabled() -> bool {
 #[doc(hidden)]
 pub fn enable_test_fixtures() {
     TEST_FIXTURES_ENABLED.store(true, Ordering::Release);
+}
+
+/// Opt a test executable into shared library fixtures before any tests run.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! enable_test_fixtures_on_startup {
+    () => {
+        const _: () = {
+            #[used]
+            #[cfg_attr(
+                target_os = "macos",
+                unsafe(link_section = "__DATA,__mod_init_func,mod_init_funcs")
+            )]
+            #[cfg_attr(windows, unsafe(link_section = ".CRT$XCU"))]
+            #[cfg_attr(
+                not(any(target_os = "macos", windows)),
+                unsafe(link_section = ".init_array")
+            )]
+            static MJ_ENABLE_TEST_FIXTURES_INIT: extern "C" fn() = {
+                extern "C" fn enable() {
+                    // The loader can call this before Rust initializes its runtime.
+                    $crate::test_hooks::enable_test_fixtures();
+                }
+                enable
+            };
+        };
+    };
 }
 
 #[doc(hidden)]
@@ -127,7 +154,6 @@ pub fn fake_command_dispatcher() -> std::path::PathBuf {
 #[cfg(unix)]
 #[doc(hidden)]
 pub fn fake_worker_dispatcher() -> std::path::PathBuf {
-    enable_test_fixtures();
     std::path::Path::new(env!("OUT_DIR")).join("fake-worker.sh")
 }
 
@@ -182,7 +208,6 @@ fn install_fake_with_dispatcher(
     program: &str,
     script: &str,
 ) {
-    enable_test_fixtures();
     assert!(
         dispatcher.is_file(),
         "fake command dispatcher is missing at {}",
@@ -267,15 +292,17 @@ pub mod leased_relay {
     pub const DROP_ADMISSION_OPEN_REPLY: &str = "MJ_TEST_DROP_ADMISSION_OPEN_REPLY";
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_hooks_stay_off_without_explicit_opt_in() {
         assert!(!test_hooks_enabled());
+        assert!(!test_fixtures_enabled());
     }
 
+    #[cfg(unix)]
     #[test]
     fn fake_command_preserves_arguments_output_and_status_with_restricted_path() {
         let root = tempfile::tempdir().unwrap();
@@ -303,6 +330,7 @@ mod tests {
         assert!(output.stderr.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn fake_command_streams_input_while_its_script_is_open_for_writing() {
         let directory = tempfile::tempdir().unwrap();

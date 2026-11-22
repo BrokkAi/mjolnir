@@ -9,13 +9,11 @@ thread_local! {
 
 #[doc(hidden)]
 pub fn take_viewer_row_visits() -> usize {
-    mj_core::test_hooks::enable_test_fixtures();
     VIEWER_ROW_VISITS.with(|visits| visits.replace(0))
 }
 
 #[cfg(test)]
 pub fn take_viewer_session_scan_visits() -> usize {
-    mj_core::test_hooks::enable_test_fixtures();
     VIEWER_SESSION_SCAN_VISITS.with(|visits| visits.replace(0))
 }
 

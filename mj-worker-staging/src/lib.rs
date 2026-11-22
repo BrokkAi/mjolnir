@@ -7,6 +7,9 @@
 //! targets, store and accounts crates. The session runtime and
 //! the controller's lifecycle operations use it; it uses neither.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 // The moved modules name these by their old paths.
 pub(crate) use mj_accounts::{harness_auth, opencode_logins};
 pub(crate) use mj_store::{database, worker_lifecycle};

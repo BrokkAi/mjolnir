@@ -8,6 +8,9 @@
 //! ([`mj_core::worker_build::install`]) and library code reads it from there,
 //! which is what keeps a commit from recompiling the libraries.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 use mj_core::worker_build::BuildIdentity;
 
 /// Identity of this build: package version plus commit. It orders daemon
@@ -58,12 +61,8 @@ mod tests {
     use mj_core::{test_hooks, worker_build};
 
     #[test]
-    fn linking_core_without_installing_an_identity_does_not_enable_test_mode() {
-        assert!(!test_hooks::test_hooks_enabled());
-        assert!(!test_hooks::test_fixtures_enabled());
-        assert!(std::panic::catch_unwind(worker_build::build_id).is_err());
-
-        test_hooks::enable_test_fixtures();
+    fn test_startup_enables_the_fallback_identity_without_runtime_hooks() {
+        assert!(test_hooks::test_fixtures_enabled());
         assert!(worker_build::worker_build_id().ends_with(&format!("+{:040x}", 0)));
         assert!(!test_hooks::test_hooks_enabled());
     }

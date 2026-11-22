@@ -6,6 +6,9 @@
 //! This is a separate crate so that the session runtime, the lifecycle
 //! operations and the daemon can each use it without rebuilding one another.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 // The moved modules name these by their old paths.
 pub(crate) use mj_store::{database, upgrade};
 pub(crate) use mj_targets::{streamed_child, targets};

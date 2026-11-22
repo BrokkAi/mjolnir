@@ -787,7 +787,6 @@ fn recovery_stops_at_a_marked_harness_startup_failure() {
     ignore = "#1296: process cancellation and relay recovery assume Unix"
 )]
 async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
-    mj_core::test_hooks::enable_test_fixtures();
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("current-worker");
     let refreshed = directory.path().join("worker-refreshed");

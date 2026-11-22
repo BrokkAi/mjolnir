@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::sync::{
@@ -19,7 +21,6 @@ use mj_worker::relay::{DurableRelay, serve_relay_json_lines};
 const SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
 fn open_test_relay(root: &std::path::Path) -> DurableRelay {
-    mj_core::test_hooks::enable_test_fixtures();
     DurableRelay::open(root, SESSION, "test").unwrap()
 }
 

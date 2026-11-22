@@ -1,6 +1,8 @@
 //! Real worker entrypoints must clean inherited state before invoking Git.
 #![cfg(unix)]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use mj_core::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
 use mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
 use std::time::Duration;
@@ -587,7 +589,6 @@ fn worker_git_uses_the_requested_repository_despite_a_polluted_launcher() {
 
 #[test]
 fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
-    mj_core::test_hooks::enable_test_fixtures();
     use anyhow::{Context, Result, ensure};
     use std::time::Instant;
     let root = tempfile::tempdir().unwrap();

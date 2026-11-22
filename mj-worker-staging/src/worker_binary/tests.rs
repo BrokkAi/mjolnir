@@ -106,7 +106,6 @@ fn skips_stale_and_unstamped_candidates_and_reports_them_when_none_match() {
 // Hard-won: 0cc3263: an explicit stale worker override previously fell through and replaced the named worker
 #[test]
 fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
-    mj_core::test_hooks::enable_test_fixtures();
     const CHILD: &str = "MJ_STALE_WORKER_OVERRIDE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
@@ -145,7 +144,6 @@ fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
 #[cfg(unix)]
 #[test]
 fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_worker() {
-    mj_core::test_hooks::enable_test_fixtures();
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     const CHILD: &str = "MJ_OLD_ROOT_WORKER_CHILD";
     const SESSION: &str = "17171717171717171717171717171717";
@@ -232,7 +230,6 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_
 #[cfg(unix)]
 #[test]
 fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
-    mj_core::test_hooks::enable_test_fixtures();
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     const CHILD: &str = "MJ_FRESH_BARE_CLOSE_CHILD";
@@ -319,7 +316,6 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
 #[cfg(unix)]
 #[test]
 fn a_control_worker_install_waits_without_holding_admission_and_a_cancel_ends_it() {
-    mj_core::test_hooks::enable_test_fixtures();
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -504,7 +500,6 @@ impl CommandExecutor for CountingExecutor {
 /// returns `true` after the child passes.
 #[cfg(unix)]
 fn in_isolated_store_with_worker(test: &str, worker_script: &str) -> bool {
-    mj_core::test_hooks::enable_test_fixtures();
     use std::os::unix::fs::PermissionsExt;
     const CHILD: &str = "MJ_CONTROL_STAGING_CHILD";
     if std::env::var_os(CHILD).is_some() {
@@ -574,7 +569,6 @@ fn a_root_whose_hel_serves_the_command_stops_without_staging() {
 #[cfg(unix)]
 #[test]
 fn status_78_stages_the_control_worker_and_reruns_once() {
-    mj_core::test_hooks::enable_test_fixtures();
     const SESSION: &str = "22222222222222222222222222222222";
     for serves in [true, false] {
         let test = "status_78_stages_the_control_worker_and_reruns_once";
@@ -664,7 +658,6 @@ fn a_diagnosis_reports_a_missing_control_worker_and_installs_nothing() {
 #[cfg(unix)]
 #[test]
 fn probing_a_worker_installs_the_control_worker_itself() {
-    mj_core::test_hooks::enable_test_fixtures();
     use std::os::unix::fs::PermissionsExt;
     const CHILD: &str = "MJ_PROBE_STAGES_CHILD";
     const SESSION: &str = "19191919191919191919191919191919";
@@ -707,7 +700,6 @@ fn probing_a_worker_installs_the_control_worker_itself() {
 
 #[test]
 fn stale_pins_are_re_resolved() {
-    mj_core::test_hooks::enable_test_fixtures();
     const CHILD: &str = "MJ_STALE_WORKER_PIN_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
@@ -757,7 +749,6 @@ fn stale_pins_are_re_resolved() {
 // Hard-won: daa70d7: worker source warming delayed daemon reconnect under large-session load
 #[test]
 fn warming_pins_the_sources_for_the_next_daemon_without_taking_its_snapshot() {
-    mj_core::test_hooks::enable_test_fixtures();
     const CHILD: &str = "MJ_WARM_WORKER_PIN_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
@@ -876,7 +867,6 @@ fn pinning_rejects_stale_sources_before_publication() {
 
 #[test]
 fn downloads_reject_stale_builds_even_with_the_expected_checksum() {
-    mj_core::test_hooks::enable_test_fixtures();
     const CHILD: &str = "MJ_STALE_DOWNLOAD_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();

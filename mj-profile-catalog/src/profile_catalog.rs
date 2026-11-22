@@ -2060,7 +2060,6 @@ fn home_digest(inputs: &[WatchedInput; 3]) -> [u8; 32] {
 /// A configuration with the named profiles enabled.
 #[doc(hidden)]
 pub fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
-    mj_core::test_hooks::enable_test_fixtures();
     Config {
         profiles: profiles
             .iter()

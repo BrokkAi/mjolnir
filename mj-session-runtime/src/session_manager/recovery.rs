@@ -448,7 +448,6 @@ pub fn recover_worker_controlled(
     session_id: Option<&str>,
     executor: &impl CommandExecutor,
 ) -> Result<WorkerRecoveryOutcome> {
-    mj_core::test_hooks::enable_test_fixtures();
     let admission = match session_id {
         Some(id) => match crate::database::test_fixtures::worker_test_gate()
             .try_start(id, crate::recovery_gate::BackgroundWork::RelayRecovery)

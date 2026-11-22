@@ -34,7 +34,6 @@ use mj_core::state::{MaterializedSession, SessionState, State, TargetLocator};
 pub const MOVE_QUEUE_SESSION_ID: &str = "0123456789abcdef0123456789abcdef";
 
 pub fn isolated_test_child(test_name: &str, marker: &str) -> bool {
-    mj_core::test_hooks::enable_test_fixtures();
     if std::env::var_os(marker).is_some() {
         return true;
     }

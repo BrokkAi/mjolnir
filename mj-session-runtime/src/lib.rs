@@ -7,6 +7,9 @@
 //! recovery plans of `mj-session-types`. The controller's lifecycle operations
 //! use it; it does not know them.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 // The moved modules name these by their old paths.
 pub(crate) use mj_accounts::{claude_login, harness_auth, opencode_logins, profile_health};
 pub(crate) use mj_import::utility_llm;

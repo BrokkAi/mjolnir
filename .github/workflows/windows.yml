@@ -54,17 +54,17 @@ jobs:
           target/x86_64-pc-windows-msvc/release
 
     - name: Run Clippy lints
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy --all-targets --features brokk-mjolnir/test-hooks -- -D warnings
 
     # Clippy above checks every test target; this compiles and links the ones
     # that run here.
     - name: Compile tests
-      run: cargo test --no-run $env:TEST_PACKAGES.Split(' ')
+      run: cargo test --no-run $env:TEST_PACKAGES.Split(' ') --features brokk-mjolnir/test-hooks
 
     # `--no-fail-fast` reports every failing crate: one failure used to hide
     # the crates after it.
     - name: Run tests
-      run: cargo test --no-fail-fast $env:TEST_PACKAGES.Split(' ')
+      run: cargo test --no-fail-fast $env:TEST_PACKAGES.Split(' ') --features brokk-mjolnir/test-hooks
 
     - name: Test the Windows installer
       run: node --test scripts/install-ps1.test.mjs

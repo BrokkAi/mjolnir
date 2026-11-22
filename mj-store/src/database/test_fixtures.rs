@@ -8,7 +8,6 @@ pub fn event_digest(value: u64) -> String {
 }
 
 pub fn materialized_session(session_id: &str) -> MaterializedSession {
-    mj_core::test_hooks::enable_test_fixtures();
     MaterializedSession {
         active_turn: None,
         last_turn_outcome: None,
@@ -121,7 +120,6 @@ pub fn materialized_session(session_id: &str) -> MaterializedSession {
 }
 
 pub fn checkpoint_test_session(session_id: &str) -> SessionRecord {
-    mj_core::test_hooks::enable_test_fixtures();
     SessionRecord {
         oracle_choice: None,
         oracle: true,
@@ -187,7 +185,6 @@ pub fn local_bundle(repository: &std::path::Path) -> mj_core::config::ProjectBun
 
 /// The recovery gate tests share for one data directory.
 pub fn worker_test_gate() -> std::sync::Arc<crate::recovery_gate::RecoveryGate> {
-    mj_core::test_hooks::enable_test_fixtures();
     use std::sync::{Arc, Mutex, OnceLock};
     static GATES: OnceLock<
         Mutex<

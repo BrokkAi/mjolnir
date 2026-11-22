@@ -297,7 +297,6 @@ pub struct CredentialSyncCoordinator {
 impl CredentialSyncCoordinator {
     #[doc(hidden)]
     pub fn spawn() -> Self {
-        mj_core::test_hooks::enable_test_fixtures();
         Self::spawn_inner(
             SessionRelays::Direct,
             None,

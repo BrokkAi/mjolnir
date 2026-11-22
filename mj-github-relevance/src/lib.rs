@@ -4,6 +4,9 @@
 //!
 //! The Guardian also uses the crate's shared model cache and ONNX Runtime.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 // The moved tests name these by their old paths.
 #[cfg(test)]
 pub(crate) use mj_targets::{signing_key, test_isolation};

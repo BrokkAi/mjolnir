@@ -2,6 +2,8 @@
 //! stand-ins that hold the real root lock the way a worker does.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -110,7 +112,6 @@ fn record_worker(root: &Path, pid: u32, birth: &str) {
 }
 
 fn start_real_worker(root: &Path, scratch: &Path) -> Child {
-    mj_core::test_hooks::enable_test_fixtures();
     drop(
         mj_worker::relay::DurableRelay::open(root, "018f9dd2-a3b4-7c8d-9000-123456789abc", "test")
             .unwrap(),

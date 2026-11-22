@@ -731,7 +731,6 @@ mod tests {
 
     #[test]
     fn a_container_daemon_publishes_no_host_pid() {
-        mj_core::test_hooks::enable_test_fixtures();
         let metadata = daemon_metadata(&spec(Vec::new()), 43123, "token".into());
         assert_eq!(metadata.pid, 0);
         assert_eq!(metadata.address.port(), 43123);

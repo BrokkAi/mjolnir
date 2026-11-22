@@ -96,7 +96,6 @@ pub fn install(identity: BuildIdentity) {
 #[doc(hidden)]
 #[must_use]
 pub fn test_worker_executable() -> std::path::PathBuf {
-    crate::test_hooks::enable_test_fixtures();
     debug_assert!(TEST_WORKER_BUILD_STAMP.contains(TEST_REVISION));
     std::hint::black_box(TEST_WORKER_BUILD_STAMP);
     std::env::current_exe().expect("locate the running test executable")

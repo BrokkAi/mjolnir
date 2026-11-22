@@ -1,6 +1,8 @@
 //! A managed child's questions go to its parent; its approvals stay with a person.
 #![cfg(unix)]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 use anyhow::Context;
 use mj_core::elicitation::{ElicitationResponse, ElicitationValue};
@@ -130,7 +132,6 @@ fn answer_form(root: &std::path::Path, elicitation_id: &str, choice: &str) -> bo
 // Hard-won: a3a103608: guessing the old permission ID left the real worker waiting forever.
 #[test]
 fn a_managed_child_sends_questions_to_its_parent_and_keeps_approvals_for_a_person() {
-    mj_core::test_hooks::enable_test_fixtures();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
     let answers = temp.path().join("answers.jsonl");

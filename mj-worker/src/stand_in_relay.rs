@@ -31,7 +31,6 @@ pub fn serve_latch_relay() {
     let Some(root) = std::env::var_os(LATCH_RELAY_ROOT) else {
         return;
     };
-    mj_core::test_hooks::enable_test_fixtures();
     // With `--nocapture` libtest writes `test <name> ... ` without a
     // trailing newline before the body runs. End that line first so it
     // cannot glue itself onto the first protocol frame.
@@ -811,7 +810,6 @@ pub fn serve_leased_relay() {
     let Some(root) = std::env::var_os(LEASED_RELAY_ROOT) else {
         return;
     };
-    mj_core::test_hooks::enable_test_fixtures();
     let memory_protocol = {
         let path = PathBuf::from(&root).join("memory-sync-protocol");
         path.exists().then(|| {

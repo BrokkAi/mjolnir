@@ -608,7 +608,6 @@ fn enabled() -> bool {
 /// Turn releases on for the current test thread until the guard drops.
 #[doc(hidden)]
 pub fn enable_for_test() -> impl Drop {
-    mj_core::test_hooks::enable_test_fixtures();
     struct Guard;
     impl Drop for Guard {
         fn drop(&mut self) {

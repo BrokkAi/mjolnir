@@ -6,7 +6,6 @@ thread_local! {
 
 #[doc(hidden)]
 pub fn take_pollability_visits() -> usize {
-    mj_core::test_hooks::enable_test_fixtures();
     POLLABILITY_VISITS.with(|visits| visits.replace(0))
 }
 

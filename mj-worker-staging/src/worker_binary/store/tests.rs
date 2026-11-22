@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::os::unix::fs::MetadataExt;
 
 fn source(root: &Path, name: &str) -> PathBuf {
-    mj_core::test_hooks::enable_test_fixtures();
     let path = root.join(name);
     let mut bytes = vec![b'x'; 256 * 1024];
     bytes.extend_from_slice(name.as_bytes());

@@ -12,7 +12,6 @@
 /// in the child, which should run the test body. `test_path` is the full test
 /// path as `--exact` matches it.
 pub(crate) fn rerun_in_isolated_child(child_var: &str, test_path: &str) -> bool {
-    mj_core::test_hooks::enable_test_fixtures();
     if std::env::var_os(child_var).is_some() {
         return false;
     }

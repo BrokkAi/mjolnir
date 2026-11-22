@@ -1,5 +1,8 @@
 //! Portable target-side entry point for Mjolnir session workers.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 #[cfg(all(target_os = "linux", target_env = "musl"))]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;

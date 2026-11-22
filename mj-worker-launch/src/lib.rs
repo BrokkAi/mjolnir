@@ -6,6 +6,9 @@
 //! plan a recovery and the controller a launch from the same code. The crate
 //! builds on worker staging and the build caches.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 // The moved modules name these by their old paths.
 pub(crate) use mj_store::{database, worker_lifecycle};
 pub(crate) use mj_targets::{aws_assume_role, aws_credentials, targets};

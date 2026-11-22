@@ -3,6 +3,8 @@
 //! and never clobber the user's default harness home, including when ACP login
 //! falls back to terminal sign-in in a headless session.
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::path::Path;
 use std::process::Command;
 

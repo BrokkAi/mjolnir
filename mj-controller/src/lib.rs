@@ -1,6 +1,9 @@
 //! Mjolnir's controller: provisioning, session management, storage, and the
 //! host-side services that the daemon in `mj-daemon` drives.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 pub use mj_accounts::claude_usage;
 pub use mj_accounts::login_terminal;
 pub use mj_core::backoff;
