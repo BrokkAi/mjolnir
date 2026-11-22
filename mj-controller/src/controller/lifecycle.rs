@@ -930,6 +930,7 @@ impl Controller {
                 if attempt.request_recorded() {
                     attempt.wait_for_stop(executor).await?;
                 }
+                drop(held_relay.take());
                 return Err(self.restart_after_refused_origin_delta(
                     admission, session_id, executor, manager, attempt, &previous, anyhow::anyhow!(reason),
                 ).await);
@@ -945,6 +946,10 @@ impl Controller {
                 }
             }
             if !attempt.request_recorded() && !attempt.worker_capable(executor)? {
+                // The upgrade takes its own idle lease to replace the worker.
+                if let Some(relay) = held_relay.take() {
+                    relay.release();
+                }
                 let mut already_recovered_worker = false;
                 let recovery_result: Result<()> = if let Some(pending) =
                     crate::database::load_worker_restart(session_id)?
@@ -1074,11 +1079,21 @@ impl Controller {
                     ));
                 }
             }
-            if !attempt.request_recorded() && let Some(manager) = manager {
-                let handle = manager.wait_for_session(session_id, Duration::from_secs(5)).await?;
-                let mut lease = handle.lease_connection(admission).await?;
-                if lease.connection_mut().sync().await?.operational.execution == RelayExecutionState::Running {
-                    lease.connection_mut().submit(new_command_id("suspend-interrupt")?, RelayCommand::CancelTurn).await?;
+            if !attempt.request_recorded() {
+                // Move hands us its exclusive source lease. Keep that same
+                // connection through interruption and worker quiescence.
+                if held_relay.is_none() && let Some(manager) = manager {
+                    let handle = manager.wait_for_session(session_id, Duration::from_secs(5)).await?;
+                    let lease = handle.lease_connection(admission).await?;
+                    held_relay = Some(ControllerRelayLease::Managed {
+                        handle,
+                        lease: Some(lease),
+                    });
+                }
+                if let Some(relay) = held_relay.as_mut()
+                    && relay.sync_snapshot().await?.operational.execution == RelayExecutionState::Running
+                {
+                    relay.submit(new_command_id("suspend-interrupt")?, RelayCommand::CancelTurn).await?;
                 }
             }
             if let Err(error) = attempt.request_stop(executor) {
@@ -1092,6 +1107,9 @@ impl Controller {
                 tracing::warn!(session_id, %error, "waiting for the worker's durable suspend request");
             }
             let receipt = attempt.wait_for_stop(executor).await?;
+            // The receipt proves this worker stopped. Drop its stale proxy
+            // before adopting the checkpoint-only or recovery connection.
+            drop(held_relay.take());
             let post_stop_restart_reason =
                 if executor.cancellation_requested() && !executor.shutdown_interrupted() {
                     attempt.restart_reason(&ProcessExecutor)?
