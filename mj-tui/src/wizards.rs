@@ -14,8 +14,9 @@ use resources::{
 
 use mj_chat::path_input::PathInput;
 
+use mj_core::config::QuotaProvider;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mj_client::runtime_feed::LaunchRecency;
 use std::time::{Duration, Instant};
@@ -151,6 +152,8 @@ pub(crate) struct NewWizard {
     pub(crate) step: WizardStep,
 
     pub(crate) profile: usize,
+    pub(crate) expanded_providers: BTreeSet<QuotaProvider>,
+    pub(crate) focused_provider: Option<QuotaProvider>,
     bundle: usize,
     pub(crate) target: usize,
     /// Whether the draft passed the target step without showing it, because
@@ -188,6 +191,76 @@ pub(crate) struct NewWizard {
     pub(crate) form: RefCell<Dialog<WizardControl>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProfilePickerItem {
+    Auto,
+    Provider(QuotaProvider),
+    Profile {
+        profile_index: usize,
+        id: String,
+        harness: HarnessKind,
+    },
+}
+
+pub(crate) fn new_wizard_profile_items(
+    dashboard: &DashboardState,
+    expanded: &BTreeSet<QuotaProvider>,
+) -> Vec<ProfilePickerItem> {
+    let has_auto = dashboard.new_wizard_has_auto_primary();
+    let mut items = Vec::new();
+    if has_auto {
+        items.push(ProfilePickerItem::Auto);
+    }
+    let mut groups =
+        BTreeMap::<QuotaProvider, Vec<(usize, &str, &mj_core::config::HarnessProfile)>>::new();
+    for (idx, (id, profile)) in dashboard.offered_profiles().enumerate() {
+        let provider =
+            crate::render::quota_pools::profile_provider(id, profile, &dashboard.quota_providers);
+        groups
+            .entry(provider)
+            .or_default()
+            .push((idx + usize::from(has_auto), id, profile));
+    }
+    for (provider, members) in groups {
+        items.push(ProfilePickerItem::Provider(provider.clone()));
+        if expanded.contains(&provider) {
+            items.extend(members.into_iter().map(|(profile_index, id, profile)| {
+                ProfilePickerItem::Profile {
+                    profile_index,
+                    id: id.to_owned(),
+                    harness: profile.kind,
+                }
+            }));
+        }
+    }
+    items
+}
+
+impl NewWizard {
+    pub(crate) fn toggle_provider(&mut self, provider: QuotaProvider) {
+        if !self.expanded_providers.remove(&provider) {
+            self.expanded_providers.insert(provider);
+        }
+    }
+
+    pub(crate) fn provider_for_profile(
+        dashboard: &DashboardState,
+        profile_index: usize,
+    ) -> Option<QuotaProvider> {
+        let has_auto = dashboard.new_wizard_has_auto_primary();
+        if has_auto && profile_index == 0 {
+            return None;
+        }
+        let offered_idx = profile_index.checked_sub(usize::from(has_auto))?;
+        let (id, profile) = dashboard.offered_profiles().nth(offered_idx)?;
+        Some(crate::render::quota_pools::profile_provider(
+            id,
+            profile,
+            &dashboard.quota_providers,
+        ))
+    }
+}
+
 impl PartialEq for NewWizard {
     fn eq(&self, other: &Self) -> bool {
         self.subagents == other.subagents
@@ -196,6 +269,8 @@ impl PartialEq for NewWizard {
             && self.workspace_id == other.workspace_id
             && self.step == other.step
             && self.profile == other.profile
+            && self.expanded_providers == other.expanded_providers
+            && self.focused_provider == other.focused_provider
             && self.bundle == other.bundle
             && self.target == other.target
             && self.profile_step_skipped == other.profile_step_skipped

@@ -1,15 +1,16 @@
+action: None
 === new_session_profile_step_aligns_its_columns (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                                                              │
 ╰───────────────                                                                                                       │
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
-│No sessions yet  │   PROFILE   HARNESS      WEEKLY      5H                                          │                 │
-│Create new work  │   claude-1  Claude Code  refreshing                                              │                 │
-│                 │   codex-1   Codex        refreshing                                              │                 │
-│                 │   codex-2   Codex        refreshing                                              │                 │
-│                 │   kimi-1    Kimi Code    refreshing                                              │                 │
-│                 │                                                                                  │                 │
+│No sessions yet  │   PROFILE      HARNESS      WEEKLY      5H                                       │                 │
+│Create new work  │   ▾ ANTHROPIC                                                                    │                 │
+│                 │     claude-1   Claude Code  refreshing                                           │                 │
+│                 │   ▸ OPENAI                                                                       │                 │
+│                 │   ▾ MOONSHOT                                                                     │                 │
+│                 │     kimi-1     Kimi Code    refreshing                                           │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
 │                 │                                                                                  │                 │
@@ -29,18 +30,19 @@
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+action: None
 === new_session_profile_step_shows_weekly_and_five_hour_percentages (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                                                              │
 ╰───────────────                                                                                                       │
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
-│hel ───────────  │   PROFILE   HARNESS      WEEKLY      5H                                          │                 │
-│› · ACP pretty   │   claude-1  Claude Code  63%         40%                                         │                 │
-│  Idle  podman   │   codex-1   Codex        refreshing                                              │                 │
-│  │ No messages  │   codex-2   Codex        refreshing                                              │                 │
-│  │              │                                                                                  │                 │
-│                 │                                                                                  │                 │
+│hel ───────────  │   PROFILE      HARNESS      WEEKLY      5H                                       │                 │
+│› · ACP pretty   │   ▾ ANTHROPIC                                                                    │                 │
+│  Idle  podman   │     claude-1   Claude Code  63%         40%                                      │                 │
+│  │ No messages  │   ▾ OPENAI                                                                       │                 │
+│  │              │     codex-1    Codex        refreshing                                           │                 │
+│                 │     codex-2    Codex        refreshing                                           │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
 │                 │                                                                                  │                 │
@@ -91,10 +93,10 @@ Enter open · / s                                                               
 ╰───────────────                                                                                                       │
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
-│No sessions yet  │   PROFILE   HARNESS      WEEKLY      5H                                          │                 │
-│Create new work  │   claude-1  Claude Code  refreshing                                              │                 │
-│                 │   codex-1   Codex        refreshing                                              │                 │
-│                 │   codex-2   Codex        refreshing                                              │                 │
+│No sessions yet  │   PROFILE      HARNESS      WEEKLY      5H                                       │                 │
+│Create new work  │   ▾ ANTHROPIC                                                                    │                 │
+│                 │     claude-1   Claude Code  refreshing                                           │                 │
+│                 │   ▸ OPENAI                                                                       │                 │
 │                 │                                                                                  │                 │
 │                 │ kimi-1: Kimi Code is not installed here: /profiles/kimi does not exist and       │                 │
 │                 │ `kimi` is not on PATH. Install Kimi Code, or turn the profile off in Settings    │  ───────────────╯

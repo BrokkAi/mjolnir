@@ -150,11 +150,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Stopped  podman  codex-                                                                                                                 │
 │  │ No messages yet        ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
-│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
-│                           │   claude-1  Claude Code  refreshing                                              │                           │
-│                           │   codex-1   Codex        refreshing                                              │                           │
-│                           │   codex-2   Codex        refreshing                                              │                           │
-│                           │                                                                                  │                           │
+│                           │   PROFILE      HARNESS  WEEKLY      5H                                           │                           │
+│                           │   ▸ ANTHROPIC                                                                    │                           │
+│                           │   ▾ OPENAI                                                                       │                           │
+│                           │     codex-1    Codex    refreshing                                               │                           │
+│                           │     codex-2    Codex    refreshing                                               │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -472,11 +472,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
   ╭ × New session · 1/4 profile ─────────────────────────╮
   │                                                      │
-  │   PROFILE   HARNESS      WEEKLY      5H              │
-  │   claude-1  Claude Code  refreshing                  │
-  │   codex-1   Codex        refreshing                  │
-  │   codex-2   Codex        refreshing                  │
-  │                                                      │
+  │   PROFILE      HARNESS  WEEKLY      5H               │
+  │   ▸ ANTHROPIC                                        │
+  │   ▾ OPENAI                                           │
+  │     codex-1    Codex    refreshing                   │
+  │     codex-2    Codex    refreshing                   │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -662,10 +662,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                                          │
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
-│                           │   claude-1  Claude Code  refreshing                                              │                           │
-│                           │   codex-1   Codex        refreshing                                              │                           │
-│                           │   codex-2   Codex        refreshing                                              │                           │
+│                           │   PROFILE      HARNESS      WEEKLY      5H                                       │                           │
+│                           │   ▾ ANTHROPIC                                                                    │                           │
+│                           │     claude-1   Claude Code  refreshing                                           │                           │
+│                           │   ▸ OPENAI                                                                       │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -744,10 +744,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                                          │
 │                           ╭ × New session · 1/3 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
-│                           │   claude-1  Claude Code  refreshing                                              │                           │
-│                           │   codex-1   Codex        refreshing                                              │                           │
-│                           │   codex-2   Codex        refreshing                                              │                           │
+│                           │   PROFILE      HARNESS  WEEKLY  5H                                               │                           │
+│                           │   ▸ ANTHROPIC                                                                    │                           │
+│                           │   ▸ OPENAI                                                                       │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -909,10 +909,10 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                                                                                                                                          │
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
-│                           │   claude-1  Claude Code  refreshing                                              │                           │
-│                           │   codex-1   Codex        refreshing                                              │                           │
-│                           │   codex-2   Codex        refreshing                                              │                           │
+│                           │   PROFILE      HARNESS      WEEKLY      5H                                       │                           │
+│                           │   ▾ ANTHROPIC                                                                    │                           │
+│                           │     claude-1   Claude Code  refreshing                                           │                           │
+│                           │   ▸ OPENAI                                                                       │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -991,10 +991,10 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                                                                                                                                          │
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
-│                           │   claude-1  Claude Code  refreshing                                              │                           │
-│                           │   codex-1   Codex        refreshing                                              │                           │
-│                           │   codex-2   Codex        refreshing                                              │                           │
+│                           │   PROFILE      HARNESS      WEEKLY      5H                                       │                           │
+│                           │   ▾ ANTHROPIC                                                                    │                           │
+│                           │     claude-1   Claude Code  refreshing                                           │                           │
+│                           │   ▸ OPENAI                                                                       │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │

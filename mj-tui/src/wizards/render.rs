@@ -128,6 +128,52 @@ fn missing_profile_help(dashboard: &DashboardState) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn new_wizard_profile_rows(dashboard: &DashboardState, wizard: &NewWizard) -> Vec<PickerChoice> {
+    let items = new_wizard_profile_items(dashboard, &wizard.expanded_providers);
+    let mut rows = Vec::new();
+    for item in items {
+        match item {
+            ProfilePickerItem::Auto => {
+                rows.push(PickerChoice::heading(vec![PickerCell::blank()]));
+                rows.push(PickerChoice::table(vec![
+                    PickerCell::blank(),
+                    PickerCell::text("Auto (Primary)"),
+                    PickerCell::text("auto"),
+                    PickerCell::blank(),
+                    PickerCell::blank(),
+                ]));
+                rows.push(PickerChoice::heading(vec![PickerCell::blank()]));
+            }
+            ProfilePickerItem::Provider(provider) => {
+                let expanded = wizard.expanded_providers.contains(&provider);
+                let arrow = if expanded {
+                    theme::glyphs().dropdown
+                } else if theme::ascii() {
+                    ">"
+                } else {
+                    "▸"
+                };
+                let accent = crate::render::provider_accent(&provider);
+                let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+                rows.push(PickerChoice::table(vec![
+                    PickerCell::blank(),
+                    PickerCell::styled(
+                        format!("{arrow} {}", provider.display_name().to_uppercase()),
+                        heading_style,
+                    ),
+                    PickerCell::blank(),
+                    PickerCell::blank(),
+                    PickerCell::blank(),
+                ]));
+            }
+            ProfilePickerItem::Profile { id, harness, .. } => {
+                rows.push(dashboard.indented_profile_choice(&id, harness));
+            }
+        }
+    }
+    profile_table(rows)
+}
+
 pub(crate) fn step_initial(step: WizardStep) -> WizardControl {
     match step {
         WizardStep::Profile => WizardControl::ProfileList,
@@ -486,25 +532,8 @@ pub(crate) fn render_new_wizard(
                 " New session · {} profile ",
                 step_counter(1, 4, target_hidden, wizard)
             ),
-            profile_table({
-                let mut rows = Vec::new();
-                if dashboard.new_wizard_has_auto_primary() {
-                    rows.push(PickerChoice::table(vec![
-                        PickerCell::blank(),
-                        PickerCell::text("Auto (Primary)"),
-                        PickerCell::text("auto"),
-                        PickerCell::blank(),
-                        PickerCell::blank(),
-                    ]));
-                }
-                rows.extend(
-                    dashboard
-                        .offered_profiles()
-                        .map(|(id, profile)| dashboard.profile_choice(id, profile.kind)),
-                );
-                rows
-            }),
-            wizard.profile,
+            new_wizard_profile_rows(dashboard, wizard),
+            wizard.profile_list_selected(dashboard),
         ),
         WizardStep::Bundle => (
             format!(
@@ -614,6 +643,7 @@ pub(crate) fn render_new_wizard(
                 _ => unreachable!("picker step has a list control"),
             },
             next_enabled: match wizard.step {
+                WizardStep::Profile => wizard.profile_advance_enabled(dashboard),
                 WizardStep::Target => target_advance_enabled(dashboard, wizard),
                 // Without a bundle there is nothing to review; the pinned
                 // action is the only way forward.

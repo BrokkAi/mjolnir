@@ -1240,10 +1240,23 @@ impl DashboardState {
     /// the harness, and the two quota percentages remaining. The picker pads
     /// the cells into aligned columns.
     pub(crate) fn profile_choice(&self, id: &str, harness: HarnessKind) -> PickerChoice {
+        self.profile_choice_with_label(id, id, harness)
+    }
+
+    pub(crate) fn indented_profile_choice(&self, id: &str, harness: HarnessKind) -> PickerChoice {
+        self.profile_choice_with_label(id, &format!("  {id}"), harness)
+    }
+
+    fn profile_choice_with_label(
+        &self,
+        id: &str,
+        label: &str,
+        harness: HarnessKind,
+    ) -> PickerChoice {
         let (weekly, five_hour) = self.profile_quota_cells(id);
         PickerChoice::table(vec![
             PickerCell::blank(),
-            PickerCell::text(id),
+            PickerCell::text(label),
             PickerCell::text(harness.display_name()),
             weekly,
             five_hour,

@@ -135,6 +135,23 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn handle_extra_shortcut(&mut self, dashboard: &DashboardState, key: KeyEvent);
     /// How many rows the profile picker shows.
     fn profile_count(&self, dashboard: &DashboardState) -> usize;
+    fn profile_list_len(&self, dashboard: &DashboardState) -> usize {
+        self.profile_count(dashboard)
+    }
+    fn profile_list_selected(&self, _dashboard: &DashboardState) -> usize {
+        self.profile()
+    }
+    fn profile_advance_enabled(&self, _dashboard: &DashboardState) -> bool {
+        true
+    }
+    fn select_profile_row(
+        &mut self,
+        _dashboard: &DashboardState,
+        row: usize,
+        _toggle_provider: bool,
+    ) {
+        self.set_profile(row);
+    }
     /// Why this draft cannot use `target_id`, or `None` when it can.
     fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String>;
     /// Whether this draft could use `target_id` once the target is ready.
@@ -363,6 +380,19 @@ impl WizardDraft for NewWizard {
         dashboard: &mut DashboardState,
         id: WizardControl,
     ) -> Result<DashboardAction, Self> {
+        if self.step == WizardStep::Profile && id == WizardControl::ProfileList {
+            if let Some(provider) = self.focused_provider.clone() {
+                self.toggle_provider(provider);
+                return Ok(dashboard.keep(self));
+            }
+            return Err(self);
+        }
+        if self.step == WizardStep::Profile
+            && id == WizardControl::Next
+            && self.focused_provider.is_some()
+        {
+            return Ok(dashboard.keep(self));
+        }
         if self.step == WizardStep::Review && self.subagents.activate(id) {
             return Ok(dashboard.keep(self));
         }
@@ -493,6 +523,12 @@ impl WizardDraft for NewWizard {
             return;
         }
         match interaction {
+            Interaction::Toggle(WizardControl::ProfileList) => {
+                if let Some(provider) = self.focused_provider.clone() {
+                    self.toggle_provider(provider);
+                    dashboard.record_event_handled();
+                }
+            }
             Interaction::Select(WizardControl::BundleList, selected) => {
                 if self.bundle != *selected {
                     self.note_draft_change(dashboard, DraftChange::BundleSelected);
@@ -541,11 +577,110 @@ impl WizardDraft for NewWizard {
         }
     }
 
-    /// Creation has no key of its own outside the form.
-    fn handle_extra_shortcut(&mut self, _dashboard: &DashboardState, _key: KeyEvent) {}
+    fn handle_extra_shortcut(&mut self, dashboard: &DashboardState, key: KeyEvent) {
+        if self.step != WizardStep::Profile
+            || self.form.borrow().focused() != Some(WizardControl::ProfileList)
+        {
+            return;
+        }
+        match key.code {
+            KeyCode::Right | KeyCode::Char('l') => {
+                if let Some(provider) = self.focused_provider.clone() {
+                    if !self.expanded_providers.contains(&provider) {
+                        self.expanded_providers.insert(provider);
+                    } else {
+                        let items = new_wizard_profile_items(dashboard, &self.expanded_providers);
+                        if let Some(pos) = items.iter().position(
+                            |item| matches!(item, ProfilePickerItem::Provider(p) if p == &provider),
+                        ) && let Some(ProfilePickerItem::Profile { profile_index, .. }) =
+                            items.get(pos + 1)
+                        {
+                            self.focused_provider = None;
+                            self.profile = *profile_index;
+                        }
+                    }
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if let Some(provider) = self.focused_provider.clone() {
+                    self.expanded_providers.remove(&provider);
+                } else if let Some(provider) = Self::provider_for_profile(dashboard, self.profile) {
+                    self.expanded_providers.remove(&provider);
+                    self.focused_provider = Some(provider);
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn profile_count(&self, dashboard: &DashboardState) -> usize {
         dashboard.new_wizard_profile_count()
+    }
+
+    fn profile_list_len(&self, dashboard: &DashboardState) -> usize {
+        new_wizard_profile_items(dashboard, &self.expanded_providers).len()
+    }
+
+    fn profile_list_selected(&self, dashboard: &DashboardState) -> usize {
+        let items = new_wizard_profile_items(dashboard, &self.expanded_providers);
+        if let Some(provider) = &self.focused_provider
+            && let Some(pos) = items
+                .iter()
+                .position(|item| matches!(item, ProfilePickerItem::Provider(p) if p == provider))
+        {
+            return pos;
+        }
+        let has_auto = dashboard.new_wizard_has_auto_primary();
+        if has_auto && self.profile == 0 {
+            if let Some(pos) = items
+                .iter()
+                .position(|item| matches!(item, ProfilePickerItem::Auto))
+            {
+                return pos;
+            }
+        } else if let Some(pos) = items.iter().position(|item| {
+            matches!(item, ProfilePickerItem::Profile { profile_index, .. } if *profile_index == self.profile)
+        }) {
+            return pos;
+        }
+        if let Some(provider) = Self::provider_for_profile(dashboard, self.profile)
+            && let Some(pos) = items
+                .iter()
+                .position(|item| matches!(item, ProfilePickerItem::Provider(p) if p == &provider))
+        {
+            return pos;
+        }
+        0
+    }
+
+    fn profile_advance_enabled(&self, _dashboard: &DashboardState) -> bool {
+        self.focused_provider.is_none()
+    }
+
+    fn select_profile_row(
+        &mut self,
+        dashboard: &DashboardState,
+        row: usize,
+        toggle_provider: bool,
+    ) {
+        let items = new_wizard_profile_items(dashboard, &self.expanded_providers);
+        match items.get(row) {
+            Some(ProfilePickerItem::Auto) => {
+                self.focused_provider = None;
+                self.profile = 0;
+            }
+            Some(ProfilePickerItem::Profile { profile_index, .. }) => {
+                self.focused_provider = None;
+                self.profile = *profile_index;
+            }
+            Some(ProfilePickerItem::Provider(provider)) => {
+                self.focused_provider = Some(provider.clone());
+                if toggle_provider {
+                    self.toggle_provider(provider.clone());
+                }
+            }
+            None => {}
+        }
     }
 
     /// A new session can start on any offered target.
