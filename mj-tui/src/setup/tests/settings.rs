@@ -353,7 +353,7 @@ fn subagent_single_page_rejects_partly_configured_rows_and_handles_remove_and_na
         }
         let saved = dashboard.profile_capabilities.clone();
         dashboard.set_profile_capabilities(ProfileCapabilitiesSnapshot {
-            profiles: unreachable_profiles,
+            profiles: unreachable_profiles.clone(),
         });
         let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
         assert!(
@@ -364,7 +364,20 @@ fn subagent_single_page_rejects_partly_configured_rows_and_handles_remove_and_na
             "background discovery error overwrote active validation notice: {:?}",
             dialog.notice
         );
+        // Existing discovery notices still refresh to new failure details and clear on recovery.
+        dialog.notice = Some("Discovery: pending".into());
+        dashboard.set_profile_capabilities(ProfileCapabilitiesSnapshot {
+            profiles: unreachable_profiles,
+        });
+        assert!(
+            setup_dialog_mut(&mut dashboard.mode)
+                .unwrap()
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("worker unavailable"))
+        );
         dashboard.set_profile_capabilities(saved);
+        assert_eq!(setup_dialog_mut(&mut dashboard.mode).unwrap().notice, None);
     }
 
     // Jumping away via search and trying to save still rejects and jumps back to the incomplete row.

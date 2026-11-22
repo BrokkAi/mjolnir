@@ -299,12 +299,7 @@ impl DashboardState {
         ) else {
             return None;
         };
-        if dialog.notice.is_none()
-            && unreachable.is_some()
-            && dialog.path.first().is_some_and(|p| p == "subagents")
-        {
-            dialog.notice = unreachable;
-        }
+        sync_subagent_discovery_notice(dialog, unreachable);
         dialog.prepare();
         None
     }
@@ -839,11 +834,8 @@ impl DashboardState {
         if let Ok(unreachable) = mj_client::settings::discovery::fill_subagent_options(
             &mut dialog.draft,
             &self.profile_capabilities,
-        ) && dialog.notice.is_none()
-            && unreachable.is_some()
-            && dialog.path.first().is_some_and(|p| p == "subagents")
-        {
-            dialog.notice = unreachable;
+        ) {
+            sync_subagent_discovery_notice(&mut dialog, unreachable);
         }
         dialog.prepare();
         match post_focus {
@@ -856,5 +848,18 @@ impl DashboardState {
         }
         self.mode = Mode::Setup(dialog);
         action
+    }
+}
+
+fn sync_subagent_discovery_notice(dialog: &mut SetupDialog, unreachable: Option<String>) {
+    if !dialog.path.first().is_some_and(|p| p == "subagents") {
+        return;
+    }
+    let notice_is_discovery = dialog
+        .notice
+        .as_deref()
+        .is_some_and(|notice| notice.starts_with("Discovery: "));
+    if dialog.notice.is_none() || notice_is_discovery {
+        dialog.notice = unreachable;
     }
 }
