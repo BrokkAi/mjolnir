@@ -21,10 +21,12 @@ mj=/home/jonathan/.cargo/bin/mj
 # (2026-11-21), so the pin is read from one file and any other binary is refused.
 pilot=
 prev=
+# Every form clap accepts for `-i, --instance <NAME>`, in any position.
 for arg in "$@"; do
-  if [ "$arg" = "--instance=rql-census-pilot" ] || { [ "$prev" = "--instance" ] && [ "$arg" = "rql-census-pilot" ]; }; then
-    pilot=1
-  fi
+  case "$arg" in
+    --instance=rql-census-pilot|-irql-census-pilot|-i=rql-census-pilot) pilot=1 ;;
+    rql-census-pilot) case "$prev" in --instance|-i) pilot=1 ;; esac ;;
+  esac
   prev=$arg
 done
 if [ -n "$pilot" ]; then
