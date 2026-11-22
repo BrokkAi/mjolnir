@@ -40,6 +40,40 @@ pub use secrets::*;
 pub use targets::*;
 pub use ui::*;
 
+/// Global settings for Mjolnir's permission guardian.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuardianConfig {
+    /// Whether Mjolnir's guardian reviews tool permission requests that reach
+    /// Mjolnir under configured approvals across all profiles.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    /// Whether the daemon runs the local zero-shot Wolf Defender Jev ONNX
+    /// approve-only Stage-1 classifier before escalating to Stage 2.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub local_classifier: bool,
+    /// Whether the local Wolf classifier may use a GPU execution provider when
+    /// available; false keeps Stage-1 inference on CPU.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub use_gpu: bool,
+}
+
+impl Default for GuardianConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            local_classifier: true,
+            use_gpu: true,
+        }
+    }
+}
+
+impl GuardianConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -1059,6 +1093,12 @@ impl Default for LegacyMailboxConfig {
 }
 
 impl Config {
+    pub fn profile_approval_choices(&self, profile: &HarnessProfile) -> ApprovalChoices {
+        let mut choices = profile.approval_choices();
+        choices.mjolnir_guardian &= self.guardian.enabled;
+        choices
+    }
+
     /// Identity of the configured profile list and the managed harness builds
     /// its probes would run, excluding policies and UI defaults.
     pub fn profiles_discovery_key(&self) -> String {
@@ -1477,6 +1517,7 @@ pub struct Config {
     /// Where the daemon runs: on this computer or in a container.
     pub daemon: DaemonConfig,
     pub github: GithubConfig,
+    pub guardian: GuardianConfig,
     pub review: ReviewConfig,
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
@@ -1554,6 +1595,8 @@ struct StoredConfig {
     daemon: DaemonConfig,
     #[serde(default, skip_serializing_if = "GithubConfig::is_default")]
     github: GithubConfig,
+    #[serde(default, skip_serializing_if = "GuardianConfig::is_default")]
+    guardian: GuardianConfig,
     #[serde(default)]
     review: ReviewConfig,
     /// Legacy `[continuation]` section, read and ignored, never written.
@@ -1749,6 +1792,7 @@ impl TryFrom<StoredConfig> for Config {
             phone,
             daemon,
             mut github,
+            guardian,
             review,
             continuation: _,
             mailbox,
@@ -1852,6 +1896,7 @@ impl TryFrom<StoredConfig> for Config {
             phone,
             daemon,
             github,
+            guardian,
             review,
             sessionwiki,
             subagents,
@@ -1913,6 +1958,7 @@ impl From<Config> for StoredConfig {
             phone: config.phone,
             daemon: config.daemon,
             github: config.github,
+            guardian: config.guardian,
             review: config.review,
             continuation: LegacyContinuationConfig::default(),
             mailbox: LegacyMailboxConfig::default(),
@@ -1945,6 +1991,7 @@ impl Default for Config {
             phone: PhoneConfig::default(),
             daemon: DaemonConfig::default(),
             github: GithubConfig::default(),
+            guardian: GuardianConfig::default(),
             review: ReviewConfig::default(),
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),

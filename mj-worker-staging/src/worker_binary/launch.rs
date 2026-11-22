@@ -184,6 +184,7 @@ pub fn worker_launch_config(
     backend: &targets::TargetLocator,
     worker_workspace: LaunchWorkspace<'_>,
     target: &mj_core::state::TargetRuntimeSettings,
+    config: &mj_core::config::Config,
 ) -> Result<(
     WorkerLaunchConfig,
     Option<ProjectMemoryLaunchConfig>,
@@ -197,9 +198,11 @@ pub fn worker_launch_config(
         backend,
         worker_workspace,
         target,
+        config,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn worker_launch_config_with_checkout(
     session: &mj_core::state::SessionRecord,
     checkout: &mj_core::state::Checkout<'_>,
@@ -208,6 +211,7 @@ pub fn worker_launch_config_with_checkout(
     backend: &targets::TargetLocator,
     worker_workspace: LaunchWorkspace<'_>,
     target: &mj_core::state::TargetRuntimeSettings,
+    config: &mj_core::config::Config,
 ) -> Result<(
     WorkerLaunchConfig,
     Option<ProjectMemoryLaunchConfig>,
@@ -457,7 +461,7 @@ pub fn worker_launch_config_with_checkout(
             serde_json::to_string(&roots)?,
         );
     }
-    let approval_choices = profile.approval_choices();
+    let approval_choices = config.profile_approval_choices(profile);
     Ok((
         WorkerLaunchConfig {
             cpu_accounting: backend.cpu_accounting(),

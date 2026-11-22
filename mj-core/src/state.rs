@@ -2224,8 +2224,11 @@ impl SessionRecord {
         let choices = config
             .profiles
             .get(&self.last_profile)
-            .map(crate::config::HarnessProfile::approval_choices)
-            .unwrap_or_default();
+            .map(|profile| config.profile_approval_choices(profile))
+            .unwrap_or_else(|| crate::config::ApprovalChoices {
+                mjolnir_guardian: config.guardian.enabled,
+                ..Default::default()
+            });
         self.harness_kind
             .resolve_execution_enforcement(policy, choices)
     }

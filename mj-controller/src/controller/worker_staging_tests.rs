@@ -721,6 +721,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
             ),
+            &mj_core::config::Config::default(),
         )
         .unwrap();
 
