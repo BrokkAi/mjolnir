@@ -192,7 +192,7 @@ fn move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry()
 fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
     let name = test_name("quota_move_preserves_idle_active_goal_at_both_admission_gates");
     if std::env::var_os("MJ_QUOTA_ACTIVE_ADMISSION_CHILD").is_none() {
-        for race in ["idle", "running", "completed", "barrier"] {
+        for race in ["idle", "running", "completed", "barrier", "old-worker"] {
             let directory = tempfile::tempdir().unwrap();
             IsolatedTest::new(name.clone())
                 .env("MJ_QUOTA_ACTIVE_RACE", race)
@@ -207,7 +207,8 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
                 )
                 .env(
                     mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_MAX_PROTOCOL,
-                    mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL.to_string(),
+                    (mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL - u32::from(race == "old-worker"))
+                        .to_string(),
                 )
                 .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
                 .isolated_store(directory.path())
@@ -240,7 +241,7 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
             .unwrap(),
         )
         .unwrap();
-    seed_quota_recovery(&mut relay, "quota-user-turn");
+    seed_quota_assessment(&mut relay, "quota-user-turn");
     drop(relay);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -279,19 +280,42 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
         assert!(manual.in_place);
         assert!(manual.route_preview.is_none());
         assert!(!manual.stops_subagents);
+        let race = std::env::var("MJ_QUOTA_ACTIVE_RACE").unwrap();
+        let quota = mj_core::continuation::QuotaRecovery {
+            user_command_id: "quota-user-turn".into(),
+            completed_command_id: "quota-user-turn".into(),
+            profile_id: IN_PLACE_SOURCE_PROFILE.into(),
+            reset_at_ms: None,
+            retry_at_ms: None,
+            notice: String::new(),
+            submitted: false,
+        };
         let request = state
-            .prepare_quota_move(LATCH_RELAY_SESSION, IN_PLACE_DESTINATION_PROFILE)
-            .await
-            .unwrap();
+            .prepare_quota_move(LATCH_RELAY_SESSION, IN_PLACE_DESTINATION_PROFILE, &quota)
+            .await;
+        if race == "old-worker" {
+            let refusal = request.unwrap_err();
+            assert!(
+                format!("{refusal:#}").contains("worker predates in-place restarts"),
+                "{refusal:#}"
+            );
+            let durable = mj_controller::database::load_move_operation(LATCH_RELAY_SESSION)
+                .unwrap()
+                .unwrap();
+            assert_eq!(durable.operation_id, failed.operation_id);
+            assert_eq!(durable.error, failed.error);
+            channels.shutdown.shutdown().await.unwrap();
+            return;
+        }
+        let request = request.unwrap();
         assert!(!request.preparation.active);
         assert!(!request.acknowledge_interruption);
         channels.shutdown.shutdown().await.unwrap();
-        let race = std::env::var("MJ_QUOTA_ACTIVE_RACE").unwrap();
         if race == "running" || race == "completed" {
             let mut relay =
                 DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
             if race == "completed" {
-                seed_quota_recovery(&mut relay, "new-user-turn");
+                seed_quota_assessment(&mut relay, "new-user-turn");
             } else {
                 relay
                     .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
@@ -466,7 +490,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
     // The automatic Move must belong to a pending, quota-stopped turn.
     let source_relay = seed_source_relay(&worker_root);
     let mut relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
-    seed_quota_recovery(&mut relay, "native-source-quota-turn");
+    seed_quota_assessment(&mut relay, "native-source-quota-turn");
     drop(relay);
     // An accepted mutation stays pending at the worker while its effect runs.
     let request = mj_core::subagent::SubagentToolRequest {
@@ -901,7 +925,7 @@ fn isolate_in_place_move_dispatch_test(name: &str) -> bool {
     false
 }
 
-fn seed_quota_recovery(relay: &mut DurableRelay, id: &str) {
+fn seed_quota_assessment(relay: &mut DurableRelay, id: &str) {
     fn submit(relay: &mut DurableRelay, id: &str, command: RelayCommand) {
         let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
             request_id: id.into(),
@@ -944,26 +968,6 @@ fn seed_quota_recovery(relay: &mut DurableRelay, id: &str) {
             })
             .unwrap();
     }
-    let operational = relay.operational_state();
-    submit(
-        relay,
-        &format!("schedule-quota-{id}"),
-        RelayCommand::SetQuotaRecovery {
-            expected: mj_core::relay::RelayCursor {
-                ordinal: operational.latest_ordinal,
-                digest: operational.latest_digest,
-            },
-            recovery: Some(Box::new(mj_core::continuation::QuotaRecovery {
-                user_command_id: id.into(),
-                completed_command_id: id.into(),
-                profile_id: IN_PLACE_SOURCE_PROFILE.into(),
-                reset_at_ms: None,
-                retry_at_ms: None,
-                notice: "quota stopped".into(),
-                submitted: false,
-            })),
-        },
-    );
 }
 
 /// The executor the move tests use, running mj-worker's checkpoint operations.

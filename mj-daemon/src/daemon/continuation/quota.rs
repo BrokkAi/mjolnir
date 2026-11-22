@@ -21,7 +21,6 @@ pub(super) enum Plan {
         reservation: Option<mj_controller::quota_telemetry::PlacementReservation>,
         /// Why the session moves, as a clause for the destination's notice.
         reason: String,
-        abstention: QuotaRecovery,
         fallback: QuotaRecovery,
     },
 }
@@ -30,7 +29,8 @@ pub(super) type StartMove = Arc<
             MoveSessionRequest,
             String,
             QuotaMoveContinuation,
-        ) -> futures::future::BoxFuture<'static, Result<()>>
+            mj_controller::upgrade::Work,
+        ) -> futures::future::BoxFuture<'static, Result<mj_core::state::MoveOutcome>>
         + Send
         + Sync,
 >;
@@ -389,6 +389,17 @@ pub(super) async fn prepare(
             now_ms / 1000,
         )
     {
+        if !child
+            && let Err(error) =
+                mj_controller::controller::move_session::in_place::ensure_worker_supports_in_place_move(
+                    id,
+                    snapshot.operational.relay_protocol_version.unwrap_or_default(),
+                    true,
+                )
+        {
+            append_bounded(&mut fallback.notice, &format!(" {error}"));
+            return Ok(Plan::Wait(fallback));
+        }
         let candidates = match (&model, state.quota_report_backend()) {
             (Some(_), Some(backend)) => match backend.session_profile_candidates().await {
                 Ok(candidates) => Some(candidates.offered),
@@ -481,19 +492,16 @@ pub(super) async fn prepare(
                         fallback,
                     });
                 }
-                match state.prepare_quota_move(id, &candidate.profile_id).await {
+                match state
+                    .prepare_quota_move(id, &candidate.profile_id, &fallback)
+                    .await
+                {
                     Ok(request) => {
-                        // The record keeps the fallback's times, so a Move that
-                        // fails leaves the retry on the source profile in place.
-                        // A completed Move changes the profile, which clears it.
-                        let mut abstention = fallback.clone();
-                        abstention.notice = move_notice(&reason, &candidate.profile_id, &fallback);
                         return Ok(Plan::Move {
                             request: Box::new(request),
                             destination: candidate.profile_id,
                             reservation: Some(reservation),
                             reason,
-                            abstention,
                             fallback,
                         });
                     }
@@ -566,26 +574,6 @@ pub(super) fn append_bounded(notice: &mut String, suffix: &str) {
     }
 }
 
-/// The notice stored while a quota Move runs. It promises only what the stored
-/// record does: with a retry time, the source profile continues then if the
-/// Move fails while the session is still running. A Move that fails after it
-/// stopped the source leaves no connected worker to retry, and Resume refuses
-/// that session; its failure message tells the user to retry the Move, so the
-/// notice points there instead of promising a retry.
-pub(super) fn move_notice(reason: &str, destination: &str, fallback: &QuotaRecovery) -> String {
-    let mut notice = format!(
-        "Subscription quota reached, and {reason}. Switching this session to profile {destination} to continue the interrupted work."
-    );
-    if let Some(time) = fallback.retry_at_ms.and_then(local_reset) {
-        notice.push_str(&format!(
-            " If the switch fails while the session is still running, it continues on profile {} at {time} (one minute after reset). \
-             If the session has already stopped, the failure message says how to retry the Move.",
-            fallback.profile_id
-        ));
-    }
-    notice
-}
-
 fn cursor(view: &ManagedSessionView) -> Result<RelayCursor> {
     let s = view.snapshot.as_ref().context("missing relay snapshot")?;
     Ok(RelayCursor {
@@ -598,70 +586,35 @@ fn cursor(view: &ManagedSessionView) -> Result<RelayCursor> {
 pub(super) struct Schedule {
     command_id: String,
     command: RelayCommand,
-    plan: Arc<Plan>,
     state: ScheduleState,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ScheduleState {
     Unconfirmed,
     Accepted,
-    Fallback(Box<PendingFallback>),
-    FallbackAccepted,
-    // Preserve the exact unanswered exchange, but discard its daemon plan
-    // once it is answered. Foreground release then supplies a fresh plan.
-    Stale(Box<ScheduleState>),
     Finished,
 }
 
-#[derive(Clone)]
-struct PendingFallback {
-    command_id: String,
-    command: RelayCommand,
+pub(super) fn unanswered(env: &Environment, id: &str) -> bool {
+    env.schedules
+        .lock()
+        .unwrap()
+        .get(id)
+        .is_some_and(|saved| saved.state != ScheduleState::Finished)
 }
 
-pub(super) fn invalidate(env: &Environment, id: &str) {
-    if let Some(saved) = env.schedules.lock().unwrap().get_mut(id)
-        && !matches!(saved.state, ScheduleState::Stale(_))
-    {
-        saved.state = ScheduleState::Stale(Box::new(saved.state.clone()));
-    }
-}
-
-fn same_recovery_context(
-    env: &Environment,
-    id: &str,
-    view: &ManagedSessionView,
-    record: &QuotaRecovery,
-) -> bool {
-    (env.profile)(id).as_ref() == Some(&record.profile_id)
-        && view.snapshot.as_ref().is_some_and(|s| {
-            s.operational.continuation.user_command_id.as_ref() == Some(&record.user_command_id)
-                && s.operational.continuation.completed_command_id.as_ref()
-                    == Some(&record.completed_command_id)
+pub(super) fn finished(env: &Environment, id: &str, view: &ManagedSessionView) -> bool {
+    wait_command_id(view).is_some_and(|id_for_turn| {
+        env.schedules.lock().unwrap().get(id).is_some_and(|saved| {
+            saved.state == ScheduleState::Finished && saved.command_id == id_for_turn
         })
-}
-
-pub(super) fn unfinished(env: &Environment, id: &str, view: &ManagedSessionView) -> bool {
-    env.schedules.lock().unwrap().get(id).is_some_and(|saved| {
-        if matches!(saved.state, ScheduleState::Finished) {
-            return false;
-        }
-        let RelayCommand::SetQuotaRecovery {
-            recovery: Some(record),
-            ..
-        } = &saved.command
-        else {
-            return false;
-        };
-        same_recovery_context(env, id, view, record)
     })
 }
 
-fn set_state(env: &Environment, id: &str, state: ScheduleState) {
-    if let Some(saved) = env.schedules.lock().unwrap().get_mut(id) {
-        saved.state = state;
-    }
+fn wait_command_id(view: &ManagedSessionView) -> Option<String> {
+    let turn = ended_turn(view.snapshot.as_ref()?)?;
+    Some(format!("quota-schedule-{}", turn.completed_ordinal))
 }
 
 fn admit(env: &Environment, id: &str) -> Result<mj_controller::recovery_gate::RecoveryAttempt> {
@@ -685,77 +638,117 @@ fn invalid_request(error: &anyhow::Error) -> bool {
         .is_some_and(|code| code.0 == mj_core::relay::RelayErrorCode::InvalidRequest)
 }
 
-fn record_finished(env: &Environment, id: &str) {
-    set_state(env, id, ScheduleState::Finished);
-}
-
-async fn send_fallback(
+pub(super) async fn wait(
     env: &Environment,
     id: &str,
-    handle: &mj_controller::session_manager::ManagedSessionHandle,
-    admission: &mj_controller::recovery_gate::RecoveryAttempt,
-    pending: PendingFallback,
-    stale: bool,
-) -> Result<bool> {
+    view: &ManagedSessionView,
+    recovery: Option<QuotaRecovery>,
+) -> Result<Box<ManagedSessionView>> {
+    let admission = admit(env, id)?;
+    let handle = env
+        .control
+        .wait_for_session(id, Duration::from_secs(5))
+        .await?;
+    let current = handle.view();
+    let previous = env.schedules.lock().unwrap().get(id).cloned();
+    let mut schedule =
+        if let Some(previous) = previous.filter(|saved| saved.state != ScheduleState::Finished) {
+            previous
+        } else {
+            let recovery = recovery.context("no unanswered quota Wait")?;
+            if finished(env, id, view) {
+                return Ok(Box::new(current));
+            }
+            let c = &current
+                .snapshot
+                .as_ref()
+                .context("missing quota snapshot")?
+                .operational
+                .continuation;
+            if c.quota_recovery
+                .as_ref()
+                .is_some_and(|r| r.completed_command_id == recovery.completed_command_id)
+            {
+                return Ok(Box::new(current));
+            }
+            ensure!(
+                (env.claim)(id) == Claim::Allowed
+                    && quota_schedulable(&current)
+                    && (env.profile)(id).as_deref() == Some(&recovery.profile_id)
+                    && c.user_command_id.as_ref() == Some(&recovery.user_command_id)
+                    && c.completed_command_id.as_ref() == Some(&recovery.completed_command_id)
+                    && evidence_ordinal(&current) == evidence_ordinal(view),
+                "quota evidence changed during refresh"
+            );
+            Schedule {
+                command_id: wait_command_id(view).context("missing quota completion")?,
+                command: RelayCommand::SetQuotaRecovery {
+                    expected: cursor(&current)?,
+                    recovery: Some(Box::new(recovery)),
+                },
+                state: ScheduleState::Unconfirmed,
+            }
+        };
     ensure!(
         !admission.load(Ordering::Acquire),
-        "quota fallback preempted"
+        "quota scheduling preempted"
     );
-    let result = handle
-        .submit(pending.command_id.clone(), pending.command.clone())
-        .await;
-    if let Err(error) = &result {
-        if invalid_request(error) {
-            tracing::warn!(session = id, command_id = %pending.command_id, error = ?error,
-                "quota fallback command ID explicitly refused; completion will not be resubmitted");
-            record_finished(env, id);
-            return Ok(false);
-        }
-        if error
-            .downcast_ref::<mj_client::session::Refused>()
-            .is_some()
+    if schedule.state == ScheduleState::Unconfirmed {
+        // Keep the exact request until the worker acknowledges or refuses it.
+        env.schedules
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), schedule.clone());
+        match handle
+            .submit(schedule.command_id.clone(), schedule.command.clone())
+            .await
         {
-            if let RelayCommand::SetQuotaRecovery {
-                recovery: Some(record),
-                ..
-            } = &pending.command
-                && !same_recovery_context(env, id, &handle.view(), record)
+            Ok(_) => {
+                schedule.state = ScheduleState::Accepted;
+                env.schedules
+                    .lock()
+                    .unwrap()
+                    .insert(id.to_owned(), schedule.clone());
+            }
+            Err(error) if invalid_request(&error) => {
+                tracing::warn!(session=id, command_id=%schedule.command_id, error=?error,
+                    "quota command ID explicitly refused; completion will not be resubmitted");
+                schedule.state = ScheduleState::Finished;
+                env.schedules
+                    .lock()
+                    .unwrap()
+                    .insert(id.to_owned(), schedule.clone());
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<mj_client::session::Refused>()
+                    .is_some() =>
             {
-                // Explicit refusal proves the old fallback never landed. A
-                // newer turn/profile must not be held behind that stale payload.
-                record_finished(env, id);
-                bail!(
-                    "obsolete quota fallback was not accepted; reconsider the current completion"
-                );
+                tracing::info!(session=id, command_id=%schedule.command_id, %error,
+                    "quota Wait refused by worker");
+                env.schedules.lock().unwrap().remove(id);
+                let current_view = handle.view();
+                if wait_command_id(&current_view).as_deref() != Some(schedule.command_id.as_str()) {
+                    return Ok(Box::new(current_view));
+                }
+                return Err(error);
             }
-            let mut retry = pending;
-            if let RelayCommand::SetQuotaRecovery { expected, .. } = &mut retry.command {
-                *expected = cursor(&handle.view())?;
-            }
-            let state = ScheduleState::Fallback(Box::new(retry));
-            set_state(
-                env,
-                id,
-                if stale {
-                    ScheduleState::Stale(Box::new(state))
-                } else {
-                    state
-                },
-            );
+            Err(error) => return Err(error),
         }
     }
-    result?;
-    let state = ScheduleState::FallbackAccepted;
-    set_state(
-        env,
-        id,
-        if stale {
-            ScheduleState::Stale(Box::new(state))
-        } else {
-            state
-        },
+    if schedule.state == ScheduleState::Accepted {
+        handle.sync_now().await?;
+        schedule.state = ScheduleState::Finished;
+        env.schedules
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), schedule);
+    }
+    ensure!(
+        !admission.load(Ordering::Acquire),
+        "quota scheduling preempted"
     );
-    Ok(true)
+    Ok(Box::new(handle.view()))
 }
 
 pub(super) async fn schedule(
@@ -763,8 +756,11 @@ pub(super) async fn schedule(
     id: &str,
     view: ManagedSessionView,
     plan: Plan,
-) -> Result<Box<ManagedSessionView>> {
-    let plan = match plan {
+    gate: &Arc<mj_controller::upgrade::Gate>,
+    work: Option<mj_controller::upgrade::Work>,
+) -> Result<Option<Box<ManagedSessionView>>> {
+    let (fallback, _work) = match plan {
+        Plan::Wait(recovery) => (recovery, work),
         Plan::ChildSwitch {
             destination,
             reservation,
@@ -792,236 +788,28 @@ pub(super) async fn schedule(
                     if let Some(reservation) = reservation {
                         reservation.commit(Some(id.to_owned()));
                     }
-                    let handle = env
+                    return Ok(env
                         .control
                         .find_session(id)
                         .await?
-                        .context("replacement child actor stopped")?;
-                    return Ok(Box::new(handle.view()));
+                        .map(|handle| Box::new(handle.view())));
                 }
                 Err(error) => tracing::warn!(session=id, %error, "child quota switch failed"),
             }
+            drop(reservation);
             append_bounded(
                 &mut fallback.notice,
                 " The sub-agent could not switch profiles. Start a new sub-agent or send again after quota resets.",
             );
-            Plan::Wait(fallback)
-        }
-        plan => plan,
-    };
-    let plan = Arc::new(plan);
-    let admission = admit(env, id)?;
-    let handle = env
-        .control
-        .wait_for_session(id, Duration::from_secs(5))
-        .await?;
-    let current = handle.view();
-    let command_id = format!(
-        "quota-schedule-{}",
-        view.snapshot
-            .as_ref()
-            .and_then(ended_turn)
-            .context("missing quota completion")?
-            .completed_ordinal
-    );
-    let previous = env.schedules.lock().unwrap().get(id).cloned();
-    let mut schedule = if let Some(previous) = previous
-        .filter(|s| !matches!(s.state, ScheduleState::Finished) || s.command_id == command_id)
-    {
-        if matches!(previous.state, ScheduleState::Finished) {
-            return Ok(Box::new(current));
-        }
-        previous
-    } else {
-        let recovery = match plan.as_ref() {
-            Plan::Obsolete => bail!("obsolete quota assessment"),
-            Plan::Pending(_) => bail!("quota report has not been published yet"),
-            Plan::ChildSwitch { .. } => {
-                unreachable!("child switches are handled before scheduling")
-            }
-            Plan::Wait(r) => r,
-            Plan::Move { abstention, .. } => abstention,
-        };
-        // A new daemon has no remaining in-memory Move decision. The worker
-        // owns whether the old schedule was accepted.
-        if current
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.operational.continuation.quota_recovery.as_ref())
-            .is_some_and(|r| r.completed_command_id == recovery.completed_command_id)
-        {
-            return Ok(Box::new(current));
-        }
-        ensure!(
-            (env.allowed)(id)
-                && quota_schedulable(&current)
-                && (env.profile)(id).as_deref() == Some(&recovery.profile_id)
-                && evidence_ordinal(&current) == evidence_ordinal(&view),
-            "quota evidence changed during refresh"
-        );
-        let schedule = Schedule {
-            command_id: command_id.clone(),
-            command: RelayCommand::SetQuotaRecovery {
-                expected: cursor(&current)?,
-                recovery: Some(Box::new(recovery.clone())),
-            },
-            plan: plan.clone(),
-            state: ScheduleState::Unconfirmed,
-        };
-        env.schedules
-            .lock()
-            .unwrap()
-            .insert(id.to_owned(), schedule.clone());
-        schedule
-    };
-    ensure!(
-        !admission.load(Ordering::Acquire),
-        "quota scheduling preempted"
-    );
-    let fresh = matches!(schedule.state, ScheduleState::Stale(_));
-    if let ScheduleState::Stale(previous) = schedule.state {
-        schedule.state = *previous;
-    }
-    if matches!(schedule.state, ScheduleState::Unconfirmed) {
-        let result = handle
-            .submit(schedule.command_id.clone(), schedule.command.clone())
-            .await;
-        if let Err(error) = &result {
-            if invalid_request(error) {
-                tracing::warn!(session = id, command_id = %schedule.command_id, error = ?error,
-                    "quota command ID explicitly refused; completion will not be resubmitted");
-                record_finished(env, id);
-                ensure!(
-                    schedule.command_id == command_id,
-                    "earlier quota command was reconciled; reconsider the new completion"
-                );
-                return Ok(Box::new(handle.view()));
-            }
-            if error
-                .downcast_ref::<mj_client::session::Refused>()
-                .is_some()
-            {
-                env.schedules.lock().unwrap().remove(id);
-            }
-        }
-        result?;
-        schedule.state = ScheduleState::Accepted;
-        set_state(
-            env,
-            id,
-            if fresh {
-                ScheduleState::Stale(Box::new(ScheduleState::Accepted))
-            } else {
-                ScheduleState::Accepted
-            },
-        );
-    }
-    if let ScheduleState::Fallback(pending) = &schedule.state {
-        if !send_fallback(
-            env,
-            id,
-            &handle,
-            &admission,
-            pending.as_ref().clone(),
-            fresh,
-        )
-        .await?
-        {
-            return Ok(Box::new(handle.view()));
-        }
-        schedule.state = ScheduleState::FallbackAccepted;
-    }
-    handle.sync_now().await?;
-    ensure!(
-        !admission.load(Ordering::Acquire),
-        "quota scheduling preempted"
-    );
-    if schedule.command_id != command_id {
-        record_finished(env, id);
-        bail!("earlier quota command was reconciled; reconsider the new completion");
-    }
-    let current = handle.view();
-    let original_profile = match &schedule.command {
-        RelayCommand::SetQuotaRecovery {
-            recovery: Some(r), ..
-        } => &r.profile_id,
-        _ => unreachable!("a quota schedule records recovery"),
-    };
-    if evidence_ordinal(&current) != evidence_ordinal(&view)
-        || !(env.allowed)(id)
-        || (env.profile)(id).as_ref() != Some(original_profile)
-        || !quota_schedulable(&current)
-    {
-        record_finished(env, id);
-        return Ok(Box::new(current));
-    }
-    let stale_move_fallback = if fresh && matches!(plan.as_ref(), Plan::Wait(_)) {
-        match schedule.plan.as_ref() {
-            Plan::Move {
-                abstention,
-                fallback,
-                ..
-            } if current
-                .snapshot
-                .as_ref()
-                .and_then(|s| s.operational.continuation.quota_recovery.as_ref())
-                .is_some_and(|record| record == abstention) =>
-            {
-                Some(fallback.clone())
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-    if fresh {
-        schedule.plan = plan.clone();
-        schedule.state = ScheduleState::Accepted;
-        if let Some(saved) = env.schedules.lock().unwrap().get_mut(id) {
-            saved.plan = schedule.plan.clone();
-            saved.state = ScheduleState::Accepted;
-        }
-    } else if matches!(schedule.state, ScheduleState::FallbackAccepted) {
-        record_finished(env, id);
-        return Ok(Box::new(current));
-    }
-    match schedule.plan.as_ref() {
-        Plan::Obsolete | Plan::Pending(_) | Plan::ChildSwitch { .. } => {
-            unreachable!("quota scheduling only records waits and Moves")
-        }
-        Plan::Wait(_) => {
-            if let Some(recovery) = stale_move_fallback {
-                let pending = PendingFallback {
-                    command_id: format!("quota-move-fallback-{}", recovery.completed_command_id),
-                    command: RelayCommand::SetQuotaRecovery {
-                        expected: cursor(&current)?,
-                        recovery: Some(Box::new(recovery.clone())),
-                    },
-                };
-                set_state(env, id, ScheduleState::Fallback(Box::new(pending.clone())));
-                if !send_fallback(env, id, &handle, &admission, pending, false).await? {
-                    return Ok(Box::new(handle.view()));
-                }
-                handle.sync_now().await?;
-                ensure!(
-                    !admission.load(Ordering::Acquire),
-                    "quota fallback preempted"
-                );
-            }
-            record_finished(env, id);
-            Ok(Box::new(handle.view()))
+            (fallback, Some(gate.enter_unless_draining("quota Wait")?))
         }
         Plan::Move {
             request,
             destination,
             reservation,
             reason,
-            fallback,
-            ..
+            mut fallback,
         } => {
-            // Foreground lifecycle ownership must be requested after releasing
-            // scheduling. Keep the daemon decision unfinished until it settles.
-            drop(admission);
             let continuation = if view
                 .snapshot
                 .as_ref()
@@ -1031,53 +819,78 @@ pub(super) async fn schedule(
             } else {
                 QuotaMoveContinuation::Prompt
             };
-            match (env.start_quota_move)((**request).clone(), reason.clone(), continuation).await {
-                Ok(()) => {
+            let reference = request.preparation.operation_id.clone();
+            let result = (env.start_quota_move)(
+                *request,
+                reason,
+                continuation,
+                work.context("missing quota admission")?,
+            )
+            .await;
+            let (error, recovery) = match result {
+                Ok(outcome) if outcome.outcome == "completed" => {
                     if let Some(reservation) = reservation {
                         reservation.commit(Some(id.to_owned()));
                     }
-                    record_finished(env, id);
-                    Ok(Box::new(handle.view()))
+                    return Ok(None);
                 }
-                Err(error) => {
-                    let mut fallback = fallback.clone();
-                    let reference =
-                        format!("quota-move-start-{id}-{}", fallback.completed_command_id);
-                    tracing::warn!(session=id, profile=%destination, %reference, error=%format!("{error:#}"), "quota Move admission refused");
-                    append_bounded(
-                        &mut fallback.notice,
-                        &format!(
-                            " Could not start the Move to profile {destination}: {}.",
-                            crate::daemon::session_move::public_quota_failure(&error, &reference)
-                        ),
-                    );
-                    let pending = PendingFallback {
-                        command_id: format!(
-                            "quota-move-fallback-{}",
-                            fallback.completed_command_id
-                        ),
-                        command: RelayCommand::SetQuotaRecovery {
-                            expected: cursor(&handle.view())?,
-                            recovery: Some(Box::new(fallback)),
-                        },
-                    };
-                    set_state(env, id, ScheduleState::Fallback(Box::new(pending.clone())));
-                    let fallback_admission = admit(env, id)?;
-                    if !send_fallback(env, id, &handle, &fallback_admission, pending, false).await?
-                    {
-                        return Ok(Box::new(handle.view()));
-                    }
-                    handle.sync_now().await?;
-                    ensure!(
-                        !fallback_admission.load(Ordering::Acquire),
-                        "quota fallback preempted"
-                    );
-                    record_finished(env, id);
-                    Ok(Box::new(handle.view()))
+                Ok(outcome) => (
+                    anyhow::anyhow!("Move {}: {:?}", outcome.outcome, outcome.error),
+                    outcome.recovery,
+                ),
+                Err(error) => (error, None),
+            };
+            drop(reservation);
+            tracing::warn!(session=id, profile=%destination, %reference, error=%format!("{error:#}"), "quota Move did not complete");
+            append_bounded(
+                &mut fallback.notice,
+                &format!(
+                    " The automatic switch to profile {destination} after the quota stop failed: {}.",
+                    crate::daemon::session_move::public_quota_failure(&error, &reference)
+                ),
+            );
+            if let Some(recovery) = recovery {
+                append_bounded(&mut fallback.notice, " ");
+                append_bounded(&mut fallback.notice, &recovery);
+            }
+            let result = async {
+                let _work = gate.enter_unless_draining("quota Wait")?;
+                wait(env, id, &view, Some(fallback.clone())).await.map(Some)
+            }
+            .await;
+            // Retry an unanswered exchange or a transient refusal/draining while
+            // the same stopped turn is still live; stop if the source moved on.
+            if let Err(error) = &result
+                && !unanswered(env, id)
+            {
+                let still_recoverable = env
+                    .control
+                    .find_session(id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|handle| {
+                        let current = handle.view();
+                        quota_schedulable(&current)
+                            && (env.profile)(id).as_deref() == Some(&fallback.profile_id)
+                            && current.snapshot.as_ref().is_some_and(|s| {
+                                s.operational.continuation.user_command_id.as_ref()
+                                    == Some(&fallback.user_command_id)
+                                    && s.operational.continuation.completed_command_id.as_ref()
+                                        == Some(&fallback.completed_command_id)
+                            })
+                            && evidence_ordinal(&current) == evidence_ordinal(&view)
+                    });
+                if !still_recoverable {
+                    tracing::info!(session=id, %reference, %error, "could not record quota Wait after Move");
+                    return Ok(None);
                 }
             }
+            return result;
         }
-    }
+        Plan::Obsolete | Plan::Pending(_) => unreachable!("quota plan is not ready for submission"),
+    };
+    wait(env, id, &view, Some(fallback)).await.map(Some)
 }
 
 pub(super) async fn resume(
@@ -1121,7 +934,7 @@ pub(super) async fn resume(
             )
         } else {
             ensure!(
-                (env.allowed)(id)
+                (env.claim)(id) == Claim::Allowed
                     && quota_resumable(&current)
                     && (env.profile)(id).as_deref() == Some(&recovery.profile_id),
                 "quota recovery no longer allowed"
