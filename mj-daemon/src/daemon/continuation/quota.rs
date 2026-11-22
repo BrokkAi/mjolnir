@@ -638,6 +638,23 @@ fn invalid_request(error: &anyhow::Error) -> bool {
         .is_some_and(|code| code.0 == mj_core::relay::RelayErrorCode::InvalidRequest)
 }
 
+fn same_wait_frontier(
+    env: &Environment,
+    id: &str,
+    view: &ManagedSessionView,
+    current: &ManagedSessionView,
+    recovery: &QuotaRecovery,
+) -> bool {
+    quota_schedulable(current)
+        && (env.profile)(id).as_deref() == Some(&recovery.profile_id)
+        && current.snapshot.as_ref().is_some_and(|s| {
+            s.operational.continuation.user_command_id.as_ref() == Some(&recovery.user_command_id)
+                && s.operational.continuation.completed_command_id.as_ref()
+                    == Some(&recovery.completed_command_id)
+        })
+        && evidence_ordinal(current) == evidence_ordinal(view)
+}
+
 pub(super) async fn wait(
     env: &Environment,
     id: &str,
@@ -673,11 +690,7 @@ pub(super) async fn wait(
             }
             ensure!(
                 (env.claim)(id) == Claim::Allowed
-                    && quota_schedulable(&current)
-                    && (env.profile)(id).as_deref() == Some(&recovery.profile_id)
-                    && c.user_command_id.as_ref() == Some(&recovery.user_command_id)
-                    && c.completed_command_id.as_ref() == Some(&recovery.completed_command_id)
-                    && evidence_ordinal(&current) == evidence_ordinal(view),
+                    && same_wait_frontier(env, id, view, &current, &recovery),
                 "quota evidence changed during refresh"
             );
             Schedule {
@@ -693,7 +706,7 @@ pub(super) async fn wait(
         !admission.load(Ordering::Acquire),
         "quota scheduling preempted"
     );
-    if schedule.state == ScheduleState::Unconfirmed {
+    while schedule.state == ScheduleState::Unconfirmed {
         // Keep the exact request until the worker acknowledges or refuses it.
         env.schedules
             .lock()
@@ -730,6 +743,40 @@ pub(super) async fn wait(
                 let current_view = handle.view();
                 if wait_command_id(&current_view).as_deref() != Some(schedule.command_id.as_str()) {
                     return Ok(Box::new(current_view));
+                }
+                // A benign relay event can advance the cursor without changing
+                // the quota-stopped turn. Refresh once per cursor advance so we
+                // record the Wait directly instead of re-entering Move planning.
+                handle.sync_now().await?;
+                ensure!(
+                    !admission.load(Ordering::Acquire),
+                    "quota scheduling preempted"
+                );
+                let fresh = handle.view();
+                if wait_command_id(&fresh).as_deref() != Some(schedule.command_id.as_str()) {
+                    return Ok(Box::new(fresh));
+                }
+                if let RelayCommand::SetQuotaRecovery {
+                    expected,
+                    recovery: Some(record),
+                } = &mut schedule.command
+                {
+                    if fresh
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| s.operational.continuation.quota_recovery.as_ref())
+                        .is_some_and(|r| r.completed_command_id == record.completed_command_id)
+                    {
+                        return Ok(Box::new(fresh));
+                    }
+                    if (env.claim)(id) == Claim::Allowed
+                        && same_wait_frontier(env, id, view, &fresh, record)
+                        && let Ok(fresh_cursor) = cursor(&fresh)
+                        && fresh_cursor != *expected
+                    {
+                        *expected = fresh_cursor;
+                        continue;
+                    }
                 }
                 return Err(error);
             }
@@ -842,46 +889,42 @@ pub(super) async fn schedule(
             };
             drop(reservation);
             tracing::warn!(session=id, profile=%destination, %reference, error=%format!("{error:#}"), "quota Move did not complete");
-            append_bounded(
-                &mut fallback.notice,
-                &format!(
-                    " The automatic switch to profile {destination} after the quota stop failed: {}.",
-                    crate::daemon::session_move::public_quota_failure(&error, &reference)
-                ),
+            let mut failure = format!(
+                "The automatic switch to profile {destination} after the quota stop failed: {}.",
+                crate::daemon::session_move::public_quota_failure(&error, &reference)
             );
             if let Some(recovery) = recovery {
-                append_bounded(&mut fallback.notice, " ");
-                append_bounded(&mut fallback.notice, &recovery);
+                failure.push(' ');
+                failure.push_str(&recovery);
             }
+            if let Some(runtime) = &env.child_switch_runtime {
+                runtime.push_notice(id, failure.clone());
+            }
+            append_bounded(&mut fallback.notice, &format!(" {failure}"));
             let result = async {
                 let _work = gate.enter_unless_draining("quota Wait")?;
                 wait(env, id, &view, Some(fallback.clone())).await.map(Some)
             }
             .await;
-            // Retry an unanswered exchange or a transient refusal/draining while
-            // the same stopped turn is still live; stop if the source moved on.
+            // Retry an unanswered exchange, transient refusal/draining, or
+            // temporary worker disconnect; stop only once the session leaves
+            // the source profile or a connected snapshot shows the turn changed.
             if let Err(error) = &result
                 && !unanswered(env, id)
             {
-                let still_recoverable = env
-                    .control
-                    .find_session(id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|handle| {
-                        let current = handle.view();
-                        quota_schedulable(&current)
-                            && (env.profile)(id).as_deref() == Some(&fallback.profile_id)
-                            && current.snapshot.as_ref().is_some_and(|s| {
-                                s.operational.continuation.user_command_id.as_ref()
-                                    == Some(&fallback.user_command_id)
-                                    && s.operational.continuation.completed_command_id.as_ref()
-                                        == Some(&fallback.completed_command_id)
-                            })
-                            && evidence_ordinal(&current) == evidence_ordinal(&view)
-                    });
-                if !still_recoverable {
+                let source_moved_on = (env.profile)(id).as_deref() != Some(&fallback.profile_id)
+                    || env
+                        .control
+                        .find_session(id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|handle| {
+                            let current = handle.view();
+                            current.connected
+                                && !same_wait_frontier(env, id, &view, &current, &fallback)
+                        });
+                if source_moved_on {
                     tracing::info!(session=id, %reference, %error, "could not record quota Wait after Move");
                     return Ok(None);
                 }
