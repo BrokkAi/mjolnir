@@ -16642,6 +16642,28 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
     mj_controller::database::save_session(&record).unwrap();
 
     let state = test_runtime_state_loading_the_store();
+    // `DaemonAction::SuspendPreflight` is routed as a cancellable machine action
+    // by `serve.rs`; verify `machine::execute` handles it instead of rejecting
+    // it as "not a machine read".
+    let preflight_reply = super::machine::execute(
+        DaemonAction::SuspendPreflight {
+            session_id: session_id.into(),
+            dry_run: false,
+            without_checkpoint: true,
+        },
+        &state,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .expect("SuspendPreflight must execute through machine::execute");
+    assert!(
+        matches!(
+            preflight_reply,
+            DaemonReply::SuspendPreflight(ref preflight) if preflight.existing_checkpoint.is_none()
+        ),
+        "expected SuspendPreflight reply with existing_checkpoint=None, got: {preflight_reply:?}"
+    );
+
     let consent = mj_core::suspend_consent::SuspendConsent {
         without_checkpoint: true,
         confirm_no_checkpoint: false,
@@ -16655,10 +16677,24 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
         format!("{err:#}").contains("No verified checkpoint exists"),
         "expected refusal, got: {err:#}"
     );
+    // `suspend_session_with_consent` awaited `started.result`, which only
+    // resolves after lifecycle completion (and any failure recording).
+    assert!(
+        state
+            .owner()
+            .lifecycle
+            .get(session_id)
+            .is_none_or(|active| !active.is_running()),
+        "refused suspend lifecycle must be finished once wait_lifecycle_result returns"
+    );
     let loaded = Controller::load().unwrap();
     assert_eq!(
         loaded.state.sessions[session_id].state,
         SessionState::Running,
         "refused without_checkpoint must not transition session to Closing"
+    );
+    assert_eq!(
+        loaded.state.sessions[session_id].last_error, None,
+        "pre-acceptance suspend refusal must not stamp last_error onto a live session"
     );
 }

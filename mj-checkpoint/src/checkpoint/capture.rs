@@ -1005,10 +1005,7 @@ fn collect_origin_delta(
     snapshot_directory: &Path,
     consent: &crate::snapshot::CaptureConsent,
 ) -> Result<RepositorySnapshot> {
-    use crate::snapshot::{
-        CheckoutKey, SessionCaptureConsent, SnapshotHead, capture_session_snapshot,
-        check_keep_dir_consent,
-    };
+    use crate::snapshot::{SessionCaptureConsent, SnapshotHead, capture_session_snapshot};
 
     let location = crate::archive::git::locate_checkout(git, path)?;
     let input = managed_clone_snapshot_input(
@@ -1018,13 +1015,6 @@ fn collect_origin_delta(
         snapshot_directory.join(&repository.id),
         repository.origin_override.clone(),
     )?;
-    if let Some(keep_dir) = &input.keep_dir {
-        let checkout = CheckoutKey {
-            repository_id: repository.id.clone(),
-            checkout_path: PathBuf::new(),
-        };
-        check_keep_dir_consent(&checkout, keep_dir, &consent.untracked)?;
-    }
     let session_consent = SessionCaptureConsent {
         repositories: [(repository.id.clone(), consent.clone())]
             .into_iter()
@@ -1182,10 +1172,7 @@ fn collect_origin_delta_cutoff(
     snapshot_directory: &Path,
     consent: &crate::snapshot::CaptureConsent,
 ) -> Result<RepositorySnapshot> {
-    use crate::snapshot::{
-        CheckoutKey, SessionCaptureConsent, SnapshotHead, capture_session_snapshot,
-        check_keep_dir_consent,
-    };
+    use crate::snapshot::{SessionCaptureConsent, SnapshotHead, capture_session_snapshot};
 
     let location = crate::archive::git::locate_checkout(git, path)?;
     let input = cutoff_snapshot_input(
@@ -1195,13 +1182,6 @@ fn collect_origin_delta_cutoff(
         exclude_commits,
         snapshot_directory.join(&repository.id),
     )?;
-    if let Some(keep_dir) = &input.keep_dir {
-        let checkout = CheckoutKey {
-            repository_id: repository.id.clone(),
-            checkout_path: PathBuf::new(),
-        };
-        check_keep_dir_consent(&checkout, keep_dir, &consent.untracked)?;
-    }
     let session_consent = SessionCaptureConsent {
         repositories: [(repository.id.clone(), consent.clone())]
             .into_iter()

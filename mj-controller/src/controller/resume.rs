@@ -817,7 +817,20 @@ impl Controller {
             prompt_contexts.extend(stopped_subagents_context);
             let (backend, worker_root) = self.worker_placement(session_id)?;
             let harness_home = target_profile_home(&backend, session_id, profile);
-            let workspace_root = if let Some(project_directory) = &resumed_project_directory {
+            let workspace_root = if let Some(worktree) =
+                self.state.sessions[session_id].managed_worktree.as_ref()
+            {
+                // Use the managed clone's parent rather than `project_directory.parent()`:
+                // a remotely seeded `--no-checkout` clone has not checked out any
+                // subdirectory yet when `ensure_room_for` and `restore_checkpoint`
+                // validate `workspace_root`.
+                worktree
+                    .worktree_root
+                    .parent()
+                    .context("managed worktree has no parent")?
+                    .to_string_lossy()
+                    .into_owned()
+            } else if let Some(project_directory) = &resumed_project_directory {
                 project_directory
                     .parent()
                     .context("bare project directory has no parent")?
@@ -2450,6 +2463,7 @@ impl Controller {
         // replaces `record.checkpoint`).
         let mut ephemeral_conversion_archive: Option<(tempfile::TempDir, PathBuf)> = None;
         let mut direct_already_transferred = false;
+        let mut remote_origin_delta_clone_restore = false;
         let result = async {
             if origin_delta {
                 if is_history_cutoff_origin_delta || plan == ResumePlan::RawToWorkspace {
@@ -2458,13 +2472,27 @@ impl Controller {
                 } else if plan == ResumePlan::WorkspaceToRaw {
                     // Handled in the WorkspaceToRaw conversion block below.
                 } else if let Some((upgraded, _)) = upgraded_origin_delta_clone.as_ref() {
-                    resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
+                    match super::worktree::restore_managed_clone_origin_delta(
                         executor, upgraded, &archive_path, archive_manifest,
-                    )?);
+                    )? {
+                        super::worktree::ManagedCloneRestoreOutcome::RestoredLocally(notices) => {
+                            resume_notices.extend(notices);
+                        }
+                        super::worktree::ManagedCloneRestoreOutcome::SeededForRemoteRestore => {
+                            remote_origin_delta_clone_restore = true;
+                        }
+                    }
                 } else if let Some(worktree) = previous_managed_worktree.as_ref() {
-                    resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
+                    match super::worktree::restore_managed_clone_origin_delta(
                         executor, worktree, &archive_path, archive_manifest,
-                    )?);
+                    )? {
+                        super::worktree::ManagedCloneRestoreOutcome::RestoredLocally(notices) => {
+                            resume_notices.extend(notices);
+                        }
+                        super::worktree::ManagedCloneRestoreOutcome::SeededForRemoteRestore => {
+                            remote_origin_delta_clone_restore = true;
+                        }
+                    }
                     recreated_managed_worktree = true;
                 } else if is_attached_checkout {
                     // Raw checkout resuming in place: the existing checkout is authoritative.
@@ -2523,7 +2551,10 @@ impl Controller {
                 .and_then(ResumeConversion::workspace_to_raw)
             {
                 if origin_delta {
-                    let local_restore_archive = if let (
+                    let local_restore_archive = if matches!(
+                        &conversion.worktree.target,
+                        mj_core::state::ManagedWorktreeTarget::Local
+                    ) && let (
                         Some(operation),
                         Some((source_backend, source_worker_root, source_keep_dir)),
                     ) = (move_operation.as_deref_mut(), direct_move_source.as_ref())
@@ -2574,12 +2605,19 @@ impl Controller {
                     } else {
                         archive_path.clone()
                     };
-                    resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
+                    match super::worktree::restore_managed_clone_origin_delta(
                         executor,
                         &conversion.worktree,
                         &local_restore_archive,
                         archive_manifest,
-                    )?);
+                    )? {
+                        super::worktree::ManagedCloneRestoreOutcome::RestoredLocally(notices) => {
+                            resume_notices.extend(notices);
+                        }
+                        super::worktree::ManagedCloneRestoreOutcome::SeededForRemoteRestore => {
+                            remote_origin_delta_clone_restore = true;
+                        }
+                    }
                 } else {
                     if conversion.reuse_existing_branch {
                         let recovery_ref =
@@ -2706,6 +2744,7 @@ impl Controller {
             let restore_repositories = if origin_delta {
                 is_history_cutoff_origin_delta
                     || plan == ResumePlan::RawToWorkspace
+                    || remote_origin_delta_clone_restore
                     || (plan == ResumePlan::InPlace
                         && resumed_project_directory.is_none()
                         && previous_managed_worktree.is_none()

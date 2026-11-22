@@ -252,7 +252,7 @@ impl Controller {
             CheckpointExportPolicy::OriginDelta => match checkout {
                 mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
                     vec![mj_core::suspend_consent::WorkerPreflightRepo {
-                        id: "workspace".to_owned(),
+                        id: super::checkpoint::HOST_CHECKOUT_REPOSITORY.to_owned(),
                         path: worktree.worktree_root.clone(),
                         raw: false,
                         exclude_commits: None,
@@ -304,37 +304,99 @@ impl Controller {
                         exclude_commits.push(base);
                     }
                 }
-                let root = checkout
-                    .managed_worktree()
-                    .map(|wt| wt.worktree_root.clone())
-                    .or_else(|| checkout.project_directory().map(std::path::Path::to_path_buf))
-                    .or_else(|| {
-                        session.target.as_deref().and_then(|locator| {
-                            backend_locator(locator, &session, &self.config)
-                                .ok()
-                                .map(|backend| PathBuf::from(targets::workspace_root(&backend, None)))
-                        })
-                    });
-                root.into_iter()
-                    .map(|path| -> Result<_> {
-                        Ok(mj_core::suspend_consent::WorkerPreflightRepo {
-                            id: "workspace".to_owned(),
+                match checkout {
+                    mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                        let path = worktree.worktree_root.clone();
+                        vec![mj_core::suspend_consent::WorkerPreflightRepo {
+                            id: super::checkpoint::HOST_CHECKOUT_REPOSITORY.to_owned(),
                             keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
                                 &path, session_id,
                             )?),
                             path,
                             raw: false,
-                            exclude_commits: Some(exclude_commits.clone()),
+                            exclude_commits: Some(exclude_commits),
                             origin_override: None,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?
+                        }]
+                    }
+                    mj_core::state::Checkout::Attached { path } => {
+                        let path = path.to_path_buf();
+                        vec![mj_core::suspend_consent::WorkerPreflightRepo {
+                            id: super::checkpoint::HOST_CHECKOUT_REPOSITORY.to_owned(),
+                            keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
+                                &path, session_id,
+                            )?),
+                            path,
+                            raw: false,
+                            exclude_commits: Some(exclude_commits),
+                            origin_override: None,
+                        }]
+                    }
+                    mj_core::state::Checkout::ManagedWorkspace => {
+                        if let Some(bundle) = session.project_bundle(&self.config) {
+                            let (backend, _) = self.worker_placement(session_id)?;
+                            let workspace_root =
+                                PathBuf::from(crate::controller::network_git::workspace_root(
+                                    &backend,
+                                    session.container_workspace.as_deref(),
+                                ));
+                            bundle
+                                .repositories
+                                .iter()
+                                .map(|repository| -> Result<_> {
+                                    let path = workspace_root.join(&repository.destination);
+                                    Ok(mj_core::suspend_consent::WorkerPreflightRepo {
+                                        id: repository.id.clone(),
+                                        keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
+                                            &path,
+                                            session_id,
+                                        )?),
+                                        path,
+                                        raw: false,
+                                        exclude_commits: Some(exclude_commits.clone()),
+                                        origin_override: None,
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?
+                        } else {
+                            let fallback_id = session
+                                .checkout
+                                .as_ref()
+                                .map(|exact| exact.repository_id.clone())
+                                .unwrap_or_else(|| "workspace".to_owned());
+                            session
+                                .target
+                                .as_deref()
+                                .and_then(|locator| {
+                                    backend_locator(locator, &session, &self.config).ok().map(
+                                        |backend| {
+                                            PathBuf::from(targets::workspace_root(&backend, None))
+                                        },
+                                    )
+                                })
+                                .into_iter()
+                                .map(|path| -> Result<_> {
+                                    Ok(mj_core::suspend_consent::WorkerPreflightRepo {
+                                        id: fallback_id.clone(),
+                                        keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
+                                            &path, session_id,
+                                        )?),
+                                        path,
+                                        raw: false,
+                                        exclude_commits: Some(exclude_commits.clone()),
+                                        origin_override: None,
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?
+                        }
+                    }
+                    mj_core::state::Checkout::Borrowed { .. } => Vec::new(),
+                }
             }
             CheckpointExportPolicy::OriginDeltaRaw => checkout
                 .project_directory()
                 .into_iter()
                 .map(|dir| mj_core::suspend_consent::WorkerPreflightRepo {
-                    id: "workspace".to_owned(),
+                    id: super::checkpoint::HOST_CHECKOUT_REPOSITORY.to_owned(),
                     path: dir.to_path_buf(),
                     raw: true,
                     exclude_commits: None,

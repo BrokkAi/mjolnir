@@ -2976,6 +2976,113 @@ fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
     );
     test_git(&worktree_root, &["fsck", "--full"]);
 
+    // Verify SSH managed clone origin-delta resume seeds the empty clone via
+    // the remote executor and delegates snapshot unpacking to target-side
+    // `restore_repositories` (rather than refusing non-local targets).
+    struct LocalSshShimExecutor;
+    impl CommandExecutor for LocalSshShimExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.program, "ssh", "expected ssh command: {command:?}");
+            let script = command
+                .args
+                .last()
+                .expect("ssh command carries remote shell script");
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .output()
+                .expect("run local sh for ssh shim");
+            Ok(CommandOutput {
+                status: output.status.code().unwrap_or(1),
+                stdout: output.stdout,
+                stderr: output.stderr,
+            })
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+    }
+    let ssh_clone_root = temp.path().join("ssh-clone-root");
+    let ssh_worktree = ManagedWorktree {
+        worktree_root: ssh_clone_root.clone(),
+        target: ManagedWorktreeTarget::Ssh {
+            destination: "remote-box".into(),
+            ssh_args: Vec::new(),
+        },
+        ..worktree.clone()
+    };
+    let ssh_outcome = restore_managed_clone_origin_delta(
+        &LocalSshShimExecutor,
+        &ssh_worktree,
+        &archive_path,
+        &verified.manifest,
+    )
+    .unwrap();
+    assert!(matches!(
+        ssh_outcome,
+        ManagedCloneRestoreOutcome::SeededForRemoteRestore
+    ));
+    assert!(ssh_clone_root.join(".git").exists());
+    let ssh_restore_spec = mj_checkpoint::checkpoint::CheckpointRestoreSpec {
+        archive_path: archive_path.clone(),
+        workspace_root: ssh_clone_root.parent().unwrap().to_path_buf(),
+        report_root: None,
+        relay_root: temp.path().join("ssh-relay-root"),
+        harness_home: temp.path().join("ssh-harness-home"),
+        restore_repositories: true,
+        restore_native: false,
+        queue_policy: mj_checkpoint::checkpoint::QueueRestorePolicy::Discard,
+        primary_repository_root: Some(ssh_clone_root.clone()),
+    };
+    std::fs::create_dir_all(&ssh_restore_spec.relay_root).unwrap();
+    std::fs::create_dir_all(&ssh_restore_spec.harness_home).unwrap();
+    mj_checkpoint::checkpoint::restore_checkpoint(
+        &ssh_restore_spec,
+        &mj_checkpoint::archive::SystemGit,
+    )
+    .unwrap();
+    assert_eq!(
+        test_git(&ssh_clone_root, &["symbolic-ref", "--short", "HEAD"]),
+        "feature/origin-seed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ssh_clone_root.join("feature.txt")).unwrap(),
+        "staged\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ssh_clone_root.join("README.md")).unwrap(),
+        "unstaged\n"
+    );
+    assert!(
+        test_git(&ssh_clone_root, &["stash", "list"]).contains("saved stash"),
+        "stash should be restored on SSH managed clone"
+    );
+    test_git(&ssh_clone_root, &["fsck", "--full"]);
+
     // Legacy checkpoints still require base_commit in source_repository before
     // deleting a managed clone, so retiring with LegacySourceCommit must refuse
     // and leave the clone intact when source_repository is absent.

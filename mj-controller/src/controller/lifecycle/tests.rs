@@ -3229,19 +3229,22 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
     let preflight = controller
         .suspend_preflight(session_id, true, false, &ProcessExecutor)
         .unwrap();
-    assert!(
-        preflight
-            .untracked
-            .iter()
-            .any(|u| u.path == std::path::Path::new("scratch.txt")),
-        "expected scratch.txt in untracked: {:?}",
+    assert_eq!(
+        preflight.untracked.len(),
+        1,
+        "keep_dir files must not be duplicated into untracked: {:?}",
         preflight.untracked
+    );
+    assert_eq!(
+        preflight.untracked[0].path,
+        std::path::Path::new("scratch.txt")
     );
     assert_eq!(preflight.keep_dir_entries.len(), 1);
     assert_eq!(
         preflight.keep_dir_entries[0].path,
         std::path::PathBuf::from("note.txt")
     );
+    assert_eq!(preflight.untracked_count(), 2);
     assert!(preflight.keep_dir_bytes > 0);
     assert_eq!(preflight.operations.len(), 1);
     assert_eq!(
@@ -3256,6 +3259,145 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
             .as_deref()
             .is_some_and(|r| r.contains("merge"))
     );
+}
+
+#[test]
+fn suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_id() {
+    if !in_isolated_store(
+        "suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_id",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let origin = directory.path().join("origin.git");
+    let source = directory.path().join("source");
+    let session_id = "preflight-shown-consent-repo-id";
+    let clone_root = source.join(".mj/clones").join(session_id);
+
+    let run_git = |cwd: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} in {} failed: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    std::fs::create_dir_all(&origin).unwrap();
+    run_git(&origin, &["init", "--bare", "-b", "main"]);
+    std::fs::create_dir_all(&source).unwrap();
+    run_git(&source, &["init", "-b", "main"]);
+    run_git(&source, &["config", "user.name", "Test"]);
+    run_git(&source, &["config", "user.email", "test@example.com"]);
+    std::fs::write(source.join("tracked.txt"), "base\n").unwrap();
+    run_git(&source, &["add", "tracked.txt"]);
+    run_git(&source, &["commit", "-m", "initial"]);
+    run_git(&source, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    run_git(&source, &["push", "-u", "origin", "main"]);
+
+    std::fs::create_dir_all(clone_root.parent().unwrap()).unwrap();
+    run_git(
+        directory.path(),
+        &[
+            "clone",
+            origin.to_str().unwrap(),
+            clone_root.to_str().unwrap(),
+        ],
+    );
+    run_git(&clone_root, &["config", "user.name", "Test"]);
+    run_git(&clone_root, &["config", "user.email", "test@example.com"]);
+    let head = run_git(&clone_root, &["rev-parse", "HEAD"]);
+    std::fs::write(clone_root.join(".git/info/exclude"), "/.mj/keep/\n").unwrap();
+    std::fs::write(clone_root.join("conflict-note.txt"), "untracked\n").unwrap();
+    let keep_dir = clone_root.join(".mj/keep").join(session_id);
+    std::fs::create_dir_all(&keep_dir).unwrap();
+    std::fs::write(keep_dir.join("note.txt"), "keep-me\n").unwrap();
+    std::fs::write(clone_root.join(".git/MERGE_HEAD"), format!("{head}\n")).unwrap();
+
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "local".into();
+    session.project_directory = Some(clone_root.clone());
+    session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: source.clone(),
+        source_repository: source.clone(),
+        worktree_root: clone_root.clone(),
+        branch: "main".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+        base_commit: Some(head),
+    }));
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: directory.path().join("workers").join(session_id),
+    }));
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&controller);
+
+    let preflight = controller
+        .suspend_preflight(session_id, false, false, &ProcessExecutor)
+        .unwrap();
+    let layout = controller
+        .session_export_layout(session_id, &ProcessExecutor)
+        .unwrap();
+    let expected_repo_id = layout.repositories[0].id.as_str();
+    assert_eq!(expected_repo_id, crate::controller::checkpoint::HOST_CHECKOUT_REPOSITORY);
+    assert_eq!(preflight.untracked.len(), 1);
+    assert_eq!(preflight.untracked[0].checkout.repository_id, expected_repo_id);
+    assert_eq!(preflight.keep_dir_entries.len(), 1);
+    assert_eq!(
+        preflight.keep_dir_entries[0].checkout.repository_id,
+        expected_repo_id
+    );
+    assert_eq!(preflight.operations.len(), 1);
+    assert_eq!(
+        preflight.operations[0].checkout.repository_id,
+        expected_repo_id
+    );
+
+    // Passing `preflight.shown_consent()` directly into capture using the
+    // layout's repository id must succeed without refusing mismatched ids.
+    let shown = preflight.shown_consent();
+    let input = mj_checkpoint::checkpoint::managed_clone_snapshot_input(
+        expected_repo_id,
+        &clone_root,
+        Some(session_id),
+        directory.path().join("snapshot.pack"),
+        None,
+    )
+    .unwrap();
+    let capture_consent = mj_checkpoint::snapshot::SessionCaptureConsent {
+        repositories: [(
+            expected_repo_id.to_owned(),
+            mj_checkpoint::snapshot::CaptureConsent {
+                untracked: shown.discard_untracked,
+                operations: shown.abort_operations,
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    mj_checkpoint::snapshot::capture_session_snapshot(
+        &mj_checkpoint::archive::SystemGit,
+        &[input],
+        &capture_consent,
+    )
+    .expect("preflight.shown_consent() must match capture repository id");
 }
 
 #[test]

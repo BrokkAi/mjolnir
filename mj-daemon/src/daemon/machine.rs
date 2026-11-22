@@ -169,6 +169,16 @@ pub(super) async fn execute(
                 )
                 .map(DaemonReply::NewSessionPreflight)
             }
+            DaemonAction::SuspendPreflight {
+                session_id,
+                dry_run,
+                without_checkpoint,
+            } => {
+                let controller = Controller::load()?;
+                controller
+                    .suspend_preflight(&session_id, dry_run, without_checkpoint, &executor)
+                    .map(|preflight| DaemonReply::SuspendPreflight(Box::new(preflight)))
+            }
             DaemonAction::ValidateProjectDirectory {
                 target_id,
                 directory,
