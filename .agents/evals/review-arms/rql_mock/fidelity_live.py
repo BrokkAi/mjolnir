@@ -11,7 +11,7 @@ import driver
 
 from .engine import CONFIG, RepairStalled, load_engine, locked, repair_answer
 from .engine.evidence import sync_directory
-from .engine.normalization import validate, validate_staged
+from .engine.normalization import SourceEvidence, decode, normalize_answer, validate, validate_answer
 from .engine.prompt import TERRA_TOOLS, assert_blind, semantics_only, turn_prompt
 from .engine.runner import EngineRunner, LaunchPreflightFailure, SealedRunner
 from .engine.snapshot import blob_reader, manifest_sources, prepared_snapshot
@@ -47,6 +47,25 @@ Different conditions, bindings, or guarded outcomes require different keys.
 Keep invalid rows distinct from valid rows. Give invalid candidates one key
 only if they make the same unsupported claim under the same evidence.
 """
+
+
+def validate_staged(output, read_blob):
+    """Decode, normalize and validate an enumerator's output, with its repair stage.
+
+    The stages are the engine loop's: "model-answer" for JSON and normalization
+    errors, "normalized-answer" once normalization succeeds. Fixing one stage can
+    expose the next stage's errors, which is progress, not a stall. This lives here,
+    not in the engine's normalization module, because that module's source is part
+    of the engine's identity, and changing it would void every saved engine answer."""
+    try:
+        answer = decode(output)
+    except (ValueError, RecursionError) as error:
+        return [], {}, [f"invalid JSON: {error}"], "model-answer"
+    source = SourceEvidence(read_blob)
+    errors = normalize_answer(answer, source)
+    if errors:
+        return [], {}, errors, "model-answer"
+    return (*validate_answer(answer, source), "normalized-answer")
 
 
 class TerraEvidenceError(ValueError):
