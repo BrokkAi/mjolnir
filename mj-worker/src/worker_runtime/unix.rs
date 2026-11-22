@@ -3724,6 +3724,7 @@ pub(super) async fn serve_client_with_memory(
                 RelayResponseBody::Ok {
                     payload: RelayResponsePayload::Accepted { .. }
                         | RelayResponsePayload::IdleReservation { ordinal: Some(_) }
+                        | RelayResponsePayload::InPlaceMoveDispatchReleased
                 }
             );
             if accepted {
