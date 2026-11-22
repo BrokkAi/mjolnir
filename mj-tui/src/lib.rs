@@ -373,6 +373,7 @@ pub enum DashboardAction {
         create_managed_worktree: Option<bool>,
         subagents: Option<mj_core::subagent::SubagentPolicy>,
         oracle: Option<bool>,
+        supervisors: Option<bool>,
         oracle_choice: Option<mj_core::config::SubagentChoice>,
         /// The session's automatic turn-review choice. `None` follows the
         /// global `[review]` settings.
@@ -475,6 +476,7 @@ pub enum DashboardAction {
         /// Delegation policy for the destination; `None` keeps the session's.
         subagents: Option<mj_core::subagent::SubagentPolicy>,
         oracle: Option<bool>,
+        supervisors: Option<bool>,
         oracle_choice: Option<mj_core::config::SubagentChoice>,
         consent: mj_core::suspend_consent::SuspendConsent,
         skip_keep_paths: Vec<std::path::PathBuf>,

@@ -85,6 +85,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
+        guardian: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
@@ -134,6 +135,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
     };
     let state = AppState {
         last_oracle_choices: Default::default(),
+        last_supervisor_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: Default::default(),
@@ -143,6 +145,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
+            supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,
@@ -859,6 +862,7 @@ fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
+            supervisor: false,
             }
             .into(),
         );
@@ -3146,6 +3150,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
@@ -3206,6 +3211,7 @@ fn container_target_missing_or_invalid_bundle_id_names_field() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |bundle_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
@@ -3291,6 +3297,7 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
          resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
             ControllerAction::New {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
@@ -3550,6 +3557,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     snapshot.sessions[0].capabilities.move_session = true;
     let selection = MoveSelection {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         subagents: None,
         consent: Default::default(),
@@ -5058,7 +5066,7 @@ if (movePathContains({{repository:'repo',path:'.agents/build'}}, {{repository:'o
 fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_stops() {
     let source = format!(
         "{}\n{}",
-        viewer_source("function subagentChoiceApplies(", "function targetIsBare("),
+        viewer_source("function isAutoPrimaryProfile(", "function targetIsBare("),
         viewer_source(
             "function moveSubagentChange(",
             "function moveQueueItemText("
@@ -5112,7 +5120,7 @@ assert(moveSubagentChange(dsh) === null, "Codex keeps the stored Native");
 fn viewer_move_controls_use_global_availability_for_delegation() {
     let source = format!(
         "{}\n{}",
-        viewer_source("function subagentChoiceApplies(", "function targetIsBare("),
+        viewer_source("function isAutoPrimaryProfile(", "function targetIsBare("),
         viewer_source(
             "function moveSubagentChange(",
             "function moveStoppedChildren("
@@ -5313,47 +5321,72 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             "/api/settings/edit",
             serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "max_concurrent"], "text": "99"}}),
         ),
+        // Subtle is a list of pairs. Adding one and choosing a model, with
+        // straightforward still empty, is the save the configuration refuses.
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["subagents", "subtle"]}),
+        ),
         (
             "/api/settings/edit",
-            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "subtle", "model"], "choice": "opus"}}),
+            serde_json::json!({"page": ["subagents", "subtle"], "edit": {"kind": "add", "path": ["subagents", "subtle"]}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents", "subtle", "0"], "edit": {"kind": "set", "path": ["subagents", "subtle", "0", "model"], "choice": "opus"}}),
         ),
         (
             "/api/settings/save",
-            serde_json::json!({"page": ["subagents"]}),
+            serde_json::json!({"page": ["subagents", "subtle", "0"]}),
+        ),
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["subagents"]}),
+        ),
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["subagents", "straightforward"]}),
         ),
         (
             "/api/settings/edit",
-            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "model"], "choice": "opus"}}),
+            serde_json::json!({"page": ["subagents", "straightforward"], "edit": {"kind": "add", "path": ["subagents", "straightforward"]}}),
         ),
         (
             "/api/settings/edit",
-            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "effort"], "choice": "high"}}),
+            serde_json::json!({"page": ["subagents", "straightforward", "0"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "0", "model"], "choice": "opus"}}),
         ),
         (
             "/api/settings/edit",
-            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+            serde_json::json!({"page": ["subagents", "straightforward", "0"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "0", "effort"], "choice": "high"}}),
+        ),
+        // A second Straightforward pair on the same provider is refused, then
+        // removed so the draft can save.
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["subagents", "straightforward"]}),
         ),
         (
             "/api/settings/edit",
-            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "yolo", "straightforward", "model"], "choice": "opus"}}),
+            serde_json::json!({"page": ["subagents", "straightforward"], "edit": {"kind": "add", "path": ["subagents", "straightforward"]}}),
         ),
         (
             "/api/settings/edit",
-            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "yolo", "straightforward", "effort"], "choice": "high"}}),
-        ),
-        (
-            "/api/settings/edit",
-            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
-        ),
-        (
-            "/api/settings/edit",
-            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+            serde_json::json!({"page": ["subagents", "straightforward", "1"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "1", "model"], "choice": "sonnet"}}),
         ),
         (
             "/api/settings/save",
-            serde_json::json!({"page": ["subagents"]}),
+            serde_json::json!({"page": ["subagents", "straightforward", "1"]}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents", "straightforward", "1"], "edit": {"kind": "remove", "path": ["subagents", "straightforward", "1"]}}),
+        ),
+        (
+            "/api/settings/save",
+            serde_json::json!({"page": ["subagents", "straightforward"]}),
         ),
     ];
+    let mut saves = 0usize;
     for (uri, sent) in steps {
         let mut request = sent.clone();
         request["draft"] = draft.clone();
@@ -5361,11 +5394,25 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             request["original"] = original.clone();
         }
         let (status, body) = settings_request(&app, &cookie, uri, Some(&request)).await;
-        let subtle_only_save =
-            uri == "/api/settings/save" && draft["subagents"]["straightforward"]["model"].is_null();
-        if subtle_only_save {
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-            assert_eq!(std::fs::read(&path).unwrap(), original_file);
+        if uri == "/api/settings/save" {
+            saves += 1;
+            match saves {
+                1 => {
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+                    assert!(
+                        body.contains("[subagents.subtle] requires [subagents.straightforward]"),
+                        "{body}"
+                    );
+                    assert_eq!(std::fs::read(&path).unwrap(), original_file);
+                }
+                2 => {
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+                    assert!(body.contains("at most one model per provider"), "{body}");
+                    assert!(body.contains("Anthropic"), "{body}");
+                    assert_eq!(std::fs::read(&path).unwrap(), original_file);
+                }
+                _ => assert_eq!(status, StatusCode::OK, "{body}"),
+            }
         } else {
             assert_eq!(status, StatusCode::OK, "{body}");
         }
@@ -5374,6 +5421,10 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             draft = next.clone();
         }
     }
+    assert_eq!(
+        saves, 3,
+        "subtle refusal, same-provider refusal, then a clean save"
+    );
 
     for body in &bodies {
         assert!(
@@ -5390,33 +5441,29 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     assert!(saved.contains(RUNTIME_SECRET), "{saved}");
     let saved = Config::load_from(&path).unwrap();
     assert!(!saved.phone.enabled);
+    let subagents = serde_json::to_value(&saved.subagents).unwrap();
     assert_eq!(
-        serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["model"],
-        "opus"
+        subagents["straightforward"].as_array().map(Vec::len),
+        Some(1),
+        "{subagents}"
     );
+    assert_eq!(subagents["straightforward"][0]["model"], "opus");
+    assert_eq!(subagents["straightforward"][0]["effort"], "high");
     assert_eq!(
-        serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["effort"],
-        "high"
+        subagents["subtle"].as_array().map(Vec::len),
+        Some(1),
+        "{subagents}"
     );
-    assert_eq!(
-        serde_json::to_value(&saved.subagents).unwrap()["subtle"]["model"],
-        "opus"
+    assert_eq!(subagents["subtle"][0]["model"], "opus");
+    assert!(
+        subagents
+            .get("primary")
+            .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
     );
-    assert!(!saved.subagents.use_same_on_all_targets);
-    assert_eq!(
-        saved.subagents.yolo.straightforward.as_ref().unwrap().model,
-        "opus"
-    );
-    assert_eq!(
-        saved
-            .subagents
-            .yolo
-            .straightforward
-            .as_ref()
-            .unwrap()
-            .effort
-            .as_deref(),
-        Some("high")
+    assert!(
+        subagents
+            .get("oracle")
+            .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
     );
 
     let rendered_home = serde_json::to_string(&home.display().to_string()).unwrap();

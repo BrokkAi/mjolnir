@@ -124,7 +124,7 @@ impl RuntimeState {
                     review_host.child_ended(child.to_owned(), reason)
                 })
             })),
-            report_backend: std::sync::OnceLock::new(),
+            report_backend: Mutex::new(None),
             rejected_logins: Default::default(),
             credential_targets: Arc::new(tokio::sync::watch::channel(Vec::new()).0),
             recent_launch: tokio::sync::watch::channel(None).0,
@@ -159,6 +159,11 @@ impl RuntimeState {
             review_host,
             reviewer_runtime,
             wiki: mj_controller::sessionwiki::WikiIndexer::spawn(),
+            power_ranking: mj_controller::power_ranking::PowerRankingStore::open(
+                &mj_core::config::data_dir(),
+                mj_core::clock::epoch_seconds(),
+            ),
+            quota_telemetry: mj_controller::quota_telemetry::QuotaTelemetryStore::new(),
         }
     }
 
@@ -324,6 +329,7 @@ impl RuntimeState {
         let registered = self
             .start_create_session(CreateSessionRequest {
                 oracle: None,
+                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: false,
                 remember_container_size: false,

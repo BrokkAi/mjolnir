@@ -331,6 +331,21 @@ When Tailscale detection succeeds, Mjolnir may advertise a secure non-loopback
 listener without changing the configured loopback fallback. Explicit TLS takes
 precedence. See [Web viewer](/web-viewer/) for access and login.
 
+## Guardian `[guardian]`
+
+```toml
+[guardian]
+enabled = true
+local_classifier = true
+use_gpu = true
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `true` | Globally enables or disables Mjolnir's permission guardian across all profiles. `false` sends pending requests to you immediately for daemon reviews and new sessions, overriding per-profile `mjolnir_guardian = true`. |
+| `local_classifier` | boolean | no | `true` | Runs the local zero-shot Wolf Defender Jev ONNX approve-only first stage before escalating to utility or ACP review. `false` skips Stage 1 immediately without loading the local model. |
+| `use_gpu` | boolean | no | `true` | Allows the local Wolf classifier to use a GPU execution provider when available (`false` keeps Stage-1 inference on CPU). Takes effect when the background server next starts. |
+
 ## Automatic review `[review]`
 
 ```toml
@@ -526,58 +541,39 @@ for a DSH profile they offer Mjolnir or None, starting on Mjolnir only when the
 last choice was Mjolnir and it is configured; a DSH session's None does not
 change the remembered choice that Claude and Codex sessions start from. Mjolnir needs a
 straightforward choice, configured in Settings → Sub-agents or config.toml, or a
-session override. A YOLO target uses `[subagents.yolo.straightforward]` when
-the split is enabled. The subtle choice is optional, but cannot be configured
-without straightforward:
+session override. The subtle choice is optional, but cannot be configured
+without straightforward. Each category holds one or more equal-peer `(model, effort)`
+pairs (at most one model per provider):
 
 ```toml
 [subagents]
 max_concurrent = 6
 
-[subagents.straightforward]
-model = "your-codex-model"
-effort = "high"
-
-[subagents.subtle]
+[[subagents.primary]]
 model = "your-claude-model"
 effort = "high"
 
-[subagents.oracle]
+[[subagents.straightforward]]
+model = "your-codex-model"
+effort = "high"
+
+[[subagents.subtle]]
+model = "your-claude-model"
+effort = "high"
+
+[[subagents.oracle]]
 model = "your-strongest-model"
 effort = "high"
 ```
 
-`max_concurrent` is shared by every target. By default the task choices above
-are shared too. To give YOLO targets, where the harness runs without
-approvals (container runtimes, and SSH bare targets with `permissions = "yolo"`),
-their own choices, turn off **Use the same subagents on all targets** in Settings, which
-writes `use_same_on_all_targets = false`, and set the `[subagents.yolo.*]`
-tables:
-
-```toml
-[subagents]
-use_same_on_all_targets = false
-
-[subagents.yolo.straightforward]
-model = "your-cheaper-model"
-effort = "high"
-
-[subagents.yolo.oracle]
-model = "your-strongest-model"
-```
-
-The YOLO set starts empty when the box is first unchecked. An empty YOLO set
-means Mjolnir sub-agents and the oracle are unavailable on YOLO targets; it
-does not fall back to the shared choices. While `use_same_on_all_targets` is
-true, any `[subagents.yolo.*]` values are ignored but retained, so checking
-the box again hides and disables them, and unchecking restores them. A
-session uses this set when its harness runs without approvals: every container
-runtime, and an SSH bare target with `permissions = "yolo"`. Localhost and
-guardian SSH bare targets use the shared choices.
-
-`[subagents.oracle]` is optional and independent of the other two: it can be set
-without straightforward. It names the read-only advisor behind the `ask_oracle`
-tool, which every top-level session is offered whatever its delegation choice.
+When `[[subagents.primary]]` is configured, bare `mj new` (without `--profile`
+or `--model`) automatically load-balances across the configured primary choices.
+`[[subagents.oracle]]` is optional and independent of the other categories: it
+can be set without straightforward. It names the read-only advisor behind the
+`ask_oracle` tool, which every top-level session is offered whatever its
+delegation choice. Legacy singular `[subagents.<category>]` tables still load
+as 1-element lists, and removed `[subagents.yolo.*]` / `use_same_on_all_targets`
+keys are ignored on load and omitted on save.
 
 Each choice requires a non-empty model. Effort is optional and must be offered
 by that model when specified; omitted effort uses the harness default. Adaptive
@@ -672,7 +668,7 @@ home = "/home/me/.codex-work"
 | `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile takes `DEEPSEEK_API_KEY` from the key saved in DSH (`.credentials.yaml` in its home) first, then the environment Mjolnir started with, then `.env` in its home, and only then from this table. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 | `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
-| `mjolnir_guardian` | boolean | no | `true` | Whether the Mjolnir guardian reviews tool permission requests that reach Mjolnir under configured approvals. It uses a configured direct utility model, with ACP review on the session's harness and model when no utility model is configured. `false` sends pending requests to the person's permission form. Available on every profile and applies to new sessions. See [Profiles](/profiles/#turn-off-the-mjolnir-guardian). |
+| `mjolnir_guardian` | boolean | no | `true` | Whether the Mjolnir guardian reviews tool permission requests that reach Mjolnir under configured approvals (when `[guardian].enabled` is also `true`). It uses the local classifier when enabled, then a configured direct utility model, with ACP review on the session's harness and model when no utility model is configured. `false` sends pending requests to the person's permission form. Available on every profile and applies to new sessions. See [Profiles](/profiles/#turn-off-the-mjolnir-guardian). |
 | `models` | array of strings | no | empty (offer everything) | Exact model values, as `mj models --profile <id> --unrestricted` lists them, that Mjolnir offers from this profile in session model pickers, sub-agent choices, review slots and Autoconfigure. The profile's current model is always offered. Edits apply without rediscovery. `mj doctor` warns when a profile advertises more than 50 models without this list, and about entries the profile does not advertise. See [Profiles](/profiles/#limit-the-models-a-profile-offers). |
 
 The profile's harness-home variable cannot appear in `environment`; set `home`

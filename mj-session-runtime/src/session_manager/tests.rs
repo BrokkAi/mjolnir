@@ -1648,6 +1648,10 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
     let response = relay_root.path().join("guardian-result.json");
     let config_path = mj_core::config::config_path();
     let valid_config = std::fs::read(&config_path).unwrap();
+    let mut local_off_config = mj_core::config::Config::default();
+    local_off_config.guardian.local_classifier = false;
+    let mut guardian_off_config = mj_core::config::Config::default();
+    guardian_off_config.guardian.enabled = false;
     for (id, expected) in [
         (
             "no-classifier",
@@ -1678,13 +1682,33 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
             "unavailable",
             GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
         ),
+        (
+            "local-disabled",
+            GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+        ),
+        (
+            "guardian-disabled",
+            GuardianReviewOutcome::AskPerson {
+                reason: "Mjolnir guardian is disabled in settings".into(),
+            },
+        ),
+        (
+            "invalid-config",
+            GuardianReviewOutcome::AskPerson {
+                reason: String::new(),
+            },
+        ),
     ] {
-        if id == "low" {
-            control.install_guardian_stage1(Arc::new(FakeStage1));
-            // The fast path must succeed even when Stage 2 cannot load its configuration.
-            mj_core::config::atomic_write(&config_path, b"invalid TOML").unwrap();
-        } else if id == "high" {
-            mj_core::config::atomic_write(&config_path, &valid_config).unwrap();
+        match id {
+            "low" => control.install_guardian_stage1(Arc::new(FakeStage1)),
+            "local-disabled" => local_off_config.save().unwrap(),
+            "guardian-disabled" => guardian_off_config.save().unwrap(),
+            "invalid-config" => {
+                mj_core::config::atomic_write(&config_path, b"invalid TOML").unwrap();
+            }
+            _ => {
+                mj_core::config::atomic_write(&config_path, &valid_config).unwrap();
+            }
         }
         mj_core::config::atomic_write(
             &queue,
@@ -1715,7 +1739,15 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
         .await
         .unwrap_or_else(|_| panic!("timed out awaiting {id}"));
         assert_eq!(result.request_id, id);
-        assert_eq!(result.decision, expected, "{id}");
+        if id == "invalid-config" {
+            assert!(
+                matches!(result.decision, GuardianReviewOutcome::AskPerson { ref reason } if reason.contains("could not load configuration")),
+                "expected AskPerson on invalid config, got {:?}",
+                result.decision
+            );
+        } else {
+            assert_eq!(result.decision, expected, "{id}");
+        }
     }
     shutdown.shutdown().await.unwrap();
 }

@@ -130,6 +130,21 @@ the ACP boundary instead.
 
 ## The Mjolnir guardian
 
+The top-level `[guardian]` configuration controls this feature globally:
+
+```toml
+[guardian]
+enabled = true
+local_classifier = true
+use_gpu = true
+```
+
+All three options default to `true`. `enabled = false` sends permission requests
+to you regardless of a profile's `mjolnir_guardian` choice. With the global
+setting enabled, a profile may still opt out with `mjolnir_guardian = false`.
+`local_classifier = false` skips the local first stage and proceeds to utility
+or ACP review. `use_gpu` takes effect when the background server next starts.
+
 Under configured approvals, the Mjolnir guardian reviews tool permission
 requests that any supported harness forwards over ACP. The harness keeps its
 native approval mode and any native reviewer. Literal `gh` and identifiable

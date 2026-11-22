@@ -23,29 +23,38 @@ impl ApiBackend {
         let question = format!("Question:\n{message}");
         // A replay of a start that already chose its model starts it again
         // unchanged, as `spawn` does.
-        let selected = match prepared.and_then(|prepared| prepared.spawn.clone()) {
-            Some(selected) => selected,
+        let (selected, reservation) = match prepared.and_then(|prepared| prepared.spawn.clone()) {
+            Some(selected) => (selected, None),
             None => {
                 let primary = self
                     .exports
                     .session_record(primary_id)
                     .context("primary session disappeared")?;
-                let yolo = self.exports.session_is_yolo_target(primary_id);
-                let choice = primary
-                    .effective_oracle(&self.exports.subagent_config(), yolo)
-                    .cloned()
-                    .context("The oracle is not configured for this session.")?;
+                let choices = primary
+                    .effective_oracle(&self.exports.subagent_config())
+                    .to_vec();
+                ensure!(
+                    !choices.is_empty(),
+                    "The oracle is not configured for this session."
+                );
                 if let Some(oracle) = self.live_oracle(primary_id).await? {
                     return self.ask_live_oracle(&oracle, question, request).await;
                 }
+                let execution_policy = if self.exports.session_is_yolo_target(primary_id) {
+                    mj_core::config::ExecutionPolicy::Unconstrained
+                } else {
+                    mj_core::config::ExecutionPolicy::ConfiguredApprovals
+                };
                 let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                 let selection = crate::server::api::resolve_oracle_selection(
                     &backend,
                     &primary.last_profile,
-                    &choice,
+                    &choices,
+                    execution_policy,
                 )
                 .await
                 .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                let reservation = Some(selection.reservation);
                 let selected = mj_controller::database::PreparedSpawn {
                     profile_id: selection.profile_id,
                     model: selection.model,
@@ -53,7 +62,7 @@ impl ApiBackend {
                     fast_mode: selection.fast_mode,
                     prompt: question.clone(),
                 };
-                if prepared.is_some() {
+                let selected = if prepared.is_some() {
                     blocking("persist selected oracle", {
                         let primary_id = primary_id.to_owned();
                         let request_id = request.request_id.clone();
@@ -66,13 +75,15 @@ impl ApiBackend {
                     .await?
                 } else {
                     selected
-                }
+                };
+                (selected, reservation)
             }
         };
         let started = self
             .start_subagent(mj_controller::controller::RegisterSubagentRequest {
                 no_github_credentials: false,
                 kind: SubagentKind::Oracle,
+                supervisor: false,
                 reviewer_launch: None,
                 parent_session_id: primary_id.to_owned(),
                 task_name: "oracle".into(),
@@ -84,10 +95,15 @@ impl ApiBackend {
                 initial_prompt: selected.prompt,
                 request_key: request.request_id.clone(),
                 report_root: None,
+                category: "oracle".into(),
             })
             .await;
         match started {
-            Ok(_) => {}
+            Ok(relation) => {
+                if let Some(reservation) = reservation {
+                    reservation.commit(Some(relation.child_session_id));
+                }
+            }
             // A concurrent first question registered the oracle first; this
             // one is an ordinary question to it.
             Err(error)

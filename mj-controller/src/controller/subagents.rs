@@ -14,6 +14,7 @@ use mj_core::subagent::SubagentRecord;
 pub struct RegisterSubagentRequest {
     pub no_github_credentials: bool,
     pub kind: mj_core::subagent::SubagentKind,
+    pub supervisor: bool,
     pub reviewer_launch: Option<mj_core::worker_launch::ReviewerLaunchConfig>,
     pub parent_session_id: String,
     pub task_name: String,
@@ -32,6 +33,9 @@ pub struct RegisterSubagentRequest {
     /// children's report directories, from [`Controller::prepare_subagent_report_root`].
     /// `None` registers a child without one.
     pub report_root: Option<String>,
+    /// Canonical task category stored on the accounting row: `primary`,
+    /// `straightforward`, `subtle`, `oracle`, `reviewer`, or `brief_writer`.
+    pub category: String,
 }
 
 /// Creates a report directory on a target and prints its absolute path.
@@ -330,10 +334,25 @@ impl Controller {
         );
         ensure!(parent.state.is_active(), "parent session is not active");
         ensure!(parent.target.is_some(), "parent session has no live target");
-        ensure!(
-            reviewer || crate::database::load_subagent(&parent.id)?.is_none(),
-            "sub-agents cannot spawn other sub-agents"
-        );
+        let parent_subagent = crate::database::load_subagent(&parent.id)?;
+        mj_core::subagent::validate_subagent_parent(
+            parent_subagent.as_ref(),
+            request.kind,
+            request.supervisor,
+        )?;
+        if request.supervisor {
+            ensure!(
+                parent.supervisors,
+                "supervisors are not enabled for this session"
+            );
+            ensure!(
+                parent
+                    .subagents
+                    .as_ref()
+                    .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir),
+                "supervisors require Mjolnir delegation"
+            );
+        }
         let profile = self
             .config
             .enabled_profile(&request.profile_id)
@@ -360,7 +379,7 @@ impl Controller {
             );
         }
         if !reviewer && !oracle {
-            self.ensure_subagent_slot_available(&parent.id, None)?;
+            self.ensure_subagent_slot_available_for(&parent.id, None, request.supervisor)?;
         }
 
         let child_id = new_session_id()?;
@@ -373,6 +392,7 @@ impl Controller {
         let session = SessionRecord {
             oracle_choice: None,
             oracle: false,
+            supervisors: false,
             notifications_ignored: false,
             project: parent.project.clone(),
             target_runtime: Some(match &parent.target_runtime {
@@ -389,9 +409,14 @@ impl Controller {
             // A child shares its parent's container, so it shares the build
             // cache that container was created with.
             build_cache: parent.build_cache.clone(),
-            // Children keep common tools and can request reviewer sessions,
-            // but never receive ordinary delegation tools.
-            subagents: Some(mj_core::subagent::SubagentPolicy::None),
+            // Supervisors inherit their parent's Mjolnir delegation policy
+            // (including straightforward/subtle overrides); other children
+            // never receive ordinary delegation tools.
+            subagents: if request.supervisor {
+                parent.subagents.clone()
+            } else {
+                Some(mj_core::subagent::SubagentPolicy::None)
+            },
             create_managed_worktree: Some(false),
             archived: false,
             // A child runs inside its parent's container, so it works in the
@@ -477,6 +502,7 @@ impl Controller {
             noticed_turn: None,
             reported_finish: None,
             handback_tool,
+            supervisor: request.supervisor,
         };
         let startup = initial_startup_deliveries(&relation, request.fast_mode)?;
         let registration = manager
@@ -487,6 +513,7 @@ impl Controller {
             &relation,
             startup,
             report_dir.as_deref(),
+            Some(request.category.as_str()),
         )?;
         if let Some(registration) = registration {
             registration.publish()?;
@@ -515,21 +542,80 @@ impl Controller {
         parent_session_id: &str,
         starting: Option<&str>,
     ) -> Result<()> {
-        let live = crate::database::list_subagents(parent_session_id)?
-            .into_iter()
-            .filter(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
-            .filter(|child| Some(child.child_session_id.as_str()) != starting)
-            .filter_map(|child| {
-                let session = self.state.sessions.get(&child.child_session_id)?;
-                session.state.has_live_worker().then(|| LiveSubagent {
+        self.ensure_subagent_slot_available_for(parent_session_id, starting, false)
+    }
+
+    /// Container-wide worker slot check with anti-starvation supervisor sub-cap.
+    pub fn ensure_subagent_slot_available_for(
+        &self,
+        parent_session_id: &str,
+        starting: Option<&str>,
+        starting_supervisor: bool,
+    ) -> Result<()> {
+        let root_id = self
+            .state
+            .workspace_owner(parent_session_id)
+            .map(|session| session.id.as_str())
+            .unwrap_or(parent_session_id);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut live = Vec::new();
+        let mut live_supervisors = 0usize;
+        for child_id in self.state.descendant_subagent_ids(root_id) {
+            if Some(child_id.as_str()) == starting || !seen.insert(child_id.clone()) {
+                continue;
+            }
+            let Some(meta) = self.state.subagents.get(&child_id) else {
+                continue;
+            };
+            if meta.kind != mj_core::subagent::SubagentKind::Worker {
+                continue;
+            }
+            let Some(session) = self.state.sessions.get(&child_id) else {
+                continue;
+            };
+            if session.state.has_live_worker() {
+                if meta.supervisor {
+                    live_supervisors += 1;
+                }
+                live.push(LiveSubagent {
+                    child_session_id: child_id,
+                    title: session.message_name(),
+                    state: live_subagent_state(session),
+                });
+            }
+        }
+        // Also check direct DB rows in case state hasn't caught up yet.
+        for child in crate::database::list_subagents(parent_session_id)? {
+            if child.kind != mj_core::subagent::SubagentKind::Worker
+                || Some(child.child_session_id.as_str()) == starting
+                || !seen.insert(child.child_session_id.clone())
+            {
+                continue;
+            }
+            let Some(session) = self.state.sessions.get(&child.child_session_id) else {
+                continue;
+            };
+            if session.state.has_live_worker() {
+                if child.supervisor {
+                    live_supervisors += 1;
+                }
+                live.push(LiveSubagent {
                     child_session_id: child.child_session_id.clone(),
                     title: session.message_name(),
                     state: live_subagent_state(session),
-                })
-            })
-            .collect::<Vec<_>>();
+                });
+            }
+        }
         let maximum = self.config.subagents.max_concurrent;
         ensure!(live.len() < maximum, "{}", slot_refusal(&live, maximum));
+        if starting_supervisor {
+            let max_supervisors = maximum / 2;
+            ensure!(
+                maximum >= 2 && live_supervisors < max_supervisors,
+                "{}",
+                slot_refusal(&live, max_supervisors)
+            );
+        }
         Ok(())
     }
 }
@@ -1171,6 +1257,7 @@ mod tests {
                     noticed_turn: None,
                     reported_finish: None,
                     handback_tool: true,
+                    supervisor: false,
                 },
             )
             .unwrap();
@@ -1229,5 +1316,252 @@ mod tests {
         controller
             .ensure_subagent_slot_available("parent-1", Some("cccccccc-park"))
             .unwrap();
+    }
+
+    #[test]
+    fn supervisor_cap_and_depth_two_slot_accounting() {
+        const MARKER: &str = "MJ_TEST_SUPERVISOR_SLOT_ACCOUNTING";
+        if std::env::var_os(MARKER).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            super::super::test_support::IsolatedTest::new(super::super::test_support::test_name(
+                module_path!(),
+                "supervisor_cap_and_depth_two_slot_accounting",
+            ))
+            .env(MARKER, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut parent = super::super::test_support::checkpoint_test_session("primary-1");
+        parent.supervisors = true;
+        crate::database::save_session(&parent).unwrap();
+
+        let save_child = |id: &str, parent_id: &str, state: SessionState, supervisor: bool| {
+            let mut child = super::super::test_support::checkpoint_test_session(id);
+            child.state = state;
+            child.session_title_override = Some(id.into());
+            crate::database::save_subagent_session(
+                &child,
+                &SubagentRecord {
+                    kind: mj_core::subagent::SubagentKind::Worker,
+                    reviewer_launch: None,
+                    child_session_id: id.into(),
+                    parent_session_id: parent_id.into(),
+                    task_name: id.into(),
+                    profile_id: "codex".into(),
+                    model: None,
+                    effort: None,
+                    working_directory: PathBuf::new(),
+                    initial_prompt: "do it".into(),
+                    request_key: format!("req-{id}"),
+                    created_at: "2026-11-21T00:00:00Z".into(),
+                    noticed_turn: None,
+                    reported_finish: None,
+                    handback_tool: true,
+                    supervisor,
+                },
+            )
+            .unwrap();
+        };
+
+        // Two live supervisors fill the supervisor cap (4 / 2 = 2).
+        save_child("sup-1", "primary-1", SessionState::Running, true);
+        save_child("sup-2", "primary-1", SessionState::Running, true);
+        save_child("sup-3-parked", "primary-1", SessionState::Parked, true);
+        // A live depth-2 worker under sup-1 consumes one total slot (3 of 4).
+        save_child("d2-worker-1", "sup-1", SessionState::Running, false);
+
+        let mut controller = Controller {
+            config: mj_core::config::Config::default(),
+            state: crate::database::load_state().unwrap(),
+        };
+        controller.config.subagents.max_concurrent = 4;
+
+        // Spawning or unparking a 3rd live supervisor is refused (cap 4 / 2 = 2).
+        let err = controller
+            .ensure_subagent_slot_available_for("primary-1", None, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("maximum is 2"), "{err}");
+        assert!(
+            controller
+                .ensure_subagent_slot_available_for("primary-1", Some("sup-3-parked"), true)
+                .is_err()
+        );
+
+        // A 4th non-supervisor worker still fits (3 live < 4).
+        controller
+            .ensure_subagent_slot_available_for("sup-1", None, false)
+            .unwrap();
+
+        // Add a 4th live worker (depth-2 under sup-2) -> total live = 4 == max_concurrent.
+        save_child("d2-worker-2", "sup-2", SessionState::Running, false);
+        controller.state = crate::database::load_state().unwrap();
+        assert!(
+            controller
+                .ensure_subagent_slot_available_for("sup-1", None, false)
+                .is_err(),
+            "depth-1 + depth-2 live workers together are capped by max_concurrent"
+        );
+
+        // Parking sup-1 frees its slot, while its live depth-2 worker STILL consumes a slot
+        // (live count drops from 4 to 3: sup-2, d2-worker-1, d2-worker-2).
+        controller
+            .state
+            .sessions
+            .get_mut("sup-1")
+            .unwrap()
+            .state = SessionState::Parked;
+        // Now 1 live supervisor < 2 and 3 total live < 4, so unparking sup-3 fits.
+        controller
+            .ensure_subagent_slot_available_for("primary-1", Some("sup-3-parked"), true)
+            .unwrap();
+    }
+
+    #[test]
+    fn register_subagent_enforces_supervisor_and_depth_two_rules() {
+        const MARKER: &str = "MJ_TEST_REGISTER_SUPERVISOR_DEPTH_RULES";
+        if std::env::var_os(MARKER).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            super::super::test_support::IsolatedTest::new(super::super::test_support::test_name(
+                module_path!(),
+                "register_subagent_enforces_supervisor_and_depth_two_rules",
+            ))
+            .env(MARKER, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workdir = tempfile::tempdir().unwrap();
+        let mut config = mj_core::config::Config::default();
+        config.subagents.max_concurrent = 4;
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile::new(HarnessKind::Codex, workdir.path()),
+        );
+
+        config.targets.insert(
+            "localhost".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        let make_primary = |id: &str, supervisors: bool| {
+            let mut s = super::super::test_support::checkpoint_test_session(id);
+            s.state = SessionState::Running;
+            s.target_template_id = "localhost".into();
+            s.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            });
+            s.supervisors = supervisors;
+            s.project_directory = Some(workdir.path().to_path_buf());
+            s.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+                worker_root: workdir.path().join(id),
+            }));
+            crate::database::save_session(&s).unwrap();
+        };
+        make_primary("primary-enabled", true);
+        make_primary("primary-disabled", false);
+
+        let mut controller = Controller {
+            config,
+            state: crate::database::load_state().unwrap(),
+        };
+
+        let make_req = |parent: &str,
+                        task: &str,
+                        kind: mj_core::subagent::SubagentKind,
+                        supervisor: bool| RegisterSubagentRequest {
+            no_github_credentials: false,
+            kind,
+            supervisor,
+            reviewer_launch: None,
+            parent_session_id: parent.into(),
+            task_name: task.into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            fast_mode: false,
+            working_directory: workdir.path().to_path_buf(),
+            initial_prompt: "do work".into(),
+            request_key: format!("req-{parent}-{task}"),
+            report_root: None,
+            category: if supervisor {
+                "supervisor".into()
+            } else {
+                "straightforward".into()
+            },
+        };
+
+        // Top-level with supervisors = false refuses supervisor: true.
+        assert!(
+            controller
+                .register_subagent(make_req(
+                    "primary-disabled",
+                    "sup-denied",
+                    mj_core::subagent::SubagentKind::Worker,
+                    true,
+                ))
+                .is_err()
+        );
+
+        // Top-level with supervisors = true spawns depth-1 supervisor.
+        let sup = controller
+            .register_subagent(make_req(
+                "primary-enabled",
+                "sup-1",
+                mj_core::subagent::SubagentKind::Worker,
+                true,
+            ))
+            .expect("depth-1 supervisor should register");
+        assert!(sup.supervisor);
+
+        // Depth-1 supervisor spawns depth-2 non-supervisor worker.
+        let d2 = controller
+            .register_subagent(make_req(
+                &sup.child_session_id,
+                "d2-worker",
+                mj_core::subagent::SubagentKind::Worker,
+                false,
+            ))
+            .expect("depth-2 worker under supervisor should register");
+        assert!(!d2.supervisor);
+
+        // Depth-1 supervisor refuses depth-2 supervisor.
+        assert!(
+            controller
+                .register_subagent(make_req(
+                    &sup.child_session_id,
+                    "d2-sup-denied",
+                    mj_core::subagent::SubagentKind::Worker,
+                    true,
+                ))
+                .is_err()
+        );
+
+        // Depth-1 supervisor refuses depth-2 oracle.
+        assert!(
+            controller
+                .register_subagent(make_req(
+                    &sup.child_session_id,
+                    "d2-oracle-denied",
+                    mj_core::subagent::SubagentKind::Oracle,
+                    false,
+                ))
+                .is_err()
+        );
+
+        // Depth-2 worker refuses depth-3 worker.
+        assert!(
+            controller
+                .register_subagent(make_req(
+                    &d2.child_session_id,
+                    "d3-denied",
+                    mj_core::subagent::SubagentKind::Worker,
+                    false,
+                ))
+                .is_err()
+        );
     }
 }

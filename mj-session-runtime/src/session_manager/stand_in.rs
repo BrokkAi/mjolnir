@@ -54,6 +54,7 @@ pub fn register_leased_relay_session() {
     crate::database::save_session(&mj_core::state::SessionRecord {
         oracle_choice: None,
         oracle: true,
+        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,

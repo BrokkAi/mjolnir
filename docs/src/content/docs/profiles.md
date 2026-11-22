@@ -551,6 +551,9 @@ requests that reach Mjolnir from any harness, and asks you when it cannot
 decide. To answer pending requests yourself, set
 `mjolnir_guardian = false` on the profile:
 
+The top-level `[guardian].enabled` setting must also be enabled for profile
+guardian reviews to run. Setting it to `false` disables the guardian globally.
+
 ```toml
 [profiles.opencode]
 kind = "open-code"

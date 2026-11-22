@@ -1278,8 +1278,26 @@ async fn execute_guardian_review(
     let cancel = tokio_util::sync::CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
     let decision = tokio::time::timeout(GUARDIAN_REVIEW_TIMEOUT, async {
+        let config = match mj_core::runtime::spawn_blocking(mj_core::config::Config::load).await {
+            Ok(Ok(config)) => config,
+            Ok(Err(error)) => {
+                return GuardianReviewOutcome::AskPerson {
+                    reason: format!("could not load configuration: {error:#}"),
+                };
+            }
+            Err(error) => {
+                return GuardianReviewOutcome::AskPerson {
+                    reason: format!("could not read configuration: {error}"),
+                };
+            }
+        };
+        if !config.guardian.enabled {
+            return GuardianReviewOutcome::AskPerson {
+                reason: "Mjolnir guardian is disabled in settings".into(),
+            };
+        }
         let mut stage1_score = None;
-        if let Some(classifier) = classifier {
+        if config.guardian.local_classifier && let Some(classifier) = classifier {
             match classifier.classify(&request).await {
                 GuardianStage1Verdict::Scored { unsafe_prob, tokens, elapsed_ms } => {
                     let local_allow = (0.0..=WOLF_STAGE1_ALLOW_THRESHOLD).contains(&unsafe_prob);
@@ -1312,19 +1330,6 @@ async fn execute_guardian_review(
                 }
             }
         }
-        let config = match mj_core::runtime::spawn_blocking(mj_core::config::Config::load).await {
-            Ok(Ok(config)) => config,
-            Ok(Err(error)) => {
-                return GuardianReviewOutcome::AskPerson {
-                    reason: format!("could not load the utility model configuration: {error:#}"),
-                };
-            }
-            Err(error) => {
-                return GuardianReviewOutcome::AskPerson {
-                    reason: format!("could not read the utility model configuration: {error}"),
-                };
-            }
-        };
         match review_guardian_with_utility(&config, &request, cancel).await {
             GuardianUtilityOutcome::Reviewed { assessment, .. } => {
                 let stage = "utility_llm".into();

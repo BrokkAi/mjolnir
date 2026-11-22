@@ -412,12 +412,52 @@ pub(super) async fn action(
     }
     let mut action: ControllerAction =
         serde_json::from_value(body).map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let mut auto_primary_selection = None;
     if let ControllerAction::New {
         remember_launch_choices,
+        profile_id,
+        target_id,
         ..
     } = &mut action
     {
         *remember_launch_choices = true;
+        if profile_id.is_empty() {
+            let backend = state
+                .subagent
+                .as_ref()
+                .ok_or_else(ApiError::controller_unavailable)?;
+            let subagents = backend.subagent_config().await.map_err(|error| {
+                ApiError::new(StatusCode::SERVICE_UNAVAILABLE, format!("{error:#}"))
+            })?;
+            if !subagents.primary_configured() {
+                return Err(ApiError::bad_request(
+                    "primary auto-selection is not configured; set [subagents] primary in config.toml or choose an explicit profile",
+                ));
+            }
+            let execution_policy = {
+                let snapshot = state.snapshot_rx.borrow();
+                let yolo = snapshot
+                    .targets
+                    .iter()
+                    .find(|target| target.id == *target_id)
+                    .is_some_and(|target| target.yolo);
+                if yolo {
+                    mj_core::config::ExecutionPolicy::Unconstrained
+                } else {
+                    mj_core::config::ExecutionPolicy::ConfiguredApprovals
+                }
+            };
+            let selection = crate::server::api::resolve_primary_session_selection(
+                backend,
+                None,
+                subagents.primary_choices(),
+                execution_policy,
+            )
+            .await
+            .map_err(|failure| ApiError::new(failure.status, failure.message))?;
+            *profile_id = selection.profile_id.clone();
+            auto_primary_selection = Some(selection);
+        }
     }
     validate_action_live(&state, &action).await?;
     if let ControllerAction::SetContainerSettings {
@@ -459,10 +499,36 @@ pub(super) async fn action(
     let outcome = outcome
         .await
         .map_err(|_| ApiError::controller_unavailable())?;
-    match outcome.rejection() {
-        Some(rejection) => Err(rejection),
-        None => Ok(StatusCode::ACCEPTED.into_response()),
+    if let Some(rejection) = outcome.rejection() {
+        return Err(rejection);
     }
+    if let Some(selection) = auto_primary_selection
+        && let ActionOutcome::Accepted {
+            session_id: Some(session_id),
+            ..
+        } = outcome
+        && let Some(backend) = state.subagent.as_ref()
+    {
+        selection.reservation.commit(Some(session_id.clone()));
+        if let Err(error) = backend
+            .start_followup(
+                session_id.clone(),
+                crate::server::api::StartFollowup {
+                    model: Some(selection.model.clone()),
+                    effort: selection.effort.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            tracing::warn!(session_id = %session_id, model = %selection.model, effort = ?selection.effort, %error, "failed to queue selected primary model/effort after creating session");
+            backend.push_notice(
+                &session_id,
+                format!("Session created on profile {}, but applying primary model {} failed ({error:#}). Select the model manually in the session.", selection.profile_id, selection.model),
+            );
+        }
+    }
+    Ok(StatusCode::ACCEPTED.into_response())
 }
 
 /// Called after request validation. Bare projects need a durable context id,
@@ -1368,6 +1434,7 @@ pub fn validate_new_preflight(
 ) -> Result<(), String> {
     let action = ControllerAction::New {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: false,
         remember_container_size: false,

@@ -28,7 +28,7 @@ fn prompt_command(text: &str) -> RelayCommand {
 fn req(id: &str, request: RelayRequest) -> RelayRequestEnvelope {
     RelayRequestEnvelope {
         request_id: id.into(),
-        protocol_version: RELAY_IN_PLACE_MOVE_PROTOCOL,
+        protocol_version: RELAY_PROTOCOL_VERSION,
         request,
     }
 }

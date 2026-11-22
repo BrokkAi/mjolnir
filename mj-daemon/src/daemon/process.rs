@@ -246,7 +246,7 @@ pub(super) async fn run_daemon_runtime(
     }));
     let guardian_classifier = Arc::new(GuardianClassifier::new(
         mj_core::config::data_dir(),
-        controller.config.github.watch.use_gpu,
+        controller.config.guardian.use_gpu,
     ));
     manager_control
         .install_guardian_stage1(Arc::new(WolfGuardianStage1(guardian_classifier.clone())));
@@ -940,7 +940,7 @@ pub(super) async fn run_daemon_runtime(
                                 let Ok(_activity) = mj_controller::upgrade::activity("profile choice cache") else { return; };
                                 match mj_controller::controller::profile_config::observe(profile.clone(), build, raw, check).await {
                                     Ok(true) => {
-                                        if let Some(backend) = state.report_backend.get().and_then(std::sync::Weak::upgrade) {
+                                        if let Some(backend) = state.quota_report_backend() {
                                             backend.profile_catalog().reread_failed(&profile);
                                         }
                                     }

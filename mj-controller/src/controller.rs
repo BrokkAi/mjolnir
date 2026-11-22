@@ -718,6 +718,7 @@ pub struct SessionLaunchOptions {
     pub no_later_history: bool,
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     pub oracle: Option<bool>,
+    pub supervisors: Option<bool>,
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     /// Turn review for this session; `None` follows `[review]`.
     pub review: Option<mj_core::config::SessionReview>,
@@ -1002,6 +1003,7 @@ impl Controller {
             no_later_history,
             subagents,
             oracle,
+            supervisors,
             mut oracle_choice,
             review,
             no_project_memory,
@@ -1044,7 +1046,7 @@ impl Controller {
         };
         let profile = self.config.named_profile(profile_id)?;
         let template = self.config.ensure_target_enabled(target_id)?;
-        let yolo_target = template.is_yolo();
+        let _ = template.is_yolo();
         if create_managed_worktree == Some(true) && !is_bare_project_target(template) {
             bail!("managed worktree creation requires a bare Git project");
         }
@@ -1153,6 +1155,17 @@ impl Controller {
         let now = now();
         let subagents = subagents
             .unwrap_or_else(|| mj_core::subagent::SubagentPolicy::default_for(profile.kind));
+        let mut supervisors_enabled = supervisors
+            .unwrap_or_else(|| self.state.last_supervisor_choice_for(profile_id));
+        if supervisors_enabled && !subagents.uses_mjolnir() {
+            if supervisors == Some(true) {
+                return Err(mj_core::refusal::Refusal::precondition(
+                    "supervisors require Mjolnir delegation (--subagents mjolnir)",
+                )
+                .into());
+            }
+            supervisors_enabled = false;
+        }
         let mut oracle_enabled = oracle.unwrap_or_else(|| {
             oracle_choice.is_some() || self.state.last_oracle_choice_for(profile_id)
         });
@@ -1163,12 +1176,8 @@ impl Controller {
             && (oracle == Some(true) || options_oracle_explicit)
             && oracle_choice
                 .as_ref()
-                .or_else(|| {
-                    self.config
-                        .subagents
-                        .choice_for(mj_core::subagent::SubagentTaskType::Oracle, yolo_target)
-                })
                 .is_none_or(|choice| choice.model.trim().is_empty())
+            && !self.config.subagents.oracle_configured()
         {
             oracle_enabled = false;
             oracle_choice = None;
@@ -1177,6 +1186,7 @@ impl Controller {
         let record = SessionRecord {
             oracle_choice: oracle_choice.map(Box::new),
             oracle: oracle_enabled,
+            supervisors: supervisors_enabled,
             notifications_ignored,
             project: project.map(std::sync::Arc::new),
             target_runtime: Some(template.into()),
@@ -1242,6 +1252,15 @@ impl Controller {
             self.state
                 .last_oracle_choices
                 .insert(profile_id.to_owned(), record.oracle);
+            if record
+                .subagents
+                .as_ref()
+                .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir)
+            {
+                self.state
+                    .last_supervisor_choices
+                    .insert(profile_id.to_owned(), record.supervisors);
+            }
         }
         self.state.sessions.insert(id.clone(), record);
         if let Some((host, size)) = selected_container_size {
@@ -1419,6 +1438,11 @@ impl Controller {
             self.state
                 .last_oracle_choices
                 .insert(new_id.to_owned(), oracle);
+        }
+        if let Some(supervisors) = self.state.last_supervisor_choices.remove(old_id) {
+            self.state
+                .last_supervisor_choices
+                .insert(new_id.to_owned(), supervisors);
         }
         if let Some(policy) = self.state.last_subagent_policies.remove(old_id) {
             self.state

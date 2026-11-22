@@ -275,8 +275,8 @@ def unused_timer_wait():
         (mount_source / "marker").write_text("mounted")
         mount = {"source": str(mount_source), "destination": "/mnt/extra", "access": "ro"}
         size = {"kind": "container", "cpus": 3, "memory_bytes": 8 << 30}
-        move = json.loads(self.cli("move", "--session", session, "--cpus", "3", "--memory-gib", "8", "--prepare").stdout)
-        assert move["container_upgrade"]["settings"]["resource_allocation"] == size and "workspace" not in move, move
+        move = json.loads(self.cli("move", "--session", session, "--cpus", "3", "--memory-gib", "8", "--dry-run", "--json").stdout)
+        assert move["container_upgrade"]["settings"]["resource_allocation"] == size, move
         status, preview = self.request("POST", "/api/actions", {
             "action": "set-container-settings", "session_id": session,
             "resource_allocation": size, "mounts": [fixture, mount]}, timeout=WAIT)

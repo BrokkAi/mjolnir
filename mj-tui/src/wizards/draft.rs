@@ -310,7 +310,10 @@ impl WizardDraft for NewWizard {
     }
 
     fn review_harness(&self, dashboard: &DashboardState) -> Option<HarnessKind> {
-        let id = dashboard.nth_offered_profile(self.profile)?;
+        let id = dashboard.new_wizard_profile_id(self.profile)?;
+        if id.is_empty() {
+            return None;
+        }
         dashboard
             .config
             .profiles
@@ -542,7 +545,7 @@ impl WizardDraft for NewWizard {
     fn handle_extra_shortcut(&mut self, _dashboard: &DashboardState, _key: KeyEvent) {}
 
     fn profile_count(&self, dashboard: &DashboardState) -> usize {
-        dashboard.offered_profiles().count()
+        dashboard.new_wizard_profile_count()
     }
 
     /// A new session can start on any offered target.

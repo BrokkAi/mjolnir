@@ -268,10 +268,10 @@ pub struct RuntimeState {
     workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
     owner: Mutex<RuntimeStateOwner>,
-    /// Rebuilt by the delegation service at daemon startup; weak so the
-    /// backend's ExportRuntime reference does not form an Arc cycle.
+    /// Rebuilt by the delegation service when the API server starts; weak so
+    /// the backend's ExportRuntime reference does not form an Arc cycle.
     pub(crate) report_backend:
-        std::sync::OnceLock<std::sync::Weak<crate::server_runtime::api::ApiBackend>>,
+        Mutex<Option<std::sync::Weak<crate::server_runtime::api::ApiBackend>>>,
     pub(crate) rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
     pub(crate) credential_targets:
         Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
@@ -334,6 +334,12 @@ pub struct RuntimeState {
     reviewer_runtime: crate::review_host::SharedReviewerRuntime,
     /// Publishes checkpointed sessions into the user's SessionWiki index.
     wiki: mj_controller::sessionwiki::WikiIndexer,
+    /// Power-ranking table. Loaded from disk or the compiled baseline without
+    /// waiting on the network; a background task refreshes it.
+    pub(crate) power_ranking: mj_controller::power_ranking::PowerRankingStore,
+    /// Trailing-60m quota velocity, durable placement reservations, and local
+    /// category burn observations.
+    pub(crate) quota_telemetry: mj_controller::quota_telemetry::QuotaTelemetryStore,
 }
 
 /// One monotonic cursor shared by daemon snapshots and their wake-up feed.
@@ -873,6 +879,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
 }
 
 mod close;
+mod purge;
 mod close_workspace;
 pub(crate) mod create;
 mod lifecycle;

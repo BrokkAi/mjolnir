@@ -42,6 +42,10 @@ pub(super) fn install_captured_records(
         .state
         .last_oracle_choices
         .clone_from(&runtime.metadata.last_oracle_choices);
+    controller
+        .state
+        .last_supervisor_choices
+        .clone_from(&runtime.metadata.last_supervisor_choices);
     controller.state.mount_history = runtime.metadata.mount_history.clone();
 }
 
@@ -61,6 +65,7 @@ pub(crate) async fn run_server(
     let mut daemon_revisions = daemon_runtime.revisions();
     daemon_revisions.borrow_and_update();
     let api_backend = services.backend.clone();
+    daemon_runtime.install_report_backend(&api_backend);
     let mut project_sources = PhoneProjectSources::default();
     let initial = daemon_runtime.runtime_publication()?;
     let mut controller = Controller {
@@ -505,6 +510,51 @@ pub(crate) async fn run_server(
                             move_preparation_jobs.spawn(async move {
                                 let result = runtime.suspend_preflight(session_id, dry_run, without_checkpoint).await.map_err(|e| format!("{e:#}"));
                                 if reply.send(result).is_err() { tracing::debug!("suspend preflight client disconnected"); }
+                            });
+                        }
+                        crate::server::ClientStateRequest::PurgeUntracked { request, mut reply } => {
+                            let runtime = daemon_runtime.clone();
+                            // This arm takes no upgrade-gate admission. The
+                            // purge future stays alive after a disconnect so
+                            // the blocking rewrite sees the cancel flag, stops,
+                            // and drops its session admission when it joins.
+                            move_preparation_jobs.spawn(async move {
+                                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                let flag = cancel.clone();
+                                let operation = std::panic::AssertUnwindSafe(runtime.purge_untracked(request, flag));
+                                let mut operation = std::pin::pin!(futures::FutureExt::catch_unwind(operation));
+                                // `closed()` borrows `reply` until this block ends, including
+                                // the binding `pin!` shadows. Send only after that borrow ends.
+                                let result = {
+                                    let disconnect = reply.closed();
+                                    tokio::pin!(disconnect);
+                                    loop {
+                                        tokio::select! {
+                                            biased;
+                                            () = &mut disconnect, if !cancel.load(std::sync::atomic::Ordering::Acquire) => {
+                                                cancel.store(true, std::sync::atomic::Ordering::Release);
+                                            }
+                                            result = &mut operation => break result,
+                                        }
+                                    }
+                                };
+                                let result = match result {
+                                    Ok(result) => result,
+                                    Err(payload) => {
+                                        let message = payload
+                                            .downcast_ref::<&str>()
+                                            .copied()
+                                            .map(str::to_owned)
+                                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                                            .unwrap_or_else(|| "unknown panic".to_owned());
+                                        Err(crate::server::api::PurgeUntrackedFailure::Internal(format!(
+                                            "purge untracked panicked: {message}"
+                                        )))
+                                    }
+                                };
+                                if reply.send(result).is_err() {
+                                    tracing::debug!("purge untracked client disconnected");
+                                }
                             });
                         }
 

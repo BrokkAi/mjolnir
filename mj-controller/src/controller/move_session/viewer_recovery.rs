@@ -14,6 +14,8 @@ pub struct ViewerMoveRecovery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisors: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     pub operation_id: String,
     pub source_profile_id: String,
@@ -71,6 +73,7 @@ impl ViewerMoveRecovery {
         Some(Self {
             failure_notice: None,
             oracle: operation.selection.oracle,
+            supervisors: operation.selection.supervisors,
             oracle_choice: operation.selection.oracle_choice.clone(),
             operation_id: operation.operation_id.clone(),
             source_profile_id: operation.source_profile_id.clone(),

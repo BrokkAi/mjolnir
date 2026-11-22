@@ -351,6 +351,21 @@ impl RuntimeState {
                         default_targets: controller.config.default_targets.clone(),
                         container_sizes: controller.state.container_sizes.clone(),
                         last_oracle_choices: controller.state.last_oracle_choices.clone(),
+                        last_supervisor_choices: controller.state.last_supervisor_choices.clone(),
+                        supervisors_available: controller
+                            .config
+                            .targets
+                            .iter()
+                            .map(|(id, target)| {
+                                (
+                                    id.clone(),
+                                    controller.config.supervisors_available_for_target(
+                                        None,
+                                        target.execution_policy(),
+                                    ),
+                                )
+                            })
+                            .collect(),
                         mount_history: controller.state.mount_history.clone(),
                         last_subagent_policies: controller.state.last_subagent_policies.clone(),
                         lifecycles,

@@ -274,6 +274,40 @@ impl RecoveryGate {
         .await
     }
 
+    /// Claim a foreground admission without waiting or preempting anyone.
+    ///
+    /// A review reservation shares the session. A foreground reservation, a
+    /// delegation drain, background holders, a relay lease, a closed gate, or
+    /// a daemon handoff refuse at once. Background work keeps running.
+    pub fn try_enter_foreground(
+        self: &Arc<Self>,
+        session_id: &str,
+        label: &'static str,
+        origin: LifecycleOrigin,
+    ) -> Result<ForegroundAdmission, Refusal> {
+        if crate::upgrade::is_draining() {
+            return Err(Refusal {
+                cause: RefusalCause::DaemonDraining,
+                holders: vec!["daemon handoff"],
+                worker_owned: false,
+            });
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(refusal) = Self::foreground_try_refusal(&state, session_id) {
+            return Err(refusal);
+        }
+        Ok(self.reserve_locked(
+            &mut state,
+            session_id,
+            label,
+            ReservationKind::Foreground,
+            origin,
+        ))
+    }
+
     /// Reviews exclude background work except delegation replies without preempting it. They share
     /// the session with foreground lifecycles, whose worker actions already
     /// cancel or refuse overlapping review capture/selection requests.
@@ -498,6 +532,28 @@ impl RecoveryGate {
             .contains_key(session_id)
     }
 
+    /// Foreground reservation labels for `session_id`.
+    ///
+    /// `try_enter_foreground` reports daemon handoff before it looks at this
+    /// session, so a test that has closed the upgrade gate cannot use that
+    /// call to see whether the session admission was released.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn foreground_reservation_labels(&self, session_id: &str) -> Vec<&'static str> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reservations
+            .get(session_id)
+            .map(|holders| {
+                holders
+                    .iter()
+                    .filter(|holder| holder.kind == ReservationKind::Foreground)
+                    .map(|holder| holder.label)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn session_refusal(
         state: &RecoveryGateState,
         session_id: &str,
@@ -571,6 +627,63 @@ impl RecoveryGate {
             });
         }
         None
+    }
+
+    /// Whether a non-waiting foreground admission can start. Reviews do not
+    /// count: they share the session with a person's lifecycle.
+    fn foreground_try_refusal(state: &RecoveryGateState, session_id: &str) -> Option<Refusal> {
+        let reservations = state.reservations.get(session_id);
+        let blocking_reservation = reservations
+            .into_iter()
+            .flatten()
+            .any(|holder| !ReservationKind::Foreground.runs_beside(holder.kind));
+        let busy = state
+            .busy
+            .get(session_id)
+            .is_some_and(|holders| !holders.is_empty());
+        let leased = state.leases.contains_key(session_id);
+        if !(state.closed || leased || blocking_reservation || busy) {
+            return None;
+        }
+        let mut holders = state
+            .busy
+            .get(session_id)
+            .into_iter()
+            .flatten()
+            .map(|holder| holder.work.label())
+            .collect::<Vec<_>>();
+        holders.extend(
+            reservations
+                .into_iter()
+                .flatten()
+                .filter(|holder| !ReservationKind::Foreground.runs_beside(holder.kind))
+                .map(|holder| holder.label),
+        );
+        if let Some(label) = state.leases.get(session_id) {
+            holders.push(*label);
+        }
+        if state.closed {
+            holders.push("daemon shutdown");
+        }
+        let worker_owned = reservations
+            .into_iter()
+            .flatten()
+            .any(|holder| holder.kind == ReservationKind::Foreground)
+            || state
+                .busy
+                .get(session_id)
+                .into_iter()
+                .flatten()
+                .any(|holder| holder.work == BackgroundWork::WorkerReplacement);
+        Some(Refusal {
+            cause: if state.closed {
+                RefusalCause::Closed
+            } else {
+                RefusalCause::SessionHeld
+            },
+            holders,
+            worker_owned,
+        })
     }
 
     /// Observe the same admission decision without claiming resources. A
@@ -1357,5 +1470,53 @@ mod tests {
             gate.try_start("session", BackgroundWork::WorkerReplacement)
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn try_enter_foreground_refuses_without_waiting_or_preempting() {
+        let gate = Arc::new(RecoveryGate::default());
+        let held = gate.reserve("session");
+        let Err(refusal) =
+            gate.try_enter_foreground("session", "purge untracked", LifecycleOrigin::Person)
+        else {
+            panic!("a reserved session granted a foreground admission");
+        };
+        assert_eq!(refusal.cause, RefusalCause::SessionHeld);
+        drop(held);
+        drop(
+            gate.try_enter_foreground("session", "purge untracked", LifecycleOrigin::Person)
+                .unwrap(),
+        );
+
+        let attempt = gate
+            .try_start("session", BackgroundWork::WorkerObservation)
+            .unwrap();
+        let Err(refusal) =
+            gate.try_enter_foreground("session", "purge untracked", LifecycleOrigin::Person)
+        else {
+            panic!("background work granted a foreground admission");
+        };
+        assert_eq!(refusal.cause, RefusalCause::SessionHeld);
+        assert!(!attempt.cancellation().load(Ordering::Acquire));
+        drop(attempt);
+        drop(
+            gate.try_enter_foreground("session", "purge untracked", LifecycleOrigin::Person)
+                .unwrap(),
+        );
+
+        let review = gate.reserve_when_idle("session").await;
+        drop(
+            gate.try_enter_foreground("session", "purge untracked", LifecycleOrigin::Person)
+                .unwrap(),
+        );
+        drop(review);
+
+        gate.close();
+        let Err(refusal) =
+            gate.try_enter_foreground("session", "purge untracked", LifecycleOrigin::Person)
+        else {
+            panic!("a closed gate granted a foreground admission");
+        };
+        assert_eq!(refusal.cause, RefusalCause::Closed);
     }
 }

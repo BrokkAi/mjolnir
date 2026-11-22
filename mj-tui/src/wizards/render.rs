@@ -257,9 +257,7 @@ pub(crate) fn render_new_wizard(
                             .is_some_and(|options| options.available),
                     )
                 }),
-                profile_id: &dashboard
-                    .nth_offered_profile(wizard.profile)
-                    .unwrap_or_default(),
+                profile_id: &dashboard.new_wizard_profile_label(wizard.profile),
                 project_label: if raw_project {
                     "Project directory"
                 } else {
@@ -488,12 +486,24 @@ pub(crate) fn render_new_wizard(
                 " New session · {} profile ",
                 step_counter(1, 4, target_hidden, wizard)
             ),
-            profile_table(
-                dashboard
-                    .offered_profiles()
-                    .map(|(id, profile)| dashboard.profile_choice(id, profile.kind))
-                    .collect(),
-            ),
+            profile_table({
+                let mut rows = Vec::new();
+                if dashboard.new_wizard_has_auto_primary() {
+                    rows.push(PickerChoice::table(vec![
+                        PickerCell::blank(),
+                        PickerCell::text("Auto (Primary)"),
+                        PickerCell::text("auto"),
+                        PickerCell::blank(),
+                        PickerCell::blank(),
+                    ]));
+                }
+                rows.extend(
+                    dashboard
+                        .offered_profiles()
+                        .map(|(id, profile)| dashboard.profile_choice(id, profile.kind)),
+                );
+                rows
+            }),
             wizard.profile,
         ),
         WizardStep::Bundle => (
@@ -1010,12 +1020,25 @@ pub(crate) fn render_review_wizard(
             lines.push(Line::raw(""));
             row
         });
-    let last_control_row = [worktree_row, sandbox_row, subagent_row, oracle_row]
-        .into_iter()
-        .flatten()
-        .map(|row| usize::from(row) + 1)
-        .max()
-        .unwrap_or(0);
+    let supervisors_row = subagents
+        .filter(|wizard| wizard.supervisors_available())
+        .map(|_| {
+            let row = lines.len() as u16;
+            lines.push(Line::raw(""));
+            row
+        });
+    let last_control_row = [
+        worktree_row,
+        sandbox_row,
+        subagent_row,
+        oracle_row,
+        supervisors_row,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|row| usize::from(row) + 1)
+    .max()
+    .unwrap_or(0);
     if mounts.mounts.is_empty() || !can_attach {
         while lines.len() > last_control_row && lines.last().is_some_and(|line| line.width() == 0) {
             lines.pop();
@@ -1035,6 +1058,7 @@ pub(crate) fn render_review_wizard(
     let sandbox_row = sandbox_row.map(map_row);
     let subagent_row = subagent_row.map(map_row);
     let oracle_row = oracle_row.map(map_row);
+    let supervisors_row = supervisors_row.map(map_row);
     let summary_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let list_height = if can_attach {
         u16::try_from(mounts.mounts.len()).unwrap_or(u16::MAX)
@@ -1061,6 +1085,7 @@ pub(crate) fn render_review_wizard(
         Some(WizardControl::UseSandboxedTarget) => sandbox_row,
         Some(WizardControl::Subagents) => subagent_row,
         Some(WizardControl::Oracle) => oracle_row,
+        Some(WizardControl::Supervisors) => supervisors_row,
         Some(WizardControl::ReviewAttachments) => Some(
             summary_height.saturating_add(
                 mounts
@@ -1099,6 +1124,17 @@ pub(crate) fn render_review_wizard(
             Rect::new(area.x, area.y, width.min(area.width), area.height),
             &[(WizardControl::UseSandboxedTarget, label.as_str(), true)],
             form,
+        );
+    }
+    if let Some((wizard, row)) = subagents.zip(supervisors_row) {
+        Checkbox::render(
+            frame,
+            viewport.row(row, 1),
+            "Supervisors",
+            wizard.supervisors,
+            true,
+            form,
+            WizardControl::Supervisors,
         );
     }
     let mut expanded_subagent_combo = None;

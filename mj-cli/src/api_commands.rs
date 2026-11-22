@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args, ValueEnum};
 use mj_daemon::server::api::{
-    ApiSession, ExportKind, ExportRequest, MailboxEventRequest, RelayState, ResumeSessionRequest,
+    ApiSession, ExportKind, ExportRequest, MailboxEventRequest, PurgeUntrackedRequest,
+    PurgeUntrackedResponse, PurgeUntrackedStatus, RelayState, ResumeSessionRequest,
     StartSessionRequest, WaitOutcome, WaitRequest, WaitResponse,
 };
 
@@ -150,6 +151,9 @@ pub(crate) struct NewArgs {
     /// Oracle availability for this session.
     #[arg(long, value_parser = ["enabled", "disabled"])]
     oracle: Option<String>,
+    /// Supervisor sub-agent availability for this session (requires --subagents mjolnir).
+    #[arg(long, value_parser = ["enabled", "disabled"])]
+    supervisors: Option<String>,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -1187,7 +1191,7 @@ pub(crate) fn subagent_policy(
     retired_effort: Option<&str>,
 ) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
     use mj_core::subagent::SubagentPolicy;
-    const REMEDY: &str = "Configure [subagents.straightforward] and optionally [subagents.subtle], or their [subagents.yolo.*] counterparts for a YOLO target, in config.toml or TUI Settings -> Sub-agents";
+    const REMEDY: &str = "Configure [subagents.straightforward] and optionally [subagents.subtle] in config.toml or TUI Settings -> Sub-agents";
     if retired_model.is_some() || retired_effort.is_some() {
         bail!(
             "--subagent-model and --subagent-effort are retired; use --subagent-straightforward, --subagent-straightforward-effort, --subagent-subtle, and --subagent-subtle-effort"
@@ -1313,6 +1317,10 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         remember_container_size: false,
         subagents: new_subagent_policy(&args)?,
         oracle: args.oracle.as_deref().map(|choice| choice == "enabled"),
+        supervisors: args
+            .supervisors
+            .as_deref()
+            .map(|choice| choice == "enabled"),
         oracle_choice: oracle_override(
             args.subagent_oracle.as_deref(),
             args.subagent_oracle_effort.as_deref(),
@@ -1444,6 +1452,10 @@ async fn infer_new_session_inputs(
         None => None,
     };
     let selected_target = options.as_ref().and_then(|options| {
+        let auto_primary = args.profile.is_none()
+            && args.model.is_none()
+            && args.effort.is_none()
+            && options.primary_configured;
         let resolve = |need_profile| {
             resolve_launch_choices(
                 args.profile.as_deref(),
@@ -1458,7 +1470,7 @@ async fn infer_new_session_inputs(
                 options.default.as_ref(),
             )
         };
-        if let Err(choices) = resolve(args.model.is_none()) {
+        if let Err(choices) = resolve(args.model.is_none() && !auto_primary) {
             open.extend(choices.into_iter().map(|choice| {
                 choice.replacen("a profile_id", "--profile ID", 1).replacen(
                     "a target_id",
@@ -2436,6 +2448,126 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
         println!("`mj wait --session {session}` returns once the session is suspended");
         Ok(())
     }
+}
+
+/// Remove legacy untracked checkpoint payloads from stopped sessions.
+#[derive(Debug, Args)]
+pub(crate) struct PurgeUntrackedArgs {
+    /// Session whose legacy untracked checkpoint payloads should be removed.
+    #[arg(long, required_unless_present = "all", conflicts_with = "all")]
+    session: Option<String>,
+    /// Purge every session the daemon holds.
+    #[arg(long)]
+    all: bool,
+    /// Report on-disk bytes that would be reclaimed without rewriting archives.
+    #[arg(long)]
+    dry_run: bool,
+    /// Print the response as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+pub(crate) async fn purge_untracked(args: PurgeUntrackedArgs) -> Result<()> {
+    let response = ApiClient::connect()
+        .await?
+        .purge_untracked(&PurgeUntrackedRequest {
+            session_id: args.session,
+            all: args.all,
+            dry_run: args.dry_run,
+        })
+        .await?;
+    let (report, status) = purge_untracked_conclusion(&response, args.json);
+    if !report.is_empty() {
+        if args.json {
+            println!("{report}");
+        } else {
+            print_lines(report.lines().map(str::to_owned));
+        }
+    }
+    status
+}
+
+/// The text or JSON of a purge report, and whether the process should fail.
+///
+/// A batch that rewrote some sessions and failed others still produces the
+/// whole report. The error comes after that report so a script sees every
+/// row and a non-zero status.
+fn purge_untracked_conclusion(
+    response: &PurgeUntrackedResponse,
+    json: bool,
+) -> (String, Result<()>) {
+    let report = if json {
+        match serde_json::to_string_pretty(response) {
+            Ok(text) => text,
+            Err(error) => {
+                return (
+                    String::new(),
+                    Err(error).context("serialize the API response"),
+                );
+            }
+        }
+    } else {
+        purge_untracked_lines(response).join("\n")
+    };
+    (report, refuse_failed_purge(response))
+}
+
+fn refuse_failed_purge(response: &PurgeUntrackedResponse) -> Result<()> {
+    let failed = response
+        .sessions
+        .iter()
+        .filter(|session| session.status == PurgeUntrackedStatus::Failed)
+        .count();
+    if failed > 0 {
+        bail!("{failed} session(s) failed to purge untracked payloads");
+    }
+    Ok(())
+}
+
+/// One line per session, then the total. A dry run says what it would reclaim.
+pub(crate) fn purge_untracked_lines(response: &PurgeUntrackedResponse) -> Vec<String> {
+    let mut lines = Vec::new();
+    for session in &response.sessions {
+        lines.push(match session.status {
+            PurgeUntrackedStatus::Purged => {
+                format!("{}: {} reclaimed", session.session_id, session.bytes_reclaimed)
+            }
+            PurgeUntrackedStatus::DryRun => {
+                format!(
+                    "{}: would reclaim {}",
+                    session.session_id, session.bytes_reclaimed
+                )
+            }
+            PurgeUntrackedStatus::Skipped => format!(
+                "{}: skipped ({})",
+                session.session_id,
+                session.reason.as_deref().unwrap_or("skipped")
+            ),
+            PurgeUntrackedStatus::Failed => format!(
+                "{}: failed ({})",
+                session.session_id,
+                session.reason.as_deref().unwrap_or("failed")
+            ),
+        });
+        for note in &session.stash_untracked_notes {
+            lines.push(format!(
+                "  stash {} {} ({})",
+                note.repository_id, note.commit, note.message
+            ));
+        }
+        for warning in &session.warnings {
+            lines.push(format!("  warning: {warning}"));
+        }
+    }
+    lines.push(if response.dry_run {
+        format!(
+            "Total: {} would be reclaimed",
+            response.total_bytes_reclaimed
+        )
+    } else {
+        format!("Total: {} reclaimed", response.total_bytes_reclaimed)
+    });
+    lines
 }
 
 fn format_human_bytes(bytes: u64) -> String {
@@ -4248,6 +4380,7 @@ mod tests {
 
         let options = mj_daemon::server::api::LaunchOptions {
             revision: 1,
+            primary_configured: false,
             profiles: Vec::new(),
             targets: vec![
                 mj_daemon::server::api::LaunchTarget {
@@ -5974,5 +6107,196 @@ mod tests {
             ApiClient::suspend_preflight_query(true, true),
             "?dry_run=true&without_checkpoint=true"
         );
+    }
+
+    #[test]
+    fn purge_untracked_parses_its_selector_and_renders_each_session() {
+        let parsed = Cli::try_parse_from([
+            "mj",
+            "purge-untracked",
+            "--session",
+            "session-1",
+            "--dry-run",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::PurgeUntracked(args)) = parsed.command else {
+            panic!("expected purge-untracked");
+        };
+        assert_eq!(args.session.as_deref(), Some("session-1"));
+        assert!(!args.all);
+        assert!(args.dry_run);
+        assert!(args.json);
+
+        let parsed = Cli::try_parse_from(["mj", "purge-untracked", "--all"]).unwrap();
+        let Some(Command::PurgeUntracked(args)) = parsed.command else {
+            panic!("expected purge-untracked");
+        };
+        assert!(args.session.is_none());
+        assert!(args.all);
+        assert!(!args.dry_run);
+        assert!(!args.json);
+
+        assert!(Cli::try_parse_from(["mj", "purge-untracked"]).is_err());
+        assert!(
+            Cli::try_parse_from(["mj", "purge-untracked", "--session", "session-1", "--all"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["mj", "purge-untracked", "--dry-run"]).is_err());
+
+        let response = sample_purge_report(false);
+        assert_eq!(
+            purge_untracked_lines(&response),
+            [
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: 4096 reclaimed",
+                "  stash project abcdef (WIP notes)",
+                "  warning: could not read one stash",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: skipped (lifecycle operation in progress)",
+                "Total: 4096 reclaimed",
+            ]
+        );
+        let dry = sample_purge_report(true);
+        assert_eq!(
+            purge_untracked_lines(&dry),
+            [
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: would reclaim 4096",
+                "  stash project abcdef (WIP notes)",
+                "  warning: could not read one stash",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: skipped (lifecycle operation in progress)",
+                "Total: 4096 would be reclaimed",
+            ]
+        );
+        assert_eq!(
+            serde_json::to_string_pretty(&response).unwrap(),
+            r#"{
+  "sessions": [
+    {
+      "session_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "status": "purged",
+      "bytes_reclaimed": 4096,
+      "reason": null,
+      "stash_untracked_notes": [
+        {
+          "repository_id": "project",
+          "commit": "abcdef",
+          "message": "WIP notes"
+        }
+      ],
+      "warnings": [
+        "could not read one stash"
+      ]
+    },
+    {
+      "session_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "skipped",
+      "bytes_reclaimed": 0,
+      "reason": "lifecycle operation in progress",
+      "stash_untracked_notes": [],
+      "warnings": []
+    }
+  ],
+  "total_bytes_reclaimed": 4096,
+  "dry_run": false
+}"#
+        );
+        let mut failed = response.clone();
+        failed.sessions.push(mj_daemon::server::api::PurgeUntrackedSession {
+            session_id: "cccccccccccccccccccccccccccccccc".into(),
+            status: PurgeUntrackedStatus::Failed,
+            bytes_reclaimed: 0,
+            reason: Some("checkpoint archive is missing".into()),
+            stash_untracked_notes: Vec::new(),
+            warnings: Vec::new(),
+        });
+        let lines = purge_untracked_lines(&failed);
+        assert_eq!(
+            lines[lines.len() - 2],
+            "cccccccccccccccccccccccccccccccc: failed (checkpoint archive is missing)"
+        );
+        assert!(lines.last().unwrap().ends_with("4096 reclaimed"));
+        let json = serde_json::to_string_pretty(&failed).unwrap();
+        assert!(json.contains("\"status\": \"failed\""));
+        assert!(json.contains("checkpoint archive is missing"));
+    }
+
+    #[test]
+    fn purge_untracked_all_prints_the_full_report_and_fails_when_a_session_failed() {
+        let parsed = Cli::try_parse_from(["mj", "purge-untracked", "--all"]).unwrap();
+        let Some(Command::PurgeUntracked(args)) = parsed.command else {
+            panic!("expected purge-untracked");
+        };
+        assert!(args.all);
+        assert!(!args.json);
+
+        let mut response = sample_purge_report(false);
+        response.sessions.push(mj_daemon::server::api::PurgeUntrackedSession {
+            session_id: "cccccccccccccccccccccccccccccccc".into(),
+            status: PurgeUntrackedStatus::Failed,
+            bytes_reclaimed: 0,
+            reason: Some("checkpoint archive is missing".into()),
+            stash_untracked_notes: Vec::new(),
+            warnings: Vec::new(),
+        });
+        let (report, status) = purge_untracked_conclusion(&response, false);
+        assert!(report.contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: 4096 reclaimed"));
+        assert!(report.contains(
+            "cccccccccccccccccccccccccccccccc: failed (checkpoint archive is missing)"
+        ));
+        assert!(report.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: skipped"));
+        assert!(report.ends_with("Total: 4096 reclaimed"));
+        let error = status.expect_err("a failed session fails the command");
+        assert_eq!(
+            error.to_string(),
+            "1 session(s) failed to purge untracked payloads"
+        );
+
+        let (json, status) = purge_untracked_conclusion(&response, true);
+        assert!(json.contains("\"status\": \"purged\""));
+        assert!(json.contains("\"status\": \"failed\""));
+        assert!(json.contains("checkpoint archive is missing"));
+        assert!(json.contains("\"bytes_reclaimed\": 4096"));
+        assert_eq!(
+            status.expect_err("json still fails after the report").to_string(),
+            "1 session(s) failed to purge untracked payloads"
+        );
+
+        let (clean, status) = purge_untracked_conclusion(&sample_purge_report(false), false);
+        assert!(clean.contains("4096 reclaimed"));
+        assert!(status.is_ok());
+    }
+
+    fn sample_purge_report(dry_run: bool) -> PurgeUntrackedResponse {
+        use mj_daemon::server::api::PurgeUntrackedSession;
+        use mj_daemon::server::api::PurgeUntrackedStashNote;
+        PurgeUntrackedResponse {
+            sessions: vec![
+                PurgeUntrackedSession {
+                    session_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    status: if dry_run {
+                        PurgeUntrackedStatus::DryRun
+                    } else {
+                        PurgeUntrackedStatus::Purged
+                    },
+                    bytes_reclaimed: 4096,
+                    reason: None,
+                    stash_untracked_notes: vec![PurgeUntrackedStashNote {
+                        repository_id: "project".into(),
+                        commit: "abcdef".into(),
+                        message: "WIP notes".into(),
+                    }],
+                    warnings: vec!["could not read one stash".into()],
+                },
+                PurgeUntrackedSession {
+                    session_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    status: PurgeUntrackedStatus::Skipped,
+                    bytes_reclaimed: 0,
+                    reason: Some("lifecycle operation in progress".into()),
+                    stash_untracked_notes: Vec::new(),
+                    warnings: Vec::new(),
+                },
+            ],
+            total_bytes_reclaimed: 4096,
+            dry_run,
+        }
     }
 }

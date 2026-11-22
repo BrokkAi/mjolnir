@@ -4,7 +4,6 @@ use crate::server::api::{
     resolve_reviewer_model_profile_selection,
 };
 use anyhow::{Context, Result, ensure};
-use futures::future::join_all;
 use mj_controller::controller::Controller;
 use mj_controller::session_manager::ManagedSessionHandle;
 use mj_core::config::{ReviewConfig, SessionReview, SubagentChoice, apply_legacy_override};
@@ -57,35 +56,44 @@ pub(crate) async fn resolve(
     } else {
         None
     };
-    let selections = join_all(choices.into_iter().map(|SubagentChoice { model, effort }| {
-        let backend = Arc::clone(&backend);
-        let pinned_profile = pinned_profile.cloned();
-        async move {
-            let selected = if let Some(profile) = pinned_profile.as_ref() {
-                resolve_pinned_reviewer_model_profile_selection(
-                    &backend,
-                    profile,
-                    &model,
-                    effort.as_deref(),
-                )
-                .await
-            } else {
-                resolve_reviewer_model_profile_selection(&backend, &model, effort.as_deref()).await
-            }
-            .map_err(|error| anyhow::anyhow!("reviewer model {model:?}: {}", error.message))?;
-            Ok(ResolvedReviewSettings {
-                profile: selected.profile_id,
-                main: ReviewModelSettings {
-                    model: Some(selected.model),
-                    effort: selected.effort,
-                    fast_mode: false,
-                },
-                autoconfigured,
-            })
+    let execution_policy = if session.is_yolo_target(&controller.config) {
+        mj_core::config::ExecutionPolicy::Unconstrained
+    } else {
+        mj_core::config::ExecutionPolicy::ConfiguredApprovals
+    };
+    let mut selections = Vec::with_capacity(choices.len());
+    for SubagentChoice { model, effort } in choices {
+        let selected = if let Some(profile) = pinned_profile {
+            resolve_pinned_reviewer_model_profile_selection(
+                &backend,
+                profile,
+                &model,
+                effort.as_deref(),
+            )
+            .await
+        } else {
+            resolve_reviewer_model_profile_selection(
+                &backend,
+                &model,
+                effort.as_deref(),
+                execution_policy,
+                "reviewer",
+            )
+            .await
         }
-    }))
-    .await;
-    selections.into_iter().collect()
+        .map_err(|error| anyhow::anyhow!("reviewer model {model:?}: {}", error.message))?;
+        selected.reservation.commit(None);
+        selections.push(ResolvedReviewSettings {
+            profile: selected.profile_id,
+            main: ReviewModelSettings {
+                model: Some(selected.model),
+                effort: selected.effort,
+                fast_mode: false,
+            },
+            autoconfigured,
+        });
+    }
+    Ok(selections)
 }
 
 /// Resolves one model choice, such as the brief writer's, to a profile the
@@ -93,11 +101,19 @@ pub(crate) async fn resolve(
 pub(crate) async fn resolve_choice(
     backend: &Arc<dyn SubagentBackend>,
     choice: SubagentChoice,
+    execution_policy: mj_core::config::ExecutionPolicy,
 ) -> Result<ResolvedReviewSettings> {
     let SubagentChoice { model, effort } = choice;
-    let selected = resolve_reviewer_model_profile_selection(backend, &model, effort.as_deref())
-        .await
-        .map_err(|error| anyhow::anyhow!("model {model:?}: {}", error.message))?;
+    let selected = resolve_reviewer_model_profile_selection(
+        backend,
+        &model,
+        effort.as_deref(),
+        execution_policy,
+        "brief_writer",
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("model {model:?}: {}", error.message))?;
+    selected.reservation.commit(None);
     Ok(ResolvedReviewSettings {
         profile: selected.profile_id,
         main: ReviewModelSettings {

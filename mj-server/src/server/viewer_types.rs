@@ -38,8 +38,12 @@ pub struct ViewerSnapshot {
         std::collections::BTreeMap<String, mj_core::subagent::SubagentPolicy>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub last_oracle_choices: std::collections::BTreeMap<String, bool>,
+    pub last_supervisor_choices: std::collections::BTreeMap<String, bool>,
     #[serde(default)]
     pub oracle_configured: bool,
+    pub supervisors_available: bool,
+    #[serde(default)]
+    pub primary_configured: bool,
     #[serde(default)]
     pub subagents_configured: bool,
     pub revision: u64,
@@ -320,6 +324,7 @@ impl ViewerSnapshot {
                     form_holder: None,
                     notifications_ignored: session.notifications_ignored,
                     oracle: session.oracle,
+                    supervisors: session.supervisors,
                     oracle_choice: session.oracle_choice.clone().map(|v| *v),
                     subagents: session.subagents.clone().unwrap_or_default(),
                     at: start.at,
@@ -484,15 +489,17 @@ impl ViewerSnapshot {
             .filter(|(_, profile)| !profile.enabled)
             .map(|(id, _)| id.clone())
             .collect();
-        let targets = config
+        let targets: Vec<_> = config
             .enabled_targets()
             .map(|(id, target)| ViewerTarget {
                 id: id.to_owned(),
                 kind: target.kind_name().into(),
                 permission_mode: target.permission_mode(),
                 yolo: target.is_yolo(),
-                subagents_configured: config.subagents.is_configured_for(target.is_yolo()),
-                oracle_configured: config.subagents.oracle_configured_for(target.is_yolo()),
+                subagents_configured: config.subagents.is_configured(),
+                oracle_configured: config.subagents.oracle_configured(),
+                supervisors_available: config
+                    .supervisors_available_for_target(None, target.execution_policy()),
                 resource_allocation_kind: target.into(),
                 requires_project_directory: matches!(
                     target,
@@ -555,10 +562,13 @@ impl ViewerSnapshot {
             profile_capabilities: Default::default(),
             last_subagent_policies: state.last_subagent_policies.clone(),
             last_oracle_choices: state.last_oracle_choices.clone(),
-            oracle_configured: config.subagents.oracle_configured_for(false),
+            last_supervisor_choices: state.last_supervisor_choices.clone(),
+            oracle_configured: config.subagents.oracle_configured(),
+            supervisors_available: targets.iter().any(|target| target.supervisors_available),
+            primary_configured: config.subagents.primary_configured(),
             operator_away: state.operator_presence.away,
             auto_afk_minutes: config.advanced.auto_afk_minutes,
-            subagents_configured: config.subagents.is_configured_for(false),
+            subagents_configured: config.subagents.is_configured(),
             revision,
             generated_at: now_unix().to_string(),
             server_time_ms: mj_core::clock::epoch_millis(),
@@ -643,6 +653,8 @@ pub struct ViewerSession {
     pub notifications_ignored: bool,
     #[serde(default = "oracle_default_enabled")]
     pub oracle: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supervisors: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     #[serde(default)]
@@ -1224,6 +1236,7 @@ pub struct ViewerTarget {
     /// Whether the oracle this target would use is configured.
     #[serde(default)]
     pub oracle_configured: bool,
+    pub supervisors_available: bool,
     /// Target sizing class, used for create validation and the size picker.
     #[serde(default)]
     pub resource_allocation_kind: ResourceAllocationKind,
